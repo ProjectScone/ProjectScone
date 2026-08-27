@@ -65,6 +65,16 @@ pub struct Engine {
     llm: Option<Box<dyn llm::LlmProvider>>,
     fts: index::fts::FtsIndex,
     vectors: index::vectors::VectorIndex,
+    /// Staged index writes awaiting a flush (flush-on-recall / on drop).
+    indexes_dirty: bool,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Best-effort: a failed flush here is recovered by the catch-up
+        // reindex on the next open (meta 'indexed_max' high-water mark).
+        let _ = self.flush_indexes();
+    }
 }
 
 impl Engine {
@@ -119,14 +129,92 @@ impl Engine {
             index::vectors::VectorIndex::open(&vectors_dir, embedder.dim())?
         };
         let fts = index::fts::FtsIndex::open(&data_dir.join("fts"))?;
-        Ok(Engine {
+        let mut engine = Engine {
             conn,
             data_dir: data_dir.to_path_buf(),
             embedder,
             llm: None,
             fts,
             vectors,
-        })
+            indexes_dirty: false,
+        };
+        engine.catch_up_indexes()?;
+        Ok(engine)
+    }
+
+    /// Reindex any chunks written after the last successful flush — the
+    /// crash-recovery half of lazy flushing. Idempotent (both indexes
+    /// upsert), and cheap: only the tail beyond the high-water mark.
+    fn catch_up_indexes(&mut self) -> Result<()> {
+        let indexed_max: i64 = self
+            .get_meta("indexed_max")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let chunk_max: i64 =
+            self.conn
+                .query_row("SELECT coalesce(max(id), 0) FROM chunks", [], |r| r.get(0))?;
+        if chunk_max <= indexed_max {
+            return Ok(());
+        }
+        let rows: Vec<(i64, i64, String, Option<Vec<u8>>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT c.id, e.space_id, e.content, c.start_byte, c.end_byte, c.embedding
+                 FROM chunks c JOIN episodes e ON e.id = c.episode_id
+                 WHERE c.id > ?1 ORDER BY c.id",
+            )?;
+            let mapped = stmt.query_map([indexed_max], |r| {
+                let content: String = r.get(2)?;
+                let start: i64 = r.get(3)?;
+                let end: i64 = r.get(4)?;
+                let text = content
+                    .get(start as usize..end as usize)
+                    .unwrap_or_default()
+                    .to_owned();
+                Ok((r.get(0)?, r.get(1)?, text, r.get(5)?))
+            })?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let dim = self.embedder.dim();
+        let fts_rows: Vec<(u64, u64, &str)> = rows
+            .iter()
+            .map(|(id, space, text, _)| (*id as u64, *space as u64, text.as_str()))
+            .collect();
+        self.fts.add(&fts_rows)?;
+        let mut vec_rows: Vec<(u64, Vec<f32>)> = Vec::new();
+        for (id, _, _, blob) in &rows {
+            if let Some(b) = blob
+                && b.len() == dim * 4
+            {
+                let v = b
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c))
+                    .collect();
+                vec_rows.push((*id as u64, v));
+            }
+        }
+        let borrowed: Vec<(u64, &[f32])> =
+            vec_rows.iter().map(|(id, v)| (*id, v.as_slice())).collect();
+        self.vectors.add(&borrowed)?;
+        self.indexes_dirty = true;
+        self.flush_indexes()
+    }
+
+    /// Flush staged index writes; advances the high-water mark only after
+    /// both indexes are durable.
+    pub(crate) fn flush_indexes(&mut self) -> Result<()> {
+        if !self.indexes_dirty {
+            return Ok(());
+        }
+        self.fts.commit()?;
+        self.vectors.flush()?;
+        let chunk_max: i64 =
+            self.conn
+                .query_row("SELECT coalesce(max(id), 0) FROM chunks", [], |r| r.get(0))?;
+        self.set_meta("indexed_max", &chunk_max.to_string())?;
+        self.indexes_dirty = false;
+        Ok(())
     }
 
     /// Attach or detach the semantic lane's LLM. `None` pauses lane 2
@@ -218,6 +306,8 @@ impl Engine {
         let vec_rows: Vec<(u64, &[f32])> =
             vec_data.iter().map(|(id, v)| (*id, v.as_slice())).collect();
         self.vectors.add(&vec_rows)?;
+        self.indexes_dirty = true;
+        self.flush_indexes()?;
         self.set_meta("embedder_id", self.embedder.id())?;
         self.set_meta("embedder_dim", &dim.to_string())?;
         self.set_meta("index_dirty", "0")?;

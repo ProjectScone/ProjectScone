@@ -16,6 +16,7 @@ fn nearest_neighbor_persists_across_reopen() {
     let mut idx = VectorIndex::open(dir.path(), 64).unwrap();
     idx.add(&[(1, &vecs[0]), (2, &vecs[1]), (3, &vecs[2])])
         .unwrap();
+    idx.flush().unwrap();
     let q = e.embed(&["alpha beta gamma"]).unwrap();
     let hits = idx.search(&q[0], 2).unwrap();
     assert_eq!(hits[0].0, 1);
@@ -33,6 +34,7 @@ fn dim_mismatch_on_reopen_is_typed_and_names_rebuild() {
     let v = e.embed(&["something"]).unwrap();
     let mut idx = VectorIndex::open(dir.path(), 32).unwrap();
     idx.add(&[(7, &v[0])]).unwrap();
+    idx.flush().unwrap();
     drop(idx);
     let err = VectorIndex::open(dir.path(), 64).unwrap_err();
     match err {

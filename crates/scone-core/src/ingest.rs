@@ -123,8 +123,9 @@ impl Engine {
             .fts
             .add(&fts_rows)
             .and_then(|()| self.vectors.add(&vec_rows));
-        if index_result.is_err() {
-            self.set_meta("index_dirty", "1")?;
+        match index_result {
+            Ok(()) => self.indexes_dirty = true,
+            Err(_) => self.set_meta("index_dirty", "1")?,
         }
 
         Ok(IngestOutcome::Ingested {

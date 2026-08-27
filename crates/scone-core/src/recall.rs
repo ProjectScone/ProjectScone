@@ -74,6 +74,8 @@ impl Engine {
         if query.trim().is_empty() {
             return Err(SconeError::InvalidInput("query is empty".into()));
         }
+        // Staged index writes become visible here (flush-on-recall).
+        self.flush_indexes()?;
         let mut degraded = Vec::new();
 
         // Fact generator: entity/predicate/object term match, validity

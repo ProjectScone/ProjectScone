@@ -75,6 +75,9 @@ impl VectorIndex {
         Ok(Self { index, path, dim })
     }
 
+    /// Stage vectors in memory (idempotent: existing keys are skipped, so
+    /// catch-up re-adds are safe). Durable only after [`VectorIndex::flush`]
+    /// — saving the whole file per note was the 96ms/ingest bottleneck.
     pub fn add(&mut self, rows: &[(u64, &[f32])]) -> Result<()> {
         let needed = self.index.size() + rows.len();
         if self.index.capacity() < needed {
@@ -88,8 +91,16 @@ impl VectorIndex {
                     self.dim
                 )));
             }
+            if self.index.contains(*key) {
+                continue;
+            }
             self.index.add(*key, vector).map_err(ix)?;
         }
+        Ok(())
+    }
+
+    /// Persist the staged index to disk.
+    pub fn flush(&self) -> Result<()> {
         self.save()
     }
 

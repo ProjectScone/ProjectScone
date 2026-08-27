@@ -11,6 +11,7 @@ fn fts_scopes_by_space_and_persists() {
         (3, 20, "the borrow checker in space twenty"),
     ])
     .unwrap();
+    idx.commit().unwrap();
     let hits = idx.search(10, "borrow checker", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].0, 1);
@@ -38,6 +39,7 @@ fn wipe_empties_the_index() {
     let dir = tempfile::tempdir().unwrap();
     let mut idx = FtsIndex::open(dir.path()).unwrap();
     idx.add(&[(1, 1, "hello world")]).unwrap();
+    idx.commit().unwrap();
     idx.wipe().unwrap();
     assert!(idx.search(1, "hello", 5).unwrap().is_empty());
 }

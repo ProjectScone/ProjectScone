@@ -50,9 +50,15 @@ impl FtsIndex {
         })
     }
 
-    /// Add `(chunk_id, space_id, text)` rows and commit.
+    /// Stage `(chunk_id, space_id, text)` rows (upsert semantics: a
+    /// re-added chunk id replaces itself, so catch-up is idempotent).
+    /// Not searchable until [`FtsIndex::commit`] — callers own the flush
+    /// cadence; committing per row was the predecessor-grade mistake our
+    /// ingest benchmark caught (96ms/note).
     pub fn add(&mut self, rows: &[(u64, u64, &str)]) -> Result<()> {
         for (chunk_id, space_id, text) in rows {
+            self.writer
+                .delete_term(Term::from_field_u64(self.f_chunk, *chunk_id));
             self.writer
                 .add_document(doc!(
                     self.f_chunk => *chunk_id,
@@ -61,6 +67,11 @@ impl FtsIndex {
                 ))
                 .map_err(ix)?;
         }
+        Ok(())
+    }
+
+    /// Make staged rows durable and searchable.
+    pub fn commit(&mut self) -> Result<()> {
         self.writer.commit().map_err(ix)?;
         self.reader.reload().map_err(ix)?;
         Ok(())
