@@ -36,6 +36,13 @@ Give Claude Code persistent memory:
 
     cargo build --release
     scone add --note "changed the oil on the truck"
-    scone search "vehicle maintenance"   # semantic hit, fully offline
+    scone search "vehicle maintenance"     # semantic hit, fully offline
+    scone watch ~/notes --once             # ingest a directory
+    scone distill                          # extract temporal facts (LLM)
+    scone facts list --all                 # history, with closure reasons
+    scone search "tools" --as-of 2026-03-15T00:00:00Z   # time travel
+    scone export > memory.jsonl            # your memory is portable
+    scone mcp                              # persistent memory for agents
+    scone serve                            # self-hostable multi-user API
 
 License: MIT
