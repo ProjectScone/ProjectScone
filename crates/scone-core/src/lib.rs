@@ -53,6 +53,7 @@ pub struct SpaceStatus {
 
 #[derive(Debug)]
 pub struct StatusReport {
+    pub read_only: bool,
     pub spaces: Vec<SpaceStatus>,
     pub embedder_id: String,
     pub embedder_dim: usize,
@@ -142,8 +143,26 @@ impl Engine {
             vectors,
             indexes_dirty: false,
         };
-        engine.catch_up_indexes()?;
+        if engine.fts.writable() {
+            engine.catch_up_indexes()?;
+        }
         Ok(engine)
+    }
+
+    /// True when another scone process holds the index write lock: search
+    /// works from committed state; ingest/distill/doctor are refused with
+    /// typed errors until the other process exits.
+    pub fn is_read_only(&self) -> bool {
+        !self.fts.writable()
+    }
+
+    fn require_writable(&self) -> Result<()> {
+        if self.is_read_only() {
+            return Err(SconeError::InvalidInput(
+                "this store is read-only: another scone process holds the write lock".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Reindex any chunks written after the last successful flush — the
@@ -208,7 +227,7 @@ impl Engine {
     /// Flush staged index writes; advances the high-water mark only after
     /// both indexes are durable.
     pub(crate) fn flush_indexes(&mut self) -> Result<()> {
-        if !self.indexes_dirty {
+        if !self.indexes_dirty || self.is_read_only() {
             return Ok(());
         }
         self.fts.commit()?;
@@ -254,6 +273,7 @@ impl Engine {
     /// Rebuild every derived index from SQLite truth, re-embedding chunks
     /// whose stored vectors no longer match the active embedder.
     pub fn doctor_rebuild(&mut self) -> Result<DoctorReport> {
+        self.require_writable()?;
         self.fts.wipe()?;
         self.vectors.wipe()?;
         // Slice chunk text in Rust: our offsets are bytes, and SQLite's
@@ -384,6 +404,7 @@ impl Engine {
             },
         )?;
         Ok(StatusReport {
+            read_only: self.is_read_only(),
             spaces,
             embedder_id: self.embedder.id().to_owned(),
             embedder_dim: self.embedder.dim(),

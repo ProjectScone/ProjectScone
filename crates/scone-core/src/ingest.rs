@@ -77,6 +77,7 @@ impl Engine {
         if content.trim().is_empty() {
             return Err(SconeError::InvalidInput("content is empty".into()));
         }
+        self.require_writable()?;
 
         let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
         let spans = chunk_text(content, CHUNK_TARGET_BYTES);

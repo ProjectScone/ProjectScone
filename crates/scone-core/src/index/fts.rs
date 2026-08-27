@@ -17,7 +17,9 @@ const WRITER_HEAP: usize = 50_000_000;
 
 pub struct FtsIndex {
     index: Index,
-    writer: IndexWriter,
+    /// None when another process holds the write lock: reads still work,
+    /// writes are refused loudly upstream (read-only degradation).
+    writer: Option<IndexWriter>,
     reader: IndexReader,
     f_chunk: Field,
     f_space: Field,
@@ -38,7 +40,14 @@ impl FtsIndex {
         let schema = schema.build();
         let mmap = tantivy::directory::MmapDirectory::open(dir).map_err(ix)?;
         let index = Index::open_or_create(mmap, schema).map_err(ix)?;
-        let writer = index.writer(WRITER_HEAP).map_err(ix)?;
+        // Lock contention is not an error: another live scone process owns
+        // writes; this one serves reads (memory/lessons.md L-9: degrade
+        // loudly, upstream surfaces say so).
+        let writer = match index.writer(WRITER_HEAP) {
+            Ok(w) => Some(w),
+            Err(tantivy::TantivyError::LockFailure(_, _)) => None,
+            Err(e) => return Err(ix(e)),
+        };
         let reader = index.reader().map_err(ix)?;
         Ok(Self {
             index,
@@ -55,15 +64,28 @@ impl FtsIndex {
     /// Not searchable until [`FtsIndex::commit`] — callers own the flush
     /// cadence; committing per row was the predecessor-grade mistake our
     /// ingest benchmark caught (96ms/note).
+    pub fn writable(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    fn writer_mut(&mut self) -> Result<&mut IndexWriter> {
+        self.writer.as_mut().ok_or_else(|| {
+            SconeError::Index("fts: read-only (another scone process holds the write lock)".into())
+        })
+    }
+
     pub fn add(&mut self, rows: &[(u64, u64, &str)]) -> Result<()> {
+        let f_chunk = self.f_chunk;
+        let f_space = self.f_space;
+        let f_text = self.f_text;
+        let writer = self.writer_mut()?;
         for (chunk_id, space_id, text) in rows {
-            self.writer
-                .delete_term(Term::from_field_u64(self.f_chunk, *chunk_id));
-            self.writer
+            writer.delete_term(Term::from_field_u64(f_chunk, *chunk_id));
+            writer
                 .add_document(doc!(
-                    self.f_chunk => *chunk_id,
-                    self.f_space => *space_id,
-                    self.f_text => *text,
+                    f_chunk => *chunk_id,
+                    f_space => *space_id,
+                    f_text => *text,
                 ))
                 .map_err(ix)?;
         }
@@ -72,7 +94,7 @@ impl FtsIndex {
 
     /// Make staged rows durable and searchable.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer.commit().map_err(ix)?;
+        self.writer_mut()?.commit().map_err(ix)?;
         self.reader.reload().map_err(ix)?;
         Ok(())
     }
@@ -108,8 +130,9 @@ impl FtsIndex {
     }
 
     pub fn wipe(&mut self) -> Result<()> {
-        self.writer.delete_all_documents().map_err(ix)?;
-        self.writer.commit().map_err(ix)?;
+        let writer = self.writer_mut()?;
+        writer.delete_all_documents().map_err(ix)?;
+        writer.commit().map_err(ix)?;
         self.reader.reload().map_err(ix)?;
         Ok(())
     }

@@ -368,6 +368,9 @@ fn run() -> Result<(), String> {
         }
         Cmd::Status => {
             let report = engine.status().map_err(|e| e.to_string())?;
+            if report.read_only {
+                println!("READ-ONLY: another scone process holds the write lock");
+            }
             for s in &report.spaces {
                 println!(
                     "space {}: episodes: {} chunks: {} revision: {}",
