@@ -8,6 +8,7 @@ pub mod chunker;
 mod db;
 pub mod embed;
 mod error;
+pub mod index;
 mod ingest;
 
 use std::path::{Path, PathBuf};
