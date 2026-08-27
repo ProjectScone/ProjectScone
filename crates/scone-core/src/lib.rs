@@ -139,6 +139,14 @@ impl Engine {
         self.llm.is_some()
     }
 
+    /// Answer a question from rendered context via the configured LLM.
+    pub fn llm_answer(&self, question: &str, context: &str) -> Result<String> {
+        match &self.llm {
+            Some(llm) => llm.answer(question, context),
+            None => Err(SconeError::Llm("no LLM configured".into())),
+        }
+    }
+
     fn pinned_dim(conn: &Connection) -> Result<Option<usize>> {
         match conn.query_row(
             "SELECT value FROM meta WHERE key = 'embedder_dim'",

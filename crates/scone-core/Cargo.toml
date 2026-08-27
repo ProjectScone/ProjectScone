@@ -12,6 +12,8 @@ local-embed = ["dep:fastembed"]
 blake3 = "1"
 fastembed = { version = "6", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
 tantivy = "0.26"
 usearch = "2.26"
 thiserror = "2"
@@ -19,6 +21,8 @@ thiserror = "2"
 [dev-dependencies]
 proptest = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
 tempfile = "3"
 
 [lints.clippy]

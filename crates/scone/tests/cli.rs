@@ -208,3 +208,61 @@ fn facts_why_shows_provenance_and_close_takes_reason() {
         .success()
         .stdout(predicates::str::contains("no longer true"));
 }
+
+#[test]
+fn ask_without_llm_prints_context_and_pause_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "the deploy key lives in the vault"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["ask", "where is the deploy key?"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deploy key"))
+        .stdout(predicates::str::contains("paused"));
+}
+
+#[test]
+fn ask_with_configured_llm_answers_from_the_stub() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let mut req = String::new();
+        loop {
+            let n = sock.read(&mut buf).unwrap();
+            req.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if req.contains("\r\n\r\n") && req.trim_end().ends_with('}') {
+                break;
+            }
+        }
+        let body = r#"{"choices":[{"message":{"content":"in the vault, per your note"}}]}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(resp.as_bytes()).unwrap();
+    });
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!("[llm]\nprovider = \"openai\"\nbase_url = \"http://{addr}\"\nmodel = \"stub\"\n"),
+    )
+    .unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "the deploy key lives in the vault"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["ask", "where is the deploy key?"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("in the vault, per your note"));
+    handle.join().unwrap();
+}

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use scone_core::embed::{EmbeddingProvider, HashEmbedder};
-use scone_core::llm::{ExtractedFact, FakeLlm, LlmProvider};
+use scone_core::llm::{AnthropicProvider, ExtractedFact, FakeLlm, LlmProvider, OpenAiCompatible};
 use scone_core::{Engine, IngestInput, IngestOutcome, RecallOpts, auth};
 
 const HASH_EMBEDDER_DIM: usize = 256;
@@ -31,7 +31,7 @@ struct Cli {
     embedder: EmbedderKind,
     /// LLM for the semantic lane: none (paused) or fake (testing hook
     /// reading SCONE_FAKE_FACTS as a JSON fact array)
-    #[arg(long, global = true, value_enum, default_value_t = LlmKind::None)]
+    #[arg(long, global = true, value_enum, default_value_t = LlmKind::Config)]
     llm: LlmKind,
     #[command(subcommand)]
     cmd: Cmd,
@@ -60,6 +60,12 @@ enum Cmd {
         /// Rebuild all indexes from SQLite truth
         #[arg(long)]
         rebuild: bool,
+    },
+    /// Ask a question against your memory (recall + optional LLM answer)
+    Ask {
+        question: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
     },
     /// Distill pending episodes into temporal facts (needs --llm)
     Distill {
@@ -92,12 +98,61 @@ enum FactsCmd {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum LlmKind {
+    /// Read [llm] from <data-dir>/config.toml (absent file = none)
+    Config,
     None,
     Fake,
 }
 
-fn make_llm(kind: LlmKind) -> Result<Option<Box<dyn LlmProvider>>, String> {
+fn llm_from_config(dir: &std::path::Path) -> Result<Option<Box<dyn LlmProvider>>, String> {
+    let path = dir.join("config.toml");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let table: toml::Table = raw
+        .parse()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(llm) = table.get("llm") else {
+        return Ok(None);
+    };
+    let get = |key: &str| llm.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let provider = get("provider").unwrap_or_else(|| "none".into());
+    let api_key = match get("api_key_env") {
+        Some(env_name) => Some(std::env::var(&env_name).map_err(|_| {
+            format!("config names api_key_env = {env_name}, but that variable is not set")
+        })?),
+        None => None,
+    };
+    let model = get("model");
+    let need_model = || {
+        model
+            .clone()
+            .ok_or_else(|| "config [llm] needs model".to_owned())
+    };
+    match provider.as_str() {
+        "none" => Ok(None),
+        "ollama" => Ok(Some(Box::new(OpenAiCompatible::new(
+            &get("base_url").unwrap_or_else(|| "http://localhost:11434/v1".into()),
+            &need_model()?,
+            api_key,
+        )))),
+        "openai" => Ok(Some(Box::new(OpenAiCompatible::new(
+            &get("base_url").unwrap_or_else(|| "https://api.openai.com/v1".into()),
+            &need_model()?,
+            api_key,
+        )))),
+        "anthropic" => Ok(Some(Box::new(AnthropicProvider::new(
+            &get("base_url").unwrap_or_else(|| "https://api.anthropic.com".into()),
+            &need_model()?,
+            &api_key.ok_or("anthropic needs api_key_env in config")?,
+        )))),
+        other => Err(format!("unknown llm provider {other:?} in config")),
+    }
+}
+
+fn make_llm(kind: LlmKind, dir: &std::path::Path) -> Result<Option<Box<dyn LlmProvider>>, String> {
     match kind {
+        LlmKind::Config => llm_from_config(dir),
         LlmKind::None => Ok(None),
         LlmKind::Fake => {
             let raw = std::env::var("SCONE_FAKE_FACTS").unwrap_or_else(|_| "[]".into());
@@ -177,7 +232,7 @@ fn run() -> Result<(), String> {
     } else {
         Engine::open(&dir, embedder).map_err(|e| e.to_string())?
     };
-    engine.set_llm(make_llm(cli.llm)?);
+    engine.set_llm(make_llm(cli.llm, &dir)?);
 
     match &cli.cmd {
         Cmd::Add { paths, note } => {
@@ -262,6 +317,47 @@ fn run() -> Result<(), String> {
                     "semantic lane: paused — no LLM configured ({} pending, {} failed)",
                     report.pending_distill, report.failed_distill
                 ),
+            }
+        }
+        Cmd::Ask { question, limit } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let opts = RecallOpts {
+                limit: *limit,
+                ..Default::default()
+            };
+            let pack = engine
+                .recall(&space, question, &opts)
+                .map_err(|e| e.to_string())?;
+            let mut context = String::new();
+            for f in &pack.facts {
+                context.push_str(&format!(
+                    "- fact: {} {} {}\n",
+                    f.subject, f.predicate, f.object
+                ));
+            }
+            for item in &pack.items {
+                context.push_str(&format!("- [episode {}] {}\n", item.episode_id, item.text));
+            }
+            if engine.has_llm() {
+                let answer = engine
+                    .llm_answer(question, &context)
+                    .map_err(|e| e.to_string())?;
+                println!("{answer}");
+                let ids: Vec<String> = pack
+                    .items
+                    .iter()
+                    .map(|i| i.episode_id.to_string())
+                    .collect();
+                if !ids.is_empty() {
+                    println!("\nsources: episodes {}", ids.join(", "));
+                }
+            } else {
+                if context.is_empty() {
+                    println!("no matching memory");
+                } else {
+                    print!("{context}");
+                }
+                println!("(semantic lane paused — no LLM configured; showing raw recall)");
             }
         }
         Cmd::Distill { limit } => {
