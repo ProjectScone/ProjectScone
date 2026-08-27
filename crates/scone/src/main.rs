@@ -58,6 +58,27 @@ enum Cmd {
     },
     /// Show stores, counts, and index health
     Status,
+    /// Scan a directory into memory, repeatedly or once
+    Watch {
+        /// Directory to scan
+        dir: std::path::PathBuf,
+        /// Scan once and exit (default: rescan every --interval-secs)
+        #[arg(long)]
+        once: bool,
+        #[arg(long, default_value_t = 60)]
+        interval_secs: u64,
+    },
+    /// Background loop: scan watch dirs and distill pending episodes
+    Daemon {
+        /// Directories to scan each cycle
+        #[arg(long)]
+        watch: Vec<std::path::PathBuf>,
+        /// Run one cycle and exit
+        #[arg(long)]
+        once: bool,
+        #[arg(long, default_value_t = 300)]
+        interval_secs: u64,
+    },
     /// Export the space as JSONL to stdout (episodes, aliases, facts)
     Export,
     /// Import a JSONL export into the space (idempotent)
@@ -440,6 +461,63 @@ fn run() -> Result<(), String> {
                         .map_err(|e| e.to_string())?;
                     println!("closed fact {id}: {reason}");
                 }
+            }
+        }
+        Cmd::Watch {
+            dir: watch_dir,
+            once,
+            interval_secs,
+        } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            loop {
+                let r = engine
+                    .ingest_directory(&space, watch_dir, 1_000_000)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "ingested {} ({} unchanged, {} skipped) from {}",
+                    r.ingested,
+                    r.deduplicated,
+                    r.skipped,
+                    watch_dir.display()
+                );
+                if *once {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs((*interval_secs).max(1)));
+            }
+        }
+        Cmd::Daemon {
+            watch,
+            once,
+            interval_secs,
+        } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            loop {
+                for watch_dir in watch {
+                    let r = engine
+                        .ingest_directory(&space, watch_dir, 1_000_000)
+                        .map_err(|e| e.to_string())?;
+                    println!(
+                        "scanned {}: {} new, {} unchanged, {} skipped",
+                        watch_dir.display(),
+                        r.ingested,
+                        r.deduplicated,
+                        r.skipped
+                    );
+                }
+                if engine.has_llm() {
+                    let r = engine.distill(&space, 100).map_err(|e| e.to_string())?;
+                    println!(
+                        "distilled {}: +{} facts, {} closed, {} failed",
+                        r.processed, r.facts_added, r.facts_closed, r.failed
+                    );
+                } else {
+                    println!("distilled 0: semantic lane paused (no LLM configured)");
+                }
+                if *once {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs((*interval_secs).max(1)));
             }
         }
         Cmd::Export => {

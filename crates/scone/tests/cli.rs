@@ -358,3 +358,44 @@ fn spaces_lists_all_spaces() {
         .stdout(predicates::str::contains("default"))
         .stdout(predicates::str::contains("work"));
 }
+
+#[test]
+fn watch_once_ingests_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = tempfile::tempdir().unwrap();
+    std::fs::write(notes.path().join("idea.md"), "watch mode found this idea").unwrap();
+    scone(dir.path())
+        .arg("watch")
+        .arg(notes.path())
+        .arg("--once")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ingested 1"));
+    scone(dir.path())
+        .args(["search", "idea"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("found this idea"));
+}
+
+#[test]
+fn daemon_once_scans_and_distills() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = tempfile::tempdir().unwrap();
+    std::fs::write(notes.path().join("fact.md"), "mark uses scone daily").unwrap();
+    scone(dir.path())
+        .env(
+            "SCONE_FAKE_FACTS",
+            r#"[{"subject":"mark","predicate":"uses","object":"scone"}]"#,
+        )
+        .args(["--llm", "fake", "daemon", "--once", "--watch"])
+        .arg(notes.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("distilled"));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark uses scone"));
+}
