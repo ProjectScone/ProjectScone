@@ -34,7 +34,7 @@ Give Claude Code persistent memory:
     scone facts list --all             # history, with closure reasons
     scone search "mark" --as-of 2026-03-15T00:00:00Z   # time travel
 
-    cargo build --release
+    cargo install scone-cli        # or: cargo build --release
     scone add --note "changed the oil on the truck"
     scone search "vehicle maintenance"     # semantic hit, fully offline
     scone watch ~/notes --once             # ingest a directory
@@ -44,5 +44,9 @@ Give Claude Code persistent memory:
     scone export > memory.jsonl            # your memory is portable
     scone mcp                              # persistent memory for agents
     scone serve                            # self-hostable multi-user API
+
+Crates: [scone-cli](https://crates.io/crates/scone-cli) (the binary) ·
+[scone-core](https://crates.io/crates/scone-core) (the engine) ·
+[scone-ffi](https://crates.io/crates/scone-ffi) (C ABI)
 
 License: MIT
