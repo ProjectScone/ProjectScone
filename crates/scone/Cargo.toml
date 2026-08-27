@@ -9,17 +9,20 @@ default = ["local-embed"]
 local-embed = ["scone-core/local-embed"]
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 clap = { version = "4", features = ["derive"] }
 rmcp = { version = "3", features = ["server", "transport-io", "schemars"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "net"] }
 serde_json = "1"
 toml = "0.9"
 scone-core = { path = "../scone-core", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 rmcp = { version = "3", features = ["client", "transport-async-rw"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 predicates = "3"

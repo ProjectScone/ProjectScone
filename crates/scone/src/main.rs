@@ -60,6 +60,12 @@ enum Cmd {
     Status,
     /// Serve persistent agent memory over MCP (stdio)
     Mcp,
+    /// Serve the multi-user HTTP API (keys from config.toml [[server.keys]])
+    Serve {
+        /// Listen address (overrides config [server].listen)
+        #[arg(long)]
+        listen: Option<String>,
+    },
     /// Verify and repair the derived indexes
     Doctor {
         /// Rebuild all indexes from SQLite truth
@@ -441,6 +447,57 @@ fn run() -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 running.waiting().await.map_err(|e| e.to_string())?;
                 Ok::<(), String>(())
+            })?;
+            return Ok(());
+        }
+        Cmd::Serve { listen } => {
+            let raw = std::fs::read_to_string(dir.join("config.toml"))
+                .map_err(|_| "scone serve needs config.toml with [[server.keys]]".to_owned())?;
+            let table: toml::Table = raw.parse().map_err(|e| format!("config.toml: {e}"))?;
+            let server = table
+                .get("server")
+                .ok_or("config.toml needs a [server] section")?;
+            let keys: Vec<scone::serve::SpaceKey> = server
+                .get("keys")
+                .and_then(|k| k.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            Some(scone::serve::SpaceKey {
+                                key: row.get("key")?.as_str()?.to_owned(),
+                                space: row.get("space")?.as_str()?.to_owned(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if keys.is_empty() {
+                return Err(
+                    "refusing to serve with zero API keys — add [[server.keys]]                      entries (key, space) to config.toml"
+                        .into(),
+                );
+            }
+            let addr = listen
+                .clone()
+                .or_else(|| {
+                    server
+                        .get("listen")
+                        .and_then(|l| l.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "127.0.0.1:7437".to_owned());
+            let n_keys = keys.len();
+            let app = scone::serve::router(engine, scone::serve::ServeConfig { keys });
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(&addr)
+                    .await
+                    .map_err(|e| format!("bind {addr}: {e}"))?;
+                println!("scone serving on http://{addr} ({n_keys} keys)");
+                axum::serve(listener, app).await.map_err(|e| e.to_string())
             })?;
             return Ok(());
         }
