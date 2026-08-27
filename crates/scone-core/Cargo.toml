@@ -8,6 +8,7 @@ license.workspace = true
 blake3 = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tantivy = "0.26"
+usearch = "2.26"
 thiserror = "2"
 
 [dev-dependencies]
