@@ -18,7 +18,9 @@ instead of deleting, and search --as-of answers "what did I believe in
 March". M3: scone mcp serves that memory to any MCP agent — memory_store,
 memory_recall, memory_facts_about, memory_forget — space-scoped and
 input-bounded, with immediate fact distillation when an LLM is configured.
-Next: M4, self-hostable HTTP API + C FFI.
+M4: scone serve is a self-hostable multi-user HTTP API (Bearer keys, each
+bound to one space), and scone-ffi ships a C ABI (include/scone.h) so any
+language can embed the engine. Next: M5, benchmarks.
 
 Give Claude Code persistent memory:
 
