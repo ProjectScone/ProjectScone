@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 
