@@ -266,3 +266,50 @@ fn ask_with_configured_llm_answers_from_the_stub() {
         .stdout(predicates::str::contains("in the vault, per your note"));
     handle.join().unwrap();
 }
+
+#[test]
+fn search_shows_facts_and_supports_as_of_time_travel() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "first claim about tools"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS_2)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["add", "--note", "second claim about tools"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    // Pin intervals to known dates so as-of is deterministic.
+    let db = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
+    db.execute(
+        "UPDATE facts SET valid_from='2026-01-01T00:00:00Z', valid_until='2026-06-01T00:00:00Z'
+         WHERE object='pnpm'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE facts SET valid_from='2026-06-01T00:00:00Z' WHERE object='bun'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    scone(dir.path())
+        .args(["search", "mark prefers"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark prefers bun"));
+    scone(dir.path())
+        .args(["search", "mark prefers", "--as-of", "2026-03-15T00:00:00Z"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark prefers pnpm"));
+}

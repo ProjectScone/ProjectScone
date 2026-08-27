@@ -2827,6 +2827,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "rusqlite",
  "scone-core",
  "serde_json",
  "tempfile",

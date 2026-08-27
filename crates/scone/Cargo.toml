@@ -16,5 +16,6 @@ scone-core = { path = "../scone-core", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
 predicates = "3"
 tempfile = "3"

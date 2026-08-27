@@ -52,6 +52,9 @@ enum Cmd {
         query: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Evaluate fact validity at this ISO-8601 instant (time travel)
+        #[arg(long)]
+        as_of: Option<String>,
     },
     /// Show stores, counts, and index health
     Status,
@@ -262,12 +265,16 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        Cmd::Search { query, limit } => {
+        Cmd::Search {
+            query,
+            limit,
+            as_of,
+        } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let opts = RecallOpts {
                 limit: *limit,
                 budget_bytes: None,
-                ..Default::default()
+                as_of: as_of.clone(),
             };
             let pack = engine
                 .recall(&space, query, &opts)
@@ -275,7 +282,13 @@ fn run() -> Result<(), String> {
             for warning in &pack.degraded {
                 eprintln!("degraded: {warning}");
             }
-            if pack.items.is_empty() {
+            for f in &pack.facts {
+                println!(
+                    "fact  {} {} {}  (conf {:.2}, {})",
+                    f.subject, f.predicate, f.object, f.confidence, f.status
+                );
+            }
+            if pack.items.is_empty() && pack.facts.is_empty() {
                 println!("no results");
             }
             for item in &pack.items {
