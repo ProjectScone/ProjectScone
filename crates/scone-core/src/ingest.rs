@@ -169,3 +169,60 @@ impl Engine {
         })
     }
 }
+
+/// Result of one directory scan.
+#[derive(Debug, Default)]
+pub struct ScanReport {
+    pub ingested: usize,
+    pub deduplicated: usize,
+    pub skipped: usize,
+}
+
+impl Engine {
+    /// Recursively ingest text files under `dir`. Hidden entries and
+    /// dependency/build directories are skipped; binary and oversized
+    /// files are counted in `skipped`, never silently dropped (spec §10).
+    /// Content-hash dedup makes rescans cheap and edits append-only.
+    pub fn ingest_directory(
+        &mut self,
+        space: &ScopedSpace,
+        dir: &std::path::Path,
+        max_file_bytes: u64,
+    ) -> Result<ScanReport> {
+        const SKIP_DIRS: [&str; 4] = ["node_modules", "target", ".git", "__pycache__"];
+        let mut report = ScanReport::default();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current)? {
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    if !SKIP_DIRS.contains(&name.as_ref()) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                if entry.metadata()?.len() > max_file_bytes {
+                    report.skipped += 1;
+                    continue;
+                }
+                match self.ingest(space, IngestInput::File { path }) {
+                    Ok(IngestOutcome::Ingested { .. }) => report.ingested += 1,
+                    Ok(IngestOutcome::Deduplicated { .. }) => report.deduplicated += 1,
+                    Err(SconeError::InvalidInput(_)) => report.skipped += 1,
+                    Err(other) => return Err(other),
+                }
+            }
+        }
+        Ok(report)
+    }
+}

@@ -21,7 +21,7 @@ use rusqlite::Connection;
 
 pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
-pub use ingest::{IngestInput, IngestOutcome};
+pub use ingest::{IngestInput, IngestOutcome, ScanReport};
 pub use portability::ImportReport;
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
 
