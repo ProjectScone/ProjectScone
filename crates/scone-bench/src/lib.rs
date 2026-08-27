@@ -123,12 +123,20 @@ pub fn substring_correct(expected: &str, got: &str) -> bool {
 
 /// Run one item in its own space (`item-<index>`); the engine accumulates
 /// spaces but items never cross-contaminate.
+#[derive(Clone, Copy)]
+pub enum Granularity {
+    /// One episode per session (default).
+    Session,
+    /// One episode per conversation turn — finer retrieval targets.
+    Turn,
+}
+
 pub fn run_item(
     engine: &mut Engine,
     item: &BenchItem,
     index: usize,
 ) -> Result<ItemOutcome, String> {
-    run_item_with(engine, item, index, true)
+    run_item_with(engine, item, index, true, Granularity::Session)
 }
 
 /// `distill = false` isolates retrieval + answering from extraction
@@ -138,15 +146,32 @@ pub fn run_item_with(
     item: &BenchItem,
     index: usize,
     distill: bool,
+    granularity: Granularity,
 ) -> Result<ItemOutcome, String> {
     let space = auth::resolve(engine, &format!("item-{index}"), true).map_err(|e| e.to_string())?;
     let mut stored_bytes = 0usize;
     for session in &item.sessions {
-        let transcript = session.join("\n");
-        stored_bytes += transcript.len();
-        engine
-            .ingest(&space, IngestInput::Note { text: transcript })
-            .map_err(|e| e.to_string())?;
+        match granularity {
+            Granularity::Session => {
+                let transcript = session.join("\n");
+                stored_bytes += transcript.len();
+                engine
+                    .ingest(&space, IngestInput::Note { text: transcript })
+                    .map_err(|e| e.to_string())?;
+            }
+            Granularity::Turn => {
+                for turn in session {
+                    stored_bytes += turn.len();
+                    match engine.ingest(&space, IngestInput::Note { text: turn.clone() }) {
+                        Ok(_) => {}
+                        // Repeated short turns ("user: thanks!") dedup or
+                        // reject as empty; both are fine at turn scale.
+                        Err(scone_core::SconeError::InvalidInput(_)) => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+            }
+        }
     }
     if engine.has_llm() && distill {
         // Best-effort: extraction failures are recorded on the queue, and

@@ -51,6 +51,12 @@ enum Cmd {
         /// Skip fact distillation: answer from raw episodic recall only
         #[arg(long)]
         no_distill: bool,
+        /// Chunk target in bytes for ingestion (default: engine default)
+        #[arg(long)]
+        chunk_bytes: Option<usize>,
+        /// Ingestion granularity: session (default) or turn
+        #[arg(long, default_value = "session")]
+        granularity: String,
     },
 }
 
@@ -86,6 +92,8 @@ fn run() -> Result<(), String> {
             llm_model,
             judge,
             no_distill,
+            chunk_bytes,
+            granularity,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -104,6 +112,14 @@ fn run() -> Result<(), String> {
                 other => return Err(format!("unknown embedder {other:?}")),
             };
             let mut engine = Engine::open(dir.path(), embedder).map_err(|e| e.to_string())?;
+            if let Some(bytes) = chunk_bytes {
+                engine.set_chunk_target(bytes);
+            }
+            let granularity = match granularity.as_str() {
+                "session" => scone_bench::Granularity::Session,
+                "turn" => scone_bench::Granularity::Turn,
+                other => return Err(format!("unknown granularity {other:?}")),
+            };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
                     engine.set_llm(Some(Box::new(scone_core::llm::OpenAiCompatible::new(
@@ -128,7 +144,8 @@ fn run() -> Result<(), String> {
             let mut judged_correct = 0usize;
             let mut recall_ms = Vec::new();
             for (i, item) in items.iter().enumerate() {
-                let outcome = scone_bench::run_item_with(&mut engine, item, i, !no_distill)?;
+                let outcome =
+                    scone_bench::run_item_with(&mut engine, item, i, !no_distill, granularity)?;
                 recall_ms.push(outcome.recall_ms);
                 report.add(
                     outcome.correct,
