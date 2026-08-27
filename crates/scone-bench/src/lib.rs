@@ -128,6 +128,17 @@ pub fn run_item(
     item: &BenchItem,
     index: usize,
 ) -> Result<ItemOutcome, String> {
+    run_item_with(engine, item, index, true)
+}
+
+/// `distill = false` isolates retrieval + answering from extraction
+/// quality (the answer model reads raw episodic recall only).
+pub fn run_item_with(
+    engine: &mut Engine,
+    item: &BenchItem,
+    index: usize,
+    distill: bool,
+) -> Result<ItemOutcome, String> {
     let space = auth::resolve(engine, &format!("item-{index}"), true).map_err(|e| e.to_string())?;
     let mut stored_bytes = 0usize;
     for session in &item.sessions {
@@ -137,7 +148,7 @@ pub fn run_item(
             .ingest(&space, IngestInput::Note { text: transcript })
             .map_err(|e| e.to_string())?;
     }
-    if engine.has_llm() {
+    if engine.has_llm() && distill {
         // Best-effort: extraction failures are recorded on the queue, and
         // episodic recall still answers (loud degradation, not abort).
         let _ = engine.distill(&space, 1_000);

@@ -2,7 +2,7 @@
 //! executes a subset against the engine with the configured LLM.
 
 use clap::{Parser, Subcommand};
-use scone_bench::{Report, parse_dataset, run_item};
+use scone_bench::{Report, parse_dataset};
 use scone_core::Engine;
 use scone_core::embed::HashEmbedder;
 
@@ -48,6 +48,9 @@ enum Cmd {
         /// Also score with an LLM judge (uses the same endpoint/model)
         #[arg(long)]
         judge: bool,
+        /// Skip fact distillation: answer from raw episodic recall only
+        #[arg(long)]
+        no_distill: bool,
     },
 }
 
@@ -82,6 +85,7 @@ fn run() -> Result<(), String> {
             llm_url,
             llm_model,
             judge,
+            no_distill,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -124,7 +128,7 @@ fn run() -> Result<(), String> {
             let mut judged_correct = 0usize;
             let mut recall_ms = Vec::new();
             for (i, item) in items.iter().enumerate() {
-                let outcome = run_item(&mut engine, item, i)?;
+                let outcome = scone_bench::run_item_with(&mut engine, item, i, !no_distill)?;
                 recall_ms.push(outcome.recall_ms);
                 report.add(
                     outcome.correct,
