@@ -8,11 +8,19 @@ it into temporal facts that know when they were true (semantic memory), and
 returns budgeted, provenance-cited context on demand — fully offline by default,
 frontier models when you want them.
 
-Status: M1 complete - the episodic engine works offline end-to-end:
-scone add / search / status / doctor --rebuild, hybrid BM25+vector recall
-with local ONNX embeddings (bge-small-en-v1.5), SQLite as the single source
-of truth. Next: M2, the semantic lane (temporal facts, contradiction
-closure, decay).
+Status: M2 complete - episodic AND semantic engines work offline
+end-to-end. Episodic: add / search / status / doctor --rebuild, hybrid
+BM25+vector recall, local ONNX embeddings, SQLite as the single truth.
+Semantic: distill extracts temporal facts (subject-predicate-object with
+validity intervals) via a pluggable LLM (Ollama / OpenAI-compatible /
+Anthropic / none), contradictions close the old interval with a reason
+instead of deleting, and search --as-of answers "what did I believe in
+March". Next: M3, the MCP server (persistent memory for agents).
+
+    scone add --note "mark switched from pnpm to bun"
+    scone distill                      # facts, via your configured LLM
+    scone facts list --all             # history, with closure reasons
+    scone search "mark" --as-of 2026-03-15T00:00:00Z   # time travel
 
     cargo build --release
     scone add --note "changed the oil on the truck"
