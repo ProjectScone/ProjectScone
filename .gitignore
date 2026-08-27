@@ -2,3 +2,4 @@ reference/
 target/
 *.db
 .scone/
+memory/raw/
