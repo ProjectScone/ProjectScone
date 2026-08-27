@@ -37,6 +37,9 @@ pub struct RecallParams {
     pub space: Option<String>,
     /// Max items (1..=50)
     pub limit: Option<usize>,
+    /// Prepend the space's profile (identity facts + recent activity).
+    /// Defaults to true.
+    pub include_profile: Option<bool>,
     /// Evaluate fact validity at this ISO-8601 instant (time travel)
     pub as_of: Option<String>,
 }
@@ -156,8 +159,14 @@ impl SconeMcp {
             )));
         }
         let limit = p.limit.unwrap_or(10).clamp(1, MAX_LIMIT);
+        let include_profile = p.include_profile.unwrap_or(true);
         let result = self.with_space(&p.space, |engine, space| {
-            engine.recall(
+            let profile = if include_profile {
+                Some(engine.profile(space, 5)?)
+            } else {
+                None
+            };
+            let pack = engine.recall(
                 space,
                 &p.query,
                 &RecallOpts {
@@ -165,11 +174,40 @@ impl SconeMcp {
                     budget_bytes: None,
                     as_of: p.as_of.clone(),
                 },
-            )
+            )?;
+            Ok((profile, pack))
         });
         Ok(match result {
-            Ok(pack) => {
+            Ok((profile, pack)) => {
                 let mut out = String::new();
+                if let Some(profile) = profile {
+                    if !profile.static_facts.is_empty() {
+                        out.push_str(
+                            "## Profile
+",
+                        );
+                        for f in &profile.static_facts {
+                            out.push_str(&format!(
+                                "- {} {} {} (conf {:.2})
+",
+                                f.subject, f.predicate, f.object, f.confidence
+                            ));
+                        }
+                    }
+                    if !profile.dynamic.is_empty() {
+                        out.push_str(
+                            "## Recent activity
+",
+                        );
+                        for d in &profile.dynamic {
+                            out.push_str(&format!(
+                                "- {}
+",
+                                d.replace('\n', " ")
+                            ));
+                        }
+                    }
+                }
                 for f in &pack.facts {
                     out.push_str(&format!(
                         "fact [{}] {} {} {} (conf {:.2}, {})\n",

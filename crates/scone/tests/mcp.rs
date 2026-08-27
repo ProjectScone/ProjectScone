@@ -167,3 +167,48 @@ async fn facts_about_and_forget_are_space_scoped() {
     );
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn recall_includes_profile_sections() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = engine(dir.path());
+    let space = auth::resolve(&mut e, "agent", true).unwrap();
+    let scone_core::IngestOutcome::Ingested { episode_id, .. } = e
+        .ingest(
+            &space,
+            scone_core::IngestInput::Note {
+                text: "seed activity".into(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    e.apply_facts(
+        &space,
+        episode_id,
+        &[ExtractedFact {
+            subject: "mark".into(),
+            predicate: "lives_in".into(),
+            object: "austin".into(),
+            confidence: 0.9,
+        }],
+    )
+    .unwrap();
+    let client = client_for(SconeMcp::new(e, "agent")).await;
+    let result = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_recall");
+            p.arguments = serde_json::json!({"query": "anything at all"})
+                .as_object()
+                .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(text.contains("## Profile"), "{text}");
+    assert!(text.contains("lives_in austin"), "{text}");
+    assert!(text.contains("## Recent activity"), "{text}");
+    client.cancel().await.unwrap();
+}

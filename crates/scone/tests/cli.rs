@@ -399,3 +399,23 @@ fn daemon_once_scans_and_distills() {
         .success()
         .stdout(predicates::str::contains("mark uses scone"));
 }
+
+#[test]
+fn profile_shows_identity_and_recent_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "team switched to bun last sprint"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .arg("profile")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark prefers bun"))
+        .stdout(predicates::str::contains("last sprint"));
+}

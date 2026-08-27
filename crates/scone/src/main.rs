@@ -56,6 +56,11 @@ enum Cmd {
         #[arg(long)]
         as_of: Option<String>,
     },
+    /// Show the space's profile: identity facts and recent activity
+    Profile {
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
     /// Show stores, counts, and index health
     Status,
     /// Scan a directory into memory, repeatedly or once
@@ -337,6 +342,28 @@ fn run() -> Result<(), String> {
                     "{:.3}  [{}] {}  {}",
                     item.score, item.episode_id, source, text
                 );
+            }
+        }
+        Cmd::Profile { limit } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let profile = engine.profile(&space, *limit).map_err(|e| e.to_string())?;
+            if !profile.static_facts.is_empty() {
+                println!("profile:");
+                for f in &profile.static_facts {
+                    println!(
+                        "  {} {} {}  (conf {:.2})",
+                        f.subject, f.predicate, f.object, f.confidence
+                    );
+                }
+            }
+            if !profile.dynamic.is_empty() {
+                println!("recent:");
+                for d in &profile.dynamic {
+                    println!("  {}", d.replace('\n', " "));
+                }
+            }
+            if profile.static_facts.is_empty() && profile.dynamic.is_empty() {
+                println!("empty profile: nothing stored in this space yet");
             }
         }
         Cmd::Status => {

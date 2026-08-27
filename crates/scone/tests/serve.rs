@@ -151,3 +151,26 @@ async fn status_reports_space_and_lane() {
     assert_eq!(body["episodes"], serde_json::json!(1));
     assert_eq!(body["semantic_lane"], serde_json::json!("paused"));
 }
+
+#[tokio::test]
+async fn profile_endpoint_serves_identity_and_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({"content": "alice ships rust code"})),
+    )
+    .await;
+    let (status, body) = call(&app, "GET", "/v1/profile", Some("sk-alice"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["dynamic"][0].as_str().unwrap().contains("ships rust"),
+        "{body}"
+    );
+    assert!(body["static_facts"].as_array().is_some());
+    let (status, _) = call(&app, "GET", "/v1/profile", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

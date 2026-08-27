@@ -46,6 +46,7 @@ pub fn router(engine: Engine, config: ServeConfig) -> Router {
         .route("/v1/recall", get(get_recall))
         .route("/v1/facts", get(get_facts))
         .route("/v1/facts/{id}/close", post(post_fact_close))
+        .route("/v1/profile", get(get_profile))
         .route("/v1/status", get(get_status))
         .with_state(state)
 }
@@ -220,6 +221,20 @@ async fn post_fact_close(
         engine.facts_close(space, id, &body.reason)
     }) {
         Ok(()) => Json(serde_json::json!({"closed": id, "reason": body.reason})).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn get_profile(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    match with_engine(&state, &headers, |engine, space| engine.profile(space, 8)) {
+        Ok(profile) => Json(serde_json::json!({
+            "static_facts": profile.static_facts.iter().map(|f| serde_json::json!({
+                "fact_id": f.fact_id, "subject": f.subject, "predicate": f.predicate,
+                "object": f.object, "confidence": f.confidence,
+            })).collect::<Vec<_>>(),
+            "dynamic": profile.dynamic,
+        }))
+        .into_response(),
         Err(response) => response,
     }
 }
