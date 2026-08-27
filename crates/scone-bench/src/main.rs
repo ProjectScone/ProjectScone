@@ -38,9 +38,13 @@ enum Cmd {
         /// Embedder: hash (hermetic) or local (ONNX, real semantics)
         #[arg(long, default_value = "local")]
         embedder: String,
-        /// config.toml directory for the LLM (defaults to none = episodic only)
+        /// OpenAI-compatible endpoint for the LLM (e.g. Ollama:
+        /// http://localhost:11434/v1). Unset = episodic-only run.
         #[arg(long)]
-        config_dir: Option<std::path::PathBuf>,
+        llm_url: Option<String>,
+        /// Model name at the endpoint (required with --llm-url)
+        #[arg(long)]
+        llm_model: Option<String>,
     },
 }
 
@@ -72,7 +76,8 @@ fn run() -> Result<(), String> {
             dataset,
             limit,
             embedder,
-            config_dir,
+            llm_url,
+            llm_model,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -91,11 +96,15 @@ fn run() -> Result<(), String> {
                 other => return Err(format!("unknown embedder {other:?}")),
             };
             let mut engine = Engine::open(dir.path(), embedder).map_err(|e| e.to_string())?;
-            if let Some(cfg) = config_dir {
-                let _ = cfg; // LLM wiring comes from scone's config loader in a follow-up.
-                eprintln!(
-                    "note: --config-dir LLM wiring lands in a follow-up; running episodic-only"
-                );
+            match (&llm_url, &llm_model) {
+                (Some(url), Some(model)) => {
+                    engine.set_llm(Some(Box::new(scone_core::llm::OpenAiCompatible::new(
+                        url, model, None,
+                    ))));
+                    eprintln!("llm: {model} at {url}");
+                }
+                (None, None) => eprintln!("no LLM configured: episodic-only run"),
+                _ => return Err("--llm-url and --llm-model go together".into()),
             }
             let mut report = Report::default();
             let mut recall_ms = Vec::new();
