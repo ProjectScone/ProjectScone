@@ -20,6 +20,22 @@ pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
 pub use recall::{ContextPack, RecallItem, RecallOpts};
 
+#[derive(Debug)]
+pub struct SpaceStatus {
+    pub name: String,
+    pub episodes: i64,
+    pub chunks: i64,
+    pub revision: i64,
+}
+
+#[derive(Debug)]
+pub struct StatusReport {
+    pub spaces: Vec<SpaceStatus>,
+    pub embedder_id: String,
+    pub embedder_dim: usize,
+    pub index_dirty: bool,
+}
+
 pub struct Engine {
     conn: Connection,
     data_dir: PathBuf,
@@ -53,8 +69,6 @@ impl Engine {
         Ok(())
     }
 
-    // Consumed by status/doctor from Task 9 on; scaffolding until then.
-    #[allow(dead_code)]
     pub(crate) fn get_meta(&self, key: &str) -> Result<Option<String>> {
         match self
             .conn
@@ -72,6 +86,34 @@ impl Engine {
             [space.id()],
             |r| r.get(0),
         )?)
+    }
+
+    /// Administrative overview of the whole store (single-user surface;
+    /// multi-user servers must scope what they expose of it).
+    pub fn status(&self) -> Result<StatusReport> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.name, s.revision,
+                    (SELECT count(*) FROM episodes e WHERE e.space_id = s.id),
+                    (SELECT count(*) FROM chunks c JOIN episodes e ON e.id = c.episode_id
+                     WHERE e.space_id = s.id)
+             FROM spaces s ORDER BY s.name",
+        )?;
+        let spaces = stmt
+            .query_map([], |r| {
+                Ok(SpaceStatus {
+                    name: r.get(0)?,
+                    revision: r.get(1)?,
+                    episodes: r.get(2)?,
+                    chunks: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(StatusReport {
+            spaces,
+            embedder_id: self.embedder.id().to_owned(),
+            embedder_dim: self.embedder.dim(),
+            index_dirty: self.get_meta("index_dirty")?.as_deref() == Some("1"),
+        })
     }
 
     /// Content and kind of one episode, straight from truth.
