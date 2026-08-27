@@ -16,6 +16,8 @@ use crate::error::{Result, SconeError};
 /// Target chunk size in bytes (~250 tokens).
 pub(crate) const CHUNK_TARGET_BYTES: usize = 1000;
 
+const KINDS: [&str; 4] = ["note", "file", "conversation", "observation"];
+
 #[derive(Debug)]
 pub enum IngestInput {
     Note { text: String },
@@ -40,21 +42,54 @@ impl Engine {
                 ("file", text, Some(path.display().to_string()))
             }
         };
+        self.ingest_raw(space, kind, &content, source.as_deref(), None)
+    }
+
+    /// Import-grade ingest: explicit kind/source/created_at, same pipeline.
+    /// Returns the episode id and whether it was freshly stored.
+    pub(crate) fn import_episode(
+        &mut self,
+        space: &ScopedSpace,
+        kind: &str,
+        content: &str,
+        source: Option<&str>,
+        created_at: Option<&str>,
+    ) -> Result<(i64, bool)> {
+        match self.ingest_raw(space, kind, content, source, created_at)? {
+            IngestOutcome::Ingested { episode_id, .. } => Ok((episode_id, true)),
+            IngestOutcome::Deduplicated { episode_id } => Ok((episode_id, false)),
+        }
+    }
+
+    fn ingest_raw(
+        &mut self,
+        space: &ScopedSpace,
+        kind: &str,
+        content: &str,
+        source: Option<&str>,
+        created_at: Option<&str>,
+    ) -> Result<IngestOutcome> {
+        if !KINDS.contains(&kind) {
+            return Err(SconeError::InvalidInput(format!(
+                "kind must be one of {KINDS:?}, got {kind:?}"
+            )));
+        }
         if content.trim().is_empty() {
             return Err(SconeError::InvalidInput("content is empty".into()));
         }
 
         let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        let spans = chunk_text(&content, CHUNK_TARGET_BYTES);
+        let spans = chunk_text(content, CHUNK_TARGET_BYTES);
         let texts: Vec<&str> = spans.iter().map(|s| &content[s.start..s.end]).collect();
         let embeddings = self.embedder.embed(&texts)?;
 
         let tx = self.conn.transaction()?;
         let inserted = tx.execute(
-            "INSERT INTO episodes (space_id, kind, content, hash, source)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO episodes (space_id, kind, content, hash, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5,
+                     COALESCE(?6, strftime('%Y-%m-%dT%H:%M:%fZ','now')))
              ON CONFLICT (space_id, hash) DO NOTHING",
-            rusqlite::params![space.id(), kind, content, hash, source],
+            rusqlite::params![space.id(), kind, content, hash, source, created_at],
         )?;
         if inserted == 0 {
             let episode_id = tx.query_row(

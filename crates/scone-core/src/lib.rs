@@ -12,6 +12,7 @@ mod error;
 pub mod index;
 mod ingest;
 pub mod llm;
+mod portability;
 mod recall;
 
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ use rusqlite::Connection;
 pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
+pub use portability::ImportReport;
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
 
 #[derive(Debug)]
