@@ -20,7 +20,9 @@ memory_recall, memory_facts_about, memory_forget — space-scoped and
 input-bounded, with immediate fact distillation when an LLM is configured.
 M4: scone serve is a self-hostable multi-user HTTP API (Bearer keys, each
 bound to one space), and scone-ffi ships a C ABI (include/scone.h) so any
-language can embed the engine. Next: M5, benchmarks.
+language can embed the engine. Measured on-device (Apple Silicon, criterion):
+recall over a 5k-chunk corpus in ~300 µs, 3.6 ms end-to-end including local
+query embedding, ingest at 2.9 ms/note - no datacenter involved.
 
 Give Claude Code persistent memory:
 
