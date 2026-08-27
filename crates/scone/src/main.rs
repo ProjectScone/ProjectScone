@@ -142,6 +142,7 @@ fn run() -> Result<(), String> {
             let opts = RecallOpts {
                 limit: *limit,
                 budget_bytes: None,
+                ..Default::default()
             };
             let pack = engine
                 .recall(&space, query, &opts)

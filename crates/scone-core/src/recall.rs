@@ -18,6 +18,9 @@ const RECENCY_HALF_LIFE_DAYS: f32 = 30.0;
 pub struct RecallOpts {
     pub limit: usize,
     pub budget_bytes: Option<usize>,
+    /// Evaluate fact validity at this instant (ISO-8601). None = now.
+    /// Time travel: a past `as_of` serves the then-valid closed facts.
+    pub as_of: Option<String>,
 }
 
 impl Default for RecallOpts {
@@ -25,8 +28,21 @@ impl Default for RecallOpts {
         Self {
             limit: 10,
             budget_bytes: None,
+            as_of: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactItem {
+    pub fact_id: i64,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f32,
+    pub valid_from: String,
+    pub valid_until: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +57,8 @@ pub struct RecallItem {
 
 #[derive(Debug, Default)]
 pub struct ContextPack {
+    /// Semantic facts, first-class and budget-first (spec §7).
+    pub facts: Vec<FactItem>,
     pub items: Vec<RecallItem>,
     /// Generators that could not contribute, stated loudly (spec §10).
     pub degraded: Vec<String>,
@@ -57,6 +75,10 @@ impl Engine {
             return Err(SconeError::InvalidInput("query is empty".into()));
         }
         let mut degraded = Vec::new();
+
+        // Fact generator: entity/predicate/object term match, validity
+        // evaluated at `as_of` (spec §5 I2/I3 make this a WHERE clause).
+        let facts = self.recall_facts(space, query, opts)?;
 
         // Candidate generation: each generator may degrade, never abort.
         let fts_hits = match self
@@ -151,6 +173,111 @@ impl Engine {
             items = kept;
         }
 
-        Ok(ContextPack { items, degraded })
+        // Budget: facts are dense and land first (spec §7); chunks share
+        // what remains under the pinned top-item rule.
+        if let Some(budget) = opts.budget_bytes {
+            let facts_bytes: usize = facts
+                .iter()
+                .map(|f| f.subject.len() + f.predicate.len() + f.object.len())
+                .sum();
+            let chunk_budget = budget.saturating_sub(facts_bytes);
+            let mut used = 0usize;
+            let mut kept = Vec::new();
+            for item in items {
+                if !kept.is_empty() && used + item.text.len() > chunk_budget {
+                    break;
+                }
+                used += item.text.len();
+                kept.push(item);
+            }
+            items = kept;
+        }
+
+        Ok(ContextPack {
+            facts,
+            items,
+            degraded,
+        })
+    }
+
+    fn recall_facts(
+        &mut self,
+        space: &ScopedSpace,
+        query: &str,
+        opts: &RecallOpts,
+    ) -> Result<Vec<FactItem>> {
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .filter(|t| t.len() > 2)
+            .map(|t| format!("%{t}%"))
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let as_of = opts
+            .as_of
+            .clone()
+            .unwrap_or_else(|| "now-sentinel".to_owned());
+        let mut found: Vec<FactItem> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT f.id, en.canonical, f.predicate, f.object, f.confidence,
+                        f.valid_from, f.valid_until, f.status
+                 FROM facts f
+                 JOIN entities en ON en.id = f.subject_entity
+                 WHERE f.space_id = ?1
+                   AND f.valid_from <= ?2
+                   AND (f.valid_until IS NULL OR f.valid_until > ?2)
+                   AND (en.canonical LIKE ?3 OR f.predicate LIKE ?3 OR f.object LIKE ?3
+                        OR EXISTS (SELECT 1 FROM entity_aliases a
+                                   WHERE a.entity_id = f.subject_entity AND a.alias LIKE ?3))
+                 ORDER BY f.confidence DESC, f.access_count DESC
+                 LIMIT ?4",
+            )?;
+            let now: String =
+                self.conn
+                    .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
+                        r.get(0)
+                    })?;
+            let effective = if as_of == "now-sentinel" { now } else { as_of };
+            for term in &terms {
+                let rows = stmt.query_map(
+                    rusqlite::params![space.id(), effective, term, opts.limit as i64],
+                    |r| {
+                        Ok(FactItem {
+                            fact_id: r.get(0)?,
+                            subject: r.get(1)?,
+                            predicate: r.get(2)?,
+                            object: r.get(3)?,
+                            confidence: r.get(4)?,
+                            valid_from: r.get(5)?,
+                            valid_until: r.get(6)?,
+                            status: r.get(7)?,
+                        })
+                    },
+                )?;
+                for row in rows {
+                    let row = row?;
+                    if !found.iter().any(|f| f.fact_id == row.fact_id) {
+                        found.push(row);
+                    }
+                }
+            }
+        }
+        found.truncate(opts.limit);
+        // Reinforcement: recalled present-time facts strengthen (spec §7).
+        // Historical (as_of) browsing does not rewrite the present.
+        if opts.as_of.is_none() {
+            for f in &found {
+                self.conn.execute(
+                    "UPDATE facts SET access_count = access_count + 1,
+                            last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                     WHERE id = ?1",
+                    [f.fact_id],
+                )?;
+            }
+        }
+        Ok(found)
     }
 }

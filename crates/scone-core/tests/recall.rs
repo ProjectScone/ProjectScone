@@ -72,6 +72,7 @@ fn budget_keeps_top_item_then_truncates() {
     let opts = RecallOpts {
         limit: 10,
         budget_bytes: Some(1),
+        ..Default::default()
     };
     let pack = e.recall(&space, "rust search", &opts).unwrap();
     assert_eq!(pack.items.len(), 1);

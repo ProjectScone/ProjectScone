@@ -21,7 +21,7 @@ use rusqlite::Connection;
 pub use distill::{ApplyReport, DistillReport};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
-pub use recall::{ContextPack, RecallItem, RecallOpts};
+pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
 
 #[derive(Debug)]
 pub struct DoctorReport {
