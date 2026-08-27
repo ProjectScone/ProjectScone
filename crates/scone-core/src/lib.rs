@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod chunker;
 mod db;
+pub mod embed;
 mod error;
 
 use std::path::{Path, PathBuf};
