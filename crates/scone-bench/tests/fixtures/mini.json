@@ -1,0 +1,36 @@
+[
+  {
+    "question_id": "mini-1",
+    "question_type": "single-session-user",
+    "question": "what espresso machine did the user buy?",
+    "answer": "a gaggia classic",
+    "question_date": "2026-08-01",
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I finally bought a Gaggia Classic espresso machine yesterday."},
+        {"role": "assistant", "content": "Congratulations on the Gaggia Classic!"}
+      ],
+      [
+        {"role": "user", "content": "My sourdough starter doubled in four hours today."},
+        {"role": "assistant", "content": "That is a healthy starter."}
+      ]
+    ]
+  },
+  {
+    "question_id": "mini-2",
+    "question_type": "knowledge-update",
+    "question": "which city does the user live in now?",
+    "answer": "austin",
+    "question_date": "2026-08-02",
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I live in Denver right now."},
+        {"role": "assistant", "content": "Denver is lovely."}
+      ],
+      [
+        {"role": "user", "content": "Update: I just moved to Austin last week."},
+        {"role": "assistant", "content": "Enjoy Austin!"}
+      ]
+    ]
+  }
+]

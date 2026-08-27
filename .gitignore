@@ -7,3 +7,4 @@ memory/raw/
 # Private: the knowledge base and design docs are the proprietary part.
 memory/
 docs/
+bench-data/

@@ -3213,6 +3213,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scone-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "scone-core",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "scone-core"
 version = "0.1.0"
 dependencies = [
