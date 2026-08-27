@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-pub use distill::ApplyReport;
+pub use distill::{ApplyReport, DistillReport};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
 pub use recall::{ContextPack, RecallItem, RecallOpts};

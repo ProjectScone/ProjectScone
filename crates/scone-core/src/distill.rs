@@ -15,6 +15,14 @@ use crate::error::{Result, SconeError};
 use crate::llm::ExtractedFact;
 
 #[derive(Debug, Default, PartialEq)]
+pub struct DistillReport {
+    pub processed: usize,
+    pub facts_added: usize,
+    pub facts_closed: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Default, PartialEq)]
 pub struct ApplyReport {
     pub added: usize,
     pub closed: usize,
@@ -56,6 +64,64 @@ fn resolve_entity(tx: &Transaction, name: &str) -> Result<i64> {
 }
 
 impl Engine {
+    /// Drain up to `limit` pending episodes of this space through the LLM.
+    ///
+    /// Failures are recorded on the queue row (attempts, last_error) and
+    /// never delete anything (memory/bugs.md P-2); after 3 attempts the row
+    /// parks as `failed` and stops being retried implicitly.
+    pub fn distill(&mut self, space: &ScopedSpace, limit: usize) -> Result<DistillReport> {
+        if self.llm.is_none() {
+            return Err(SconeError::Llm(
+                "no LLM configured — semantic lane paused; set [llm] in config.toml                  or pass --llm (episodic search is unaffected)"
+                    .into(),
+            ));
+        }
+        let pending: Vec<(i64, i64, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT q.id, q.episode_id, e.content
+                 FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
+                 WHERE q.state = 'pending' AND e.space_id = ?1
+                 ORDER BY q.id LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![space.id(), limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut report = DistillReport::default();
+        for (queue_id, episode_id, content) in pending {
+            let extraction = match &self.llm {
+                Some(llm) => llm.extract_facts(&content),
+                None => unreachable!("checked above"),
+            };
+            match extraction {
+                Ok(facts) => {
+                    let applied = self.apply_facts(space, episode_id, &facts)?;
+                    self.conn.execute(
+                        "UPDATE distill_queue SET state = 'done', last_error = NULL
+                         WHERE id = ?1",
+                        [queue_id],
+                    )?;
+                    report.processed += 1;
+                    report.facts_added += applied.added;
+                    report.facts_closed += applied.closed;
+                }
+                Err(e) => {
+                    self.conn.execute(
+                        "UPDATE distill_queue SET attempts = attempts + 1,
+                                last_error = ?1,
+                                state = CASE WHEN attempts + 1 >= 3
+                                             THEN 'failed' ELSE 'pending' END
+                         WHERE id = ?2",
+                        rusqlite::params![e.to_string(), queue_id],
+                    )?;
+                    report.failed += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Register `alias` as another name for `canonical` (both canonicalized).
     pub fn add_entity_alias(&mut self, alias: &str, canonical: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
