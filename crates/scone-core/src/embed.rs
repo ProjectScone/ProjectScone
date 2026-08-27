@@ -6,7 +6,7 @@
 
 use crate::error::Result;
 
-pub trait EmbeddingProvider {
+pub trait EmbeddingProvider: Send {
     /// Stable identity, pinned into the index metadata; changing providers
     /// requires `doctor --rebuild` (spec §9).
     fn id(&self) -> &str;

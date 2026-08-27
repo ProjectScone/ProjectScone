@@ -14,7 +14,7 @@ pub struct ExtractedFact {
     pub confidence: f32,
 }
 
-pub trait LlmProvider {
+pub trait LlmProvider: Send {
     fn id(&self) -> &str;
     fn extract_facts(&self, text: &str) -> Result<Vec<ExtractedFact>>;
     fn answer(&self, question: &str, context: &str) -> Result<String>;

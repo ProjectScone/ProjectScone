@@ -58,6 +58,8 @@ enum Cmd {
     },
     /// Show stores, counts, and index health
     Status,
+    /// Serve persistent agent memory over MCP (stdio)
+    Mcp,
     /// Verify and repair the derived indexes
     Doctor {
         /// Rebuild all indexes from SQLite truth
@@ -424,6 +426,23 @@ fn run() -> Result<(), String> {
                     println!("closed fact {id}: {reason}");
                 }
             }
+        }
+        Cmd::Mcp => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let server = scone::mcp::SconeMcp::new(engine, &cli.space);
+            rt.block_on(async move {
+                use rmcp::ServiceExt;
+                let running = server
+                    .serve(rmcp::transport::stdio())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                running.waiting().await.map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            })?;
+            return Ok(());
         }
         Cmd::Doctor { rebuild } => {
             if !rebuild {
