@@ -65,3 +65,42 @@ impl EmbeddingProvider for HashEmbedder {
             .collect())
     }
 }
+
+/// Local ONNX embedder (spec §9 default): bge-small-en-v1.5, 384 dims,
+/// downloaded once into the data dir and cached — offline thereafter.
+#[cfg(feature = "local-embed")]
+pub struct OnnxEmbedder {
+    model: std::cell::RefCell<fastembed::TextEmbedding>,
+}
+
+#[cfg(feature = "local-embed")]
+impl OnnxEmbedder {
+    pub fn new(cache_dir: &std::path::Path) -> Result<Self> {
+        let options = fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+            .with_cache_dir(cache_dir.to_path_buf())
+            .with_show_download_progress(false);
+        let model = fastembed::TextEmbedding::try_new(options)
+            .map_err(|e| crate::SconeError::Embed(e.to_string()))?;
+        Ok(Self {
+            model: std::cell::RefCell::new(model),
+        })
+    }
+}
+
+#[cfg(feature = "local-embed")]
+impl EmbeddingProvider for OnnxEmbedder {
+    fn id(&self) -> &str {
+        "bge-small-en-v1.5"
+    }
+
+    fn dim(&self) -> usize {
+        384
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.model
+            .borrow_mut()
+            .embed(texts, None)
+            .map_err(|e| crate::SconeError::Embed(e.to_string()))
+    }
+}

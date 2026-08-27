@@ -43,6 +43,18 @@ impl std::fmt::Debug for VectorIndex {
 }
 
 impl VectorIndex {
+    /// Open, resetting the stored file on dimension mismatch. Only the
+    /// repair path uses this; normal opens refuse mismatches loudly.
+    pub fn open_or_reset(dir: &Path, dim: usize) -> Result<Self> {
+        match Self::open(dir, dim) {
+            Err(SconeError::Index(_)) => {
+                std::fs::remove_file(dir.join(FILE_NAME))?;
+                Self::open(dir, dim)
+            }
+            other => other,
+        }
+    }
+
     pub fn open(dir: &Path, dim: usize) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE_NAME);

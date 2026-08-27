@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["local-embed"]
+local-embed = ["scone-core/local-embed"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-scone-core = { path = "../scone-core" }
+scone-core = { path = "../scone-core", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"

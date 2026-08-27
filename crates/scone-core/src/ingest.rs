@@ -88,6 +88,16 @@ impl Engine {
             "UPDATE spaces SET revision = revision + 1 WHERE id = ?1",
             [space.id()],
         )?;
+        // Pin the embedder identity on first write (spec §9); later opens
+        // with a different embedder are refused until doctor --rebuild.
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('embedder_id', ?1)",
+            [self.embedder.id()],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('embedder_dim', ?1)",
+            [self.embedder.dim().to_string()],
+        )?;
         tx.commit()?;
 
         // Feed the derived indexes after truth commits. An index failure

@@ -3,8 +3,29 @@ use assert_cmd::Command;
 
 fn scone(dir: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("scone").unwrap();
-    c.arg("--data-dir").arg(dir);
+    // Tests stay hermetic: the hash embedder needs no model download.
+    c.arg("--data-dir").arg(dir).args(["--embedder", "hash"]);
     c
+}
+
+#[test]
+fn doctor_rebuild_recovers_from_deleted_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "memory survives rebuilds"])
+        .assert()
+        .success();
+    std::fs::remove_dir_all(dir.path().join("fts")).unwrap();
+    scone(dir.path())
+        .args(["doctor", "--rebuild"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("rebuilt"));
+    scone(dir.path())
+        .args(["search", "survives"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("survives"));
 }
 
 #[test]

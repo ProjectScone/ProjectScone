@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-use scone_core::embed::HashEmbedder;
+use clap::{Parser, Subcommand, ValueEnum};
+use scone_core::embed::{EmbeddingProvider, HashEmbedder};
 use scone_core::{Engine, IngestInput, IngestOutcome, RecallOpts, auth};
 
 const HASH_EMBEDDER_DIM: usize = 256;
@@ -24,6 +24,10 @@ struct Cli {
     /// Space to operate in
     #[arg(long, global = true, default_value = "default")]
     space: String,
+    /// Embedding provider: local ONNX model (default) or the model-free
+    /// deterministic hash embedder
+    #[arg(long, global = true, value_enum, default_value_t = EmbedderKind::Local)]
+    embedder: EmbedderKind,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -46,6 +50,36 @@ enum Cmd {
     },
     /// Show stores, counts, and index health
     Status,
+    /// Verify and repair the derived indexes
+    Doctor {
+        /// Rebuild all indexes from SQLite truth
+        #[arg(long)]
+        rebuild: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum EmbedderKind {
+    Local,
+    Hash,
+}
+
+fn make_embedder(
+    kind: EmbedderKind,
+    dir: &std::path::Path,
+) -> Result<Box<dyn EmbeddingProvider>, String> {
+    match kind {
+        EmbedderKind::Hash => Ok(Box::new(HashEmbedder::new(HASH_EMBEDDER_DIM))),
+        #[cfg(feature = "local-embed")]
+        EmbedderKind::Local => Ok(Box::new(
+            scone_core::embed::OnnxEmbedder::new(&dir.join("models")).map_err(|e| e.to_string())?,
+        )),
+        #[cfg(not(feature = "local-embed"))]
+        EmbedderKind::Local => {
+            let _ = dir;
+            Err("this build lacks the local-embed feature; use --embedder hash".into())
+        }
+    }
 }
 
 fn main() {
@@ -67,8 +101,13 @@ fn data_dir(cli: &Cli) -> Result<PathBuf, String> {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let dir = data_dir(&cli)?;
-    let mut engine = Engine::open(&dir, Box::new(HashEmbedder::new(HASH_EMBEDDER_DIM)))
-        .map_err(|e| e.to_string())?;
+    let embedder = make_embedder(cli.embedder, &dir)?;
+    let repair = matches!(cli.cmd, Cmd::Doctor { rebuild: true });
+    let mut engine = if repair {
+        Engine::open_for_repair(&dir, embedder).map_err(|e| e.to_string())?
+    } else {
+        Engine::open(&dir, embedder).map_err(|e| e.to_string())?
+    };
 
     match &cli.cmd {
         Cmd::Add { paths, note } => {
@@ -143,6 +182,22 @@ fn run() -> Result<(), String> {
                     "clean"
                 }
             );
+        }
+        Cmd::Doctor { rebuild } => {
+            if !rebuild {
+                let report = engine.status().map_err(|e| e.to_string())?;
+                println!(
+                    "indexes: {}",
+                    if report.index_dirty { "DIRTY" } else { "clean" }
+                );
+                println!("run `scone doctor --rebuild` to rebuild from truth");
+            } else {
+                let report = engine.doctor_rebuild().map_err(|e| e.to_string())?;
+                println!(
+                    "rebuilt: {} episodes, {} chunks ({} re-embedded)",
+                    report.episodes, report.chunks, report.reembedded
+                );
+            }
         }
     }
     Ok(())

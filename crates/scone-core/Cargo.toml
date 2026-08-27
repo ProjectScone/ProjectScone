@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["local-embed"]
+local-embed = ["dep:fastembed"]
+
 [dependencies]
 blake3 = "1"
+fastembed = { version = "6", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tantivy = "0.26"
 usearch = "2.26"

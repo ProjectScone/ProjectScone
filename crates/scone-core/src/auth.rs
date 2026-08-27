@@ -20,8 +20,6 @@ impl ScopedSpace {
         &self.name
     }
 
-    // Consumed by ingest/recall from Task 5 on; scaffolding until then.
-    #[allow(dead_code)]
     pub(crate) fn id(&self) -> i64 {
         self.id
     }
