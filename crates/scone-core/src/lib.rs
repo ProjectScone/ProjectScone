@@ -3,6 +3,7 @@
 //! This crate performs no stdout I/O and touches the network only through
 //! provider traits. SQLite is the single source of truth (spec §5).
 
+pub mod auth;
 mod db;
 mod error;
 
@@ -30,6 +31,10 @@ impl Engine {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     pub fn schema_version(&self) -> Result<i64> {
