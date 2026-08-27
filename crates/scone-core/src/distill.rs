@@ -301,3 +301,35 @@ impl Engine {
         Ok(())
     }
 }
+
+impl Engine {
+    /// Active facts whose subject is `entity` (canonicalized, aliases
+    /// honored), scoped to one space.
+    pub fn facts_about(&self, space: &ScopedSpace, entity: &str) -> Result<Vec<crate::FactItem>> {
+        let canonical = entity.trim().to_lowercase();
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, en.canonical, f.predicate, f.object, f.confidence,
+                    f.valid_from, f.valid_until, f.status
+             FROM facts f JOIN entities en ON en.id = f.subject_entity
+             WHERE f.space_id = ?1 AND f.status = 'active'
+               AND f.subject_entity IN (
+                   SELECT id FROM entities WHERE canonical = ?2
+                   UNION
+                   SELECT entity_id FROM entity_aliases WHERE alias = ?2)
+             ORDER BY f.confidence DESC, f.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![space.id(), canonical], |r| {
+            Ok(crate::FactItem {
+                fact_id: r.get(0)?,
+                subject: r.get(1)?,
+                predicate: r.get(2)?,
+                object: r.get(3)?,
+                confidence: r.get(4)?,
+                valid_from: r.get(5)?,
+                valid_until: r.get(6)?,
+                status: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+}

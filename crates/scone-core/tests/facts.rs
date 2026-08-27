@@ -142,3 +142,24 @@ fn alias_merges_subjects() {
         "alias resolves to same entity, so this contradicts"
     );
 }
+
+#[test]
+fn facts_about_resolves_aliases_and_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space, ep) = setup(dir.path());
+    e.add_entity_alias("sconeuser00", "mark").unwrap();
+    e.apply_facts(&space, ep, &[fact("mark", "prefers", "bun")])
+        .unwrap();
+    e.apply_facts(&space, ep, &[fact("sourdough", "needs", "feeding")])
+        .unwrap();
+    let about = e.facts_about(&space, "SconeUser00").unwrap();
+    assert_eq!(about.len(), 1, "alias + case fold resolve to mark");
+    assert_eq!(about[0].object, "bun");
+    let other = auth::resolve(&mut e, "other", true).unwrap();
+    assert!(
+        e.facts_about(&other, "mark").unwrap().is_empty(),
+        "space-scoped"
+    );
+    let none = e.facts_about(&space, "nobody").unwrap();
+    assert!(none.is_empty());
+}
