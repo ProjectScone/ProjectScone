@@ -66,6 +66,7 @@ impl Engine {
             return Ok(IngestOutcome::Deduplicated { episode_id });
         }
         let episode_id = tx.last_insert_rowid();
+        let mut chunk_ids = Vec::with_capacity(spans.len());
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (episode_id, pos, start_byte, end_byte, embedding)
@@ -80,6 +81,7 @@ impl Engine {
                     span.end as i64,
                     blob
                 ])?;
+                chunk_ids.push(tx.last_insert_rowid());
             }
         }
         tx.execute(
@@ -87,6 +89,28 @@ impl Engine {
             [space.id()],
         )?;
         tx.commit()?;
+
+        // Feed the derived indexes after truth commits. An index failure
+        // never fails the ingest: it marks the indexes dirty for
+        // `doctor --rebuild` and the status surface says so (spec §10).
+        let fts_rows: Vec<(u64, u64, &str)> = chunk_ids
+            .iter()
+            .zip(&texts)
+            .map(|(id, text)| (*id as u64, space.id() as u64, *text))
+            .collect();
+        let vec_rows: Vec<(u64, &[f32])> = chunk_ids
+            .iter()
+            .zip(&embeddings)
+            .map(|(id, emb)| (*id as u64, emb.as_slice()))
+            .collect();
+        let index_result = self
+            .fts
+            .add(&fts_rows)
+            .and_then(|()| self.vectors.add(&vec_rows));
+        if index_result.is_err() {
+            self.set_meta("index_dirty", "1")?;
+        }
+
         Ok(IngestOutcome::Ingested {
             episode_id,
             chunks: spans.len(),

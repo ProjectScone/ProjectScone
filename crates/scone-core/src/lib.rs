@@ -10,6 +10,7 @@ pub mod embed;
 mod error;
 pub mod index;
 mod ingest;
+mod recall;
 
 use std::path::{Path, PathBuf};
 
@@ -17,11 +18,14 @@ use rusqlite::Connection;
 
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
+pub use recall::{ContextPack, RecallItem, RecallOpts};
 
 pub struct Engine {
     conn: Connection,
     data_dir: PathBuf,
     embedder: Box<dyn embed::EmbeddingProvider>,
+    fts: index::fts::FtsIndex,
+    vectors: index::vectors::VectorIndex,
 }
 
 impl Engine {
@@ -29,11 +33,37 @@ impl Engine {
     pub fn open(data_dir: &Path, embedder: Box<dyn embed::EmbeddingProvider>) -> Result<Engine> {
         std::fs::create_dir_all(data_dir)?;
         let conn = db::open(&data_dir.join("scone.db"))?;
+        let fts = index::fts::FtsIndex::open(&data_dir.join("fts"))?;
+        let vectors = index::vectors::VectorIndex::open(&data_dir.join("vectors"), embedder.dim())?;
         Ok(Engine {
             conn,
             data_dir: data_dir.to_path_buf(),
             embedder,
+            fts,
+            vectors,
         })
+    }
+
+    pub(crate) fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
+    // Consumed by status/doctor from Task 9 on; scaffolding until then.
+    #[allow(dead_code)]
+    pub(crate) fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        match self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SconeError::Db(e)),
+        }
     }
 
     pub fn space_revision(&self, space: &auth::ScopedSpace) -> Result<i64> {
