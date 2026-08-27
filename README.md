@@ -8,7 +8,15 @@ it into temporal facts that know when they were true (semantic memory), and
 returns budgeted, provenance-cited context on demand — fully offline by default,
 frontier models when you want them.
 
-Status: pre-alpha, under active design. See docs/superpowers/specs/ for the
-design spec and memory/ for the knowledge base that informs it.
+Status: M1 complete - the episodic engine works offline end-to-end:
+scone add / search / status / doctor --rebuild, hybrid BM25+vector recall
+with local ONNX embeddings (bge-small-en-v1.5), SQLite as the single source
+of truth. Next: M2, the semantic lane (temporal facts, contradiction
+closure, decay). See docs/superpowers/specs/ for the design spec and
+memory/ for the predecessor study that informs it.
+
+    cargo build --release
+    scone add --note "changed the oil on the truck"
+    scone search "vehicle maintenance"   # semantic hit, fully offline
 
 License: MIT
