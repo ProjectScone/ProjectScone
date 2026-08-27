@@ -182,3 +182,22 @@ pub fn run_item(
         recall_ms,
     })
 }
+
+/// LLM-judge scoring: asks the model whether the produced answer states
+/// the expected one. First token YES/NO; anything else counts as NO —
+/// conservative, never inflating (memory/benchmarks.md keeps both scores).
+pub fn judge_correct(
+    llm: &dyn scone_core::llm::LlmProvider,
+    question: &str,
+    expected: &str,
+    got: &str,
+) -> Result<bool, String> {
+    let verdict = llm
+        .answer(
+            "You are grading a memory benchmark. Reply with exactly YES or NO: \
+             does the candidate answer state the same fact as the reference answer?",
+            &format!("Question: {question}\nReference answer: {expected}\nCandidate answer: {got}"),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(verdict.trim_start().to_uppercase().starts_with("YES"))
+}

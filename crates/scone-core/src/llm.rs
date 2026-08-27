@@ -25,6 +25,7 @@ pub trait LlmProvider: Send {
 pub struct FakeLlm {
     facts: Vec<ExtractedFact>,
     fail: Option<String>,
+    answer: Option<String>,
     calls: std::cell::RefCell<Vec<String>>,
 }
 
@@ -33,14 +34,22 @@ impl FakeLlm {
         Self {
             facts,
             fail: None,
+            answer: None,
             calls: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Program the exact string `answer` returns.
+    pub fn with_answer(mut self, answer: &str) -> Self {
+        self.answer = Some(answer.to_owned());
+        self
     }
 
     pub fn failing(message: &str) -> Self {
         Self {
             facts: Vec::new(),
             fail: Some(message.to_owned()),
+            answer: None,
             calls: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -64,9 +73,10 @@ impl LlmProvider for FakeLlm {
     }
 
     fn answer(&self, question: &str, context: &str) -> Result<String> {
-        match &self.fail {
-            Some(msg) => Err(SconeError::Llm(msg.clone())),
-            None => Ok(format!(
+        match (&self.fail, &self.answer) {
+            (Some(msg), _) => Err(SconeError::Llm(msg.clone())),
+            (None, Some(programmed)) => Ok(programmed.clone()),
+            (None, None) => Ok(format!(
                 "answer to {question} given {} bytes",
                 context.len()
             )),

@@ -47,3 +47,21 @@ fn report_aggregates() {
     assert!((report.accuracy() - 0.5).abs() < f64::EPSILON);
     assert!((report.context_reduction() - 0.8).abs() < 1e-9);
 }
+
+#[test]
+fn llm_judge_accepts_paraphrase_and_rejects_wrong() {
+    use scone_bench::judge_correct;
+    use scone_core::llm::FakeLlm;
+    let yes = FakeLlm::new(vec![]).with_answer("YES — same city.");
+    assert!(
+        judge_correct(
+            &yes,
+            "where does the user live?",
+            "austin",
+            "They moved to Austin, Texas."
+        )
+        .unwrap()
+    );
+    let no = FakeLlm::new(vec![]).with_answer("NO");
+    assert!(!judge_correct(&no, "where does the user live?", "austin", "Denver.").unwrap());
+}
