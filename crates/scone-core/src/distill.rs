@@ -333,3 +333,28 @@ impl Engine {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }
+
+impl Engine {
+    /// Decay (spec §5): expire active facts that are old, unaccessed, and
+    /// low-confidence. Expiry is an interval close with a recorded reason
+    /// (adopted from the predecessor's forgetReason, rationales.md R-3) —
+    /// never a delete. Recalled facts are reinforced (access_count,
+    /// last_accessed) and therefore immune. Returns how many expired.
+    pub fn decay_facts(&mut self, space: &ScopedSpace, max_idle_days: u32) -> Result<usize> {
+        const DECAY_CONFIDENCE_CEILING: f64 = 0.6;
+        let cutoff = format!("-{max_idle_days} days");
+        let expired = self.conn.execute(
+            "UPDATE facts SET status = 'expired',
+                    valid_until = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    status_reason = 'decayed: unaccessed for ' || ?1 || '+ days'
+             WHERE space_id = ?2 AND status = 'active'
+               AND confidence < ?3
+               AND access_count = 0
+               AND valid_from < strftime('%Y-%m-%dT%H:%M:%fZ','now', ?4)
+               AND (last_accessed IS NULL
+                    OR last_accessed < strftime('%Y-%m-%dT%H:%M:%fZ','now', ?4))",
+            rusqlite::params![max_idle_days, space.id(), DECAY_CONFIDENCE_CEILING, cutoff],
+        )?;
+        Ok(expired)
+    }
+}
