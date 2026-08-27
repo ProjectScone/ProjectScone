@@ -1,0 +1,20 @@
+[package]
+name = "scone-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["local-embed"]
+local-embed = ["scone-core/local-embed"]
+
+[dependencies]
+scone-core = { path = "../scone-core", default-features = false }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

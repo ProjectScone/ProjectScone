@@ -3085,6 +3085,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scone-ffi"
+version = "0.1.0"
+dependencies = [
+ "scone-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "scratch"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
