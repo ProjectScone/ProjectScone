@@ -1,0 +1,8 @@
+[package]
+name = "scone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scone-core = { path = "../scone-core" }
