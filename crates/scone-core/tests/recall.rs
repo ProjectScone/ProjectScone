@@ -51,6 +51,11 @@ fn deleted_truth_is_never_served_even_if_indexed() {
     let episode_id = pack.items[0].episode_id;
     // Simulate truth deletion behind the indexes' back (bugs.md P-3).
     let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
+    raw.execute(
+        "DELETE FROM distill_queue WHERE episode_id = ?1",
+        [episode_id],
+    )
+    .unwrap();
     raw.execute("DELETE FROM chunks WHERE episode_id = ?1", [episode_id])
         .unwrap();
     raw.execute("DELETE FROM episodes WHERE id = ?1", [episode_id])

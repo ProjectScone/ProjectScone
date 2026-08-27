@@ -88,6 +88,12 @@ impl Engine {
             "UPDATE spaces SET revision = revision + 1 WHERE id = ?1",
             [space.id()],
         )?;
+        // Lane 2 is asynchronous: enqueue for distillation, never block
+        // ingest on a model (spec §6).
+        tx.execute(
+            "INSERT OR IGNORE INTO distill_queue (episode_id) VALUES (?1)",
+            [episode_id],
+        )?;
         // Pin the embedder identity on first write (spec §9); later opens
         // with a different embedder are refused until doctor --rebuild.
         tx.execute(

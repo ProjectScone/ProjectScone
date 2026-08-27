@@ -8,6 +8,6 @@ fn open_creates_schema_and_is_idempotent() {
     let e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
     drop(e);
     let e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
-    assert_eq!(e.schema_version().unwrap(), 1);
+    assert_eq!(e.schema_version().unwrap(), 2);
     assert!(dir.path().join("scone.db").exists());
 }
