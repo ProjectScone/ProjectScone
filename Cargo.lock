@@ -3192,7 +3192,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "scone"
+name = "scone-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "scone-core",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "scone-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
@@ -3210,17 +3221,6 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
-]
-
-[[package]]
-name = "scone-bench"
-version = "0.1.0"
-dependencies = [
- "clap",
- "scone-core",
- "serde_json",
- "tempfile",
- "ureq",
 ]
 
 [[package]]

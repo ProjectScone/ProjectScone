@@ -1,8 +1,18 @@
 [package]
-name = "scone"
+name = "scone-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Scone: a local-first temporal memory engine — CLI, MCP server, and HTTP API"
+readme = "../../README.md"
+
+[lib]
+name = "scone"
+
+[[bin]]
+name = "scone"
+path = "src/main.rs"
 
 [features]
 default = ["local-embed"]
@@ -17,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "net"] }
 serde_json = "1"
 toml = "0.9"
-scone-core = { path = "../scone-core", default-features = false }
+scone-core = { path = "../scone-core", version = "0.1.0", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
