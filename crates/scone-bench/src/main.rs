@@ -23,7 +23,7 @@ enum Cmd {
         /// Override the dataset URL
         #[arg(
             long,
-            default_value = "https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/longmemeval_oracle.json"
+            default_value = "https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/longmemeval_oracle"
         )]
         url: String,
     },
