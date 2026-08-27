@@ -122,3 +122,43 @@ fn three_failures_park_the_episode_as_failed() {
         "failed rows are not retried implicitly"
     );
 }
+
+#[test]
+fn malformed_extracted_facts_are_skipped_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = engine(dir.path());
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "note with messy extraction".into(),
+        },
+    )
+    .unwrap();
+    e.set_llm(Some(Box::new(FakeLlm::new(vec![
+        ExtractedFact {
+            subject: "mark".into(),
+            predicate: "".into(),
+            object: "junk".into(),
+            confidence: 0.5,
+        },
+        ExtractedFact {
+            subject: "".into(),
+            predicate: "likes".into(),
+            object: "".into(),
+            confidence: 0.5,
+        },
+        ExtractedFact {
+            subject: "mark".into(),
+            predicate: "uses".into(),
+            object: "scone".into(),
+            confidence: 0.9,
+        },
+    ]))));
+    let r = e.distill(&space, 10).unwrap();
+    assert_eq!(r.processed, 1, "the episode still processes");
+    assert_eq!(r.facts_added, 1, "the valid fact lands");
+    assert_eq!(r.failed, 0, "malformed facts are skipped, not batch-fatal");
+    let facts = e.facts_list(&space, false).unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].object, "scone");
+}

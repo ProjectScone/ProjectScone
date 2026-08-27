@@ -96,7 +96,32 @@ impl Engine {
             };
             match extraction {
                 Ok(facts) => {
-                    let applied = self.apply_facts(space, episode_id, &facts)?;
+                    // Sanitize before applying: a model emitting one junk
+                    // triple must not poison the batch (bugs.md P-2; found
+                    // by manual QA with llama3.2:3b, 2026-08-27).
+                    let usable: Vec<_> = facts
+                        .into_iter()
+                        .filter(|f| {
+                            !f.subject.trim().is_empty()
+                                && !f.predicate.trim().is_empty()
+                                && !f.object.trim().is_empty()
+                        })
+                        .collect();
+                    let applied = match self.apply_facts(space, episode_id, &usable) {
+                        Ok(applied) => applied,
+                        Err(e) => {
+                            self.conn.execute(
+                                "UPDATE distill_queue SET attempts = attempts + 1,
+                                        last_error = ?1,
+                                        state = CASE WHEN attempts + 1 >= 3
+                                                     THEN 'failed' ELSE 'pending' END
+                                 WHERE id = ?2",
+                                rusqlite::params![e.to_string(), queue_id],
+                            )?;
+                            report.failed += 1;
+                            continue;
+                        }
+                    };
                     self.conn.execute(
                         "UPDATE distill_queue SET state = 'done', last_error = NULL
                          WHERE id = ?1",
