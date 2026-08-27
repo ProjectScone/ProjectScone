@@ -10,6 +10,7 @@ pub mod embed;
 mod error;
 pub mod index;
 mod ingest;
+pub mod llm;
 mod recall;
 
 use std::path::{Path, PathBuf};
@@ -56,6 +57,7 @@ pub struct Engine {
     conn: Connection,
     data_dir: PathBuf,
     embedder: Box<dyn embed::EmbeddingProvider>,
+    llm: Option<Box<dyn llm::LlmProvider>>,
     fts: index::fts::FtsIndex,
     vectors: index::vectors::VectorIndex,
 }
@@ -116,9 +118,20 @@ impl Engine {
             conn,
             data_dir: data_dir.to_path_buf(),
             embedder,
+            llm: None,
             fts,
             vectors,
         })
+    }
+
+    /// Attach or detach the semantic lane's LLM. `None` pauses lane 2
+    /// loudly; the episodic engine is unaffected (spec §9).
+    pub fn set_llm(&mut self, llm: Option<Box<dyn llm::LlmProvider>>) {
+        self.llm = llm;
+    }
+
+    pub fn has_llm(&self) -> bool {
+        self.llm.is_some()
     }
 
     fn pinned_dim(conn: &Connection) -> Result<Option<usize>> {

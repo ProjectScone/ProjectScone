@@ -12,6 +12,8 @@ pub enum SconeError {
     Index(String),
     #[error("embed: {0}")]
     Embed(String),
+    #[error("llm: {0}")]
+    Llm(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("not found: {0}")]
