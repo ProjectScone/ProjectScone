@@ -292,6 +292,9 @@ impl SconeMcp {
 impl ServerHandler for SconeMcp {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info = rmcp::model::ServerInfo::default();
+        info.server_info.name = "scone".into();
+        info.server_info.title = Some("Scone memory engine".into());
+        info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Persistent memory for this agent. Call memory_recall at task start; \
              memory_store for durable observations; memory_facts_about before acting \
