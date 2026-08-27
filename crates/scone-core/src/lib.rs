@@ -4,6 +4,7 @@
 //! provider traits. SQLite is the single source of truth (spec §5).
 
 pub mod auth;
+pub mod chunker;
 mod db;
 mod error;
 
