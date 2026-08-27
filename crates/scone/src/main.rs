@@ -58,6 +58,15 @@ enum Cmd {
     },
     /// Show stores, counts, and index health
     Status,
+    /// Export the space as JSONL to stdout (episodes, aliases, facts)
+    Export,
+    /// Import a JSONL export into the space (idempotent)
+    Import {
+        /// Path to a JSONL file, or - for stdin
+        path: std::path::PathBuf,
+    },
+    /// List spaces with their episode counts
+    Spaces,
     /// Serve persistent agent memory over MCP (stdio)
     Mcp,
     /// Serve the multi-user HTTP API (keys from config.toml [[server.keys]])
@@ -431,6 +440,49 @@ fn run() -> Result<(), String> {
                         .map_err(|e| e.to_string())?;
                     println!("closed fact {id}: {reason}");
                 }
+            }
+        }
+        Cmd::Export => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let jsonl = engine.export_jsonl(&space).map_err(|e| e.to_string())?;
+            print!("{jsonl}");
+        }
+        Cmd::Import { path } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let data = if path.as_os_str() == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| e.to_string())?;
+                buf
+            } else {
+                std::fs::read_to_string(path).map_err(|e| e.to_string())?
+            };
+            let report = engine
+                .import_jsonl(&space, &data)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "imported {} episode{} ({} deduplicated), {} fact{}, {} alias{}",
+                report.episodes,
+                if report.episodes == 1 { "" } else { "s" },
+                report.deduplicated,
+                report.facts,
+                if report.facts == 1 { "" } else { "s" },
+                report.aliases,
+                if report.aliases == 1 { "" } else { "es" },
+            );
+        }
+        Cmd::Spaces => {
+            let report = engine.status().map_err(|e| e.to_string())?;
+            if report.spaces.is_empty() {
+                println!("no spaces yet");
+            }
+            for s in &report.spaces {
+                println!(
+                    "{}  ({} episodes, revision {})",
+                    s.name, s.episodes, s.revision
+                );
             }
         }
         Cmd::Mcp => {

@@ -313,3 +313,48 @@ fn search_shows_facts_and_supports_as_of_time_travel() {
         .success()
         .stdout(predicates::str::contains("mark prefers pnpm"));
 }
+
+#[test]
+fn export_import_moves_memory_between_stores() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    scone(a.path())
+        .args(["add", "--note", "portable memory survives moves"])
+        .assert()
+        .success();
+    let out = scone(a.path()).arg("export").assert().success();
+    let jsonl = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(jsonl.contains("portable memory"));
+    let f = a.path().join("dump.jsonl");
+    std::fs::write(&f, &jsonl).unwrap();
+    scone(b.path())
+        .arg("import")
+        .arg(&f)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 episode"));
+    scone(b.path())
+        .args(["search", "portable memory"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("survives moves"));
+}
+
+#[test]
+fn spaces_lists_all_spaces() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "one"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["--space", "work", "add", "--note", "two"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .arg("spaces")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("default"))
+        .stdout(predicates::str::contains("work"));
+}

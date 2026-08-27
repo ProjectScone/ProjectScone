@@ -141,10 +141,8 @@ impl Engine {
                         report.aliases += 1;
                     }
                 }
-                Some("fact") => {
-                    if self.import_fact(space, record, &hash_to_id)? {
-                        report.facts += 1;
-                    }
+                Some("fact") if self.import_fact(space, record, &hash_to_id)? => {
+                    report.facts += 1;
                 }
                 _ => {}
             }
