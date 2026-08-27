@@ -514,6 +514,10 @@ fn run() -> Result<(), String> {
                 } else {
                     println!("distilled 0: semantic lane paused (no LLM configured)");
                 }
+                let expired = engine.decay_facts(&space, 90).map_err(|e| e.to_string())?;
+                if expired > 0 {
+                    println!("decayed {expired} stale facts (reasons recorded)");
+                }
                 if *once {
                     break;
                 }

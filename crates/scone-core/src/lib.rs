@@ -13,6 +13,7 @@ pub mod index;
 mod ingest;
 pub mod llm;
 mod portability;
+pub mod profile;
 mod recall;
 
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome, ScanReport};
 pub use portability::ImportReport;
+pub use profile::Profile;
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
 
 #[derive(Debug)]
