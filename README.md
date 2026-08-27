@@ -12,8 +12,7 @@ Status: M1 complete - the episodic engine works offline end-to-end:
 scone add / search / status / doctor --rebuild, hybrid BM25+vector recall
 with local ONNX embeddings (bge-small-en-v1.5), SQLite as the single source
 of truth. Next: M2, the semantic lane (temporal facts, contradiction
-closure, decay). See docs/superpowers/specs/ for the design spec and
-memory/ for the predecessor study that informs it.
+closure, decay).
 
     cargo build --release
     scone add --note "changed the oil on the truck"
