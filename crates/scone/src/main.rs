@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use scone_core::embed::{EmbeddingProvider, HashEmbedder};
+use scone_core::llm::{ExtractedFact, FakeLlm, LlmProvider};
 use scone_core::{Engine, IngestInput, IngestOutcome, RecallOpts, auth};
 
 const HASH_EMBEDDER_DIM: usize = 256;
@@ -28,6 +29,10 @@ struct Cli {
     /// deterministic hash embedder
     #[arg(long, global = true, value_enum, default_value_t = EmbedderKind::Local)]
     embedder: EmbedderKind,
+    /// LLM for the semantic lane: none (paused) or fake (testing hook
+    /// reading SCONE_FAKE_FACTS as a JSON fact array)
+    #[arg(long, global = true, value_enum, default_value_t = LlmKind::None)]
+    llm: LlmKind,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -56,6 +61,70 @@ enum Cmd {
         #[arg(long)]
         rebuild: bool,
     },
+    /// Distill pending episodes into temporal facts (needs --llm)
+    Distill {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Inspect the semantic store
+    Facts {
+        #[command(subcommand)]
+        action: FactsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactsCmd {
+    /// List facts (active only; --all includes closed with reasons)
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show which episodes taught us a fact
+    Why { id: i64 },
+    /// Close a fact by hand with a reason (never deletes)
+    Close {
+        id: i64,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LlmKind {
+    None,
+    Fake,
+}
+
+fn make_llm(kind: LlmKind) -> Result<Option<Box<dyn LlmProvider>>, String> {
+    match kind {
+        LlmKind::None => Ok(None),
+        LlmKind::Fake => {
+            let raw = std::env::var("SCONE_FAKE_FACTS").unwrap_or_else(|_| "[]".into());
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| format!("SCONE_FAKE_FACTS: {e}"))?;
+            let facts = parsed
+                .as_array()
+                .ok_or("SCONE_FAKE_FACTS must be a JSON array")?
+                .iter()
+                .map(|f| {
+                    Ok(ExtractedFact {
+                        subject: f["subject"]
+                            .as_str()
+                            .ok_or("fact needs subject")?
+                            .to_owned(),
+                        predicate: f["predicate"]
+                            .as_str()
+                            .ok_or("fact needs predicate")?
+                            .to_owned(),
+                        object: f["object"].as_str().ok_or("fact needs object")?.to_owned(),
+                        confidence: f["confidence"].as_f64().unwrap_or(0.8) as f32,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Some(Box::new(FakeLlm::new(facts))))
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -108,6 +177,7 @@ fn run() -> Result<(), String> {
     } else {
         Engine::open(&dir, embedder).map_err(|e| e.to_string())?
     };
+    engine.set_llm(make_llm(cli.llm)?);
 
     match &cli.cmd {
         Cmd::Add { paths, note } => {
@@ -183,6 +253,68 @@ fn run() -> Result<(), String> {
                     "clean"
                 }
             );
+            match &report.llm_id {
+                Some(id) => println!(
+                    "semantic lane: llm {id} — {} pending, {} failed",
+                    report.pending_distill, report.failed_distill
+                ),
+                None => println!(
+                    "semantic lane: paused — no LLM configured ({} pending, {} failed)",
+                    report.pending_distill, report.failed_distill
+                ),
+            }
+        }
+        Cmd::Distill { limit } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let r = engine.distill(&space, *limit).map_err(|e| e.to_string())?;
+            println!(
+                "distilled {} episode{}: +{} facts, {} closed, {} failed",
+                r.processed,
+                if r.processed == 1 { "" } else { "s" },
+                r.facts_added,
+                r.facts_closed,
+                r.failed
+            );
+        }
+        Cmd::Facts { action } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            match action {
+                FactsCmd::List { all } => {
+                    let facts = engine.facts_list(&space, *all).map_err(|e| e.to_string())?;
+                    if facts.is_empty() {
+                        println!("no facts");
+                    }
+                    for f in facts {
+                        println!(
+                            "[{}] {} {} {}  (conf {:.2}, {}, from {})",
+                            f.fact_id,
+                            f.subject,
+                            f.predicate,
+                            f.object,
+                            f.confidence,
+                            f.status,
+                            f.valid_from
+                        );
+                    }
+                }
+                FactsCmd::Why { id } => {
+                    for p in engine.facts_why(&space, *id).map_err(|e| e.to_string())? {
+                        println!(
+                            "episode {} ({}) {} at {}",
+                            p.episode_id,
+                            p.kind,
+                            p.source.as_deref().unwrap_or("note"),
+                            p.created_at
+                        );
+                    }
+                }
+                FactsCmd::Close { id, reason } => {
+                    engine
+                        .facts_close(&space, *id, reason)
+                        .map_err(|e| e.to_string())?;
+                    println!("closed fact {id}: {reason}");
+                }
+            }
         }
         Cmd::Doctor { rebuild } => {
             if !rebuild {

@@ -107,3 +107,104 @@ fn add_reads_files() {
         .success()
         .stdout(predicates::str::contains("doc.md"));
 }
+
+const FAKE_FACTS: &str = r#"[{"subject":"mark","predicate":"prefers","object":"bun"}]"#;
+const FAKE_FACTS_2: &str = r#"[{"subject":"mark","predicate":"prefers","object":"pnpm"}]"#;
+
+#[test]
+fn status_says_semantic_lane_is_paused_without_llm() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "a note"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("paused"))
+        .stdout(predicates::str::contains("1 pending"));
+}
+
+#[test]
+fn distill_extracts_facts_and_lists_them() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark said he prefers bun"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 episode"));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark prefers bun"));
+}
+
+#[test]
+fn contradiction_history_is_visible_and_explained() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "first claim"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS_2)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["add", "--note", "second claim"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    let out = scone(dir.path()).args(["facts", "list"]).assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("bun") && !stdout.contains("pnpm"),
+        "{stdout}"
+    );
+    scone(dir.path())
+        .args(["facts", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("pnpm"))
+        .stdout(predicates::str::contains("superseded"));
+}
+
+#[test]
+fn facts_why_shows_provenance_and_close_takes_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark prefers bun today"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "why", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("episode"));
+    scone(dir.path())
+        .args(["facts", "close", "1", "--reason", "no longer true"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no longer true"));
+}

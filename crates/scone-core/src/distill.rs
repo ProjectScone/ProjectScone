@@ -208,3 +208,96 @@ impl Engine {
         Ok(report)
     }
 }
+
+/// One provenance link: which episode taught us a fact.
+#[derive(Debug)]
+pub struct ProvenanceItem {
+    pub episode_id: i64,
+    pub kind: String,
+    pub source: Option<String>,
+    pub created_at: String,
+}
+
+impl Engine {
+    /// Facts of a space; active only unless `all` (closed/expired included).
+    pub fn facts_list(&self, space: &ScopedSpace, all: bool) -> Result<Vec<crate::FactItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, en.canonical, f.predicate, f.object, f.confidence,
+                    f.valid_from, f.valid_until, f.status, f.status_reason
+             FROM facts f JOIN entities en ON en.id = f.subject_entity
+             WHERE f.space_id = ?1 AND (?2 OR f.status = 'active')
+             ORDER BY f.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![space.id(), all], |r| {
+            Ok((
+                crate::FactItem {
+                    fact_id: r.get(0)?,
+                    subject: r.get(1)?,
+                    predicate: r.get(2)?,
+                    object: r.get(3)?,
+                    confidence: r.get(4)?,
+                    valid_from: r.get(5)?,
+                    valid_until: r.get(6)?,
+                    status: r.get(7)?,
+                },
+                r.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (mut item, reason) = row?;
+            // Carry the closure reason in status for display surfaces.
+            if let Some(reason) = reason {
+                item.status = format!("{} ({reason})", item.status);
+            }
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    /// The episodes that taught us this fact (invariant I4 guarantees ≥1).
+    pub fn facts_why(&self, space: &ScopedSpace, fact_id: i64) -> Result<Vec<ProvenanceItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.kind, e.source, e.created_at
+             FROM fact_provenance fp
+             JOIN facts f ON f.id = fp.fact_id
+             JOIN episodes e ON e.id = fp.episode_id
+             WHERE fp.fact_id = ?1 AND f.space_id = ?2
+             ORDER BY e.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fact_id, space.id()], |r| {
+            Ok(ProvenanceItem {
+                episode_id: r.get(0)?,
+                kind: r.get(1)?,
+                source: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        let out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        if out.is_empty() {
+            return Err(SconeError::NotFound(format!(
+                "fact {fact_id} in space {}",
+                space.name()
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Close a fact by hand, with a reason (interval close, never delete).
+    pub fn facts_close(&mut self, space: &ScopedSpace, fact_id: i64, reason: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE facts SET status = 'closed',
+                    valid_until = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    status_reason = ?1
+             WHERE id = ?2 AND space_id = ?3 AND status = 'active'",
+            rusqlite::params![reason, fact_id, space.id()],
+        )?;
+        if changed == 0 {
+            return Err(SconeError::NotFound(format!(
+                "active fact {fact_id} in space {}",
+                space.name()
+            )));
+        }
+        Ok(())
+    }
+}

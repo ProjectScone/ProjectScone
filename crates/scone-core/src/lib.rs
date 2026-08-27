@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-pub use distill::{ApplyReport, DistillReport};
+pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
@@ -53,6 +53,9 @@ pub struct StatusReport {
     pub embedder_id: String,
     pub embedder_dim: usize,
     pub index_dirty: bool,
+    pub pending_distill: i64,
+    pub failed_distill: i64,
+    pub llm_id: Option<String>,
 }
 
 pub struct Engine {
@@ -268,11 +271,24 @@ impl Engine {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let (pending_distill, failed_distill) = self.conn.query_row(
+            "SELECT sum(state = 'pending'), sum(state = 'failed') FROM distill_queue",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                ))
+            },
+        )?;
         Ok(StatusReport {
             spaces,
             embedder_id: self.embedder.id().to_owned(),
             embedder_dim: self.embedder.dim(),
             index_dirty: self.get_meta("index_dirty")?.as_deref() == Some("1"),
+            pending_distill,
+            failed_distill,
+            llm_id: self.llm.as_ref().map(|l| l.id().to_owned()),
         })
     }
 

@@ -2828,6 +2828,7 @@ dependencies = [
  "clap",
  "predicates",
  "scone-core",
+ "serde_json",
  "tempfile",
 ]
 
