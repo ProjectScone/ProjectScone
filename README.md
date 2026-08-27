@@ -15,7 +15,15 @@ Semantic: distill extracts temporal facts (subject-predicate-object with
 validity intervals) via a pluggable LLM (Ollama / OpenAI-compatible /
 Anthropic / none), contradictions close the old interval with a reason
 instead of deleting, and search --as-of answers "what did I believe in
-March". Next: M3, the MCP server (persistent memory for agents).
+March". M3: scone mcp serves that memory to any MCP agent — memory_store,
+memory_recall, memory_facts_about, memory_forget — space-scoped and
+input-bounded, with immediate fact distillation when an LLM is configured.
+Next: M4, self-hostable HTTP API + C FFI.
+
+Give Claude Code persistent memory:
+
+    cargo build --release
+    claude mcp add scone -- $PWD/target/release/scone --space myproject mcp
 
     scone add --note "mark switched from pnpm to bun"
     scone distill                      # facts, via your configured LLM
