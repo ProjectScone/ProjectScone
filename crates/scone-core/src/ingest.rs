@@ -13,7 +13,7 @@ use crate::auth::ScopedSpace;
 use crate::chunker::chunk_text;
 use crate::error::{Result, SconeError};
 
-/// Target chunk size in bytes (~250 tokens).
+/// Default target chunk size in bytes (~250 tokens).
 pub(crate) const CHUNK_TARGET_BYTES: usize = 1000;
 
 const KINDS: [&str; 4] = ["note", "file", "conversation", "observation"];
@@ -80,7 +80,7 @@ impl Engine {
         self.require_writable()?;
 
         let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        let spans = chunk_text(content, CHUNK_TARGET_BYTES);
+        let spans = chunk_text(content, self.chunk_target);
         let texts: Vec<&str> = spans.iter().map(|s| &content[s.start..s.end]).collect();
         let embeddings = self.embedder.embed(&texts)?;
 

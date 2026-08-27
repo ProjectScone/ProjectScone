@@ -115,3 +115,24 @@ fn empty_note_is_rejected_typed() {
         .unwrap_err();
     assert!(matches!(err, scone_core::SconeError::InvalidInput(_)));
 }
+
+#[test]
+fn chunk_target_is_tunable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = engine(dir.path());
+    e.set_chunk_target(100);
+    let space = auth::resolve(&mut e, "default", true).unwrap();
+    let text = "para one is long enough to matter for chunking purposes here.\n\n\
+para two is also long enough to matter for chunking purposes here.\n\n\
+para three is likewise long enough to matter for chunking here.";
+    let out = e
+        .ingest(&space, IngestInput::Note { text: text.into() })
+        .unwrap();
+    let IngestOutcome::Ingested { chunks, .. } = out else {
+        panic!()
+    };
+    assert!(
+        chunks >= 2,
+        "small target must split paragraphs, got {chunks}"
+    );
+}

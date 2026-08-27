@@ -72,6 +72,9 @@ pub struct Engine {
     vectors: index::vectors::VectorIndex,
     /// Staged index writes awaiting a flush (flush-on-recall / on drop).
     indexes_dirty: bool,
+    /// Chunking granularity for future ingests (tuning knob; benchmarked
+    /// sweeps live in memory/benchmarks.md).
+    chunk_target: usize,
 }
 
 impl Drop for Engine {
@@ -142,11 +145,17 @@ impl Engine {
             fts,
             vectors,
             indexes_dirty: false,
+            chunk_target: ingest::CHUNK_TARGET_BYTES,
         };
         if engine.fts.writable() {
             engine.catch_up_indexes()?;
         }
         Ok(engine)
+    }
+
+    /// Set the chunking granularity (bytes) for future ingests.
+    pub fn set_chunk_target(&mut self, bytes: usize) {
+        self.chunk_target = bytes.max(64);
     }
 
     /// True when another scone process holds the index write lock: search
