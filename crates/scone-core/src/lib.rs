@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod chunker;
 mod db;
+pub mod distill;
 pub mod embed;
 mod error;
 pub mod index;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+pub use distill::ApplyReport;
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome};
 pub use recall::{ContextPack, RecallItem, RecallOpts};
