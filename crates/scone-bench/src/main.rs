@@ -45,6 +45,9 @@ enum Cmd {
         /// Model name at the endpoint (required with --llm-url)
         #[arg(long)]
         llm_model: Option<String>,
+        /// Also score with an LLM judge (uses the same endpoint/model)
+        #[arg(long)]
+        judge: bool,
     },
 }
 
@@ -78,6 +81,7 @@ fn run() -> Result<(), String> {
             embedder,
             llm_url,
             llm_model,
+            judge,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -106,7 +110,18 @@ fn run() -> Result<(), String> {
                 (None, None) => eprintln!("no LLM configured: episodic-only run"),
                 _ => return Err("--llm-url and --llm-model go together".into()),
             }
+            let judge_llm = if judge {
+                match (&llm_url, &llm_model) {
+                    (Some(url), Some(model)) => {
+                        Some(scone_core::llm::OpenAiCompatible::new(url, model, None))
+                    }
+                    _ => return Err("--judge needs --llm-url and --llm-model".into()),
+                }
+            } else {
+                None
+            };
             let mut report = Report::default();
+            let mut judged_correct = 0usize;
             let mut recall_ms = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let outcome = run_item(&mut engine, item, i)?;
@@ -116,17 +131,37 @@ fn run() -> Result<(), String> {
                     outcome.stored_bytes,
                     outcome.retrieved_bytes,
                 );
+                let judged = match &judge_llm {
+                    Some(llm) => {
+                        let ok = scone_bench::judge_correct(
+                            llm,
+                            &item.question,
+                            &item.answer,
+                            &outcome.model_answer,
+                        )?;
+                        judged_correct += usize::from(ok);
+                        if ok { " judge:YES" } else { " judge:NO" }
+                    }
+                    None => "",
+                };
                 eprintln!(
-                    "[{}/{}] {} {} ({:.1} ms recall)",
+                    "[{}/{}] {} {}{} ({:.1} ms recall)",
                     i + 1,
                     items.len(),
                     outcome.question_id,
                     if outcome.correct { "correct" } else { "MISS" },
+                    judged,
                     outcome.recall_ms,
                 );
             }
             recall_ms.sort_by(f64::total_cmp);
             let p50 = recall_ms.get(recall_ms.len() / 2).copied().unwrap_or(0.0);
+            if judge_llm.is_some() {
+                println!(
+                    "accuracy(llm-judge): {:.1}%",
+                    judged_correct as f64 / report.total.max(1) as f64 * 100.0
+                );
+            }
             println!(
                 "items: {}  accuracy(substring): {:.1}%  context-reduction: {:.1}%  recall p50: {:.1} ms",
                 report.total,
