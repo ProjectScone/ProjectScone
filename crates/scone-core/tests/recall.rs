@@ -125,7 +125,10 @@ third verify the health dashboard turns fully green again.";
         .recall(
             &space,
             "flip traffic standby cluster",
-            &RecallOpts::default(),
+            &RecallOpts {
+                expand_neighbors: true,
+                ..Default::default()
+            },
         )
         .unwrap();
     let hit = &pack.items[0];

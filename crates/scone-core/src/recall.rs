@@ -52,6 +52,12 @@ pub struct RecallOpts {
     /// Evaluate fact validity at this instant (ISO-8601). None = now.
     /// Time travel: a past `as_of` serves the then-valid closed facts.
     pub as_of: Option<String>,
+    /// Widen each hit with its adjacent chunks. Roughly triples context
+    /// for a within-noise accuracy change on the retrieval floor
+    /// (measured 2026-08-27) — so it is off by default and enabled by
+    /// reader-facing surfaces (ask, MCP recall) where a downstream model
+    /// benefits from surrounding context.
+    pub expand_neighbors: bool,
 }
 
 impl Default for RecallOpts {
@@ -60,6 +66,7 @@ impl Default for RecallOpts {
             limit: 10,
             budget_bytes: None,
             as_of: None,
+            expand_neighbors: false,
         }
     }
 }
@@ -218,6 +225,10 @@ impl Engine {
         // is one slice), skipping items swallowed by an earlier span.
         let mut expanded: Vec<RecallItem> = Vec::with_capacity(items.len());
         for mut item in items {
+            if !opts.expand_neighbors {
+                expanded.push(item);
+                continue;
+            }
             let row = self.conn.query_row(
                 "SELECT e.content,
                         (SELECT min(start_byte) FROM chunks n

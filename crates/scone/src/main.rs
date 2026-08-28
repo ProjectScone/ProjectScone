@@ -318,6 +318,7 @@ fn run() -> Result<(), String> {
                 limit: *limit,
                 budget_bytes: None,
                 as_of: as_of.clone(),
+                ..Default::default()
             };
             let pack = engine
                 .recall(&space, query, &opts)
@@ -404,6 +405,7 @@ fn run() -> Result<(), String> {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let opts = RecallOpts {
                 limit: *limit,
+                expand_neighbors: true,
                 ..Default::default()
             };
             let pack = engine

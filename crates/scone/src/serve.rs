@@ -151,6 +151,7 @@ async fn get_recall(
         limit: query.limit.unwrap_or(10).clamp(1, 50),
         budget_bytes: None,
         as_of: query.as_of.clone(),
+        expand_neighbors: false,
     };
     match with_engine(&state, &headers, |engine, space| {
         engine.recall(space, &query.q, &opts)

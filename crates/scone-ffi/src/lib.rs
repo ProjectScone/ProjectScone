@@ -156,6 +156,7 @@ pub unsafe extern "C" fn scone_recall_json(
             limit: limit.clamp(1, 50),
             budget_bytes: None,
             as_of: None,
+            expand_neighbors: false,
         };
         match state.engine.recall(&scoped, query, &opts) {
             Ok(pack) => {
