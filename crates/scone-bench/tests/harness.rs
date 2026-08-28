@@ -111,3 +111,35 @@ fn question_date_reaches_the_answer_call() {
         outcome.model_answer
     );
 }
+
+#[test]
+fn stratified_sampling_covers_types_deterministically() {
+    use scone_bench::stratified_sample;
+    let raw: Vec<serde_json::Value> = (0..100)
+        .map(|i| {
+            serde_json::json!({
+                "question_id": format!("q{i}"),
+                "question_type": if i < 80 { "type-a" } else { "type-b" },
+                "question": "q", "answer": "a", "question_date": "",
+                "haystack_sessions": [[{"role":"user","content":"x"}]],
+                "haystack_dates": [""], "haystack_session_ids": ["s"],
+                "answer_session_ids": ["s"],
+            })
+        })
+        .collect();
+    let items = scone_bench::parse_dataset(&serde_json::to_string(&raw).unwrap()).unwrap();
+    let sample = stratified_sample(&items, 10, 42);
+    assert_eq!(sample.len(), 10);
+    let b_count = sample
+        .iter()
+        .filter(|i| i.question_type == "type-b")
+        .count();
+    assert_eq!(
+        b_count, 2,
+        "20% of the population is type-b; the sample matches"
+    );
+    let again = stratified_sample(&items, 10, 42);
+    let ids: Vec<_> = sample.iter().map(|i| &i.question_id).collect();
+    let ids2: Vec<_> = again.iter().map(|i| &i.question_id).collect();
+    assert_eq!(ids, ids2, "same seed, same sample");
+}

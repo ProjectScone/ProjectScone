@@ -6,6 +6,7 @@
 
 use scone_core::{Engine, RecallOpts, auth};
 
+#[derive(Clone)]
 pub struct BenchItem {
     pub question_id: String,
     pub question_type: String,
@@ -444,4 +445,48 @@ pub fn judge_correct_typed(
         return Ok(score == 1);
     }
     Ok(trimmed.to_uppercase().starts_with("YES"))
+}
+
+/// Proportional stratified sample: `n` items spread across question types
+/// by their population share, deterministic for a given seed. Required
+/// because longmemeval_s is ordered by type, so head sampling measures
+/// only the easiest class (found 2026-08-28).
+pub fn stratified_sample(items: &[BenchItem], n: usize, seed: u64) -> Vec<BenchItem>
+where
+    BenchItem: Clone,
+{
+    use std::collections::BTreeMap;
+    let mut by_type: BTreeMap<&str, Vec<&BenchItem>> = BTreeMap::new();
+    for item in items {
+        by_type.entry(&item.question_type).or_default().push(item);
+    }
+    // Simple deterministic PRNG (xorshift) so we need no rand dependency.
+    let mut state = seed.max(1);
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let total = items.len().max(1);
+    let mut sample = Vec::new();
+    for bucket in by_type.values() {
+        let take = (n * bucket.len() + total / 2) / total;
+        let mut pool: Vec<&BenchItem> = bucket.clone();
+        for _ in 0..take.min(pool.len()) {
+            let idx = (next() as usize) % pool.len();
+            sample.push(pool.swap_remove(idx).clone());
+        }
+    }
+    // Rounding may leave us short; top up deterministically.
+    let mut pool: Vec<&BenchItem> = items
+        .iter()
+        .filter(|i| !sample.iter().any(|s| s.question_id == i.question_id))
+        .collect();
+    while sample.len() < n && !pool.is_empty() {
+        let idx = (next() as usize) % pool.len();
+        sample.push(pool.swap_remove(idx).clone());
+    }
+    sample.truncate(n);
+    sample
 }

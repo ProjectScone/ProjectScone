@@ -35,6 +35,10 @@ enum Cmd {
         /// Number of items (0 = all)
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Stratified sample across question types with this seed
+        /// (recommended for subsets: the dataset is ordered by type)
+        #[arg(long)]
+        stratified_seed: Option<u64>,
         /// Embedder: hash (hermetic) or local (ONNX, real semantics)
         #[arg(long, default_value = "local")]
         embedder: String,
@@ -103,6 +107,7 @@ fn run() -> Result<(), String> {
         Cmd::Run {
             dataset,
             limit,
+            stratified_seed,
             embedder,
             embed_model,
             llm_url,
@@ -117,7 +122,12 @@ fn run() -> Result<(), String> {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
             let mut items = parse_dataset(&raw)?;
-            if limit > 0 {
+            if let Some(seed) = stratified_seed {
+                if limit > 0 {
+                    items = scone_bench::stratified_sample(&items, limit, seed);
+                    eprintln!("stratified sample of {} (seed {seed})", items.len());
+                }
+            } else if limit > 0 {
                 items.truncate(limit);
             }
             let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
