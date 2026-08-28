@@ -38,6 +38,10 @@ enum Cmd {
         /// Embedder: hash (hermetic) or local (ONNX, real semantics)
         #[arg(long, default_value = "local")]
         embedder: String,
+        /// Local embed model: bge-small-en-v1.5 | bge-base-en-v1.5 |
+        /// nomic-embed-text-v1.5
+        #[arg(long, default_value = "bge-small-en-v1.5")]
+        embed_model: String,
         /// OpenAI-compatible endpoint for the LLM (e.g. Ollama:
         /// http://localhost:11434/v1). Unset = episodic-only run.
         #[arg(long)]
@@ -91,6 +95,7 @@ fn run() -> Result<(), String> {
             dataset,
             limit,
             embedder,
+            embed_model,
             llm_url,
             llm_model,
             judge,
@@ -115,7 +120,8 @@ fn run() -> Result<(), String> {
                     // (observed 2026-08-27).
                     let cache = std::env::temp_dir().join("scone-bench-models");
                     Box::new(
-                        scone_core::embed::OnnxEmbedder::new(&cache).map_err(|e| e.to_string())?,
+                        scone_core::embed::OnnxEmbedder::with_model(&cache, &embed_model)
+                            .map_err(|e| e.to_string())?,
                     )
                 }
                 other => return Err(format!("unknown embedder {other:?}")),
