@@ -15,6 +15,7 @@ pub mod llm;
 mod portability;
 pub mod profile;
 mod recall;
+pub mod rerank;
 
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,7 @@ pub struct Engine {
     data_dir: PathBuf,
     embedder: Box<dyn embed::EmbeddingProvider>,
     llm: Option<Box<dyn llm::LlmProvider>>,
+    reranker: Option<Box<dyn rerank::Reranker>>,
     fts: index::fts::FtsIndex,
     vectors: index::vectors::VectorIndex,
     /// Staged index writes awaiting a flush (flush-on-recall / on drop).
@@ -142,6 +144,7 @@ impl Engine {
             data_dir: data_dir.to_path_buf(),
             embedder,
             llm: None,
+            reranker: None,
             fts,
             vectors,
             indexes_dirty: false,
@@ -257,6 +260,11 @@ impl Engine {
 
     pub fn has_llm(&self) -> bool {
         self.llm.is_some()
+    }
+
+    /// Attach or detach a cross-encoder reranker for recall precision.
+    pub fn set_reranker(&mut self, reranker: Option<Box<dyn rerank::Reranker>>) {
+        self.reranker = reranker;
     }
 
     /// Answer a question from rendered context via the configured LLM.

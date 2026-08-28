@@ -40,6 +40,10 @@ const RRF_K: f32 = 60.0;
 const W_FUSED: f32 = 0.8;
 const W_RECENCY: f32 = 0.2;
 const RECENCY_HALF_LIFE_DAYS: f32 = 30.0;
+/// Weight of the cross-encoder score when a reranker is attached; the
+/// fused+recency score keeps the remainder (v1 blend, benchmarked in
+/// memory/benchmarks.md).
+const W_RERANK: f32 = 0.7;
 
 #[derive(Debug, Clone)]
 pub struct RecallOpts {
@@ -185,6 +189,27 @@ impl Engine {
                 });
             }
         }
+        // Cross-encoder pass: rescore every surviving candidate against
+        // the query jointly. Rank fusion proposes; the reranker disposes.
+        if let Some(reranker) = &self.reranker
+            && !items.is_empty()
+        {
+            let docs: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+            match reranker.rerank(query, &docs) {
+                Ok(scores) => {
+                    let (lo, hi) = scores
+                        .iter()
+                        .fold((f32::MAX, f32::MIN), |(lo, hi), s| (lo.min(*s), hi.max(*s)));
+                    let span = (hi - lo).max(f32::MIN_POSITIVE);
+                    for (item, raw) in items.iter_mut().zip(&scores) {
+                        let normalized = (raw - lo) / span;
+                        item.score = W_RERANK * normalized + (1.0 - W_RERANK) * item.score;
+                    }
+                }
+                Err(e) => degraded.push(format!("reranker: {e}")),
+            }
+        }
+
         items.sort_by(|a, b| b.score.total_cmp(&a.score));
         items.truncate(opts.limit);
 

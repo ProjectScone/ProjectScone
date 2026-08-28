@@ -136,3 +136,38 @@ third verify the health dashboard turns fully green again.";
         hit.text
     );
 }
+
+#[test]
+fn reranker_overrules_lexical_repetition() {
+    use scone_core::rerank::FakeReranker;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = setup(dir.path());
+    // A decoy stuffed with the query terms wins BM25; the reranker knows
+    // the pale-ale note is the actual answer.
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "favorite beer beer beer favorite beer favorite beer beer".into(),
+        },
+    )
+    .unwrap();
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "ordered the hazy pale ale again, definitely the favorite".into(),
+        },
+    )
+    .unwrap();
+    let before = recall(&mut e, &space, "favorite beer");
+    assert!(
+        before.items[0].text.contains("beer beer"),
+        "decoy wins without reranker"
+    );
+    e.set_reranker(Some(Box::new(FakeReranker::preferring("pale ale"))));
+    let after = recall(&mut e, &space, "favorite beer");
+    assert!(
+        after.items[0].text.contains("pale ale"),
+        "reranker flips the order: {}",
+        after.items[0].text
+    );
+}
