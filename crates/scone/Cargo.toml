@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "net"] }
 serde_json = "1"
 toml = "0.9"
-scone-core = { path = "../scone-core", version = "0.1.0", default-features = false }
+scone-core = { path = "../scone-core", version = "0.2.0", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
