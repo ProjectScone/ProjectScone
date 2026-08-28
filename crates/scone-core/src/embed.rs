@@ -71,18 +71,39 @@ impl EmbeddingProvider for HashEmbedder {
 #[cfg(feature = "local-embed")]
 pub struct OnnxEmbedder {
     model: std::cell::RefCell<fastembed::TextEmbedding>,
+    id: String,
+    dim: usize,
 }
 
 #[cfg(feature = "local-embed")]
 impl OnnxEmbedder {
     pub fn new(cache_dir: &std::path::Path) -> Result<Self> {
-        let options = fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+        Self::with_model(cache_dir, "bge-small-en-v1.5")
+    }
+
+    /// Open a specific local model by short name. Supported:
+    /// bge-small-en-v1.5 (384d, default), bge-base-en-v1.5 (768d),
+    /// nomic-embed-text-v1.5 (768d, long context).
+    pub fn with_model(cache_dir: &std::path::Path, name: &str) -> Result<Self> {
+        let (model, dim) = match name {
+            "bge-small-en-v1.5" => (fastembed::EmbeddingModel::BGESmallENV15, 384),
+            "bge-base-en-v1.5" => (fastembed::EmbeddingModel::BGEBaseENV15, 768),
+            "nomic-embed-text-v1.5" => (fastembed::EmbeddingModel::NomicEmbedTextV15, 768),
+            other => {
+                return Err(crate::SconeError::InvalidInput(format!(
+                    "unknown embed model {other:?}"
+                )));
+            }
+        };
+        let options = fastembed::InitOptions::new(model)
             .with_cache_dir(cache_dir.to_path_buf())
             .with_show_download_progress(false);
         let model = fastembed::TextEmbedding::try_new(options)
             .map_err(|e| crate::SconeError::Embed(e.to_string()))?;
         Ok(Self {
             model: std::cell::RefCell::new(model),
+            id: name.to_owned(),
+            dim,
         })
     }
 }
@@ -90,11 +111,11 @@ impl OnnxEmbedder {
 #[cfg(feature = "local-embed")]
 impl EmbeddingProvider for OnnxEmbedder {
     fn id(&self) -> &str {
-        "bge-small-en-v1.5"
+        &self.id
     }
 
     fn dim(&self) -> usize {
-        384
+        self.dim
     }
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
