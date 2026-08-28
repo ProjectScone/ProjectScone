@@ -497,7 +497,11 @@ fn tagging_focuses_search_and_curates_sources() {
 fn setup_claude_desktop_writes_mcp_config_preserving_existing() {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let cfg_dir = home.path().join("Library/Application Support/Claude");
+    let cfg_dir = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/Claude")
+    } else {
+        home.path().join(".config/Claude")
+    };
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(
         cfg_dir.join("claude_desktop_config.json"),
