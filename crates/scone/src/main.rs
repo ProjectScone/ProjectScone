@@ -67,6 +67,11 @@ enum Cmd {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
+    /// Claude Code hook handler (reads hook JSON on stdin, fail-open)
+    Hook {
+        /// session-start, user-prompt, or session-end
+        event: String,
+    },
     /// Register scone as a memory server, zero questions asked
     Setup {
         /// claude-code or claude-desktop
@@ -398,6 +403,26 @@ fn run() -> Result<(), String> {
                     "{:.3}  [{}] {}  {}",
                     item.score, item.episode_id, source, text
                 );
+            }
+        }
+        Cmd::Hook { event } => {
+            use std::io::Read;
+            let mut stdin = String::new();
+            let _ = std::io::stdin().read_to_string(&mut stdin);
+            match event.as_str() {
+                "session-start" => {
+                    print!("{}", scone::hook::session_start(&mut engine, &cli.space));
+                }
+                "user-prompt" => {
+                    print!(
+                        "{}",
+                        scone::hook::user_prompt(&mut engine, &cli.space, &stdin)
+                    );
+                }
+                "session-end" => {
+                    scone::hook::session_end(&mut engine, &cli.space, &stdin);
+                }
+                other => return Err(format!("unknown hook event {other:?}")),
             }
         }
         Cmd::Setup { client } => {

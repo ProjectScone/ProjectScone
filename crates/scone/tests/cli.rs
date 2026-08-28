@@ -562,3 +562,77 @@ fn setup_claude_code_invokes_the_claude_cli() {
     assert!(logged.contains("mcp add scone"), "{logged}");
     assert!(logged.contains("mcp"), "{logged}");
 }
+
+#[test]
+fn hook_session_start_injects_profile_context() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "this project uses tokio and axum"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env(
+            "SCONE_FAKE_FACTS",
+            r#"[{"subject":"project","predicate":"uses","object":"axum"}]"#,
+        )
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["hook", "session-start"])
+        .write_stdin(r#"{"session_id": "s1", "cwd": "/tmp"}"#)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("project uses axum"));
+}
+
+#[test]
+fn hook_user_prompt_injects_relevant_memory_and_fails_open() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "the deploy password rotates every monday"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin(r#"{"prompt": "when does the deploy password rotate?"}"#)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("rotates every monday"));
+    // Garbage stdin must not break the session: exit 0, empty stdout.
+    let out = scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin("not json at all")
+        .assert()
+        .success();
+    assert!(out.get_output().stdout.is_empty());
+}
+
+#[test]
+fn hook_session_end_captures_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    std::fs::write(&transcript, concat!(
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"we decided to use blake3 for hashing"}]}}"#, "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"noted, blake3 it is"}]}}"#, "\n",
+        r#"{"type":"other","ignored":true}"#, "\n",
+    )).unwrap();
+    scone(dir.path())
+        .args(["hook", "session-end"])
+        .write_stdin(format!(
+            r#"{{"transcript_path": "{}"}}"#,
+            transcript.display()
+        ))
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["search", "blake3 hashing"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("blake3"));
+    scone(dir.path())
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude-code"));
+}
