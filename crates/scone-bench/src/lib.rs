@@ -6,6 +6,8 @@
 
 use scone_core::{Engine, RecallOpts, auth};
 
+pub mod synth;
+
 #[derive(Clone)]
 pub struct BenchItem {
     pub question_id: String,

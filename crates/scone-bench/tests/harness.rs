@@ -158,3 +158,65 @@ fn per_type_breakdown_aggregates_and_reports() {
     let lines: Vec<&str> = report.lines().collect();
     assert!(lines.len() >= 3, "one line per type plus header: {report}");
 }
+
+#[test]
+fn synthetic_dataset_is_deterministic_and_self_consistent() {
+    use scone_bench::synth::{SynthConfig, generate};
+    let real_text = "The Voyager program launched two probes. Jupiter flybys \
+returned images. The Golden Record carries sounds of Earth. Pale Blue Dot \
+was photographed from beyond Neptune. Carl Sagan chaired the committee. \
+The Deep Space Network tracks the probes. Titan required a trajectory choice.";
+    let cfg = SynthConfig {
+        items: 8,
+        sessions_per_item: 4,
+        seed: 7,
+    };
+    let a = generate(real_text, &cfg).unwrap();
+    let b = generate(real_text, &cfg).unwrap();
+    assert_eq!(a, b, "same seed, same dataset");
+
+    let items = scone_bench::parse_dataset(&a).unwrap();
+    assert_eq!(items.len(), 8);
+    let mut types = std::collections::HashSet::new();
+    for item in &items {
+        types.insert(item.question_type.clone());
+        assert_eq!(item.sessions.len(), 4);
+        assert!(!item.answer_session_ids.is_empty());
+        let joined_all: String = item
+            .sessions
+            .iter()
+            .map(|s| s.join(" "))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if item.question_type == "abstention" {
+            assert!(
+                !joined_all.contains(&item.answer),
+                "abstention facts must not appear anywhere"
+            );
+        } else {
+            // The answer text appears in every evidence session and in no
+            // distractor session: exact ground truth by construction.
+            for (idx, sid) in item.session_ids.iter().enumerate() {
+                let session_text = item.sessions[idx].join(" ");
+                if item.answer_session_ids.contains(sid) {
+                    assert!(
+                        session_text.contains(&item.answer),
+                        "{}: evidence session lacks answer {:?}",
+                        item.question_id,
+                        item.answer
+                    );
+                } else {
+                    assert!(
+                        !session_text.contains(&item.answer),
+                        "{}: distractor leaks the answer",
+                        item.question_id
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        types.len() >= 3,
+        "multiple question types generated: {types:?}"
+    );
+}

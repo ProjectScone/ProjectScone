@@ -18,6 +18,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Generate a synthetic-from-real dataset: real prose carries the
+    /// sessions, injected facts give exact ground truth
+    Synth {
+        /// File of real published text to harvest from
+        #[arg(long)]
+        source: std::path::PathBuf,
+        #[arg(long, default_value_t = 40)]
+        items: usize,
+        #[arg(long, default_value_t = 6)]
+        sessions: usize,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        /// Output path (LongMemEval-format JSON)
+        #[arg(long, default_value = "bench-data/synthetic.json")]
+        out: std::path::PathBuf,
+    },
     /// Download the LongMemEval oracle split (smallest) to bench-data/
     Fetch {
         /// Override the dataset URL
@@ -86,6 +102,27 @@ fn main() {
 
 fn run() -> Result<(), String> {
     match Cli::parse().cmd {
+        Cmd::Synth {
+            source,
+            items,
+            sessions,
+            seed,
+            out,
+        } => {
+            let text = std::fs::read_to_string(&source).map_err(|e| e.to_string())?;
+            let cfg = scone_bench::synth::SynthConfig {
+                items,
+                sessions_per_item: sessions,
+                seed,
+            };
+            let json = scone_bench::synth::generate(&text, &cfg)?;
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&out, &json).map_err(|e| e.to_string())?;
+            println!("wrote {} items to {}", items, out.display());
+            Ok(())
+        }
         Cmd::Fetch { url } => {
             std::fs::create_dir_all("bench-data").map_err(|e| e.to_string())?;
             eprintln!("fetching {url} …");
