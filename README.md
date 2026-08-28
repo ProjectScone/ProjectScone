@@ -62,6 +62,14 @@ One binary, one config file, Bearer keys each bound to a space.
 
 ## Quickstart
 
+No Rust toolchain needed: grab a prebuilt binary from
+[Releases](https://github.com/DrDrewCain/ProjectScone/releases), then:
+
+    scone setup claude-desktop      # or: scone setup claude-code
+    scone add --note "hello, memory"
+
+Building from source instead:
+
     cargo install scone-cli
 
     scone add --note "changed the oil on the truck"
