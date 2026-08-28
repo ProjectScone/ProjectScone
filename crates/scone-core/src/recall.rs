@@ -265,7 +265,35 @@ impl Engine {
         }
 
         items.sort_by(|a, b| b.score.total_cmp(&a.score));
-        items.truncate(opts.limit);
+
+        // Episode diversity: one strong episode must not hog the top slots
+        // with many of its chunks; multi-evidence questions need distinct
+        // sources in the window (stratified data 2026-08-28: all-evidence
+        // recall trails any-evidence by 8 points).
+        const MAX_CHUNKS_PER_EPISODE: usize = 2;
+        let mut per_episode: HashMap<i64, usize> = HashMap::new();
+        let mut picked = Vec::with_capacity(opts.limit);
+        let mut overflow = Vec::new();
+        for item in items {
+            let count = per_episode.entry(item.episode_id).or_insert(0);
+            if *count < MAX_CHUNKS_PER_EPISODE {
+                *count += 1;
+                picked.push(item);
+            } else {
+                overflow.push(item);
+            }
+            if picked.len() == opts.limit {
+                break;
+            }
+        }
+        // Fill any remaining slots from the overflow, best first.
+        for item in overflow {
+            if picked.len() == opts.limit {
+                break;
+            }
+            picked.push(item);
+        }
+        let items = picked;
 
         // Neighbor expansion: answers often live one chunk over. Widen each
         // kept item to its adjacent chunks (contiguous byte spans, so this

@@ -199,3 +199,49 @@ fn recall_reports_its_context_economy() {
     let reduction = pack.context_reduction();
     assert!(reduction > 0.0 && reduction < 1.0, "reduction {reduction}");
 }
+
+#[test]
+fn top_results_diversify_across_episodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    e.set_chunk_target(64);
+    let space = auth::resolve(&mut e, "default", true).unwrap();
+    // One episode with many strongly-matching chunks...
+    let hog = "alpha topic one.\n\nalpha topic two.\n\nalpha topic three.\n\n\
+alpha topic four.\n\nalpha topic five.\n\nalpha topic six.";
+    e.ingest(&space, IngestInput::Note { text: hog.into() })
+        .unwrap();
+    // ...and two other episodes that also match.
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "alpha appears here in beta land".into(),
+        },
+    )
+    .unwrap();
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "gamma note also mentions alpha".into(),
+        },
+    )
+    .unwrap();
+    let pack = e
+        .recall(
+            &space,
+            "alpha",
+            &RecallOpts {
+                limit: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let episodes: std::collections::HashSet<i64> =
+        pack.items.iter().map(|i| i.episode_id).collect();
+    assert!(
+        episodes.len() >= 3,
+        "one episode must not hog the top slots: episodes {:?} from {} items",
+        episodes,
+        pack.items.len()
+    );
+}
