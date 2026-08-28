@@ -86,8 +86,14 @@ fn run() -> Result<(), String> {
                 .limit(1 << 30)
                 .read_to_vec()
                 .map_err(|e| e.to_string())?;
-            std::fs::write("bench-data/longmemeval_oracle.json", &body)
-                .map_err(|e| e.to_string())?;
+            let name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("dataset")
+                .trim_end_matches(".json");
+            let path = format!("bench-data/{name}.json");
+            std::fs::write(&path, &body).map_err(|e| e.to_string())?;
+            eprintln!("wrote {path}");
             eprintln!("saved {} MB", body.len() / (1 << 20));
             Ok(())
         }
@@ -170,10 +176,16 @@ fn run() -> Result<(), String> {
             let mut report = Report::default();
             let mut judged_correct = 0usize;
             let mut recall_ms = Vec::new();
+            let mut r_any = [0usize; 3];
+            let mut r_all = [0usize; 3];
             for (i, item) in items.iter().enumerate() {
                 let outcome =
                     scone_bench::run_item_with(&mut engine, item, i, !no_distill, granularity)?;
                 recall_ms.push(outcome.recall_ms);
+                for (slot, k) in [5usize, 10, 15].iter().enumerate() {
+                    r_any[slot] += usize::from(outcome.recall_any_at(*k));
+                    r_all[slot] += usize::from(outcome.recall_all_at(*k));
+                }
                 report.add(
                     outcome.correct,
                     outcome.stored_bytes,
@@ -210,6 +222,16 @@ fn run() -> Result<(), String> {
                     judged_correct as f64 / report.total.max(1) as f64 * 100.0
                 );
             }
+            let pct = |n: usize| n as f64 / report.total.max(1) as f64 * 100.0;
+            println!(
+                "recall@5/10/15 any-evidence: {:.1}% / {:.1}% / {:.1}%   all-evidence: {:.1}% / {:.1}% / {:.1}%",
+                pct(r_any[0]),
+                pct(r_any[1]),
+                pct(r_any[2]),
+                pct(r_all[0]),
+                pct(r_all[1]),
+                pct(r_all[2]),
+            );
             println!(
                 "items: {}  accuracy(substring): {:.1}%  context-reduction: {:.1}%  recall p50: {:.1} ms",
                 report.total,

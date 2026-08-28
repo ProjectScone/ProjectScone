@@ -4,7 +4,7 @@
 //! latency. LLM-agnostic: mechanics are tested with FakeLlm; real runs
 //! use whatever `[llm]` config.toml provides.
 
-use scone_core::{Engine, IngestInput, RecallOpts, auth};
+use scone_core::{Engine, RecallOpts, auth};
 
 pub struct BenchItem {
     pub question_id: String,
@@ -16,11 +16,19 @@ pub struct BenchItem {
     /// ISO-8601 timestamp per session (from haystack_dates), parallel to
     /// `sessions`; empty string when the dataset lacks one.
     pub session_dates: Vec<String>,
+    /// Session ids parallel to `sessions` (ground truth for Recall@k).
+    pub session_ids: Vec<String>,
+    /// The evidence sessions the answer lives in.
+    pub answer_session_ids: Vec<String>,
 }
 
 pub struct ItemOutcome {
     pub question_id: String,
     pub correct: bool,
+    /// Session ids of retrieved items, best-first (for Recall@k).
+    pub retrieved_sessions: Vec<String>,
+    /// Ground truth evidence sessions.
+    pub answer_sessions: Vec<String>,
     pub model_answer: String,
     pub retrieved: String,
     pub stored_bytes: usize,
@@ -34,6 +42,36 @@ pub struct Report {
     pub correct: usize,
     pub stored_bytes: usize,
     pub retrieved_bytes: usize,
+}
+
+impl ItemOutcome {
+    /// Any evidence session appears in the top-k retrieved items.
+    pub fn recall_any_at(&self, k: usize) -> bool {
+        let seen: std::collections::HashSet<&str> = self
+            .retrieved_sessions
+            .iter()
+            .take(k)
+            .map(String::as_str)
+            .collect();
+        self.answer_sessions
+            .iter()
+            .any(|a| seen.contains(a.as_str()))
+    }
+
+    /// Every evidence session appears in the top-k retrieved items.
+    pub fn recall_all_at(&self, k: usize) -> bool {
+        let seen: std::collections::HashSet<&str> = self
+            .retrieved_sessions
+            .iter()
+            .take(k)
+            .map(String::as_str)
+            .collect();
+        !self.answer_sessions.is_empty()
+            && self
+                .answer_sessions
+                .iter()
+                .all(|a| seen.contains(a.as_str()))
+    }
 }
 
 impl Report {
@@ -124,6 +162,16 @@ pub fn parse_dataset(raw: &str) -> Result<Vec<BenchItem>, String> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let string_list = |key: &str| -> Vec<String> {
+                item.get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
             Ok(BenchItem {
                 question_id: s("question_id"),
                 question_type: s("question_type"),
@@ -131,6 +179,8 @@ pub fn parse_dataset(raw: &str) -> Result<Vec<BenchItem>, String> {
                 answer: s("answer"),
                 sessions,
                 session_dates,
+                session_ids: string_list("haystack_session_ids"),
+                answer_session_ids: string_list("answer_session_ids"),
             })
         })
         .collect()
@@ -190,14 +240,17 @@ pub fn run_item_with(
                     .get(s_idx)
                     .filter(|d| !d.is_empty())
                     .map(String::as_str);
+                // source carries the session id: ground truth for Recall@k.
+                let source = item.session_ids.get(s_idx).map(String::as_str);
                 engine
-                    .import_episode(&space, "conversation", &transcript, None, date)
+                    .import_episode(&space, "conversation", &transcript, source, date)
                     .map_err(|e| e.to_string())?;
             }
             Granularity::Turn => {
+                let source = item.session_ids.get(s_idx).map(String::as_str);
                 for turn in session {
                     stored_bytes += turn.len();
-                    match engine.ingest(&space, IngestInput::Note { text: turn.clone() }) {
+                    match engine.import_episode(&space, "conversation", turn, source, None) {
                         Ok(_) => {}
                         // Repeated short turns ("user: thanks!") dedup or
                         // reject as empty; both are fine at turn scale.
@@ -219,7 +272,7 @@ pub fn run_item_with(
             &space,
             &item.question,
             &RecallOpts {
-                limit: 10,
+                limit: 15,
                 budget_bytes: None,
                 as_of: None,
                 expand_neighbors: false,
@@ -244,9 +297,13 @@ pub fn run_item_with(
     } else {
         retrieved.clone()
     };
+    let retrieved_sessions: Vec<String> =
+        pack.items.iter().filter_map(|i| i.source.clone()).collect();
     Ok(ItemOutcome {
         question_id: item.question_id.clone(),
         correct: substring_correct(&item.answer, &model_answer),
+        retrieved_sessions,
+        answer_sessions: item.answer_session_ids.clone(),
         model_answer,
         retrieved_bytes: retrieved.len(),
         retrieved,
