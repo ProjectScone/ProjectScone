@@ -192,6 +192,18 @@ impl Engine {
         dir: &std::path::Path,
         max_file_bytes: u64,
     ) -> Result<ScanReport> {
+        self.ingest_directory_tagged(space, dir, max_file_bytes, &[])
+    }
+
+    /// Directory scan with curation tags: every ingested (or re-seen) file
+    /// gets the given tags plus its lowercase extension as a source tag.
+    pub fn ingest_directory_tagged(
+        &mut self,
+        space: &ScopedSpace,
+        dir: &std::path::Path,
+        max_file_bytes: u64,
+        tags: &[&str],
+    ) -> Result<ScanReport> {
         const SKIP_DIRS: [&str; 4] = ["node_modules", "target", ".git", "__pycache__"];
         let mut report = ScanReport::default();
         let mut stack = vec![dir.to_path_buf()];
@@ -218,9 +230,26 @@ impl Engine {
                     report.skipped += 1;
                     continue;
                 }
+                let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase());
                 match self.ingest(space, IngestInput::File { path }) {
-                    Ok(IngestOutcome::Ingested { .. }) => report.ingested += 1,
-                    Ok(IngestOutcome::Deduplicated { .. }) => report.deduplicated += 1,
+                    Ok(outcome) => {
+                        let (episode_id, fresh) = match outcome {
+                            IngestOutcome::Ingested { episode_id, .. } => (episode_id, true),
+                            IngestOutcome::Deduplicated { episode_id } => (episode_id, false),
+                        };
+                        let mut all: Vec<&str> = tags.to_vec();
+                        if let Some(ext) = extension.as_deref() {
+                            all.push(ext);
+                        }
+                        if !all.is_empty() {
+                            self.tag_episode(space, episode_id, &all)?;
+                        }
+                        if fresh {
+                            report.ingested += 1;
+                        } else {
+                            report.deduplicated += 1;
+                        }
+                    }
                     Err(SconeError::InvalidInput(_)) => report.skipped += 1,
                     Err(other) => return Err(other),
                 }

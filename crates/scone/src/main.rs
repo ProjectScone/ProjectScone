@@ -50,6 +50,10 @@ enum Cmd {
         /// Ingest this text directly as a note
         #[arg(long)]
         note: Option<String>,
+        /// Tag the ingested content (repeatable); files also get their
+        /// extension as a source tag
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Hybrid search within the space
     Search {
@@ -59,7 +63,12 @@ enum Cmd {
         /// Evaluate fact validity at this ISO-8601 instant (time travel)
         #[arg(long)]
         as_of: Option<String>,
+        /// Focus on episodes carrying ALL of these tags (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
+    /// List tags in this space with usage counts
+    Tags,
     /// Show the space's profile: identity facts and recent activity
     Profile {
         #[arg(long, default_value_t = 8)]
@@ -76,6 +85,9 @@ enum Cmd {
         once: bool,
         #[arg(long, default_value_t = 60)]
         interval_secs: u64,
+        /// Tag everything ingested by this watch (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Background loop: scan watch dirs and distill pending episodes
     Daemon {
@@ -292,7 +304,7 @@ fn run() -> Result<(), String> {
     }
 
     match &cli.cmd {
-        Cmd::Add { paths, note } => {
+        Cmd::Add { paths, note, tags } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let mut inputs = Vec::new();
             if let Some(text) = note {
@@ -309,13 +321,31 @@ fn run() -> Result<(), String> {
                     IngestInput::Note { .. } => "note".to_owned(),
                     IngestInput::File { path } => path.display().to_string(),
                 };
-                match engine.ingest(&space, input).map_err(|e| e.to_string())? {
+                let is_file = matches!(&input, IngestInput::File { .. });
+                let outcome = engine.ingest(&space, input).map_err(|e| e.to_string())?;
+                let episode_id = match outcome {
                     IngestOutcome::Ingested { episode_id, chunks } => {
                         println!("ingested {label} as episode {episode_id} ({chunks} chunks)");
+                        episode_id
                     }
                     IngestOutcome::Deduplicated { episode_id } => {
                         println!("deduplicated {label}: already stored as episode {episode_id}");
+                        episode_id
                     }
+                };
+                let mut all: Vec<String> = tags.clone();
+                if is_file
+                    && let Some(ext) = std::path::Path::new(&label)
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_lowercase())
+                {
+                    all.push(ext);
+                }
+                if !all.is_empty() {
+                    let refs: Vec<&str> = all.iter().map(String::as_str).collect();
+                    engine
+                        .tag_episode(&space, episode_id, &refs)
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -323,12 +353,14 @@ fn run() -> Result<(), String> {
             query,
             limit,
             as_of,
+            tags,
         } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let opts = RecallOpts {
                 limit: *limit,
                 budget_bytes: None,
                 as_of: as_of.clone(),
+                tags: tags.clone(),
                 ..Default::default()
             };
             let pack = engine
@@ -361,6 +393,16 @@ fn run() -> Result<(), String> {
                     "{:.3}  [{}] {}  {}",
                     item.score, item.episode_id, source, text
                 );
+            }
+        }
+        Cmd::Tags => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let tags = engine.tags_list(&space).map_err(|e| e.to_string())?;
+            if tags.is_empty() {
+                println!("no tags yet: add with `scone add --tag <name>`");
+            }
+            for (name, count) in tags {
+                println!("{name}  ({count})");
             }
         }
         Cmd::Profile { limit } => {
@@ -517,11 +559,13 @@ fn run() -> Result<(), String> {
             dir: watch_dir,
             once,
             interval_secs,
+            tags,
         } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             loop {
+                let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
                 let r = engine
-                    .ingest_directory(&space, watch_dir, 1_000_000)
+                    .ingest_directory_tagged(&space, watch_dir, 1_000_000, &tag_refs)
                     .map_err(|e| e.to_string())?;
                 println!(
                     "ingested {} ({} unchanged, {} skipped) from {}",

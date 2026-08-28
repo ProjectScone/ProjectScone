@@ -443,3 +443,52 @@ fn search_reports_context_economy() {
         .success()
         .stdout(predicates::str::contains("% saved"));
 }
+
+#[test]
+fn tagging_focuses_search_and_curates_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = tempfile::tempdir().unwrap();
+    std::fs::write(
+        notes.path().join("paper.md"),
+        "the retrieval paper describes fusion",
+    )
+    .unwrap();
+    scone(dir.path())
+        .args([
+            "add",
+            "--note",
+            "meeting notes about fusion budget",
+            "--tag",
+            "meeting",
+        ])
+        .assert()
+        .success();
+    scone(dir.path())
+        .arg("watch")
+        .arg(notes.path())
+        .args(["--once", "--tag", "research"])
+        .assert()
+        .success();
+    // Auto extension tag curates the source kind.
+    scone(dir.path())
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("meeting"))
+        .stdout(predicates::str::contains("research"))
+        .stdout(predicates::str::contains("md"));
+    scone(dir.path())
+        .args(["search", "fusion", "--tag", "research"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("retrieval paper"));
+    let out = scone(dir.path())
+        .args(["search", "fusion", "--tag", "meeting"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("budget") && !stdout.contains("retrieval paper"),
+        "{stdout}"
+    );
+}
