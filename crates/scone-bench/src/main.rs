@@ -64,6 +64,9 @@ enum Cmd {
         /// Attach the local cross-encoder reranker (bge-reranker-base)
         #[arg(long)]
         reranker: bool,
+        /// Answer system prompt: v1 (default) or v2 (extraction-style)
+        #[arg(long, default_value = "v1")]
+        prompt: String,
     },
 }
 
@@ -109,6 +112,7 @@ fn run() -> Result<(), String> {
             chunk_bytes,
             granularity,
             reranker,
+            prompt,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -153,6 +157,16 @@ fn run() -> Result<(), String> {
                 "turn" => scone_bench::Granularity::Turn,
                 other => return Err(format!("unknown granularity {other:?}")),
             };
+            let answer_system = match prompt.as_str() {
+                "v1" => None,
+                "v2" => Some(scone_core::llm::ANSWER_SYSTEM_V2.to_owned()),
+                other => return Err(format!("unknown prompt {other:?}")),
+            };
+            let run_opts = scone_bench::RunOpts {
+                distill: !no_distill,
+                granularity,
+                answer_system,
+            };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
                     engine.set_llm(Some(Box::new(scone_core::llm::OpenAiCompatible::new(
@@ -179,8 +193,7 @@ fn run() -> Result<(), String> {
             let mut r_any = [0usize; 3];
             let mut r_all = [0usize; 3];
             for (i, item) in items.iter().enumerate() {
-                let outcome =
-                    scone_bench::run_item_with(&mut engine, item, i, !no_distill, granularity)?;
+                let outcome = scone_bench::run_item_with(&mut engine, item, i, &run_opts)?;
                 recall_ms.push(outcome.recall_ms);
                 for (slot, k) in [5usize, 10, 15].iter().enumerate() {
                     r_any[slot] += usize::from(outcome.recall_any_at(*k));

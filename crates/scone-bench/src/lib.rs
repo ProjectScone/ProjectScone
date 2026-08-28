@@ -211,27 +211,43 @@ pub enum Granularity {
     Turn,
 }
 
+pub struct RunOpts {
+    pub distill: bool,
+    pub granularity: Granularity,
+    /// System prompt for the answer call; None = provider default (v1).
+    pub answer_system: Option<String>,
+}
+
+impl Default for RunOpts {
+    fn default() -> Self {
+        Self {
+            distill: true,
+            granularity: Granularity::Session,
+            answer_system: None,
+        }
+    }
+}
+
 pub fn run_item(
     engine: &mut Engine,
     item: &BenchItem,
     index: usize,
 ) -> Result<ItemOutcome, String> {
-    run_item_with(engine, item, index, true, Granularity::Session)
+    run_item_with(engine, item, index, &RunOpts::default())
 }
 
-/// `distill = false` isolates retrieval + answering from extraction
+/// `opts.distill = false` isolates retrieval + answering from extraction
 /// quality (the answer model reads raw episodic recall only).
 pub fn run_item_with(
     engine: &mut Engine,
     item: &BenchItem,
     index: usize,
-    distill: bool,
-    granularity: Granularity,
+    opts: &RunOpts,
 ) -> Result<ItemOutcome, String> {
     let space = auth::resolve(engine, &format!("item-{index}"), true).map_err(|e| e.to_string())?;
     let mut stored_bytes = 0usize;
     for (s_idx, session) in item.sessions.iter().enumerate() {
-        match granularity {
+        match opts.granularity {
             Granularity::Session => {
                 let transcript = session.join("\n");
                 stored_bytes += transcript.len();
@@ -264,7 +280,7 @@ pub fn run_item_with(
             }
         }
     }
-    if engine.has_llm() && distill {
+    if engine.has_llm() && opts.distill {
         // Best-effort: extraction failures are recorded on the queue, and
         // episodic recall still answers (loud degradation, not abort).
         let _ = engine.distill(&space, 1_000);
@@ -294,9 +310,11 @@ pub fn run_item_with(
         retrieved.push_str(&format!("- {}\n", i.text));
     }
     let model_answer = if engine.has_llm() {
-        engine
-            .llm_answer(&item.question, &retrieved)
-            .unwrap_or_else(|e| format!("<llm error: {e}>"))
+        let result = match &opts.answer_system {
+            Some(system) => engine.llm_answer_with_system(system, &item.question, &retrieved),
+            None => engine.llm_answer(&item.question, &retrieved),
+        };
+        result.unwrap_or_else(|e| format!("<llm error: {e}>"))
     } else {
         retrieved.clone()
     };
