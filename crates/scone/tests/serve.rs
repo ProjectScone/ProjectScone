@@ -174,3 +174,40 @@ async fn profile_endpoint_serves_identity_and_activity() {
     let (status, _) = call(&app, "GET", "/v1/profile", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn http_tags_flow_from_store_to_focused_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({"content": "deploy checklist lives in the wiki", "tags": ["ops"]})),
+    )
+    .await;
+    call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({"content": "the checklist for baking bread"})),
+    )
+    .await;
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/v1/recall?q=checklist&tags=ops",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{body}");
+    assert!(items[0]["text"].as_str().unwrap().contains("wiki"));
+    let (status, body) = call(&app, "GET", "/v1/tags", Some("sk-alice"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["tags"][0]["name"].as_str().unwrap() == "ops", "{body}");
+}

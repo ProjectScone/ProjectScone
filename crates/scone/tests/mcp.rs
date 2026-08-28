@@ -212,3 +212,47 @@ async fn recall_includes_profile_sections() {
     assert!(text.contains("## Recent activity"), "{text}");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn store_accepts_tags_and_recall_focuses_on_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(SconeMcp::new(engine(dir.path()), "agent")).await;
+    for (content, tags) in [
+        ("the api redesign ships tuesday", r#"["work"]"#),
+        ("the sourdough recipe needs more salt", r#"["baking"]"#),
+    ] {
+        let stored = client
+            .call_tool({
+                let mut p = CallToolRequestParams::new("memory_store");
+                p.arguments = serde_json::from_str::<serde_json::Value>(&format!(
+                    r#"{{"content": "{content}", "tags": {tags}}}"#
+                ))
+                .unwrap()
+                .as_object()
+                .cloned();
+                p
+            })
+            .await
+            .unwrap();
+        assert_ne!(stored.is_error, Some(true), "{stored:?}");
+    }
+    let focused = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_recall");
+            p.arguments = serde_json::json!({
+                "query": "what ships", "tags": ["work"], "include_profile": false
+            })
+            .as_object()
+            .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let text = text_of(&focused);
+    assert!(text.contains("redesign"), "{text}");
+    assert!(
+        !text.contains("sourdough"),
+        "tag focus must exclude: {text}"
+    );
+    client.cancel().await.unwrap();
+}

@@ -48,6 +48,7 @@ pub fn router(engine: Engine, config: ServeConfig) -> Router {
         .route("/v1/facts/{id}/close", post(post_fact_close))
         .route("/v1/profile", get(get_profile))
         .route("/v1/status", get(get_status))
+        .route("/v1/tags", get(get_tags))
         .with_state(state)
 }
 
@@ -90,6 +91,8 @@ fn with_engine<T>(
 #[derive(serde::Deserialize)]
 struct EpisodeBody {
     content: String,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 async fn post_episode(
@@ -103,13 +106,25 @@ async fn post_episode(
             format!("content must be 1..={MAX_CONTENT} bytes"),
         );
     }
+    if body.tags.len() > 10 {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "at most 10 tags");
+    }
     match with_engine(&state, &headers, |engine, space| {
-        engine.ingest(
+        let outcome = engine.ingest(
             space,
             IngestInput::Note {
                 text: body.content.clone(),
             },
-        )
+        )?;
+        let episode_id = match &outcome {
+            IngestOutcome::Ingested { episode_id, .. }
+            | IngestOutcome::Deduplicated { episode_id } => *episode_id,
+        };
+        if !body.tags.is_empty() {
+            let refs: Vec<&str> = body.tags.iter().map(String::as_str).collect();
+            engine.tag_episode(space, episode_id, &refs)?;
+        }
+        Ok(outcome)
     }) {
         Ok(IngestOutcome::Ingested { episode_id, chunks }) => (
             StatusCode::CREATED,
@@ -134,6 +149,8 @@ struct RecallQuery {
     q: String,
     limit: Option<usize>,
     as_of: Option<String>,
+    /// Comma-separated tag filter (AND semantics).
+    tags: Option<String>,
 }
 
 async fn get_recall(
@@ -152,7 +169,11 @@ async fn get_recall(
         budget_bytes: None,
         as_of: query.as_of.clone(),
         expand_neighbors: false,
-        tags: Vec::new(),
+        tags: query
+            .tags
+            .as_deref()
+            .map(|t| t.split(',').map(|x| x.trim().to_owned()).collect())
+            .unwrap_or_default(),
     };
     match with_engine(&state, &headers, |engine, space| {
         engine.recall(space, &query.q, &opts)
@@ -238,6 +259,18 @@ async fn get_profile(State(state): State<AppState>, headers: axum::http::HeaderM
                 "object": f.object, "confidence": f.confidence,
             })).collect::<Vec<_>>(),
             "dynamic": profile.dynamic,
+        }))
+        .into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn get_tags(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    match with_engine(&state, &headers, |engine, space| engine.tags_list(space)) {
+        Ok(tags) => Json(serde_json::json!({
+            "tags": tags.iter().map(|(name, count)| serde_json::json!({
+                "name": name, "count": count,
+            })).collect::<Vec<_>>(),
         }))
         .into_response(),
         Err(response) => response,

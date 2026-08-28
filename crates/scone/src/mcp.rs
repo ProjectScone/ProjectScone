@@ -28,6 +28,8 @@ pub struct StoreParams {
     pub content: String,
     /// Space to store into; defaults to the server's space
     pub space: Option<String>,
+    /// Tags for focused retrieval later (each 1..=64 chars, max 10)
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -40,6 +42,8 @@ pub struct RecallParams {
     /// Prepend the space's profile (identity facts + recent activity).
     /// Defaults to true.
     pub include_profile: Option<bool>,
+    /// Focus recall to episodes carrying ALL of these tags.
+    pub tags: Option<Vec<String>>,
     /// Evaluate fact validity at this ISO-8601 instant (time travel)
     pub as_of: Option<String>,
 }
@@ -110,6 +114,10 @@ impl SconeMcp {
                 p.content.len()
             )));
         }
+        let tags = p.tags.clone().unwrap_or_default();
+        if tags.len() > 10 {
+            return Ok(tool_error("at most 10 tags per store"));
+        }
         let result = self.with_space(&p.space, |engine, space| {
             let outcome = engine.ingest(
                 space,
@@ -117,6 +125,14 @@ impl SconeMcp {
                     text: p.content.clone(),
                 },
             )?;
+            let episode_id = match &outcome {
+                IngestOutcome::Ingested { episode_id, .. }
+                | IngestOutcome::Deduplicated { episode_id } => *episode_id,
+            };
+            if !tags.is_empty() {
+                let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+                engine.tag_episode(space, episode_id, &refs)?;
+            }
             let lane = if engine.has_llm() {
                 let r = engine.distill(space, 10)?;
                 format!(
@@ -174,7 +190,7 @@ impl SconeMcp {
                     budget_bytes: None,
                     as_of: p.as_of.clone(),
                     expand_neighbors: true,
-                    tags: Vec::new(),
+                    tags: p.tags.clone().unwrap_or_default(),
                 },
             )?;
             Ok((profile, pack))
