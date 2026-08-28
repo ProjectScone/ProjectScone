@@ -20,6 +20,8 @@ pub struct BenchItem {
     pub session_ids: Vec<String>,
     /// The evidence sessions the answer lives in.
     pub answer_session_ids: Vec<String>,
+    /// ISO-8601 date of the question (temporal reasoning context).
+    pub question_date: String,
 }
 
 pub struct ItemOutcome {
@@ -181,6 +183,7 @@ pub fn parse_dataset(raw: &str) -> Result<Vec<BenchItem>, String> {
                 session_dates,
                 session_ids: string_list("haystack_session_ids"),
                 answer_session_ids: string_list("answer_session_ids"),
+                question_date: iso_date(&s("question_date")),
             })
         })
         .collect()
@@ -311,9 +314,20 @@ pub fn run_item_with(
         retrieved.push_str(&format!("- {}\n", i.text));
     }
     let model_answer = if engine.has_llm() {
+        // Question date travels with the question (memorybench protocol;
+        // temporal questions are unanswerable without it).
+        let dated_question = if item.question_date.is_empty() {
+            item.question.clone()
+        } else {
+            format!(
+                "Question date: {}
+{}",
+                item.question_date, item.question
+            )
+        };
         let result = match &opts.answer_system {
-            Some(system) => engine.llm_answer_with_system(system, &item.question, &retrieved),
-            None => engine.llm_answer(&item.question, &retrieved),
+            Some(system) => engine.llm_answer_with_system(system, &dated_question, &retrieved),
+            None => engine.llm_answer(&dated_question, &retrieved),
         };
         result.unwrap_or_else(|e| format!("<llm error: {e}>"))
     } else {
@@ -351,4 +365,83 @@ pub fn judge_correct(
         )
         .map_err(|e| e.to_string())?;
     Ok(verdict.trim_start().to_uppercase().starts_with("YES"))
+}
+
+/// Judge prompts by question type, following the memorybench protocol
+/// (reference/SupermemoryReference/memorybench/src/prompts/defaults.ts,
+/// itself derived from LongMemEval's official scoring). Structured JSON
+/// verdicts; abstention gets credit for saying unknown; temporal tolerates
+/// off-by-one day counts; knowledge updates accept old info beside the new
+/// answer.
+const JUDGE_DEFAULT: &str = "I will give you a question, a correct answer, and a response \
+from a model. Answer whether the response contains the correct answer. Equivalent phrasing \
+counts. A response with only a subset of the required information does not count. Respond \
+with ONLY a JSON object: {\"score\": 1, \"label\": \"correct\", \"explanation\": \"...\"} or \
+{\"score\": 0, \"label\": \"incorrect\", \"explanation\": \"...\"}";
+
+const JUDGE_ABSTENTION: &str = "You are evaluating an abstention question: the correct \
+behavior is to say the information was NOT available. The response is correct if it \
+abstains, says it does not know, or states the information is missing; incorrect if it \
+makes up an answer. Respond with ONLY a JSON object: {\"score\": 1, \"label\": \"correct\", \
+\"explanation\": \"...\"} or {\"score\": 0, \"label\": \"incorrect\", \"explanation\": \"...\"}";
+
+const JUDGE_TEMPORAL: &str = "I will give you a question, a correct answer, and a response \
+from a model. Answer whether the response contains the correct answer. Do not penalize \
+off-by-one errors in day/week/month counts. Respond with ONLY a JSON object: {\"score\": 1, \
+\"label\": \"correct\", \"explanation\": \"...\"} or {\"score\": 0, \"label\": \"incorrect\", \
+\"explanation\": \"...\"}";
+
+const JUDGE_UPDATE: &str = "I will give you a question, a correct answer, and a response \
+from a model. If the response mentions previous information alongside an updated answer, it \
+is correct as long as the updated answer is the required one. Respond with ONLY a JSON \
+object: {\"score\": 1, \"label\": \"correct\", \"explanation\": \"...\"} or {\"score\": 0, \
+\"label\": \"incorrect\", \"explanation\": \"...\"}";
+
+const JUDGE_PREFERENCE: &str = "I will give you a question, a rubric for the desired \
+personalized response, and a response from a model. The response is correct if it recalls \
+and uses the user's personal information correctly; it need not cover every rubric point. \
+Respond with ONLY a JSON object: {\"score\": 1, \"label\": \"correct\", \"explanation\": \
+\"...\"} or {\"score\": 0, \"label\": \"incorrect\", \"explanation\": \"...\"}";
+
+pub fn judge_prompt_for(question_type: &str) -> &'static str {
+    let t = question_type.to_lowercase();
+    if t.contains("abstention") || t.contains("adversarial") {
+        JUDGE_ABSTENTION
+    } else if t.contains("temporal") {
+        JUDGE_TEMPORAL
+    } else if t.contains("update") || t.contains("changing") {
+        JUDGE_UPDATE
+    } else if t.contains("preference") {
+        JUDGE_PREFERENCE
+    } else {
+        JUDGE_DEFAULT
+    }
+}
+
+/// Type-aware judge with structured verdicts. Falls back to conservative
+/// yes-prefix matching when the model ignores the JSON instruction.
+pub fn judge_correct_typed(
+    llm: &dyn scone_core::llm::LlmProvider,
+    question_type: &str,
+    question: &str,
+    expected: &str,
+    got: &str,
+) -> Result<bool, String> {
+    let verdict = llm
+        .answer_with_system(
+            judge_prompt_for(question_type),
+            "Grade the response.",
+            &format!("Question: {question}\nCorrect answer: {expected}\nModel response: {got}"),
+        )
+        .map_err(|e| e.to_string())?;
+    let trimmed = verdict.trim();
+    if let Some(start) = trimmed.find('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(
+            &trimmed[start..trimmed.rfind('}').map_or(trimmed.len(), |e| e + 1)],
+        )
+        && let Some(score) = value["score"].as_i64()
+    {
+        return Ok(score == 1);
+    }
+    Ok(trimmed.to_uppercase().starts_with("YES"))
 }

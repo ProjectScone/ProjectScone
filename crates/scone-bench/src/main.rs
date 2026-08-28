@@ -206,8 +206,9 @@ fn run() -> Result<(), String> {
                 );
                 let judged = match &judge_llm {
                     Some(llm) => {
-                        let ok = scone_bench::judge_correct(
+                        let ok = scone_bench::judge_correct_typed(
                             llm,
+                            &item.question_type,
                             &item.question,
                             &item.answer,
                             &outcome.model_answer,

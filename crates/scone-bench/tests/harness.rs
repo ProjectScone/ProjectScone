@@ -65,3 +65,49 @@ fn llm_judge_accepts_paraphrase_and_rejects_wrong() {
     let no = FakeLlm::new(vec![]).with_answer("NO");
     assert!(!judge_correct(&no, "where does the user live?", "austin", "Denver.").unwrap());
 }
+
+#[test]
+fn typed_judges_select_by_question_type_and_parse_json() {
+    use scone_bench::{judge_correct_typed, judge_prompt_for};
+    use scone_core::llm::FakeLlm;
+    assert!(judge_prompt_for("temporal-reasoning").contains("off-by-one"));
+    assert!(judge_prompt_for("abstention-style").contains("abstain"));
+    assert!(judge_prompt_for("knowledge-update").contains("updated answer"));
+    assert!(judge_prompt_for("single-session-preference").contains("rubric"));
+    let yes = FakeLlm::new(vec![])
+        .with_answer(r#"{"score": 1, "label": "correct", "explanation": "same"}"#);
+    assert!(
+        judge_correct_typed(&yes, "multi-session", "q", "austin", "they moved to Austin").unwrap()
+    );
+    let no = FakeLlm::new(vec![])
+        .with_answer(r#"{"score": 0, "label": "incorrect", "explanation": "different"}"#);
+    assert!(!judge_correct_typed(&no, "multi-session", "q", "austin", "Denver").unwrap());
+    // Non-JSON output falls back to yes/no prefix, conservatively.
+    let messy = FakeLlm::new(vec![]).with_answer("yes, that matches");
+    assert!(judge_correct_typed(&messy, "multi-session", "q", "a", "a").unwrap());
+}
+
+#[test]
+fn question_date_reaches_the_answer_call() {
+    use scone_core::embed::HashEmbedder;
+    use scone_core::llm::FakeLlm;
+    let raw = r#"[{"question_id":"d1","question_type":"temporal-reasoning",
+        "question":"how many days between the trips?","answer":"3",
+        "question_date":"2023/05/20 (Sat) 02:21",
+        "haystack_sessions":[[{"role":"user","content":"first trip monday, second trip thursday"}]],
+        "haystack_dates":["2023/05/01 (Mon) 10:00"],
+        "haystack_session_ids":["s1"],"answer_session_ids":["s1"]}]"#;
+    let items = scone_bench::parse_dataset(raw).unwrap();
+    assert_eq!(items[0].question_date, "2023-05-20T02:21:00Z");
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let fake = FakeLlm::new(vec![]);
+    engine.set_llm(Some(Box::new(FakeLlm::new(vec![]))));
+    let _ = fake; // the engine's own fake echoes; verify via outcome text
+    let outcome = scone_bench::run_item(&mut engine, &items[0], 0).unwrap();
+    assert!(
+        outcome.model_answer.contains("2023-05-20"),
+        "the answer call must see the question date: {}",
+        outcome.model_answer
+    );
+}
