@@ -29,11 +29,6 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         run: cargo build --release -p scone-cli --target ${{ matrix.target }}
-      - name: Build mac x86_64 too
-        if: matrix.target == 'aarch64-apple-darwin'
-        run: |
-          rustup target add x86_64-apple-darwin
-          cargo build --release -p scone-cli --target x86_64-apple-darwin
       - name: Package
         run: |
           package() {
@@ -44,10 +39,10 @@ jobs:
             cp crates/scone-ffi/include/scone.h "$STAGE/"
             tar czf "$STAGE.tar.gz" "$STAGE"
           }
+          # Intel macOS is unsupported for prebuilts: ort ships no ONNX
+          # binaries for x86_64-apple-darwin. Intel users can
+          # `cargo install scone-cli --no-default-features --features pdf`.
           package "${{ matrix.target }}"
-          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
-            package x86_64-apple-darwin
-          fi
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
