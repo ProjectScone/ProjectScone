@@ -14,10 +14,28 @@ pub struct ExtractedFact {
     pub confidence: f32,
 }
 
+/// Default system prompt for answering from memory (v1).
+pub const ANSWER_SYSTEM_V1: &str = "Answer from the provided memory context. \
+Cite nothing you cannot find there; say so when the context lacks the answer.";
+
+/// Extraction-style answering for small readers (v2): short, literal,
+/// time-aware. Benchmarked against v1 in memory/benchmarks.md.
+pub const ANSWER_SYSTEM_V2: &str = "You answer questions from retrieved \
+personal memory. Reply with ONLY the specific fact or detail asked for - a \
+short phrase, no preamble, no explanation. Prefer the exact wording found in \
+the context. If the question refers to time ('first', 'last', 'in May'), use \
+the timestamps and ordering in the context to pick the right instance. If the \
+context does not contain the answer, reply exactly: unknown";
+
 pub trait LlmProvider: Send {
     fn id(&self) -> &str;
     fn extract_facts(&self, text: &str) -> Result<Vec<ExtractedFact>>;
-    fn answer(&self, question: &str, context: &str) -> Result<String>;
+    /// Answer with an explicit system prompt.
+    fn answer_with_system(&self, system: &str, question: &str, context: &str) -> Result<String>;
+    /// Answer with the default (v1) system prompt.
+    fn answer(&self, question: &str, context: &str) -> Result<String> {
+        self.answer_with_system(ANSWER_SYSTEM_V1, question, context)
+    }
 }
 
 /// Deterministic in-process provider for tests: returns programmed facts
@@ -72,7 +90,7 @@ impl LlmProvider for FakeLlm {
         }
     }
 
-    fn answer(&self, question: &str, context: &str) -> Result<String> {
+    fn answer_with_system(&self, _system: &str, question: &str, context: &str) -> Result<String> {
         match (&self.fail, &self.answer) {
             (Some(msg), _) => Err(SconeError::Llm(msg.clone())),
             (None, Some(programmed)) => Ok(programmed.clone()),
@@ -185,10 +203,9 @@ impl LlmProvider for OpenAiCompatible {
         parse_extraction(&self.chat(EXTRACTION_PROMPT, text)?)
     }
 
-    fn answer(&self, question: &str, context: &str) -> Result<String> {
+    fn answer_with_system(&self, system: &str, question: &str, context: &str) -> Result<String> {
         self.chat(
-            "Answer from the provided memory context. Cite nothing you cannot find there; \
-             say so when the context lacks the answer.",
+            system,
             &format!("Context:\n{context}\n\nQuestion: {question}"),
         )
     }
@@ -237,9 +254,9 @@ impl LlmProvider for AnthropicProvider {
         parse_extraction(&self.message(EXTRACTION_PROMPT, text)?)
     }
 
-    fn answer(&self, question: &str, context: &str) -> Result<String> {
+    fn answer_with_system(&self, system: &str, question: &str, context: &str) -> Result<String> {
         self.message(
-            "Answer from the provided memory context. Say so when the context lacks the answer.",
+            system,
             &format!("Context:\n{context}\n\nQuestion: {question}"),
         )
     }
