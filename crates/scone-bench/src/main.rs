@@ -105,10 +105,15 @@ fn run() -> Result<(), String> {
             let embedder: Box<dyn scone_core::embed::EmbeddingProvider> = match embedder.as_str() {
                 "hash" => Box::new(HashEmbedder::new(384)),
                 #[cfg(feature = "local-embed")]
-                "local" => Box::new(
-                    scone_core::embed::OnnxEmbedder::new(&dir.path().join("models"))
-                        .map_err(|e| e.to_string())?,
-                ),
+                "local" => {
+                    // Persistent cache: without it every run re-downloads the
+                    // model, and one hung download stalls a whole sweep
+                    // (observed 2026-08-27).
+                    let cache = std::env::temp_dir().join("scone-bench-models");
+                    Box::new(
+                        scone_core::embed::OnnxEmbedder::new(&cache).map_err(|e| e.to_string())?,
+                    )
+                }
                 other => return Err(format!("unknown embedder {other:?}")),
             };
             let mut engine = Engine::open(dir.path(), embedder).map_err(|e| e.to_string())?;
