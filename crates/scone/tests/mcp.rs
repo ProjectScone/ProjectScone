@@ -33,7 +33,7 @@ fn text_of(result: &rmcp::model::CallToolResult) -> String {
 }
 
 #[tokio::test]
-async fn lists_the_four_memory_tools() {
+async fn lists_the_memory_tools() {
     let dir = tempfile::tempdir().unwrap();
     let client = client_for(SconeMcp::new(engine(dir.path()), "agent")).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -44,8 +44,10 @@ async fn lists_the_four_memory_tools() {
         [
             "memory_facts_about",
             "memory_forget",
+            "memory_pending",
             "memory_recall",
-            "memory_store"
+            "memory_store",
+            "memory_store_facts"
         ]
     );
     client.cancel().await.unwrap();
@@ -254,5 +256,78 @@ async fn store_accepts_tags_and_recall_focuses_on_them() {
         !text.contains("sourdough"),
         "tag focus must exclude: {text}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_driven_distillation_loop_works_without_any_llm() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(SconeMcp::new(engine(dir.path()), "agent")).await;
+    // Store creates a pending episode (no LLM configured on the server).
+    client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_store");
+            p.arguments = serde_json::json!({"content": "mark moved the standup to 9am"})
+                .as_object()
+                .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    // The agent pulls pending work.
+    let pending = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_pending");
+            p.arguments = serde_json::json!({}).as_object().cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let text = text_of(&pending);
+    assert!(text.contains("standup"), "{text}");
+    assert!(text.contains("episode 1"), "{text}");
+    // The agent submits facts it extracted with its own model.
+    let stored = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_store_facts");
+            p.arguments = serde_json::json!({
+                "episode_id": 1,
+                "facts": [
+                    {"subject": "standup", "predicate": "moved_to", "object": "9am", "confidence": 0.9}
+                ]
+            })
+            .as_object()
+            .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    assert_ne!(stored.is_error, Some(true), "{stored:?}");
+    assert!(text_of(&stored).contains("1 fact"), "{stored:?}");
+    // Queue drained; facts queryable.
+    let pending = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_pending");
+            p.arguments = serde_json::json!({}).as_object().cloned();
+            p
+        })
+        .await
+        .unwrap();
+    assert!(
+        text_of(&pending).contains("nothing pending"),
+        "{:?}",
+        text_of(&pending)
+    );
+    let about = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_facts_about");
+            p.arguments = serde_json::json!({"entity": "standup"})
+                .as_object()
+                .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    assert!(text_of(&about).contains("9am"), "{:?}", text_of(&about));
     client.cancel().await.unwrap();
 }

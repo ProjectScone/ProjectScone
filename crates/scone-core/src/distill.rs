@@ -383,3 +383,64 @@ impl Engine {
         Ok(expired)
     }
 }
+
+impl Engine {
+    /// Episodes awaiting distillation, for agent-driven extraction
+    /// (subscription-native path: the host agent is the model).
+    pub fn pending_episodes(
+        &self,
+        space: &ScopedSpace,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, substr(e.content, 1, 4000), e.created_at
+             FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
+             WHERE q.state = 'pending' AND e.space_id = ?1
+             ORDER BY q.id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![space.id(), limit.clamp(1, 20) as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Apply agent-extracted facts for one pending episode and mark its
+    /// queue row done. The engine enforces the invariants; the agent only
+    /// proposes.
+    pub fn complete_distillation(
+        &mut self,
+        space: &ScopedSpace,
+        episode_id: i64,
+        facts: &[crate::llm::ExtractedFact],
+    ) -> Result<ApplyReport> {
+        let pending: i64 = self.conn.query_row(
+            "SELECT count(*) FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
+             WHERE q.episode_id = ?1 AND e.space_id = ?2",
+            rusqlite::params![episode_id, space.id()],
+            |r| r.get(0),
+        )?;
+        if pending == 0 {
+            return Err(SconeError::NotFound(format!(
+                "episode {episode_id} in space {}",
+                space.name()
+            )));
+        }
+        let usable: Vec<crate::llm::ExtractedFact> = facts
+            .iter()
+            .filter(|f| {
+                !f.subject.trim().is_empty()
+                    && !f.predicate.trim().is_empty()
+                    && !f.object.trim().is_empty()
+            })
+            .cloned()
+            .collect();
+        let report = self.apply_facts(space, episode_id, &usable)?;
+        self.conn.execute(
+            "UPDATE distill_queue SET state = 'done', last_error = NULL
+             WHERE episode_id = ?1",
+            [episode_id],
+        )?;
+        Ok(report)
+    }
+}

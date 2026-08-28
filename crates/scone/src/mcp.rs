@@ -64,6 +64,31 @@ pub struct ForgetParams {
     pub space: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PendingParams {
+    /// Max episodes to return (1..=20)
+    pub limit: Option<usize>,
+    pub space: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SubmittedFact {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    /// 0..=1; defaults to 0.8
+    pub confidence: Option<f32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct StoreFactsParams {
+    /// Episode id from memory_pending
+    pub episode_id: i64,
+    /// Extracted facts (max 50)
+    pub facts: Vec<SubmittedFact>,
+    pub space: Option<String>,
+}
+
 fn tool_error(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
@@ -283,6 +308,74 @@ impl SconeMcp {
         })
     }
 
+    /// List episodes awaiting fact extraction. YOU are the extractor:
+    /// read each episode, distill durable subject/predicate/object facts
+    /// with your own reasoning, then submit them via memory_store_facts.
+    #[tool(name = "memory_pending")]
+    async fn memory_pending(
+        &self,
+        Parameters(p): Parameters<PendingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = p.limit.unwrap_or(5).clamp(1, 20);
+        let result = self.with_space(&p.space, |engine, space| {
+            engine.pending_episodes(space, limit)
+        });
+        Ok(match result {
+            Ok(rows) if rows.is_empty() => ok_text("nothing pending: memory is fully distilled"),
+            Ok(rows) => {
+                let mut out = String::from(
+                    "Episodes awaiting fact extraction (submit via memory_store_facts):
+",
+                );
+                for (id, content, created_at) in rows {
+                    out.push_str(&format!(
+                        "--- episode {id} ({created_at})
+{content}
+"
+                    ));
+                }
+                ok_text(out)
+            }
+            Err(e) => tool_error(e),
+        })
+    }
+
+    /// Submit facts you extracted from a pending episode. The engine
+    /// applies contradiction closure and provenance; you only propose.
+    #[tool(name = "memory_store_facts")]
+    async fn memory_store_facts(
+        &self,
+        Parameters(p): Parameters<StoreFactsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if p.facts.len() > 50 {
+            return Ok(tool_error("at most 50 facts per submission"));
+        }
+        let facts: Vec<scone_core::llm::ExtractedFact> = p
+            .facts
+            .iter()
+            .map(|f| scone_core::llm::ExtractedFact {
+                subject: f.subject.clone(),
+                predicate: f.predicate.clone(),
+                object: f.object.clone(),
+                confidence: f.confidence.unwrap_or(0.8).clamp(0.0, 1.0),
+            })
+            .collect();
+        let result = self.with_space(&p.space, |engine, space| {
+            engine.complete_distillation(space, p.episode_id, &facts)
+        });
+        Ok(match result {
+            Ok(report) => ok_text(format!(
+                "episode {} distilled: {} fact{} added, {} closed, {} deduplicated",
+                p.episode_id,
+                report.added,
+                if report.added == 1 { "" } else { "s" },
+                report.closed,
+                report.deduplicated,
+            )),
+            Err(e) => tool_error(e),
+        })
+    }
+
     /// Forget a fact: closes its validity interval with your reason.
     /// History is preserved; nothing is deleted.
     #[tool(name = "memory_forget")]
@@ -316,7 +409,11 @@ impl ServerHandler for SconeMcp {
         info.instructions = Some(
             "Persistent memory for this agent. Call memory_recall at task start; \
              memory_store for durable observations; memory_facts_about before acting \
-             on an entity; memory_forget when the user retracts something."
+             on an entity; memory_forget when the user retracts something. \
+             Periodically (session start or idle), call memory_pending and distill \
+             the returned episodes into subject/predicate/object facts with your own \
+             reasoning, submitting via memory_store_facts; you are the extraction \
+             model and no API key is needed."
                 .into(),
         );
         info
