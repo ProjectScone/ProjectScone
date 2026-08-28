@@ -81,6 +81,24 @@ CREATE TABLE IF NOT EXISTS distill_queue (
 );
 ";
 
+/// Schema v3 (2026-08-28): user-controlled tags for focused retrieval and
+/// source curation. Tags are orthogonal to spaces: spaces isolate, tags
+/// focus within a space.
+const SCHEMA_V3: &str = "
+CREATE TABLE IF NOT EXISTS tags (
+    id       INTEGER PRIMARY KEY,
+    space_id INTEGER NOT NULL REFERENCES spaces(id),
+    name     TEXT NOT NULL,
+    UNIQUE (space_id, name)
+);
+CREATE TABLE IF NOT EXISTS episode_tags (
+    episode_id INTEGER NOT NULL REFERENCES episodes(id),
+    tag_id     INTEGER NOT NULL REFERENCES tags(id),
+    UNIQUE (episode_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS episode_tags_by_tag ON episode_tags (tag_id, episode_id);
+";
+
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -105,6 +123,18 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         )?;
         conn.execute(
             "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version.as_str() < "3" {
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute(
+            "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
             [],
         )?;
     }

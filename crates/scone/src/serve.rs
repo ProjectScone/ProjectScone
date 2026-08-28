@@ -152,6 +152,7 @@ async fn get_recall(
         budget_bytes: None,
         as_of: query.as_of.clone(),
         expand_neighbors: false,
+        tags: Vec::new(),
     };
     match with_engine(&state, &headers, |engine, space| {
         engine.recall(space, &query.q, &opts)

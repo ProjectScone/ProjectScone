@@ -295,6 +295,7 @@ pub fn run_item_with(
                 budget_bytes: None,
                 as_of: None,
                 expand_neighbors: false,
+                tags: Vec::new(),
             },
         )
         .map_err(|e| e.to_string())?;

@@ -16,6 +16,7 @@ mod portability;
 pub mod profile;
 mod recall;
 pub mod rerank;
+mod tags;
 
 use std::path::{Path, PathBuf};
 

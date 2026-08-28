@@ -7,10 +7,10 @@ fn engine(dir: &std::path::Path) -> Engine {
 }
 
 #[test]
-fn fresh_store_is_schema_v2_with_semantic_tables() {
+fn fresh_store_has_semantic_tables() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(dir.path());
-    assert_eq!(e.schema_version().unwrap(), 2);
+    assert!(e.schema_version().unwrap() >= 2);
     let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
     for table in [
         "facts",
@@ -69,14 +69,15 @@ fn v1_store_migrates_and_backfills_queue() {
     }
     let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
     raw.execute_batch(
-        "DROP TABLE distill_queue; DROP TABLE fact_provenance; DROP TABLE facts;
+        "DROP TABLE episode_tags; DROP TABLE tags;
+         DROP TABLE distill_queue; DROP TABLE fact_provenance; DROP TABLE facts;
          DROP TABLE entity_aliases; DROP TABLE entities;
          UPDATE meta SET value='1' WHERE key='schema_version';",
     )
     .unwrap();
     drop(raw);
     let e = engine(dir.path());
-    assert_eq!(e.schema_version().unwrap(), 2);
+    assert!(e.schema_version().unwrap() >= 2);
     let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
     let pending: i64 = raw
         .query_row(

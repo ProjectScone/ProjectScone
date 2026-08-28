@@ -174,6 +174,7 @@ impl SconeMcp {
                     budget_bytes: None,
                     as_of: p.as_of.clone(),
                     expand_neighbors: true,
+                    tags: Vec::new(),
                 },
             )?;
             Ok((profile, pack))

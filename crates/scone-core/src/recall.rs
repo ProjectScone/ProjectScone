@@ -58,6 +58,9 @@ pub struct RecallOpts {
     /// reader-facing surfaces (ask, MCP recall) where a downstream model
     /// benefits from surrounding context.
     pub expand_neighbors: bool,
+    /// Focus retrieval to episodes carrying ALL of these tags (facts
+    /// narrow through provenance). Empty = no tag filter.
+    pub tags: Vec<String>,
 }
 
 impl Default for RecallOpts {
@@ -67,6 +70,7 @@ impl Default for RecallOpts {
             budget_bytes: None,
             as_of: None,
             expand_neighbors: false,
+            tags: Vec::new(),
         }
     }
 }
@@ -173,25 +177,53 @@ impl Engine {
         // at all; vector hits are space-filtered here too.
         let mut items = Vec::new();
         {
-            let mut stmt = self.conn.prepare(
+            // Tag focus (AND semantics): the episode must carry every
+            // requested tag (normalized lowercase).
+            let normalized_tags: Vec<String> =
+                opts.tags.iter().map(|t| t.trim().to_lowercase()).collect();
+            let tag_filter = if normalized_tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " AND (SELECT count(DISTINCT t.name) FROM episode_tags et
+                           JOIN tags t ON t.id = et.tag_id
+                           WHERE et.episode_id = e.id AND t.name IN ({})) = {}",
+                    normalized_tags
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    normalized_tags.len()
+                )
+            };
+            let sql = format!(
                 "SELECT c.episode_id, c.start_byte, c.end_byte, e.content, e.source,
                         e.created_at,
                         (julianday('now') - julianday(e.created_at)) AS age_days
                  FROM chunks c JOIN episodes e ON e.id = c.episode_id
-                 WHERE c.id = ?1 AND e.space_id = ?2",
-            )?;
+                 WHERE c.id = ?1 AND e.space_id = ?2{tag_filter}"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
             for (chunk_id, fused_score) in &fused {
-                let row = stmt.query_row(rusqlite::params![*chunk_id as i64, space.id()], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, f64>(6)?,
-                    ))
-                });
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(*chunk_id as i64), Box::new(space.id())];
+                for tag in &normalized_tags {
+                    params.push(Box::new(tag.clone()));
+                }
+                let row = stmt.query_row(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, f64>(6)?,
+                        ))
+                    },
+                );
                 let (episode_id, start, end, content, source, created_at, age_days) = match row {
                     Ok(r) => r,
                     Err(rusqlite::Error::QueryReturnedNoRows) => continue,
