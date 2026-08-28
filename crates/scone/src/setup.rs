@@ -83,6 +83,61 @@ pub fn setup_claude_code(space: &str) -> Result<String, String> {
     ))
 }
 
+/// Merge scone's hook wiring into a Claude Code settings.json, preserving
+/// everything else. Pure function, unit-tested.
+pub fn merged_settings_hooks(existing: &str, exe: &Path, space: &str) -> Result<String, String> {
+    let mut root: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(existing).map_err(|e| format!("settings.json is not JSON: {e}"))?
+    };
+    if !root.is_object() {
+        return Err("settings.json is not a JSON object".into());
+    }
+    let entry = |event: &str, timeout: u64| {
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": format!(
+                    "{} --space {} hook {}",
+                    exe.display(), space, event
+                ),
+                "timeout": timeout,
+            }]
+        }])
+    };
+    let hooks = root
+        .as_object_mut()
+        .expect("checked object")
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        return Err("hooks is not an object".into());
+    }
+    let hooks = hooks.as_object_mut().expect("checked object");
+    hooks.insert("SessionStart".into(), entry("session-start", 10));
+    hooks.insert("UserPromptSubmit".into(), entry("user-prompt", 10));
+    hooks.insert("SessionEnd".into(), entry("session-end", 60));
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
+/// Wire this project's `.claude/settings.json` to the scone hook handlers.
+pub fn setup_claude_code_hooks(space: &str) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join(".claude");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let merged = merged_settings_hooks(&existing, &exe, space)?;
+    std::fs::write(&path, merged).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "wrote {}\nnew Claude Code sessions here get memory injection and capture (space: {space})",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

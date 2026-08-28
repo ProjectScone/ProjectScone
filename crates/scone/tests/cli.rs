@@ -636,3 +636,36 @@ fn hook_session_end_captures_the_transcript() {
         .success()
         .stdout(predicates::str::contains("claude-code"));
 }
+
+#[test]
+fn setup_claude_code_hooks_wires_project_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+    std::fs::write(
+        project.path().join(".claude/settings.json"),
+        r#"{"permissions": {"allow": ["Bash(ls:*)"]}}"#,
+    )
+    .unwrap();
+    scone(dir.path())
+        .current_dir(project.path())
+        .args(["setup", "claude-code-hooks"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("settings.json"));
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.path().join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["permissions"]["allow"][0], "Bash(ls:*)",
+        "existing settings kept"
+    );
+    for event in ["SessionStart", "UserPromptSubmit", "SessionEnd"] {
+        let cmd = written["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(cmd.contains("hook"), "{event}: {cmd}");
+        assert!(cmd.contains("scone"), "{event}: {cmd}");
+    }
+}

@@ -429,9 +429,10 @@ fn run() -> Result<(), String> {
             let message = match client.as_str() {
                 "claude-code" => scone::setup::setup_claude_code(&cli.space)?,
                 "claude-desktop" => scone::setup::setup_claude_desktop(&cli.space)?,
+                "claude-code-hooks" => scone::setup::setup_claude_code_hooks(&cli.space)?,
                 other => {
                     return Err(format!(
-                        "unknown client {other:?}: use claude-code or claude-desktop"
+                        "unknown client {other:?}: use claude-code, claude-desktop, or claude-code-hooks"
                     ));
                 }
             };
