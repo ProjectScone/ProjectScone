@@ -77,3 +77,23 @@ fn answer_returns_model_text() {
         .unwrap();
     assert_eq!(a, "bun, since 2026");
 }
+
+#[test]
+fn a_dead_server_times_out_instead_of_hanging_forever() {
+    // Accepts the connection, never responds.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _keep = std::thread::spawn(move || {
+        let (_sock, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    });
+    let p = OpenAiCompatible::new(&format!("http://{addr}"), "m", None)
+        .with_timeout(std::time::Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    let err = p.answer("q", "ctx").unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "must not hang"
+    );
+    assert!(err.to_string().contains("http"), "{err}");
+}

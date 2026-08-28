@@ -146,11 +146,20 @@ fn parse_extraction(content: &str) -> Result<Vec<ExtractedFact>> {
         .collect()
 }
 
+/// Default ceiling for one model call. A hung provider must become a typed
+/// error, never a stuck process (the missing-timeout class already cost us
+/// a stalled sweep and an unobservable bench leg, 2026-08-27/28).
+pub const DEFAULT_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 fn http_json(
     req: ureq::RequestBuilder<ureq::typestate::WithBody>,
+    timeout: std::time::Duration,
     body: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let mut res = req
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .send_json(body)
         .map_err(|e| SconeError::Llm(format!("http: {e}")))?;
     res.body_mut()
@@ -163,6 +172,7 @@ pub struct OpenAiCompatible {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    timeout: std::time::Duration,
 }
 
 impl OpenAiCompatible {
@@ -171,7 +181,13 @@ impl OpenAiCompatible {
             base_url: base_url.trim_end_matches('/').to_owned(),
             model: model.to_owned(),
             api_key,
+            timeout: DEFAULT_LLM_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn chat(&self, system: &str, user: &str) -> Result<String> {
@@ -186,7 +202,7 @@ impl OpenAiCompatible {
                 {"role": "user", "content": user},
             ],
         });
-        let value = http_json(req, body)?;
+        let value = http_json(req, self.timeout, body)?;
         value["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_owned)
@@ -216,6 +232,7 @@ pub struct AnthropicProvider {
     base_url: String,
     model: String,
     api_key: String,
+    timeout: std::time::Duration,
 }
 
 impl AnthropicProvider {
@@ -224,7 +241,13 @@ impl AnthropicProvider {
             base_url: base_url.trim_end_matches('/').to_owned(),
             model: model.to_owned(),
             api_key: api_key.to_owned(),
+            timeout: DEFAULT_LLM_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn message(&self, system: &str, user: &str) -> Result<String> {
@@ -237,7 +260,7 @@ impl AnthropicProvider {
             "system": system,
             "messages": [{"role": "user", "content": user}],
         });
-        let value = http_json(req, body)?;
+        let value = http_json(req, self.timeout, body)?;
         value["content"][0]["text"]
             .as_str()
             .map(str::to_owned)
