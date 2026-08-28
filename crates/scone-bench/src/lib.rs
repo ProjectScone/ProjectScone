@@ -13,6 +13,9 @@ pub struct BenchItem {
     pub answer: String,
     /// Each session flattened to one "role: content" transcript per turn.
     pub sessions: Vec<Vec<String>>,
+    /// ISO-8601 timestamp per session (from haystack_dates), parallel to
+    /// `sessions`; empty string when the dataset lacks one.
+    pub session_dates: Vec<String>,
 }
 
 pub struct ItemOutcome {
@@ -58,6 +61,22 @@ impl Report {
     }
 }
 
+/// LongMemEval dates look like "2023/05/20 (Sat) 02:21"; normalize to
+/// ISO-8601 so SQLite's julianday() can subtract them.
+fn iso_date(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.len() < 10 {
+        return String::new();
+    }
+    let date = raw[..10].replace('/', "-");
+    let time = raw
+        .rsplit(' ')
+        .next()
+        .filter(|t| t.contains(':'))
+        .unwrap_or("00:00");
+    format!("{date}T{time}:00Z")
+}
+
 pub fn parse_dataset(raw: &str) -> Result<Vec<BenchItem>, String> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let array = value.as_array().ok_or("dataset must be a JSON array")?;
@@ -95,12 +114,23 @@ pub fn parse_dataset(raw: &str) -> Result<Vec<BenchItem>, String> {
                         .unwrap_or_default()
                 })
                 .collect();
+            let session_dates = item
+                .get("haystack_dates")
+                .and_then(|v| v.as_array())
+                .map(|dates| {
+                    dates
+                        .iter()
+                        .map(|d| iso_date(d.as_str().unwrap_or_default()))
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(BenchItem {
                 question_id: s("question_id"),
                 question_type: s("question_type"),
                 question: s("question"),
                 answer: s("answer"),
                 sessions,
+                session_dates,
             })
         })
         .collect()
@@ -150,13 +180,18 @@ pub fn run_item_with(
 ) -> Result<ItemOutcome, String> {
     let space = auth::resolve(engine, &format!("item-{index}"), true).map_err(|e| e.to_string())?;
     let mut stored_bytes = 0usize;
-    for session in &item.sessions {
+    for (s_idx, session) in item.sessions.iter().enumerate() {
         match granularity {
             Granularity::Session => {
                 let transcript = session.join("\n");
                 stored_bytes += transcript.len();
+                let date = item
+                    .session_dates
+                    .get(s_idx)
+                    .filter(|d| !d.is_empty())
+                    .map(String::as_str);
                 engine
-                    .ingest(&space, IngestInput::Note { text: transcript })
+                    .import_episode(&space, "conversation", &transcript, None, date)
                     .map_err(|e| e.to_string())?;
             }
             Granularity::Turn => {

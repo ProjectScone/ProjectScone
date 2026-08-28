@@ -46,8 +46,10 @@ impl Engine {
     }
 
     /// Import-grade ingest: explicit kind/source/created_at, same pipeline.
-    /// Returns the episode id and whether it was freshly stored.
-    pub(crate) fn import_episode(
+    /// Returns the episode id and whether it was freshly stored. Public for
+    /// importers and harnesses that must preserve original timestamps —
+    /// temporal scoring is only as real as created_at.
+    pub fn import_episode(
         &mut self,
         space: &ScopedSpace,
         kind: &str,
