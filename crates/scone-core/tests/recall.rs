@@ -245,3 +245,39 @@ alpha topic four.\n\nalpha topic five.\n\nalpha topic six.";
         pack.items.len()
     );
 }
+
+#[test]
+fn date_referencing_queries_prefer_episodes_from_that_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let space = auth::resolve(&mut e, "default", true).unwrap();
+    e.import_episode(
+        &space,
+        "note",
+        "team offsite planning notes with the venue decision",
+        None,
+        Some("2023-05-12T10:00:00Z"),
+    )
+    .unwrap();
+    e.import_episode(
+        &space,
+        "note",
+        "team offsite planning notes with the budget decision",
+        None,
+        Some("2023-09-03T10:00:00Z"),
+    )
+    .unwrap();
+    let pack = e
+        .recall(
+            &space,
+            "offsite planning notes from May 2023",
+            &RecallOpts::default(),
+        )
+        .unwrap();
+    assert!(
+        pack.items[0].text.contains("venue"),
+        "the May episode must outrank the September one: {}",
+        pack.items[0].text
+    );
+    assert!(pack.items[0].created_at.starts_with("2023-05"));
+}

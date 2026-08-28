@@ -39,6 +39,9 @@ fn bm25_query(query: &str) -> String {
 const RRF_K: f32 = 60.0;
 const W_FUSED: f32 = 0.8;
 const W_RECENCY: f32 = 0.2;
+/// Bonus when the query references a date window and the episode falls in
+/// it (E12: temporal questions are time-anchored; measured weakest class).
+const W_DATE_MATCH: f32 = 0.4;
 const RECENCY_HALF_LIFE_DAYS: f32 = 30.0;
 /// Weight of the cross-encoder score when a reranker is attached; the
 /// fused+recency score keeps the remainder (v1 blend, benchmarked in
@@ -134,6 +137,7 @@ impl Engine {
         // Staged index writes become visible here (flush-on-recall).
         self.flush_indexes()?;
         let mut degraded = Vec::new();
+        let date_windows = crate::timeparse::date_windows(query);
 
         // Fact generator: entity/predicate/object term match, validity
         // evaluated at `as_of` (spec §5 I2/I3 make this a WHERE clause).
@@ -232,7 +236,14 @@ impl Engine {
                 let (start, end) = (start as usize, end as usize);
                 let text = content.get(start..end).unwrap_or_default().to_owned();
                 let recency = (-(age_days.max(0.0) as f32) / RECENCY_HALF_LIFE_DAYS).exp();
-                let score = W_FUSED * (fused_score / max_fused) + W_RECENCY * recency;
+                let date_bonus = if date_windows.iter().any(|w| {
+                    created_at.as_str() >= w.start.as_str() && created_at.as_str() <= w.end.as_str()
+                }) {
+                    W_DATE_MATCH
+                } else {
+                    0.0
+                };
+                let score = W_FUSED * (fused_score / max_fused) + W_RECENCY * recency + date_bonus;
                 items.push(RecallItem {
                     chunk_id: *chunk_id as i64,
                     episode_id,
