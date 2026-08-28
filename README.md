@@ -93,6 +93,8 @@ needs one. `~/.scone/config.toml`:
 ## Give your AI memory
 
     claude mcp add scone -- scone --space myproject mcp
+    scone setup claude-code-hooks   # real-time: inject memory each prompt,
+                                    # capture the session when it ends
 
 | Tool | What it does |
 |---|---|
