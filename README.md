@@ -13,7 +13,7 @@
 
 <p align="center">
   <strong>98% Recall@15 on LongMemEval-S with 97.7% context reduction, measured fully on-device at 135 ms p50. No datacenter.</strong><br/>
-  <em>(50-item run, session-id ground truth. Full-dataset verification is in progress. Every number we publish comes from an executed run.)</em>
+  <em>(First 50 items, which are all single-session questions; session-id ground truth. Full-dataset verification across all question types is pending. Every number we publish comes from an executed run.)</em>
 </p>
 
 ---
