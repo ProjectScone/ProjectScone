@@ -87,3 +87,52 @@ fn unparseable_query_degrades_instead_of_failing() {
         .unwrap();
     assert!(!pack.degraded.is_empty());
 }
+
+#[test]
+fn interrogative_noise_does_not_drown_bm25() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = setup(dir.path());
+    // Sprinkle question-words through a decoy note so a naive OR-query
+    // would rank it on "what/did/about" hits alone.
+    e.ingest(
+        &space,
+        IngestInput::Note {
+            text: "what did we say about what we did and what about that".into(),
+        },
+    )
+    .unwrap();
+    let pack = recall(&mut e, &space, "what did I say about the borrow checker");
+    assert!(
+        pack.items[0].text.contains("borrow checker"),
+        "content terms must outrank interrogative noise: {}",
+        pack.items[0].text
+    );
+}
+
+#[test]
+fn neighbor_chunks_ride_along_for_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    e.set_chunk_target(64);
+    let space = auth::resolve(&mut e, "default", true).unwrap();
+    let text = "the deploy runbook has three steps in order.\n\n\
+first drain the load balancer before anything else happens here.\n\n\
+second flip the traffic to the standby cluster region now.\n\n\
+third verify the health dashboard turns fully green again.";
+    e.ingest(&space, IngestInput::Note { text: text.into() })
+        .unwrap();
+    let pack = e
+        .recall(
+            &space,
+            "flip traffic standby cluster",
+            &RecallOpts::default(),
+        )
+        .unwrap();
+    let hit = &pack.items[0];
+    assert!(hit.text.contains("standby"), "{}", hit.text);
+    assert!(
+        hit.text.contains("drain the load balancer") || hit.text.contains("health dashboard"),
+        "a neighbor chunk must ride along: {}",
+        hit.text
+    );
+}

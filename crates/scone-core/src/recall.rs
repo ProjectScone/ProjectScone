@@ -9,6 +9,33 @@ use crate::auth::ScopedSpace;
 use crate::error::{Result, SconeError};
 
 const CANDIDATES_PER_GENERATOR: usize = 50;
+
+/// Interrogative and function words that pollute the BM25 leg of a
+/// natural-language question ("what did I say about X" must rank on X,
+/// not on "what"). The embedding leg keeps the full query — word order
+/// and function words carry meaning there.
+const QUERY_STOPWORDS: [&str; 33] = [
+    "a", "an", "the", "i", "me", "my", "we", "our", "you", "your", "it", "is", "was", "were",
+    "are", "be", "been", "do", "does", "did", "have", "has", "had", "what", "when", "where",
+    "which", "who", "how", "why", "say", "said", "about",
+];
+
+fn bm25_query(query: &str) -> String {
+    let kept: Vec<&str> = query
+        .split_whitespace()
+        .filter(|t| {
+            !QUERY_STOPWORDS.contains(
+                &t.to_lowercase()
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            )
+        })
+        .collect();
+    if kept.is_empty() {
+        query.to_owned()
+    } else {
+        kept.join(" ")
+    }
+}
 const RRF_K: f32 = 60.0;
 const W_FUSED: f32 = 0.8;
 const W_RECENCY: f32 = 0.2;
@@ -83,10 +110,11 @@ impl Engine {
         let facts = self.recall_facts(space, query, opts)?;
 
         // Candidate generation: each generator may degrade, never abort.
-        let fts_hits = match self
-            .fts
-            .search(space.id() as u64, query, CANDIDATES_PER_GENERATOR)
-        {
+        let fts_hits = match self.fts.search(
+            space.id() as u64,
+            &bm25_query(query),
+            CANDIDATES_PER_GENERATOR,
+        ) {
             Ok(hits) => hits,
             Err(SconeError::InvalidInput(msg)) => {
                 degraded.push(format!("fts: {msg}"));
@@ -159,6 +187,43 @@ impl Engine {
         }
         items.sort_by(|a, b| b.score.total_cmp(&a.score));
         items.truncate(opts.limit);
+
+        // Neighbor expansion: answers often live one chunk over. Widen each
+        // kept item to its adjacent chunks (contiguous byte spans, so this
+        // is one slice), skipping items swallowed by an earlier span.
+        let mut expanded: Vec<RecallItem> = Vec::with_capacity(items.len());
+        for mut item in items {
+            let row = self.conn.query_row(
+                "SELECT e.content,
+                        (SELECT min(start_byte) FROM chunks n
+                         WHERE n.episode_id = c.episode_id AND n.pos BETWEEN c.pos - 1 AND c.pos + 1),
+                        (SELECT max(end_byte) FROM chunks n
+                         WHERE n.episode_id = c.episode_id AND n.pos BETWEEN c.pos - 1 AND c.pos + 1)
+                 FROM chunks c JOIN episodes e ON e.id = c.episode_id
+                 WHERE c.id = ?1",
+                [item.chunk_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            );
+            if let Ok((content, start, end)) = row {
+                let (start, end) = (start as usize, end as usize);
+                if let Some(wider) = content.get(start..end) {
+                    item.text = wider.to_owned();
+                }
+            }
+            let redundant = expanded
+                .iter()
+                .any(|kept| kept.episode_id == item.episode_id && kept.text.contains(&item.text));
+            if !redundant {
+                expanded.push(item);
+            }
+        }
+        let mut items = expanded;
 
         // Budget rule (pinned): the top item always survives; the budget
         // truncates strictly after it.
