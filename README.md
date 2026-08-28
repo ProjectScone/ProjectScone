@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <strong>91.7% Recall@15 on LongMemEval-S (stratified across all question types) with 97.8% context reduction, fully on-device at 179 ms p50. No datacenter.</strong><br/>
-  <em>(60-item stratified sample, session-id ground truth, any-evidence; all-evidence 83.3%. Full-dataset run pending. Every number we publish comes from an executed run.)</em>
+  <strong>94.0% Recall@15 on the full LongMemEval-S dataset (all 500 questions, every type) with 97.8% context reduction, fully on-device. No datacenter.</strong><br/>
+  <em>(Session-id ground truth, any-evidence; all-evidence 81.0%. Full per-type breakdown in the project ledger. Every number we publish comes from an executed run.)</em>
 </p>
 
 ---
