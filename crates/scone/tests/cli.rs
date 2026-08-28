@@ -492,3 +492,69 @@ fn tagging_focuses_search_and_curates_sources() {
         "{stdout}"
     );
 }
+
+#[test]
+fn setup_claude_desktop_writes_mcp_config_preserving_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg_dir = home.path().join("Library/Application Support/Claude");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("claude_desktop_config.json"),
+        r#"{"mcpServers": {"other": {"command": "keepme"}}, "theme": "dark"}"#,
+    )
+    .unwrap();
+    scone(dir.path())
+        .env("HOME", home.path())
+        .args(["setup", "claude-desktop"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude_desktop_config.json"));
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cfg_dir.join("claude_desktop_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["mcpServers"]["other"]["command"], "keepme",
+        "existing servers kept"
+    );
+    assert_eq!(written["theme"], "dark", "unrelated settings kept");
+    let scone_cfg = &written["mcpServers"]["scone"];
+    assert!(scone_cfg["command"].as_str().unwrap().contains("scone"));
+    assert!(
+        scone_cfg["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "mcp")
+    );
+}
+
+#[test]
+fn setup_claude_code_invokes_the_claude_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("invocations.log");
+    let shim = bin.path().join("claude");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    scone(dir.path())
+        .env("PATH", &path)
+        .args(["setup", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("registered"));
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(logged.contains("mcp add scone"), "{logged}");
+    assert!(logged.contains("mcp"), "{logged}");
+}

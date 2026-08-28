@@ -67,6 +67,11 @@ enum Cmd {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
+    /// Register scone as a memory server, zero questions asked
+    Setup {
+        /// claude-code or claude-desktop
+        client: String,
+    },
     /// List tags in this space with usage counts
     Tags,
     /// Show the space's profile: identity facts and recent activity
@@ -394,6 +399,18 @@ fn run() -> Result<(), String> {
                     item.score, item.episode_id, source, text
                 );
             }
+        }
+        Cmd::Setup { client } => {
+            let message = match client.as_str() {
+                "claude-code" => scone::setup::setup_claude_code(&cli.space)?,
+                "claude-desktop" => scone::setup::setup_claude_desktop(&cli.space)?,
+                other => {
+                    return Err(format!(
+                        "unknown client {other:?}: use claude-code or claude-desktop"
+                    ));
+                }
+            };
+            println!("{message}");
         }
         Cmd::Tags => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;

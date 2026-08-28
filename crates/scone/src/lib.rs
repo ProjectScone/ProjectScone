@@ -2,3 +2,4 @@
 
 pub mod mcp;
 pub mod serve;
+pub mod setup;
