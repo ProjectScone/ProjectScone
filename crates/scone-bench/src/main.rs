@@ -57,6 +57,9 @@ enum Cmd {
         /// Ingestion granularity: session (default) or turn
         #[arg(long, default_value = "session")]
         granularity: String,
+        /// Attach the local cross-encoder reranker (bge-reranker-base)
+        #[arg(long)]
+        reranker: bool,
     },
 }
 
@@ -94,6 +97,7 @@ fn run() -> Result<(), String> {
             no_distill,
             chunk_bytes,
             granularity,
+            reranker,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -119,6 +123,18 @@ fn run() -> Result<(), String> {
             let mut engine = Engine::open(dir.path(), embedder).map_err(|e| e.to_string())?;
             if let Some(bytes) = chunk_bytes {
                 engine.set_chunk_target(bytes);
+            }
+            #[cfg(feature = "local-embed")]
+            if reranker {
+                let cache = std::env::temp_dir().join("scone-bench-models");
+                engine.set_reranker(Some(Box::new(
+                    scone_core::rerank::OnnxReranker::new(&cache).map_err(|e| e.to_string())?,
+                )));
+                eprintln!("reranker: bge-reranker-base");
+            }
+            #[cfg(not(feature = "local-embed"))]
+            if reranker {
+                return Err("this build lacks local-embed; no reranker".into());
             }
             let granularity = match granularity.as_str() {
                 "session" => scone_bench::Granularity::Session,

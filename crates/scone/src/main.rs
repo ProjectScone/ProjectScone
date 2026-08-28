@@ -33,6 +33,10 @@ struct Cli {
     /// reading SCONE_FAKE_FACTS as a JSON fact array)
     #[arg(long, global = true, value_enum, default_value_t = LlmKind::Config)]
     llm: LlmKind,
+    /// Attach the local cross-encoder reranker for higher recall precision
+    /// (downloads bge-reranker-base once into the data dir)
+    #[arg(long, global = true)]
+    reranker: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -279,6 +283,13 @@ fn run() -> Result<(), String> {
         Engine::open(&dir, embedder).map_err(|e| e.to_string())?
     };
     engine.set_llm(make_llm(cli.llm, &dir)?);
+    #[cfg(feature = "local-embed")]
+    if cli.reranker {
+        engine.set_reranker(Some(Box::new(
+            scone_core::rerank::OnnxReranker::new(&dir.join("models"))
+                .map_err(|e| e.to_string())?,
+        )));
+    }
 
     match &cli.cmd {
         Cmd::Add { paths, note } => {
