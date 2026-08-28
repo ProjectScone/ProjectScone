@@ -35,10 +35,32 @@ impl Engine {
         let (kind, content, source) = match input {
             IngestInput::Note { text } => ("note", text, None),
             IngestInput::File { path } => {
-                let bytes = std::fs::read(&path)?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    SconeError::InvalidInput(format!("{} is not valid UTF-8", path.display()))
-                })?;
+                let is_pdf = path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+                let text = if is_pdf {
+                    #[cfg(feature = "pdf")]
+                    {
+                        pdf_extract::extract_text(&path).map_err(|e| {
+                            SconeError::InvalidInput(format!(
+                                "{}: pdf extraction failed: {e}",
+                                path.display()
+                            ))
+                        })?
+                    }
+                    #[cfg(not(feature = "pdf"))]
+                    {
+                        return Err(SconeError::InvalidInput(format!(
+                            "{}: this build lacks the pdf feature",
+                            path.display()
+                        )));
+                    }
+                } else {
+                    let bytes = std::fs::read(&path)?;
+                    String::from_utf8(bytes).map_err(|_| {
+                        SconeError::InvalidInput(format!("{} is not valid UTF-8", path.display()))
+                    })?
+                };
                 ("file", text, Some(path.display().to_string()))
             }
         };

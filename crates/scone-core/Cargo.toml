@@ -8,12 +8,14 @@ description = "The Scone memory engine: episodic + temporal-fact dual store with
 readme = "../../README.md"
 
 [features]
-default = ["local-embed"]
+default = ["local-embed", "pdf"]
 local-embed = ["dep:fastembed"]
+pdf = ["dep:pdf-extract"]
 
 [dependencies]
 blake3 = "1"
 fastembed = { version = "6", optional = true }
+pdf-extract = { version = "0.9", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json"] }
@@ -23,6 +25,7 @@ thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.5"
+lopdf = "0.36"
 proptest = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
