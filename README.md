@@ -76,6 +76,7 @@ Building from source instead:
     scone search "vehicle maintenance"      # semantic hit, fully offline
     scone watch ~/notes --once              # ingest a directory
     scone add paper.pdf --tag research      # PDFs become searchable text
+    scone add --url https://example.com/post --tag reading
     scone distill                           # extract temporal facts (any LLM)
     scone facts list --all                  # history, with closure reasons
     scone search "tools" --as-of 2026-03-15T00:00:00Z
