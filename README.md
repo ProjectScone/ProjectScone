@@ -12,25 +12,25 @@
 </p>
 
 <p align="center">
-  <strong>98% Recall@15 on LongMemEval-S with 97.7% context reduction — measured fully on-device, 135 ms p50, no datacenter.</strong><br/>
-  <em>(50-item run, session-id ground truth; full-dataset verification in progress — every number we publish comes from an executed run.)</em>
+  <strong>98% Recall@15 on LongMemEval-S with 97.7% context reduction, measured fully on-device at 135 ms p50. No datacenter.</strong><br/>
+  <em>(50-item run, session-id ground truth. Full-dataset verification is in progress. Every number we publish comes from an executed run.)</em>
 </p>
 
 ---
 
 Your AI forgets everything between conversations, and the memory services
 that fix it want your memories in their cloud. Scone fixes both: a complete
-memory engine — episodic + semantic, temporal, searchable — that runs
-entirely on your machine and is embeddable in anything.
+memory engine, episodic and semantic, temporal and searchable, that runs
+entirely on your machine and embeds in anything.
 
 | | |
 |---|---|
-| 🧠 **Temporal memory** | Facts extracted from what you store, with validity intervals. Contradictions close the old fact with a reason — history stays queryable. Stale facts decay; recalled facts strengthen. |
-| 🕰️ **Time travel** | `search --as-of 2026-03-15` answers "what did I believe in March?" — validity is a WHERE clause, not a version-chain walk. |
-| 🔍 **Hybrid search** | BM25 + vectors + facts + recency fused in one query, with provenance on every result. Local ONNX embeddings by default — works on a plane. |
+| 🧠 **Temporal memory** | Facts extracted from what you store, with validity intervals. A contradiction closes the old fact with a recorded reason, so history stays queryable. Stale facts decay; recalled facts strengthen. |
+| 🕰️ **Time travel** | `search --as-of 2026-03-15` answers "what did I believe in March?". Validity is a WHERE clause, not a version-chain walk. |
+| 🔍 **Hybrid search** | BM25, vectors, facts, and recency fused in one query, with provenance on every result. Local ONNX embeddings by default; it works on a plane. |
 | 👤 **Profiles** | Identity facts + recent activity in one call, on the CLI, MCP, and HTTP surfaces. |
-| 📉 **Context economy** | Every recall reports bytes returned vs stored ("97.7% saved") — token optimization is a product surface, not a benchmark footnote. |
-| 📦 **Portable & embeddable** | `scone export` → JSONL with full fact history. C ABI (`include/scone.h`) embeds the engine in any language. Zero TypeScript. |
+| 📉 **Context economy** | Every recall reports bytes returned vs stored ("97.7% saved"). Token optimization is a product surface, not a benchmark footnote. |
+| 📦 **Portable & embeddable** | `scone export` writes JSONL with full fact history. The C ABI (`include/scone.h`) embeds the engine in any language. Zero TypeScript. |
 
 ## Use Scone
 
@@ -73,8 +73,8 @@ One binary, one config file, Bearer keys each bound to a space.
     scone profile                           # identity + recent activity
     scone export > memory.jsonl             # your memory is portable
 
-The semantic lane uses whatever LLM you configure — Ollama, OpenAI-compatible,
-or Anthropic — and pauses loudly when none is set; episodic search never
+The semantic lane uses whatever LLM you configure (Ollama, OpenAI-compatible,
+or Anthropic) and pauses loudly when none is set. Episodic search never
 needs one. `~/.scone/config.toml`:
 
     [llm]
@@ -90,7 +90,7 @@ needs one. `~/.scone/config.toml`:
 | `memory_store` | Save an observation; duplicates are recognized, facts distill immediately when an LLM is configured. |
 | `memory_recall` | Hybrid recall with your profile prepended; `as_of` for time travel. |
 | `memory_facts_about` | What's currently known about an entity (aliases resolved). |
-| `memory_forget` | Close a fact with your reason — recorded, never deleted. |
+| `memory_forget` | Close a fact with your reason. Recorded, never deleted. |
 
 Each `--space` is an isolated brain: one per project, per client, per team.
 
@@ -108,7 +108,7 @@ let pack = engine.recall(&space, "what do I know about X", &RecallOpts::default(
 | API | Purpose |
 |---|---|
 | `Engine::ingest` | Store content: chunked, embedded, indexed, queued for distillation |
-| `Engine::recall` | Hybrid retrieval → facts + cited chunks + context economy |
+| `Engine::recall` | Hybrid retrieval: facts, cited chunks, context economy |
 | `Engine::distill` | Drain the queue through your LLM into temporal facts |
 | `Engine::profile` | Identity facts + recent activity |
 | `Engine::export_jsonl` / `import_jsonl` | Full-fidelity portability |
@@ -126,8 +126,8 @@ let pack = engine.recall(&space, "what do I know about X", &RecallOpts::default(
     scone serve
 
 `POST /v1/episodes` · `GET /v1/recall` · `GET /v1/facts` ·
-`POST /v1/facts/{id}/close` · `GET /v1/profile` · `GET /v1/status` — every
-key is bound to exactly one space; the server refuses to start keyless.
+`POST /v1/facts/{id}/close` · `GET /v1/profile` · `GET /v1/status`. Every
+key is bound to exactly one space, and the server refuses to start keyless.
 
 ## How it works
 
