@@ -490,3 +490,49 @@ where
     sample.truncate(n);
     sample
 }
+
+/// Per-question-type metric accumulation (user requirement 2026-08-28:
+/// recall is always measured across many different session/question
+/// classes; aggregates alone hide easy-class bias).
+#[derive(Default)]
+pub struct TypeBreakdown {
+    rows: std::collections::BTreeMap<String, (usize, usize, usize, usize, usize)>,
+}
+
+impl TypeBreakdown {
+    /// Record one item: recall hit (all-evidence@15), substring correct,
+    /// and judge verdict when a judge ran.
+    pub fn add(
+        &mut self,
+        question_type: &str,
+        recall_hit: bool,
+        substring: bool,
+        judged: Option<bool>,
+    ) {
+        let row = self.rows.entry(question_type.to_owned()).or_default();
+        row.0 += 1;
+        row.1 += usize::from(recall_hit);
+        row.2 += usize::from(substring);
+        if let Some(j) = judged {
+            row.3 += 1;
+            row.4 += usize::from(j);
+        }
+    }
+
+    pub fn report(&self) -> String {
+        let mut out = String::from("type breakdown (n / recall@15 / substring / judge):\n");
+        for (ty, (n, hits, substr, judged_n, judged_ok)) in &self.rows {
+            let pct = |num: usize, den: usize| match (num * 100).checked_div(den) {
+                Some(v) => format!("{v}%"),
+                None => "-".to_owned(),
+            };
+            out.push_str(&format!(
+                "  {ty}: {n} / {} / {} / {}\n",
+                pct(*hits, *n),
+                pct(*substr, *n),
+                pct(*judged_ok, *judged_n),
+            ));
+        }
+        out
+    }
+}

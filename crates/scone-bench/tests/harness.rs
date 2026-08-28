@@ -143,3 +143,18 @@ fn stratified_sampling_covers_types_deterministically() {
     let ids2: Vec<_> = again.iter().map(|i| &i.question_id).collect();
     assert_eq!(ids, ids2, "same seed, same sample");
 }
+
+#[test]
+fn per_type_breakdown_aggregates_and_reports() {
+    use scone_bench::TypeBreakdown;
+    let mut b = TypeBreakdown::default();
+    b.add("multi-session", true, true, Some(true));
+    b.add("multi-session", false, false, Some(false));
+    b.add("temporal-reasoning", true, false, None);
+    let report = b.report();
+    assert!(report.contains("multi-session"), "{report}");
+    assert!(report.contains("2"), "{report}");
+    assert!(report.contains("temporal-reasoning"), "{report}");
+    let lines: Vec<&str> = report.lines().collect();
+    assert!(lines.len() >= 3, "one line per type plus header: {report}");
+}

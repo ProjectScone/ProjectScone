@@ -35,10 +35,13 @@ enum Cmd {
         /// Number of items (0 = all)
         #[arg(long, default_value_t = 10)]
         limit: usize,
-        /// Stratified sample across question types with this seed
-        /// (recommended for subsets: the dataset is ordered by type)
+        /// Seed for the default stratified subset sampling
+        #[arg(long, default_value_t = 42)]
+        stratified_seed: u64,
+        /// Take the head of the dataset instead of a stratified sample
+        /// (the dataset is ordered by type; head runs measure one class)
         #[arg(long)]
-        stratified_seed: Option<u64>,
+        head: bool,
         /// Embedder: hash (hermetic) or local (ONNX, real semantics)
         #[arg(long, default_value = "local")]
         embedder: String,
@@ -108,6 +111,7 @@ fn run() -> Result<(), String> {
             dataset,
             limit,
             stratified_seed,
+            head,
             embedder,
             embed_model,
             llm_url,
@@ -122,13 +126,17 @@ fn run() -> Result<(), String> {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
             let mut items = parse_dataset(&raw)?;
-            if let Some(seed) = stratified_seed {
-                if limit > 0 {
-                    items = scone_bench::stratified_sample(&items, limit, seed);
-                    eprintln!("stratified sample of {} (seed {seed})", items.len());
+            if limit > 0 {
+                if head {
+                    items.truncate(limit);
+                    eprintln!("head sample of {} (single-class risk)", items.len());
+                } else {
+                    items = scone_bench::stratified_sample(&items, limit, stratified_seed);
+                    eprintln!(
+                        "stratified sample of {} (seed {stratified_seed})",
+                        items.len()
+                    );
                 }
-            } else if limit > 0 {
-                items.truncate(limit);
             }
             let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
             let embedder: Box<dyn scone_core::embed::EmbeddingProvider> = match embedder.as_str() {
@@ -198,6 +206,7 @@ fn run() -> Result<(), String> {
                 None
             };
             let mut report = Report::default();
+            let mut breakdown = scone_bench::TypeBreakdown::default();
             let mut judged_correct = 0usize;
             let mut recall_ms = Vec::new();
             let mut r_any = [0usize; 3];
@@ -214,6 +223,7 @@ fn run() -> Result<(), String> {
                     outcome.stored_bytes,
                     outcome.retrieved_bytes,
                 );
+                let mut judged_verdict: Option<bool> = None;
                 let judged = match &judge_llm {
                     Some(llm) => {
                         let ok = scone_bench::judge_correct_typed(
@@ -224,10 +234,17 @@ fn run() -> Result<(), String> {
                             &outcome.model_answer,
                         )?;
                         judged_correct += usize::from(ok);
+                        judged_verdict = Some(ok);
                         if ok { " judge:YES" } else { " judge:NO" }
                     }
                     None => "",
                 };
+                breakdown.add(
+                    &item.question_type,
+                    outcome.recall_all_at(15),
+                    outcome.correct,
+                    judged_verdict,
+                );
                 let mut top_sessions: Vec<&str> = Vec::new();
                 for s in &outcome.retrieved_sessions {
                     if !top_sessions.contains(&s.as_str()) {
@@ -259,6 +276,7 @@ fn run() -> Result<(), String> {
                     judged_correct as f64 / report.total.max(1) as f64 * 100.0
                 );
             }
+            print!("{}", breakdown.report());
             let pct = |n: usize| n as f64 / report.total.max(1) as f64 * 100.0;
             println!(
                 "recall@5/10/15 any-evidence: {:.1}% / {:.1}% / {:.1}%   all-evidence: {:.1}% / {:.1}% / {:.1}%",
