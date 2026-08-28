@@ -217,14 +217,27 @@ fn run() -> Result<(), String> {
                     }
                     None => "",
                 };
+                let mut top_sessions: Vec<&str> = Vec::new();
+                for s in &outcome.retrieved_sessions {
+                    if !top_sessions.contains(&s.as_str()) {
+                        top_sessions.push(s);
+                    }
+                }
                 eprintln!(
-                    "[{}/{}] {} {}{} ({:.1} ms recall)",
+                    "[{}/{}] {} {}{} ({:.1} ms recall) R@15:{} expected={:?} got_top={:?}",
                     i + 1,
                     items.len(),
                     outcome.question_id,
                     if outcome.correct { "correct" } else { "MISS" },
                     judged,
                     outcome.recall_ms,
+                    if outcome.recall_all_at(15) {
+                        "HIT"
+                    } else {
+                        "MISS"
+                    },
+                    outcome.answer_sessions,
+                    top_sessions.iter().take(4).collect::<Vec<_>>(),
                 );
             }
             recall_ms.sort_by(f64::total_cmp);
