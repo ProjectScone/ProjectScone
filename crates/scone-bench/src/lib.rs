@@ -242,9 +242,12 @@ pub fn run_item_with(
                     .map(String::as_str);
                 // source carries the session id: ground truth for Recall@k.
                 let source = item.session_ids.get(s_idx).map(String::as_str);
-                engine
-                    .import_episode(&space, "conversation", &transcript, source, date)
-                    .map_err(|e| e.to_string())?;
+                match engine.import_episode(&space, "conversation", &transcript, source, date) {
+                    Ok(_) => {}
+                    // Real datasets contain empty sessions; skip, not abort.
+                    Err(scone_core::SconeError::InvalidInput(_)) => {}
+                    Err(e) => return Err(e.to_string()),
+                }
             }
             Granularity::Turn => {
                 let source = item.session_ids.get(s_idx).map(String::as_str);
