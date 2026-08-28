@@ -168,6 +168,9 @@ async fn get_recall(
                 "source": i.source, "created_at": i.created_at,
             })).collect::<Vec<_>>(),
             "degraded": pack.degraded,
+            "returned_bytes": pack.returned_bytes,
+            "space_bytes": pack.space_bytes,
+            "context_reduction": pack.context_reduction(),
         }))
         .into_response(),
         Err(response) => response,

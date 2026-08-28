@@ -345,6 +345,13 @@ fn run() -> Result<(), String> {
             }
             if pack.items.is_empty() && pack.facts.is_empty() {
                 println!("no results");
+            } else {
+                println!(
+                    "context: {} bytes of {} stored ({:.1}% saved)",
+                    pack.returned_bytes,
+                    pack.space_bytes,
+                    pack.context_reduction() * 100.0
+                );
             }
             for item in &pack.items {
                 let text: String = item.text.chars().take(120).collect();

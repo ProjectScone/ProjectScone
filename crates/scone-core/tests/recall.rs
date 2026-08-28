@@ -174,3 +174,28 @@ fn reranker_overrules_lexical_repetition() {
         after.items[0].text
     );
 }
+
+#[test]
+fn recall_reports_its_context_economy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = setup(dir.path());
+    let pack = e
+        .recall(
+            &space,
+            "borrow checker ownership",
+            &RecallOpts {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(pack.space_bytes > 0, "stored corpus size is known");
+    let returned: usize = pack.items.iter().map(|i| i.text.len()).sum();
+    assert_eq!(pack.returned_bytes, returned, "returned bytes are counted");
+    assert!(
+        pack.returned_bytes < pack.space_bytes as usize,
+        "limit 1 must return less than the whole store"
+    );
+    let reduction = pack.context_reduction();
+    assert!(reduction > 0.0 && reduction < 1.0, "reduction {reduction}");
+}

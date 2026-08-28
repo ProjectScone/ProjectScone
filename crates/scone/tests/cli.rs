@@ -419,3 +419,27 @@ fn profile_shows_identity_and_recent_activity() {
         .stdout(predicates::str::contains("mark prefers bun"))
         .stdout(predicates::str::contains("last sprint"));
 }
+
+#[test]
+fn search_reports_context_economy() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..5 {
+        scone(dir.path())
+            .args([
+                "add",
+                "--note",
+                &format!("filler note number {i} about various topics"),
+            ])
+            .assert()
+            .success();
+    }
+    scone(dir.path())
+        .args(["add", "--note", "the tokens saved line matters"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["search", "tokens saved", "--limit", "2"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("% saved"));
+}

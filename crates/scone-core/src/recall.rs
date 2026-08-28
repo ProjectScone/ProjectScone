@@ -100,6 +100,21 @@ pub struct ContextPack {
     pub items: Vec<RecallItem>,
     /// Generators that could not contribute, stated loudly (spec §10).
     pub degraded: Vec<String>,
+    /// Bytes of chunk text returned in `items` (MISSION.md: token economy
+    /// is a product surface, not a benchmark-only number).
+    pub returned_bytes: usize,
+    /// Total episode bytes stored in the space at query time.
+    pub space_bytes: i64,
+}
+
+impl ContextPack {
+    /// Fraction of the stored corpus NOT sent: 0.99 = 99% saved.
+    pub fn context_reduction(&self) -> f64 {
+        if self.space_bytes <= 0 {
+            return 0.0;
+        }
+        1.0 - (self.returned_bytes as f64 / self.space_bytes as f64)
+    }
 }
 
 impl Engine {
@@ -296,10 +311,18 @@ impl Engine {
             items = kept;
         }
 
+        let returned_bytes = items.iter().map(|i| i.text.len()).sum();
+        let space_bytes = self.conn.query_row(
+            "SELECT coalesce(sum(length(content)), 0) FROM episodes WHERE space_id = ?1",
+            [space.id()],
+            |r| r.get(0),
+        )?;
         Ok(ContextPack {
             facts,
             items,
             degraded,
+            returned_bytes,
+            space_bytes,
         })
     }
 
