@@ -50,6 +50,9 @@ enum Cmd {
         /// Ingest this text directly as a note
         #[arg(long)]
         note: Option<String>,
+        /// Fetch and ingest a web page (converted to markdown locally)
+        #[arg(long)]
+        url: Option<String>,
         /// Tag the ingested content (repeatable); files also get their
         /// extension as a source tag
         #[arg(long = "tag")]
@@ -314,7 +317,12 @@ fn run() -> Result<(), String> {
     }
 
     match &cli.cmd {
-        Cmd::Add { paths, note, tags } => {
+        Cmd::Add {
+            paths,
+            note,
+            url,
+            tags,
+        } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let mut inputs = Vec::new();
             if let Some(text) = note {
@@ -323,8 +331,24 @@ fn run() -> Result<(), String> {
             for path in paths {
                 inputs.push(IngestInput::File { path: path.clone() });
             }
-            if inputs.is_empty() {
-                return Err("nothing to add: pass file paths or --note".into());
+            if let Some(url) = url {
+                let (markdown, domain) = scone::web::fetch_page(url)?;
+                let (episode_id, fresh) = engine
+                    .import_episode(&space, "file", &markdown, Some(url), None)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "{} {url} as episode {episode_id}",
+                    if fresh { "ingested" } else { "deduplicated" }
+                );
+                let mut all: Vec<&str> = tags.iter().map(String::as_str).collect();
+                all.push("url");
+                all.push(&domain);
+                engine
+                    .tag_episode(&space, episode_id, &all)
+                    .map_err(|e| e.to_string())?;
+            }
+            if inputs.is_empty() && url.is_none() {
+                return Err("nothing to add: pass file paths, --note, or --url".into());
             }
             for input in inputs {
                 let label = match &input {

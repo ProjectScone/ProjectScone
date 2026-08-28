@@ -669,3 +669,57 @@ fn setup_claude_code_hooks_wires_project_settings() {
         assert!(cmd.contains("scone"), "{event}: {cmd}");
     }
 }
+
+#[test]
+fn add_url_ingests_page_text_with_domain_tags() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = sock.read(&mut buf).unwrap();
+        let body = "<html><head><title>Q3 Plan</title></head><body>\
+            <nav>ignore this chrome</nav>\
+            <h1>Quarterly Plan</h1><p>The quarterly plan targets three regions.</p>\
+            <script>var junk = 1;</script></body></html>";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(resp.as_bytes()).unwrap();
+    });
+    scone(dir.path())
+        .args([
+            "add",
+            "--url",
+            &format!("http://{addr}/plan"),
+            "--tag",
+            "planning",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ingested"));
+    handle.join().unwrap();
+    scone(dir.path())
+        .args(["search", "quarterly plan regions"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("three regions"));
+    scone(dir.path())
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("url"))
+        .stdout(predicates::str::contains("planning"))
+        .stdout(predicates::str::contains("127.0.0.1"));
+    // Script junk must not be ingested as content.
+    let out = scone(dir.path())
+        .args(["search", "var junk"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(!stdout.contains("var junk = 1"), "{stdout}");
+}
