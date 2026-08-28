@@ -24,6 +24,11 @@ language can embed the engine. Measured on-device (Apple Silicon, criterion):
 recall over a 5k-chunk corpus in ~300 µs, 3.6 ms end-to-end including local
 query embedding, ingest at 2.9 ms/note - no datacenter involved.
 
+On LongMemEval-S (session-id ground truth, 50 items, first run):
+98% Recall@15 with 97.7% context reduction at 135 ms p50 - fully local,
+no reranker, no LLM in the retrieval path. Full-dataset verification run
+in progress; methodology and caveats in the project ledger.
+
 Give Claude Code persistent memory:
 
     cargo build --release
