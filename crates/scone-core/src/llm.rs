@@ -173,6 +173,7 @@ pub struct OpenAiCompatible {
     model: String,
     api_key: Option<String>,
     timeout: std::time::Duration,
+    think: Option<bool>,
 }
 
 impl OpenAiCompatible {
@@ -182,6 +183,7 @@ impl OpenAiCompatible {
             model: model.to_owned(),
             api_key,
             timeout: DEFAULT_LLM_TIMEOUT,
+            think: None,
         }
     }
 
@@ -190,18 +192,29 @@ impl OpenAiCompatible {
         self
     }
 
+    /// Control thinking on reasoning models (Ollama passes `think`
+    /// through; real OpenAI endpoints reject unknown fields, so the
+    /// field is only serialized when explicitly set).
+    pub fn with_think(mut self, think: bool) -> Self {
+        self.think = Some(think);
+        self
+    }
+
     fn chat(&self, system: &str, user: &str) -> Result<String> {
         let mut req = ureq::post(format!("{}/chat/completions", self.base_url));
         if let Some(key) = &self.api_key {
             req = req.header("authorization", format!("Bearer {key}"));
         }
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         });
+        if let Some(think) = self.think {
+            body["think"] = serde_json::Value::Bool(think);
+        }
         let value = http_json(req, self.timeout, body)?;
         value["choices"][0]["message"]["content"]
             .as_str()

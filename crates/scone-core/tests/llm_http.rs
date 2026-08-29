@@ -97,3 +97,23 @@ fn a_dead_server_times_out_instead_of_hanging_forever() {
     );
     assert!(err.to_string().contains("http"), "{err}");
 }
+
+#[test]
+fn openai_compatible_sends_think_only_when_set() {
+    let body = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+    let (url, handle) = stub_once(body);
+    let p = OpenAiCompatible::new(&url, "m", None).with_think(false);
+    p.answer_with_system("s", "q", "c").unwrap();
+    let req = handle.join().unwrap();
+    let compact: String = req.split_whitespace().collect();
+    assert!(compact.contains("\"think\":false"), "{req}");
+
+    let (url2, handle2) = stub_once(body);
+    let p2 = OpenAiCompatible::new(&url2, "m", None);
+    p2.answer_with_system("s", "q", "c").unwrap();
+    let req2 = handle2.join().unwrap();
+    assert!(
+        !req2.contains("think"),
+        "unset think must not travel: {req2}"
+    );
+}

@@ -79,6 +79,11 @@ enum Cmd {
         /// Judge model override; pins the judge across reader experiments
         #[arg(long)]
         judge_model: Option<String>,
+        /// Send think:false to the reader (Ollama reasoning models
+        /// otherwise burn the budget on reasoning tokens); judge
+        /// unaffected
+        #[arg(long)]
+        no_think: bool,
         /// Skip fact distillation: answer from raw episodic recall only
         #[arg(long)]
         no_distill: bool,
@@ -159,6 +164,7 @@ fn run() -> Result<(), String> {
             llm_model,
             judge,
             judge_model,
+            no_think,
             no_distill,
             chunk_bytes,
             granularity,
@@ -229,10 +235,14 @@ fn run() -> Result<(), String> {
             };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
-                    engine.set_llm(Some(Box::new(scone_core::llm::OpenAiCompatible::new(
-                        url, model, None,
-                    ))));
-                    eprintln!("llm: {model} at {url}");
+                    let mut llm = scone_core::llm::OpenAiCompatible::new(url, model, None);
+                    if no_think {
+                        llm = llm.with_think(false);
+                        eprintln!("llm: {model} at {url} (think off)");
+                    } else {
+                        eprintln!("llm: {model} at {url}");
+                    }
+                    engine.set_llm(Some(Box::new(llm)));
                 }
                 (None, None) => eprintln!("no LLM configured: episodic-only run"),
                 _ => return Err("--llm-url and --llm-model go together".into()),
