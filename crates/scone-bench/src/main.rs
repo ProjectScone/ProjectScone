@@ -72,9 +72,13 @@ enum Cmd {
         /// Model name at the endpoint (required with --llm-url)
         #[arg(long)]
         llm_model: Option<String>,
-        /// Also score with an LLM judge (uses the same endpoint/model)
+        /// Also score with an LLM judge (same endpoint/model unless
+        /// --judge-model overrides)
         #[arg(long)]
         judge: bool,
+        /// Judge model override; pins the judge across reader experiments
+        #[arg(long)]
+        judge_model: Option<String>,
         /// Skip fact distillation: answer from raw episodic recall only
         #[arg(long)]
         no_distill: bool,
@@ -154,6 +158,7 @@ fn run() -> Result<(), String> {
             llm_url,
             llm_model,
             judge,
+            judge_model,
             no_distill,
             chunk_bytes,
             granularity,
@@ -233,8 +238,9 @@ fn run() -> Result<(), String> {
                 _ => return Err("--llm-url and --llm-model go together".into()),
             }
             let judge_llm = if judge {
-                match (&llm_url, &llm_model) {
+                match (&llm_url, judge_model.as_ref().or(llm_model.as_ref())) {
                     (Some(url), Some(model)) => {
+                        eprintln!("judge: {model}");
                         Some(scone_core::llm::OpenAiCompatible::new(url, model, None))
                     }
                     _ => return Err("--judge needs --llm-url and --llm-model".into()),
