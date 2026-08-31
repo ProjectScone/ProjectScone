@@ -222,6 +222,8 @@ pub struct RunOpts {
     pub granularity: Granularity,
     /// System prompt for the answer call; None = provider default (v1).
     pub answer_system: Option<String>,
+    /// Two-pass reading: extract evidence first, answer from only that.
+    pub two_pass: bool,
 }
 
 impl Default for RunOpts {
@@ -230,6 +232,7 @@ impl Default for RunOpts {
             distill: true,
             granularity: Granularity::Session,
             answer_system: None,
+            two_pass: false,
         }
     }
 }
@@ -328,9 +331,25 @@ pub fn run_item_with(
                 item.question_date, item.question
             )
         };
-        let result = match &opts.answer_system {
-            Some(system) => engine.llm_answer_with_system(system, &dated_question, &retrieved),
-            None => engine.llm_answer(&dated_question, &retrieved),
+        let result = if opts.two_pass {
+            let system = opts
+                .answer_system
+                .as_deref()
+                .unwrap_or(scone_core::llm::ANSWER_SYSTEM_V1);
+            engine
+                .llm_answer_with_system(
+                    scone_core::llm::TWO_PASS_EXTRACT_SYSTEM,
+                    &dated_question,
+                    &retrieved,
+                )
+                .and_then(|evidence| {
+                    engine.llm_answer_with_system(system, &dated_question, &evidence)
+                })
+        } else {
+            match &opts.answer_system {
+                Some(system) => engine.llm_answer_with_system(system, &dated_question, &retrieved),
+                None => engine.llm_answer(&dated_question, &retrieved),
+            }
         };
         result.unwrap_or_else(|e| format!("<llm error: {e}>"))
     } else {

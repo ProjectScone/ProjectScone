@@ -27,6 +27,27 @@ the context. If the question refers to time ('first', 'last', 'in May'), use \
 the timestamps and ordering in the context to pick the right instance. If the \
 context does not contain the answer, reply exactly: unknown";
 
+/// Evidence-chaining answering (v3): the reader lists the dated context
+/// lines it relies on before committing to a final ANSWER: line. Aims at
+/// multi-session and temporal synthesis, where small readers lose the
+/// thread (E15/E16). Benchmarked as E19.
+pub const ANSWER_SYSTEM_V3: &str = "You answer questions from retrieved \
+personal memory. Work in two steps, in one reply. Step 1: copy the 2 to 4 \
+context lines that bear on the question, each on its own line starting \
+EVIDENCE:, keeping their [timestamps]. Step 2: end with one line starting \
+ANSWER: followed by the specific fact or detail asked for, short, in the \
+context's own wording. When the question involves time ('first', 'last', \
+'before', 'in May'), order the evidence timestamps and pick accordingly; \
+when facts conflict, the latest timestamp wins. If the evidence does not \
+contain the answer, end with exactly: ANSWER: unknown";
+
+/// Pass-1 prompt for the two-pass reader (E20): pull the relevant
+/// evidence out of the noisy pack; pass 2 answers from only that.
+pub const TWO_PASS_EXTRACT_SYSTEM: &str = "From the retrieved memory \
+context, copy every line that could bear on the question, verbatim with \
+its [timestamp], one per line. No commentary, no answer. If nothing \
+bears on it, reply exactly: NO EVIDENCE";
+
 pub trait LlmProvider: Send {
     fn id(&self) -> &str;
     fn extract_facts(&self, text: &str) -> Result<Vec<ExtractedFact>>;

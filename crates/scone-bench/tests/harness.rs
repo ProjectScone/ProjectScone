@@ -220,3 +220,48 @@ The Deep Space Network tracks the probes. Titan required a trajectory choice.";
         "multiple question types generated: {types:?}"
     );
 }
+
+#[test]
+fn two_pass_answers_from_extracted_evidence_not_the_raw_pack() {
+    use scone_core::embed::HashEmbedder;
+    use scone_core::llm::FakeLlm;
+    let raw = r#"[{"question_id":"tp1","question_type":"single-session-user",
+        "question":"what did the user adopt?","answer":"a puppy",
+        "haystack_sessions":[[{"role":"user","content":"I adopted a puppy last weekend and named him Biscuit."}]],
+        "haystack_dates":["2023/05/01 (Mon) 10:00"],
+        "haystack_session_ids":["s1"],"answer_session_ids":["s1"]}]"#;
+    let items = scone_bench::parse_dataset(raw).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    engine.set_llm(Some(Box::new(FakeLlm::new(vec![]))));
+    let single = scone_bench::run_item(&mut engine, &items[0], 0).unwrap();
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut engine2 = Engine::open(dir2.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    engine2.set_llm(Some(Box::new(FakeLlm::new(vec![]))));
+    let opts = scone_bench::RunOpts {
+        two_pass: true,
+        ..Default::default()
+    };
+    let two = scone_bench::run_item_with(&mut engine2, &items[0], 0, &opts).unwrap();
+
+    // FakeLlm echoes the byte count of the context it was given. The
+    // two-pass second call must see pass-1 output (tens of bytes), not
+    // the raw retrieved pack (hundreds).
+    let bytes = |s: &str| -> usize {
+        s.rsplit("given ")
+            .next()
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert!(
+        bytes(&two.model_answer) < bytes(&single.model_answer),
+        "two-pass answer context should be the extracted evidence: single={} two={}",
+        single.model_answer,
+        two.model_answer
+    );
+}

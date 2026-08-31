@@ -96,9 +96,14 @@ enum Cmd {
         /// Attach the local cross-encoder reranker (bge-reranker-base)
         #[arg(long)]
         reranker: bool,
-        /// Answer system prompt: v1 (default) or v2 (extraction-style)
+        /// Answer system prompt: v1 (default), v2 (extraction-style),
+        /// or v3 (evidence-chaining)
         #[arg(long, default_value = "v1")]
         prompt: String,
+        /// Two-pass reader: pass 1 extracts evidence, pass 2 answers
+        /// from only that evidence
+        #[arg(long)]
+        two_pass: bool,
     },
 }
 
@@ -170,6 +175,7 @@ fn run() -> Result<(), String> {
             granularity,
             reranker,
             prompt,
+            two_pass,
         } => {
             let raw = std::fs::read_to_string(&dataset)
                 .map_err(|e| format!("{dataset}: {e} (run `scone-bench fetch` first)"))?;
@@ -226,12 +232,14 @@ fn run() -> Result<(), String> {
             let answer_system = match prompt.as_str() {
                 "v1" => None,
                 "v2" => Some(scone_core::llm::ANSWER_SYSTEM_V2.to_owned()),
+                "v3" => Some(scone_core::llm::ANSWER_SYSTEM_V3.to_owned()),
                 other => return Err(format!("unknown prompt {other:?}")),
             };
             let run_opts = scone_bench::RunOpts {
                 distill: !no_distill,
                 granularity,
                 answer_system,
+                two_pass,
             };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
