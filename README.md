@@ -91,6 +91,15 @@ needs one. `~/.scone/config.toml`:
     provider = "ollama"
     model = "llama3.1:8b"
 
+Running local models on a laptop, two lessons from our own benchmarks:
+derive a bounded-context variant (`ollama create llama3.1-ctx8k` from a
+Modelfile with `PARAMETER num_ctx 8192`) so an 8B reserves ~6GB instead
+of 22GB and stops tripping macOS memory kills, and wrap anything
+long-running in `caffeinate -i` so idle sleep cannot end a job hours in.
+Reasoning models (Gemma 4 and kin) need thinking disabled for short
+extraction calls or they return empty answers under token caps; scone
+sends Ollama's `think: false` when configured to.
+
 ## Give your AI memory
 
     claude mcp add scone -- scone --space myproject mcp
