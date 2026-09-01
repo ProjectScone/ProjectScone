@@ -97,11 +97,13 @@ enum Cmd {
         #[arg(long)]
         reranker: bool,
         /// Answer system prompt: v1 (default), v2 (extraction-style),
-        /// or v3 (evidence-chaining)
+        /// or v3 (evidence-chaining; benchmarked 10 points WORSE than v2
+        /// on an 8B reader)
         #[arg(long, default_value = "v1")]
         prompt: String,
         /// Two-pass reader: pass 1 extracts evidence, pass 2 answers
-        /// from only that evidence
+        /// from only that evidence (benchmarked 13 points WORSE than
+        /// single-pass on an 8B reader; temporal questions collapse)
         #[arg(long)]
         two_pass: bool,
     },

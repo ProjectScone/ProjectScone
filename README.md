@@ -100,6 +100,17 @@ Reasoning models (Gemma 4 and kin) need thinking disabled for short
 extraction calls or they return empty answers under token caps; scone
 sends Ollama's `think: false` when configured to.
 
+Expect a local model to retrieve well and answer imperfectly. Retrieval
+lands the right session for 90 to 100% of questions in our benchmarks
+while an 8B reader converts under half of them into a correct answer, and
+the gap is entirely reasoning over evidence, not finding it. Attempts to
+close it by asking more of the model backfired: an evidence-chaining
+prompt cost 10 points, and splitting the work into extract-then-answer
+passes cost 13 and zeroed out temporal questions. Small readers improve
+when you shrink their job, not when you add structure to it. For answer
+quality beyond that ceiling, point the answer step at a larger model, or
+let your coding agent do the reading through the MCP server.
+
 ## Give your AI memory
 
     claude mcp add scone -- scone --space myproject mcp

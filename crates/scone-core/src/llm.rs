@@ -28,9 +28,13 @@ the timestamps and ordering in the context to pick the right instance. If the \
 context does not contain the answer, reply exactly: unknown";
 
 /// Evidence-chaining answering (v3): the reader lists the dated context
-/// lines it relies on before committing to a final ANSWER: line. Aims at
-/// multi-session and temporal synthesis, where small readers lose the
-/// thread (E15/E16). Benchmarked as E19.
+/// lines it relies on before committing to a final ANSWER: line.
+///
+/// Measured worse than [`ANSWER_SYSTEM_V2`] on an 8B reader: 36.7% vs
+/// 46.7% judged accuracy over a stratified LongMemEval-S sample, and the
+/// multi-session and temporal classes it targeted did not improve. Kept
+/// for larger readers and for reproducing the result; do not reach for it
+/// with a small local model.
 pub const ANSWER_SYSTEM_V3: &str = "You answer questions from retrieved \
 personal memory. Work in two steps, in one reply. Step 1: copy the 2 to 4 \
 context lines that bear on the question, each on its own line starting \
@@ -41,8 +45,13 @@ context's own wording. When the question involves time ('first', 'last', \
 when facts conflict, the latest timestamp wins. If the evidence does not \
 contain the answer, end with exactly: ANSWER: unknown";
 
-/// Pass-1 prompt for the two-pass reader (E20): pull the relevant
-/// evidence out of the noisy pack; pass 2 answers from only that.
+/// Pass-1 prompt for the two-pass reader: pull the relevant evidence out
+/// of the noisy pack; pass 2 answers from only that.
+///
+/// Measured worse than single-pass v2 on an 8B reader: 33.3% vs 46.7%,
+/// with temporal-reasoning falling to zero because the extraction pass
+/// drops the timestamps the answer needs. Two passes compound one small
+/// model's errors instead of cancelling them.
 pub const TWO_PASS_EXTRACT_SYSTEM: &str = "From the retrieved memory \
 context, copy every line that could bear on the question, verbatim with \
 its [timestamp], one per line. No commentary, no answer. If nothing \
