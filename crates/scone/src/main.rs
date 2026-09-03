@@ -123,6 +123,23 @@ enum Cmd {
     },
     /// List spaces with their episode counts
     Spaces,
+    /// Store a connector credential (notion). Token from --token or the
+    /// SCONE_<PROVIDER>_TOKEN environment variable.
+    Connect {
+        /// Connector name, e.g. notion
+        provider: String,
+        /// Access token; omit to use the environment variable
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Pull new documents from connected services into memory
+    Sync {
+        /// Connector to sync; omit to sync everything connected
+        provider: Option<String>,
+        /// Re-read everything, ignoring the last sync cursor
+        #[arg(long)]
+        full: bool,
+    },
     /// Serve persistent agent memory over MCP (stdio)
     Mcp,
     /// Serve the multi-user HTTP API (keys from config.toml [[server.keys]])
@@ -704,6 +721,104 @@ fn run() -> Result<(), String> {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let jsonl = engine.export_jsonl(&space).map_err(|e| e.to_string())?;
             print!("{jsonl}");
+        }
+        Cmd::Connect { provider, token } => {
+            if !scone::connectors::KNOWN.contains(&provider.as_str()) {
+                return Err(format!(
+                    "unknown connector {provider:?}: known connectors are {}",
+                    scone::connectors::KNOWN.join(", ")
+                ));
+            }
+            let mut creds = scone::connectors::load_credentials(&dir)?;
+            let token = match token {
+                Some(t) => t.clone(),
+                None => scone::connectors::token_for(provider, &creds).ok_or_else(|| {
+                    format!(
+                        "no token: pass --token or set SCONE_{}_TOKEN",
+                        provider.to_uppercase()
+                    )
+                })?,
+            };
+            let entry = creds.providers.entry(provider.clone()).or_default();
+            entry.token = token;
+            scone::connectors::save_credentials(&dir, &creds)?;
+            println!(
+                "connected {provider}; credential stored in {} (0600)",
+                scone::connectors::credentials_path(&dir).display()
+            );
+            println!("run `scone sync {provider}` to pull documents into memory");
+        }
+        Cmd::Sync { provider, full } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            let mut creds = scone::connectors::load_credentials(&dir)?;
+            let wanted: Vec<String> = match provider {
+                Some(p) => vec![p.clone()],
+                None => scone::connectors::KNOWN
+                    .iter()
+                    .map(|p| (*p).to_owned())
+                    .filter(|p| scone::connectors::token_for(p, &creds).is_some())
+                    .collect(),
+            };
+            if wanted.is_empty() {
+                println!("nothing connected: run `scone connect <provider>` first");
+                return Ok(());
+            }
+            for name in &wanted {
+                let Some(token) = scone::connectors::token_for(name, &creds) else {
+                    println!("{name}: not connected, skipping");
+                    continue;
+                };
+                let connector = scone::connectors::connector_for(name, token)?;
+                let since = if *full {
+                    None
+                } else {
+                    creds.providers.get(name).and_then(|p| p.last_sync.clone())
+                };
+                let docs = connector.fetch(since.as_deref())?;
+                let (mut added, mut seen) = (0usize, 0usize);
+                let mut newest = since.clone();
+                for doc in &docs {
+                    let content = if doc.title.is_empty() {
+                        doc.body.clone()
+                    } else {
+                        format!("{}\n\n{}", doc.title, doc.body)
+                    };
+                    let source = if doc.url.is_empty() {
+                        format!("{name}:{}", doc.id)
+                    } else {
+                        doc.url.clone()
+                    };
+                    let (episode_id, fresh) = engine
+                        .import_episode(
+                            &space,
+                            name,
+                            &content,
+                            Some(&source),
+                            doc.updated_at.as_deref(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    engine
+                        .tag_episode(&space, episode_id, &[name.as_str()])
+                        .map_err(|e| e.to_string())?;
+                    if fresh {
+                        added += 1;
+                    } else {
+                        seen += 1;
+                    }
+                    if let Some(edited) = &doc.updated_at {
+                        if newest.as_deref().is_none_or(|n| edited.as_str() > n) {
+                            newest = Some(edited.clone());
+                        }
+                    }
+                }
+                // Only advance the cursor on success, so an interrupted
+                // sync re-reads rather than silently skipping documents.
+                if let Some(newest) = newest {
+                    creds.providers.entry(name.clone()).or_default().last_sync = Some(newest);
+                }
+                println!("{name}: {added} new, {seen} already known");
+            }
+            scone::connectors::save_credentials(&dir, &creds)?;
         }
         Cmd::Import { path } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
