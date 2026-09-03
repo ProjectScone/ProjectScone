@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::Engine;
 use crate::auth::ScopedSpace;
-use crate::chunker::chunk_text;
+use crate::chunker::{self, chunk_syntax};
 use crate::error::{Result, SconeError};
 
 /// Default target chunk size in bytes (~250 tokens).
@@ -108,7 +108,7 @@ impl Engine {
         self.require_writable()?;
 
         let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        let spans = chunk_text(content, self.chunk_target);
+        let spans = chunk_syntax(content, self.chunk_target, chunker::syntax_for(source));
         let texts: Vec<&str> = spans.iter().map(|s| &content[s.start..s.end]).collect();
         let embeddings = self.embedder.embed(&texts)?;
 
