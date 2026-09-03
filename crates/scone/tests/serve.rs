@@ -260,3 +260,76 @@ async fn console_page_carries_its_key_and_the_api_still_refuses_others() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A caller's mistake must not read as a server failure. Reporting
+/// these as 500 tells every client to retry what can never succeed.
+#[tokio::test]
+async fn client_mistakes_get_client_status_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/close",
+        Some("sk-alice"),
+        Some(serde_json::json!({"reason": "gone"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // Whitespace passes an is_empty check but not the engine's.
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/v1/recall?q=%20%20%20",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+/// Provenance and event time have to survive the API, or anything
+/// ingested over HTTP is undated and unattributed, and the facts
+/// distilled from it inherit the wrong day.
+#[tokio::test]
+async fn episodes_keep_their_source_and_date_over_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({
+            "content": "an old decision",
+            "source": "https://example.com/x",
+            "created_at": "2023-03-01T09:00:00.000Z"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (_, recalled) = call(&app, "GET", "/v1/recall?q=decision", Some("sk-alice"), None).await;
+    let item = &recalled["items"][0];
+    assert_eq!(item["source"], "https://example.com/x");
+    assert!(
+        item["created_at"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("2023-03-01"),
+        "the caller's date must survive: {item}"
+    );
+
+    // A field we would otherwise silently drop is refused instead.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({"content": "x", "nonsense": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}

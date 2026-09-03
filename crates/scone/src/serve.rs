@@ -14,7 +14,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use scone_core::{Engine, IngestInput, IngestOutcome, RecallOpts, auth};
+use scone_core::{Engine, IngestOutcome, RecallOpts, auth};
 
 const MAX_CONTENT: usize = 100_000;
 const MAX_QUERY: usize = 1_000;
@@ -102,21 +102,51 @@ fn with_engine<T>(
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "engine lock poisoned"))?;
     let space = auth::resolve(&mut engine, &space_name, true)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    f(&mut engine, &space).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    f(&mut engine, &space).map_err(|e| err(status_for(&e), e.to_string()))
 }
 
+/// A caller's mistake is not a server failure. Reporting a missing
+/// fact or an empty query as 500 tells every client to retry
+/// something that will never succeed.
+fn status_for(e: &scone_core::SconeError) -> StatusCode {
+    use scone_core::SconeError::*;
+    match e {
+        NotFound(_) => StatusCode::NOT_FOUND,
+        InvalidInput(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Unknown fields are refused rather than ignored: a client that sends
+/// a field we silently drop believes it stored something it did not.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EpisodeBody {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
+    /// Where this came from, kept as provenance.
+    #[serde(default)]
+    source: Option<String>,
+    /// When it happened. Facts distilled from it inherit this, so
+    /// backfilling history over the API dates correctly.
+    #[serde(default)]
+    created_at: Option<String>,
 }
 
 async fn post_episode(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(body): Json<EpisodeBody>,
+    // Taken as a Result so a malformed body still answers in the JSON
+    // error shape every other failure uses, instead of plain text.
+    body: Result<Json<EpisodeBody>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection) => {
+            return err(StatusCode::UNPROCESSABLE_ENTITY, rejection.body_text());
+        }
+    };
     if body.content.is_empty() || body.content.len() > MAX_CONTENT {
         return err(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -127,15 +157,20 @@ async fn post_episode(
         return err(StatusCode::UNPROCESSABLE_ENTITY, "at most 10 tags");
     }
     match with_engine(&state, &headers, |engine, space| {
-        let outcome = engine.ingest(
+        let (episode_id, fresh) = engine.import_episode(
             space,
-            IngestInput::Note {
-                text: body.content.clone(),
-            },
+            "note",
+            &body.content,
+            body.source.as_deref(),
+            body.created_at.as_deref(),
         )?;
-        let episode_id = match &outcome {
-            IngestOutcome::Ingested { episode_id, .. }
-            | IngestOutcome::Deduplicated { episode_id } => *episode_id,
+        let outcome = if fresh {
+            IngestOutcome::Ingested {
+                episode_id,
+                chunks: 0,
+            }
+        } else {
+            IngestOutcome::Deduplicated { episode_id }
         };
         if !body.tags.is_empty() {
             let refs: Vec<&str> = body.tags.iter().map(String::as_str).collect();
@@ -175,7 +210,7 @@ async fn get_recall(
     headers: axum::http::HeaderMap,
     Query(query): Query<RecallQuery>,
 ) -> Response {
-    if query.q.is_empty() || query.q.len() > MAX_QUERY {
+    if query.q.trim().is_empty() || query.q.len() > MAX_QUERY {
         return err(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("q must be 1..={MAX_QUERY} chars"),
@@ -295,10 +330,6 @@ async fn get_tags(State(state): State<AppState>, headers: axum::http::HeaderMap)
 }
 
 async fn get_status(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let space_name = match space_for(&headers, &state.config) {
-        Ok(name) => name,
-        Err(response) => return response,
-    };
     match with_engine(&state, &headers, |engine, space| {
         let report = engine.status()?;
         let mine = report.spaces.iter().find(|s| s.name == space.name());
@@ -311,10 +342,7 @@ async fn get_status(State(state): State<AppState>, headers: axum::http::HeaderMa
             "pending_distill": report.pending_distill,
         }))
     }) {
-        Ok(value) => {
-            let _ = space_name;
-            Json(value).into_response()
-        }
+        Ok(value) => Json(value).into_response(),
         Err(response) => response,
     }
 }
