@@ -534,10 +534,10 @@ pub fn parse_search(value: &serde_json::Value, since: Option<&str>) -> Vec<Docum
         };
         let edited = page["last_edited_time"].as_str().map(str::to_owned);
         // Incremental: the source's own clock decides, not ours.
-        if let (Some(since), Some(edited)) = (since, edited.as_deref()) {
-            if edited <= since {
-                continue;
-            }
+        let already_seen =
+            matches!((since, edited.as_deref()), (Some(cursor), Some(at)) if at <= cursor);
+        if already_seen {
+            continue;
         }
         out.push(Document {
             id: id.to_owned(),

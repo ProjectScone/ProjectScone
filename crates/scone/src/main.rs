@@ -805,10 +805,12 @@ fn run() -> Result<(), String> {
                     } else {
                         seen += 1;
                     }
-                    if let Some(edited) = &doc.updated_at {
-                        if newest.as_deref().is_none_or(|n| edited.as_str() > n) {
-                            newest = Some(edited.clone());
-                        }
+                    let advances = matches!(
+                        &doc.updated_at,
+                        Some(edited) if newest.as_deref().is_none_or(|n| edited.as_str() > n)
+                    );
+                    if advances {
+                        newest.clone_from(&doc.updated_at);
                     }
                 }
                 // Only advance the cursor on success, so an interrupted
