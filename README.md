@@ -122,6 +122,18 @@ when you shrink their job, not when you add structure to it. For answer
 quality beyond that ceiling, point the answer step at a larger model, or
 let your coding agent do the reading through the MCP server.
 
+## See what it remembers
+
+    scone ui        # opens a console at http://127.0.0.1:7438
+
+Search your memory, read the facts distilled from it, and close one
+that is wrong with a reason attached. Nothing is deleted; a closed fact
+keeps its history and stops being returned. The console binds to
+loopback only and mints a key that lives as long as the process, so it
+authenticates like every other client rather than opening a private
+door into the store. It is one file with no build step and no network
+calls, so it works on a plane like everything else here.
+
 ## Connect what you already write in
 
     scone connect notion --token secret_abc     # or: github, slack, google-drive

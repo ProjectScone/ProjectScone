@@ -142,6 +142,15 @@ enum Cmd {
     },
     /// Serve persistent agent memory over MCP (stdio)
     Mcp,
+    /// Open a local console in your browser to read and correct memory
+    Ui {
+        /// Port on loopback (default 7438)
+        #[arg(long, default_value_t = 7438)]
+        port: u16,
+        /// Print the URL instead of opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Serve the multi-user HTTP API (keys from config.toml [[server.keys]])
     Serve {
         /// Listen address (overrides config [server].listen)
@@ -304,6 +313,20 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Enough entropy for a per-run console key without pulling in a
+/// random-number crate: the clock and this process's own address space.
+fn session_key_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = u64::from(std::process::id());
+    let stack = &nanos as *const u64 as u64;
+    nanos.rotate_left(17).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ pid.wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        ^ stack.rotate_left(31)
 }
 
 fn data_dir(cli: &Cli) -> Result<PathBuf, String> {
@@ -874,6 +897,48 @@ fn run() -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 running.waiting().await.map_err(|e| e.to_string())?;
                 Ok::<(), String>(())
+            })?;
+            return Ok(());
+        }
+        Cmd::Ui { port, no_open } => {
+            // A fresh key per run, never written down. The console is
+            // loopback-only, so the only way to reach it is to already
+            // be on this machine, but the auth chokepoint stays intact
+            // rather than growing an unauthenticated path.
+            let key = format!("ui-{:016x}", session_key_seed());
+            let space = cli.space.clone();
+            let addr = format!("127.0.0.1:{port}");
+            let app = scone::serve::console_router(
+                engine,
+                scone::serve::ServeConfig {
+                    keys: vec![scone::serve::SpaceKey {
+                        key: key.clone(),
+                        space: space.clone(),
+                    }],
+                },
+                &key,
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(&addr)
+                    .await
+                    .map_err(|e| format!("bind {addr}: {e}"))?;
+                let url = format!("http://{addr}/");
+                println!("scone console for space {space:?} at {url}");
+                println!("stop it with ctrl-c; the key dies with this process");
+                if !*no_open {
+                    // Best effort: a failed opener must not stop the server.
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    };
+                    let _ = std::process::Command::new(opener).arg(&url).status();
+                }
+                axum::serve(listener, app).await.map_err(|e| e.to_string())
             })?;
             return Ok(());
         }

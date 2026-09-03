@@ -36,6 +36,23 @@ struct AppState {
     config: Arc<ServeConfig>,
 }
 
+/// The console page, with a placeholder where the session key goes.
+const CONSOLE_HTML: &str = include_str!("console.html");
+
+/// Serve the console at `/` on top of the same API the CLI and agents
+/// use. The key is baked into the page rather than the URL so it stays
+/// out of browser history and out of anything the user might paste.
+pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router {
+    let page = CONSOLE_HTML.replace("__SCONE_TOKEN__", key);
+    router(engine, config).route(
+        "/",
+        get(move || {
+            let page = page.clone();
+            async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+        }),
+    )
+}
+
 pub fn router(engine: Engine, config: ServeConfig) -> Router {
     let state = AppState {
         engine: Arc::new(Mutex::new(engine)),

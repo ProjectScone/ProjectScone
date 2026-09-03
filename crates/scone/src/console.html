@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scone</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #1c1a17; --muted: #6b655c;
+    --line: #e6e1d8; --accent: #8a5a2b; --accent-soft: #f3ece2;
+    --warn: #8a2b2b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --panel: #1f1e1b; --ink: #ece8e1; --muted: #9a938a;
+      --line: #33302b; --accent: #d9a066; --accent-soft: #2a251e;
+      --warn: #e08585;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button {
+    font: inherit; background: none; border: 1px solid transparent;
+    color: var(--muted); padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button[aria-current="true"] {
+    background: var(--accent-soft); color: var(--accent); border-color: var(--line);
+  }
+  main { padding: 22px 24px 60px; max-width: 900px; }
+  .row { display: flex; gap: 8px; margin-bottom: 18px; }
+  input[type=search], input[type=text] {
+    font: inherit; flex: 1; padding: 9px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button.go {
+    font: inherit; padding: 9px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--accent); color: #fff;
+  }
+  button.go:hover { filter: brightness(1.08); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 15px; margin-bottom: 10px;
+  }
+  .meta {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    color: var(--muted); font-size: 12.5px; margin-bottom: 6px;
+  }
+  .tag {
+    background: var(--accent-soft); color: var(--accent); border-radius: 5px;
+    padding: 1px 7px; font-size: 11.5px;
+  }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .stat { display: flex; justify-content: space-between; padding: 7px 0;
+          border-bottom: 1px solid var(--line); }
+  .stat:last-child { border-bottom: 0; }
+  .forget {
+    font: inherit; font-size: 12.5px; background: none; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px;
+    color: var(--warn); margin-left: auto;
+  }
+  .empty { color: var(--muted); padding: 26px 0; }
+  .err { color: var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥐 Scone <span id="space"></span></h1>
+  <nav>
+    <button data-view="search" aria-current="true">Memory</button>
+    <button data-view="facts">Facts</button>
+    <button data-view="tags">Tags</button>
+    <button data-view="profile">Profile</button>
+    <button data-view="status">Status</button>
+  </nav>
+</header>
+<main>
+  <div class="row" id="controls">
+    <input type="search" id="q" placeholder="Search your memory" autocomplete="off">
+    <button class="go" id="run">Search</button>
+  </div>
+  <div id="out"><p class="empty">Search, or press Enter to see what is here.</p></div>
+</main>
+<script>
+const TOKEN = document.currentScript.dataset.token || "__SCONE_TOKEN__";
+const out = document.getElementById("out");
+const q = document.getElementById("q");
+const controls = document.getElementById("controls");
+let view = "search";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { authorization: "Bearer " + TOKEN, "content-type": "application/json",
+               ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+}
+
+function show(html) { out.innerHTML = html; }
+function fail(e) { show('<p class="err">' + esc(e.message) + "</p>"); }
+function none(what) { return '<p class="empty">No ' + what + " yet.</p>"; }
+
+async function search() {
+  const term = q.value.trim();
+  try {
+    const r = await api("/v1/recall?limit=25&q=" + encodeURIComponent(term || "*"));
+    const items = r.items || [];
+    if (!items.length) return show(none("matching memory"));
+    const saved = r.context_reduction != null
+      ? '<p class="muted">' + Math.round(r.context_reduction * 100) +
+        "% of your stored bytes left behind.</p>" : "";
+    show(saved + items.map((i) => `
+      <div class="card">
+        <div class="meta">
+          <span>${esc((i.created_at || "").slice(0, 10))}</span>
+          <span>episode ${esc(i.episode_id)}</span>
+          ${i.source ? `<a href="${esc(i.source)}" target="_blank" rel="noreferrer">source</a>` : ""}
+        </div>
+        <div class="body">${esc(i.text)}</div>
+      </div>`).join(""));
+  } catch (e) { fail(e); }
+}
+
+async function facts() {
+  try {
+    const r = await api("/v1/facts?limit=100");
+    const list = r.facts || [];
+    if (!list.length) return show(none("facts distilled"));
+    show(list.map((f) => `
+      <div class="card">
+        <div class="meta">
+          <span class="tag">${esc(f.status)}</span>
+          <span>since ${esc((f.valid_from || "").slice(0, 10))}</span>
+          <button class="forget" data-id="${esc(f.fact_id)}">Forget</button>
+        </div>
+        <div class="body"><strong>${esc(f.subject)}</strong> ${esc(f.predicate)} ${esc(f.object)}</div>
+      </div>`).join(""));
+  } catch (e) { fail(e); }
+}
+
+async function tags() {
+  try {
+    const r = await api("/v1/tags");
+    const list = r.tags || [];
+    if (!list.length) return show(none("tags"));
+    show(list.map((t) => `
+      <div class="card">
+        <div class="body"><span class="tag">${esc(t.name)}</span>
+        <span class="muted">${esc(t.count)} episodes</span></div>
+      </div>`).join(""));
+  } catch (e) { fail(e); }
+}
+
+async function profile() {
+  try {
+    const r = await api("/v1/profile");
+    const stat = r.static_facts || [], dyn = r.dynamic || [];
+    if (!stat.length && !dyn.length) return show(none("profile"));
+    show(
+      (stat.length ? '<div class="card"><div class="meta">Identity</div>' +
+        stat.map((f) => `<div class="body">${esc(f.subject)} ${esc(f.predicate)} ${esc(f.object)}</div>`).join("") +
+        "</div>" : "") +
+      (dyn.length ? '<div class="card"><div class="meta">Recent activity</div>' +
+        dyn.map((d) => `<div class="body">${esc(d)}</div>`).join("") + "</div>" : ""));
+  } catch (e) { fail(e); }
+}
+
+async function status() {
+  try {
+    const r = await api("/v1/status");
+    const rows = [
+      ["Space", r.space],
+      ["Episodes", r.episodes],
+      ["Chunks", r.chunks],
+      ["Revision", r.revision],
+      ["Semantic lane", r.semantic_lane],
+      ["Awaiting distillation", r.pending_distill],
+    ];
+    show('<div class="card">' + rows.map(
+      ([k, v]) => `<div class="stat"><span>${esc(k)}</span><span class="muted">${esc(v)}</span></div>`
+    ).join("") + "</div>" +
+    (r.semantic_lane === "paused"
+      ? '<p class="muted">No answering model is configured, so facts are not being distilled. ' +
+        'Point scone at one in ~/.scone/config.toml, or let your agent do it over MCP.</p>'
+      : ""));
+  } catch (e) { fail(e); }
+}
+
+const views = { search, facts, tags, profile, status };
+
+document.querySelectorAll("nav button").forEach((b) => {
+  b.onclick = () => {
+    view = b.dataset.view;
+    document.querySelectorAll("nav button").forEach(
+      (o) => o.setAttribute("aria-current", String(o === b)));
+    controls.style.display = view === "search" ? "flex" : "none";
+    show('<p class="empty">Loading…</p>');
+    views[view]();
+  };
+});
+
+out.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".forget");
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    await api("/v1/facts/" + encodeURIComponent(btn.dataset.id) + "/close", {
+      method: "POST",
+      body: JSON.stringify({ reason: "closed from the console" }),
+    });
+    facts();
+  } catch (err) { btn.disabled = false; fail(err); }
+});
+
+document.getElementById("run").onclick = search;
+q.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+search();
+</script>
+</body>
+</html>

@@ -211,3 +211,52 @@ async fn http_tags_flow_from_store_to_focused_recall() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["tags"][0]["name"].as_str().unwrap() == "ops", "{body}");
 }
+
+/// The console is the only surface a non-developer touches, so the page
+/// must carry a working key and the API underneath must still refuse
+/// everyone else. A console that serves an unauthenticated path would
+/// hand the whole memory store to any process that can reach loopback.
+#[tokio::test]
+async fn console_page_carries_its_key_and_the_api_still_refuses_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let app = scone::serve::console_router(
+        engine,
+        ServeConfig {
+            keys: vec![SpaceKey {
+                key: "ui-deadbeefdeadbeef".into(),
+                space: "default".into(),
+            }],
+        },
+        "ui-deadbeefdeadbeef",
+    );
+
+    let res = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let page = String::from_utf8_lossy(&body);
+    assert!(
+        page.contains("ui-deadbeefdeadbeef"),
+        "the key must reach the page"
+    );
+    assert!(
+        !page.contains("__SCONE_TOKEN__"),
+        "the placeholder must be replaced, or every call 401s"
+    );
+
+    // Same server, no key: the console must not have opened a back door.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/recall?q=anything")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
