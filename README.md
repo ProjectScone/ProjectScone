@@ -63,10 +63,16 @@ One binary, one config file, Bearer keys each bound to a space.
 
 ## Quickstart
 
-No Rust toolchain needed: grab a prebuilt binary from
-[Releases](https://github.com/DrDrewCain/ProjectScone/releases), then:
+Install with Homebrew:
 
-    scone setup claude-desktop      # or: scone setup claude-code
+    brew install DrDrewCain/scone/scone
+
+Or grab a prebuilt binary from
+[Releases](https://github.com/DrDrewCain/ProjectScone/releases). Either
+way, no Rust toolchain is needed:
+
+    scone setup claude-code         # also: claude-desktop, cursor, vscode,
+                                    # windsurf, zed, codex, opencode, cline
     scone add --note "hello, memory"
 
 Building from source instead:

@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "scone-bench"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "scone-core",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "scone-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -3718,7 +3718,7 @@ dependencies = [
 
 [[package]]
 name = "scone-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "criterion",
@@ -3737,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "scone-ffi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "scone-core",
  "serde_json",

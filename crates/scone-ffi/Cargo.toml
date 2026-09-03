@@ -15,7 +15,7 @@ default = ["local-embed"]
 local-embed = ["scone-core/local-embed"]
 
 [dependencies]
-scone-core = { path = "../scone-core", version = "0.2.0", default-features = false }
+scone-core = { path = "../scone-core", version = "0.2.1", default-features = false }
 serde_json = "1"
 
 [dev-dependencies]
