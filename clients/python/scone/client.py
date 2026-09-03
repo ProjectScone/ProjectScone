@@ -98,22 +98,18 @@ class Scone:
         text: str,
         tags: Optional[Iterable[str]] = None,
         source: Optional[str] = None,
+        created_at: Optional[str] = None,
     ) -> Added:
         """Store a note in the space, optionally tagged, and report the outcome.
 
         Storing the same text twice deduplicates rather than creating a second
         episode; the returned ``Added.deduplicated`` says which happened.
 
-        ``source`` is accepted only to be refused: POST /v1/episodes has no
-        source field, so a server-side source would be silently dropped.
-        Passing a non-None value raises rather than lying about it.
+        ``source`` records where it came from. ``created_at`` (RFC3339) records
+        when it happened, so backfilled history is dated by the event rather
+        than by the moment it was uploaded, and facts distilled from it inherit
+        that date.
         """
-        if source is not None:
-            raise SconeError(
-                "POST /v1/episodes accepts only content and tags; a source "
-                "would be dropped on the floor. Ingest with a source via the "
-                "CLI (`scone add <file>`) instead."
-            )
         if not text:
             raise SconeError("text must not be empty")
         encoded = len(text.encode("utf-8"))
@@ -125,6 +121,10 @@ class Scone:
         body: Json = {"content": text}
         if tag_list:
             body["tags"] = tag_list
+        if source is not None:
+            body["source"] = source
+        if created_at is not None:
+            body["created_at"] = created_at
         return Added.from_json(self._request("POST", "/v1/episodes", json=body))
 
     def recall(

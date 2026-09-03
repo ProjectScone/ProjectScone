@@ -9,3 +9,5 @@ memory/
 docs/
 bench-data/
 bench-runs/
+clients/python/**/__pycache__/
+clients/python/.pytest_cache/

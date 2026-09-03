@@ -157,20 +157,16 @@ async fn post_episode(
         return err(StatusCode::UNPROCESSABLE_ENTITY, "at most 10 tags");
     }
     match with_engine(&state, &headers, |engine, space| {
-        let (episode_id, fresh) = engine.import_episode(
+        let outcome = engine.import_episode_outcome(
             space,
             "note",
             &body.content,
             body.source.as_deref(),
             body.created_at.as_deref(),
         )?;
-        let outcome = if fresh {
-            IngestOutcome::Ingested {
-                episode_id,
-                chunks: 0,
-            }
-        } else {
-            IngestOutcome::Deduplicated { episode_id }
+        let episode_id = match &outcome {
+            IngestOutcome::Ingested { episode_id, .. }
+            | IngestOutcome::Deduplicated { episode_id } => *episode_id,
         };
         if !body.tags.is_empty() {
             let refs: Vec<&str> = body.tags.iter().map(String::as_str).collect();

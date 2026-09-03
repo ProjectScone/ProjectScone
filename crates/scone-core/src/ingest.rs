@@ -75,6 +75,19 @@ impl Engine {
     /// Returns the episode id and whether it was freshly stored. Public for
     /// importers and harnesses that must preserve original timestamps —
     /// temporal scoring is only as real as created_at.
+    /// As [`Engine::import_episode`], but returns the full outcome so
+    /// callers can report how much was actually stored.
+    pub fn import_episode_outcome(
+        &mut self,
+        space: &ScopedSpace,
+        kind: &str,
+        content: &str,
+        source: Option<&str>,
+        created_at: Option<&str>,
+    ) -> Result<IngestOutcome> {
+        self.ingest_raw(space, kind, content, source, created_at)
+    }
+
     pub fn import_episode(
         &mut self,
         space: &ScopedSpace,

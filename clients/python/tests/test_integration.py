@@ -207,21 +207,20 @@ def test_the_live_server_enforces_its_bounds(client: Scone):
 
 
 @pytest.mark.integration
-def test_closing_an_absent_fact_reports_500_not_404(client: Scone):
-    """Documents real server behavior: NotFound is mapped to 500 by serve.rs."""
+def test_closing_an_absent_fact_reports_404(client: Scone):
+    """A fact that was never there is a 404, not a server failure."""
     with pytest.raises(SconeError) as excinfo:
         client.close_fact(4242, "no such fact")
-    assert excinfo.value.status == 500, "serve.rs maps every engine error to 500"
+    assert excinfo.value.status == 404, "a missing fact is the caller's mistake, not ours"
     assert "4242" in excinfo.value.message
 
 
 @pytest.mark.integration
-def test_a_blank_query_500s_on_the_server_so_the_client_refuses_it_first(client: Scone):
-    """serve.rs checks q.is_empty(), not q.trim(); a blank q reaches the engine."""
+def test_a_blank_query_is_refused_by_client_and_server_alike(client: Scone):
+    """The server trims before its length guard, so a blank q is a 422."""
     with pytest.raises(SconeError) as excinfo:
         client._request("GET", "/v1/recall", params={"q": "   "})
-    assert excinfo.value.status == 500
-    assert "query is empty" in excinfo.value.message
+    assert excinfo.value.status == 422
 
     # The client stops it locally, before a request exists.
     with pytest.raises(SconeError) as local:
@@ -240,3 +239,19 @@ def test_axum_rejections_arrive_as_plain_text_and_still_parse(client: Scone):
         client._request("GET", "/v1/nope")
     assert unknown_route.value.status == 404
     assert unknown_route.value.message == "HTTP 404", "404 has an empty body"
+
+
+@pytest.mark.integration
+def test_source_and_event_date_survive_the_round_trip(client: Scone):
+    """Provenance and event time are the point of a memory store; if the
+    API drops them, everything ingested over HTTP is anonymous and undated."""
+    client.add(
+        "the zeppelin inspection ledger was archived in Trondheim",
+        source="https://example.com/decision",
+        created_at="2023-03-01T09:00:00.000Z",
+    )
+    hits = client.recall("zeppelin inspection ledger Trondheim").items
+    assert hits, "the note must come back"
+    stored = next(h for h in hits if "zeppelin" in h.text)
+    assert stored.source == "https://example.com/decision"
+    assert stored.created_at.startswith("2023-03-01")

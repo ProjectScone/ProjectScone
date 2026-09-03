@@ -158,12 +158,23 @@ def test_a_deduplicated_store_reports_no_chunks(stub, client):
     assert added.chunks is None
 
 
-def test_add_refuses_a_source_the_server_would_drop(stub, client):
-    with pytest.raises(SconeError) as excinfo:
-        client.add("a note", source="notebook.md")
-    assert "source" in str(excinfo.value)
-    assert stub.requests == [], "the doomed request must not be sent"
+def test_add_sends_source_and_created_at_when_given(stub, client):
+    """Provenance and event time must reach the wire, not be dropped."""
+    stub.route("POST", "/v1/episodes", 201,
+               {"episode_id": 1, "deduplicated": False, "chunks": 2})
+    client.add("a decision", source="https://example.com/x",
+               created_at="2023-03-01T09:00:00.000Z")
+    body = stub.requests[0].json
+    assert body["source"] == "https://example.com/x"
+    assert body["created_at"] == "2023-03-01T09:00:00.000Z"
 
+
+def test_add_omits_source_and_created_at_when_absent(stub, client):
+    stub.route("POST", "/v1/episodes", 201,
+               {"episode_id": 1, "deduplicated": False, "chunks": 1})
+    client.add("a plain note")
+    body = stub.requests[0].json
+    assert "source" not in body and "created_at" not in body
 
 def test_add_enforces_the_servers_bounds_locally(stub, client):
     with pytest.raises(SconeError):
