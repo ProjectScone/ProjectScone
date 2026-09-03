@@ -81,7 +81,7 @@ impl Engine {
                 "SELECT q.id, q.episode_id, e.content
                  FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
                  WHERE q.state = 'pending' AND e.space_id = ?1
-                 ORDER BY q.id LIMIT ?2",
+                 ORDER BY e.created_at, q.id LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![space.id(), limit as i64], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -168,6 +168,15 @@ impl Engine {
     ) -> Result<ApplyReport> {
         let mut report = ApplyReport::default();
         let tx = self.conn.transaction()?;
+        // A fact is true from when the thing happened, not from when we
+        // got around to reading about it. Without this, importing a
+        // 2023 note in 2026 dates its facts to 2026, which breaks
+        // as-of queries and lets stale news overwrite current truth.
+        let happened_at: String = tx.query_row(
+            "SELECT created_at FROM episodes WHERE id = ?1",
+            rusqlite::params![episode_id],
+            |r| r.get(0),
+        )?;
         for fact in facts {
             let subject = resolve_entity(&tx, &fact.subject)?;
             let predicate = fact.predicate.trim().to_lowercase();
@@ -206,9 +215,17 @@ impl Engine {
             }
 
             tx.execute(
-                "INSERT INTO facts (space_id, subject_entity, predicate, object, confidence)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![space.id(), subject, predicate, object, fact.confidence],
+                "INSERT INTO facts
+                     (space_id, subject_entity, predicate, object, confidence, valid_from)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    space.id(),
+                    subject,
+                    predicate,
+                    object,
+                    fact.confidence,
+                    happened_at
+                ],
             )?;
             let new_id = tx.last_insert_rowid();
             tx.execute(
@@ -219,15 +236,44 @@ impl Engine {
 
             // Contradiction: same subject+predicate, different object →
             // close the old interval, keep the history (I2/I3).
+            // Only a fact that is actually newer may supersede:
+            // backfilling an old document must not overwrite what we
+            // have learned since.
             let closed = tx.execute(
                 "UPDATE facts SET status = 'closed',
-                        valid_until = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                        valid_until = ?5,
                         status_reason = 'superseded by fact ' || ?1
                  WHERE space_id = ?2 AND subject_entity = ?3 AND predicate = ?4
-                   AND status = 'active' AND id != ?1",
-                rusqlite::params![new_id, space.id(), subject, predicate],
+                   AND status = 'active' AND id != ?1 AND valid_from <= ?5",
+                rusqlite::params![new_id, space.id(), subject, predicate, happened_at],
             )?;
             report.closed += closed;
+
+            // The new fact lost to something already on record: it is
+            // history the moment it lands, not the current answer.
+            let newer: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM facts
+                     WHERE space_id = ?1 AND subject_entity = ?2 AND predicate = ?3
+                       AND status = 'active' AND id != ?4 AND valid_from > ?5
+                     ORDER BY valid_from DESC LIMIT 1",
+                    rusqlite::params![space.id(), subject, predicate, new_id, happened_at],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(SconeError::Db(other)),
+                })?;
+            if let Some(winner) = newer {
+                tx.execute(
+                    "UPDATE facts SET status = 'closed',
+                            valid_until = (SELECT valid_from FROM facts WHERE id = ?2),
+                            status_reason = 'superseded by fact ' || ?2
+                     WHERE id = ?1",
+                    rusqlite::params![new_id, winner],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(report)
@@ -396,7 +442,7 @@ impl Engine {
             "SELECT e.id, substr(e.content, 1, 4000), e.created_at
              FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
              WHERE q.state = 'pending' AND e.space_id = ?1
-             ORDER BY q.id LIMIT ?2",
+             ORDER BY e.created_at, q.id LIMIT ?2",
         )?;
         let rows = stmt.query_map(
             rusqlite::params![space.id(), limit.clamp(1, 20) as i64],

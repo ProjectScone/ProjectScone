@@ -162,3 +162,119 @@ fn malformed_extracted_facts_are_skipped_not_fatal() {
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].object, "scone");
 }
+
+/// A fact is true from when the thing happened. Dating it to ingest
+/// time makes as-of queries lie about every imported or connector
+/// episode, which is most of what a memory store holds.
+#[test]
+fn facts_inherit_the_date_of_the_episode_that_taught_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = engine(dir.path());
+    let (episode, _) = e
+        .import_episode(
+            &space,
+            "note",
+            "the deploy target is heroku",
+            Some("old"),
+            Some("2023-01-15T10:00:00.000Z"),
+        )
+        .unwrap();
+    e.apply_facts(&space, episode, &[fact("deploy target", "is", "heroku")])
+        .unwrap();
+    let facts = e.facts_list(&space, true).unwrap();
+    assert_eq!(facts.len(), 1);
+    assert!(
+        facts[0].valid_from.starts_with("2023-01-15"),
+        "dated when it happened, not when we read it: {}",
+        facts[0].valid_from
+    );
+}
+
+/// Backfilling an old document must not overwrite what has been
+/// learned since. Connectors pull history in whatever order a service
+/// hands it over, so arrival order cannot decide the truth.
+#[test]
+fn an_older_fact_arriving_late_loses_to_the_newer_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = engine(dir.path());
+    let (recent, _) = e
+        .import_episode(
+            &space,
+            "note",
+            "we moved the deploy target to fly.io",
+            Some("new"),
+            Some("2024-06-01T10:00:00.000Z"),
+        )
+        .unwrap();
+    e.apply_facts(&space, recent, &[fact("deploy target", "is", "fly.io")])
+        .unwrap();
+
+    let (stale, _) = e
+        .import_episode(
+            &space,
+            "note",
+            "the deploy target is heroku",
+            Some("old"),
+            Some("2023-01-15T10:00:00.000Z"),
+        )
+        .unwrap();
+    e.apply_facts(&space, stale, &[fact("deploy target", "is", "heroku")])
+        .unwrap();
+
+    let active: Vec<_> = e.facts_list(&space, false).unwrap();
+    assert_eq!(active.len(), 1, "exactly one answer stays current");
+    assert_eq!(
+        active[0].object, "fly.io",
+        "the 2024 fact must survive a 2023 fact arriving after it"
+    );
+
+    // The loser is kept as history, not dropped.
+    let all = e.facts_list(&space, true).unwrap();
+    assert_eq!(all.len(), 2, "closing preserves the record");
+    let closed = all.iter().find(|f| f.object == "heroku").unwrap();
+    assert!(
+        closed.status.starts_with("closed"),
+        "the stale fact is closed with its reason: {}",
+        closed.status
+    );
+    assert!(
+        closed.status.contains("superseded"),
+        "and the record says why: {}",
+        closed.status
+    );
+}
+
+/// The ordinary case must keep working: a genuinely newer fact still
+/// supersedes the older one it contradicts.
+#[test]
+fn a_newer_fact_still_supersedes_the_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = engine(dir.path());
+    let (first, _) = e
+        .import_episode(
+            &space,
+            "note",
+            "the deploy target is heroku",
+            None,
+            Some("2023-01-15T10:00:00.000Z"),
+        )
+        .unwrap();
+    e.apply_facts(&space, first, &[fact("deploy target", "is", "heroku")])
+        .unwrap();
+    let (second, _) = e
+        .import_episode(
+            &space,
+            "note",
+            "we moved the deploy target to fly.io",
+            None,
+            Some("2024-06-01T10:00:00.000Z"),
+        )
+        .unwrap();
+    let report = e
+        .apply_facts(&space, second, &[fact("deploy target", "is", "fly.io")])
+        .unwrap();
+    assert_eq!(report.closed, 1, "the older fact closes");
+    let active = e.facts_list(&space, false).unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].object, "fly.io");
+}
