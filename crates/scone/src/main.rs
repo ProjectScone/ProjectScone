@@ -77,7 +77,8 @@ enum Cmd {
     },
     /// Register scone as a memory server, zero questions asked
     Setup {
-        /// claude-code or claude-desktop
+        /// claude-code, claude-desktop, claude-code-hooks, cursor,
+        /// windsurf, vscode, codex, zed, or gemini-cli
         client: String,
     },
     /// List tags in this space with usage counts
@@ -454,11 +455,20 @@ fn run() -> Result<(), String> {
                 "claude-code" => scone::setup::setup_claude_code(&cli.space)?,
                 "claude-desktop" => scone::setup::setup_claude_desktop(&cli.space)?,
                 "claude-code-hooks" => scone::setup::setup_claude_code_hooks(&cli.space)?,
-                other => {
-                    return Err(format!(
-                        "unknown client {other:?}: use claude-code, claude-desktop, or claude-code-hooks"
-                    ));
-                }
+                other => match scone::setup::client_by_name(other) {
+                    Some(client) => scone::setup::setup_client(client, &cli.space)?,
+                    None => {
+                        let known: Vec<&str> = scone::setup::CLIENTS
+                            .iter()
+                            .map(|c| c.name)
+                            .chain(["claude-code", "claude-desktop", "claude-code-hooks"])
+                            .collect();
+                        return Err(format!(
+                            "unknown client {other:?}: try one of {}",
+                            known.join(", ")
+                        ));
+                    }
+                },
             };
             println!("{message}");
         }
