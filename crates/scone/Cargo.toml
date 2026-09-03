@@ -15,8 +15,9 @@ name = "scone"
 path = "src/main.rs"
 
 [features]
-default = ["local-embed"]
+default = ["local-embed", "pdf"]
 local-embed = ["scone-core/local-embed"]
+pdf = ["scone-core/pdf"]
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }

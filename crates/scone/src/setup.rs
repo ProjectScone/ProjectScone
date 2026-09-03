@@ -13,9 +13,15 @@ pub enum Shape {
     /// `{"servers": {"scone": {"type": "stdio", "command", "args"}}}`
     /// VS Code's mcp.json.
     VsCodeServers,
-    /// `{"context_servers": {"scone": {"source": "custom", "enabled", ...}}}`
-    /// Zed's settings.json.
+    /// `{"context_servers": {"scone": {"command", "args"}}}` in Zed's
+    /// settings.json. `source` and `enabled` are not in the schema any
+    /// more (verified against Zed 1.6.3's settings_content); they only
+    /// survive because the enum is untagged and ignores extra keys.
+    /// Variant selection is by shape, so `args` must always be present.
     ZedContextServers,
+    /// `{"mcp": {"scone": {"type": "local", "command": [exe, args...]}}}`
+    /// OpenCode folds the executable into one command array.
+    OpenCodeMcp,
     /// `[mcp_servers.scone]` with `command` and `args`. Codex CLI's TOML.
     CodexToml,
 }
@@ -29,8 +35,11 @@ fn entry(shape: Shape, exe: &Path, space: &str) -> serde_json::Value {
         Shape::VsCodeServers => {
             serde_json::json!({"type": "stdio", "command": command, "args": args})
         }
-        Shape::ZedContextServers => serde_json::json!({
-            "source": "custom", "enabled": true, "command": command, "args": args
+        Shape::ZedContextServers => serde_json::json!({"command": command, "args": args}),
+        Shape::OpenCodeMcp => serde_json::json!({
+            "type": "local",
+            "command": [command, "--space", space, "mcp"],
+            "enabled": true,
         }),
         Shape::CodexToml => serde_json::json!({"command": command, "args": args}),
     }
@@ -42,6 +51,7 @@ fn container(shape: Shape) -> &'static str {
         Shape::McpServers => "mcpServers",
         Shape::VsCodeServers => "servers",
         Shape::ZedContextServers => "context_servers",
+        Shape::OpenCodeMcp => "mcp",
         Shape::CodexToml => "mcp_servers",
     }
 }
@@ -58,7 +68,13 @@ pub fn merged_json_config(
     let mut root: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(existing).map_err(|e| format!("existing config is not JSON: {e}"))?
+        serde_json::from_str(existing).map_err(|e| {
+            format!(
+                "existing config is not plain JSON ({e}); if it has comments, \
+                 add scone by hand rather than let this command rewrite the \
+                 file and drop them"
+            )
+        })?
     };
     if !root.is_object() {
         return Err("existing config is not a JSON object".into());
@@ -122,11 +138,24 @@ pub fn merged_desktop_config(existing: &str, exe: &Path, space: &str) -> Result<
 pub struct Client {
     /// What the user types after `scone setup`.
     pub name: &'static str,
-    /// Config path relative to the user's home directory.
+    /// Config path relative to home. Used on Linux, and on macOS when
+    /// `mac_rel_path` is None.
     pub rel_path: &'static str,
+    /// macOS path when the client keeps config somewhere else there.
+    pub mac_rel_path: Option<&'static str>,
     pub shape: Shape,
     /// Shown after a successful write.
     pub after: &'static str,
+}
+
+impl Client {
+    /// Config path for the platform we are running on.
+    pub fn rel_path(&self) -> &'static str {
+        match (cfg!(target_os = "macos"), self.mac_rel_path) {
+            (true, Some(mac)) => mac,
+            _ => self.rel_path,
+        }
+    }
 }
 
 /// Every client whose config layout we have verified. Adding one is a
@@ -135,38 +164,60 @@ pub const CLIENTS: &[Client] = &[
     Client {
         name: "cursor",
         rel_path: ".cursor/mcp.json",
+        mac_rel_path: None,
         shape: Shape::McpServers,
         after: "restart Cursor, then check Settings > MCP",
     },
     Client {
         name: "windsurf",
         rel_path: ".codeium/windsurf/mcp_config.json",
+        mac_rel_path: None,
         shape: Shape::McpServers,
-        after: "restart Windsurf, then refresh MCP servers in Cascade",
+        after: "restart Windsurf and refresh MCP servers in Cascade (newer \
+                Devin-agent tabs read their own config and may not see this)",
     },
     Client {
         name: "gemini-cli",
         rel_path: ".gemini/settings.json",
+        mac_rel_path: None,
         shape: Shape::McpServers,
         after: "restart the gemini CLI",
     },
     Client {
         name: "zed",
         rel_path: ".config/zed/settings.json",
+        mac_rel_path: None,
         shape: Shape::ZedContextServers,
         after: "restart Zed; scone appears under context servers",
     },
     Client {
         name: "codex",
         rel_path: ".codex/config.toml",
+        mac_rel_path: None,
         shape: Shape::CodexToml,
         after: "restart the codex CLI",
     },
     Client {
         name: "vscode",
-        rel_path: ".vscode/mcp.json",
+        rel_path: ".config/Code/User/mcp.json",
+        mac_rel_path: Some("Library/Application Support/Code/User/mcp.json"),
         shape: Shape::VsCodeServers,
-        after: "reload VS Code; start the server from the mcp.json gutter",
+        after: "reload VS Code; scone is available in agent mode",
+    },
+    Client {
+        name: "opencode",
+        rel_path: ".config/opencode/opencode.json",
+        mac_rel_path: None,
+        shape: Shape::OpenCodeMcp,
+        after: "restart opencode",
+    },
+    Client {
+        name: "cline",
+        rel_path: ".cline/data/settings/cline_mcp_settings.json",
+        mac_rel_path: None,
+        shape: Shape::McpServers,
+        after: "restart the Cline extension (older builds read a legacy \
+                globalStorage path instead; re-run setup after updating)",
     },
 ];
 
@@ -179,7 +230,7 @@ pub fn client_by_name(name: &str) -> Option<&'static Client> {
 pub fn setup_client(client: &Client, space: &str) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").ok_or("cannot resolve HOME")?;
-    let path = PathBuf::from(&home).join(client.rel_path);
+    let path = PathBuf::from(&home).join(client.rel_path());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -335,13 +386,21 @@ mod tests {
                 "{}: dropped the existing server",
                 client.name
             );
+            let command = &v[key]["scone"]["command"];
+            let exe = command.as_str().or_else(|| command[0].as_str());
             assert_eq!(
-                v[key]["scone"]["command"].as_str(),
+                exe,
                 Some("/usr/local/bin/scone"),
                 "{}: no scone entry",
                 client.name
             );
-            assert_eq!(v[key]["scone"]["args"][1].as_str(), Some("work"));
+            if client.shape == Shape::OpenCodeMcp {
+                // OpenCode folds the executable and its args into one array.
+                assert_eq!(command[2].as_str(), Some("work"));
+                assert_eq!(v[key]["scone"]["type"].as_str(), Some("local"));
+            } else {
+                assert_eq!(v[key]["scone"]["args"][1].as_str(), Some("work"));
+            }
         }
     }
 
@@ -353,11 +412,15 @@ mod tests {
         assert_eq!(v["servers"]["scone"]["type"].as_str(), Some("stdio"));
         let zed = merged_json_config("", Shape::ZedContextServers, exe, "d").unwrap();
         let z: serde_json::Value = serde_json::from_str(&zed).unwrap();
-        assert_eq!(
-            z["context_servers"]["scone"]["source"].as_str(),
-            Some("custom")
+        // Zed picks its variant by SHAPE, so args must always be emitted,
+        // and `source` left the schema; it only ever parsed by accident.
+        let scone = &z["context_servers"]["scone"];
+        assert!(
+            scone["command"].is_string(),
+            "command must be a plain string"
         );
-        assert_eq!(z["context_servers"]["scone"]["enabled"], true);
+        assert!(scone["args"].is_array(), "args must always be emitted");
+        assert!(scone["source"].is_null(), "source is not in the schema");
     }
 
     #[test]
