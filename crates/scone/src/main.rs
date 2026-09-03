@@ -791,7 +791,7 @@ fn run() -> Result<(), String> {
                     let (episode_id, fresh) = engine
                         .import_episode(
                             &space,
-                            name,
+                            "connector",
                             &content,
                             Some(&source),
                             doc.updated_at.as_deref(),

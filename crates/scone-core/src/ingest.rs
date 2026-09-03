@@ -16,7 +16,11 @@ use crate::error::{Result, SconeError};
 /// Default target chunk size in bytes (~250 tokens).
 pub(crate) const CHUNK_TARGET_BYTES: usize = 1000;
 
-const KINDS: [&str; 4] = ["note", "file", "conversation", "observation"];
+/// Episode kinds. Closed on purpose: the column is meant to stay
+/// answerable. Anything pulled from an outside service is a
+/// "connector" episode; which service it was lives in its tag and its
+/// source URL, so adding a provider never widens this list.
+const KINDS: [&str; 5] = ["note", "file", "conversation", "observation", "connector"];
 
 #[derive(Debug)]
 pub enum IngestInput {

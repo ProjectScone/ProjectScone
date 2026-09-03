@@ -7,10 +7,10 @@ fn engine(dir: &std::path::Path) -> Engine {
 }
 
 #[test]
-fn fresh_store_is_schema_v3_with_tag_tables() {
+fn fresh_store_is_current_schema_with_tag_tables() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(dir.path());
-    assert_eq!(e.schema_version().unwrap(), 3);
+    assert_eq!(e.schema_version().unwrap(), 4);
     let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
     for t in ["tags", "episode_tags"] {
         let n: i64 = raw

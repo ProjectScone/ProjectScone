@@ -105,6 +105,7 @@ pub fn token_for(provider: &str, creds: &Credentials) -> Option<String> {
 pub fn connector_for(provider: &str, token: String) -> Result<Box<dyn Connector>, String> {
     match provider {
         "notion" => Ok(Box::new(Notion { token })),
+        "github" => Ok(Box::new(GitHub { token })),
         other => Err(format!(
             "unknown connector {other:?}: known connectors are {}",
             KNOWN.join(", ")
@@ -112,7 +113,82 @@ pub fn connector_for(provider: &str, token: String) -> Result<Box<dyn Connector>
     }
 }
 
-pub const KNOWN: &[&str] = &["notion"];
+pub const KNOWN: &[&str] = &["notion", "github"];
+
+/// GitHub issues and pull requests across everything the token can see.
+/// A personal access token is enough; no OAuth app to register.
+pub struct GitHub {
+    pub token: String,
+}
+
+impl Connector for GitHub {
+    fn name(&self) -> &'static str {
+        "github"
+    }
+
+    fn fetch(&self, since: Option<&str>) -> Result<Vec<Document>, String> {
+        let mut url = String::from(
+            "https://api.github.com/issues?filter=all&state=all\
+             &sort=updated&direction=desc&per_page=100",
+        );
+        if let Some(since) = since {
+            url.push_str(&format!("&since={since}"));
+        }
+        let mut res = ureq::get(&url)
+            .header("authorization", format!("Bearer {}", self.token))
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            // GitHub rejects requests without one.
+            .header("user-agent", "scone")
+            .config()
+            .timeout_global(Some(TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| format!("github: {e}"))?;
+        let value = read_json(res.body_mut().as_reader())?;
+        Ok(parse_issues(&value))
+    }
+}
+
+/// Turn a GitHub issues payload into documents. Pure, so the shape of
+/// their API is tested without touching the network.
+pub fn parse_issues(value: &serde_json::Value) -> Vec<Document> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Some(number) = item["number"].as_u64() else {
+            continue;
+        };
+        let repo = item["repository"]["full_name"].as_str().unwrap_or("");
+        let title = item["title"].as_str().unwrap_or("untitled");
+        let kind = if item["pull_request"].is_object() {
+            "pull request"
+        } else {
+            "issue"
+        };
+        let state = item["state"].as_str().unwrap_or("");
+        let body = item["body"].as_str().unwrap_or("");
+        let header = if repo.is_empty() {
+            format!("{kind} #{number} ({state}): {title}")
+        } else {
+            format!("{repo} {kind} #{number} ({state}): {title}")
+        };
+        out.push(Document {
+            id: format!("github:{repo}#{number}"),
+            title: header.clone(),
+            url: item["html_url"].as_str().unwrap_or_default().to_owned(),
+            body: if body.trim().is_empty() {
+                header
+            } else {
+                body.to_owned()
+            },
+            updated_at: item["updated_at"].as_str().map(str::to_owned),
+        });
+    }
+    out
+}
 
 /// Notion, via an internal integration token. No OAuth app to register:
 /// create an integration, share the pages with it, paste the token.
@@ -386,6 +462,55 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "a token file must not be readable");
         }
+    }
+
+    #[test]
+    fn github_issues_become_documents() {
+        let payload = serde_json::json!([
+            {
+                "number": 12,
+                "title": "Recall drops timestamps",
+                "body": "The reader cannot order events without them.",
+                "state": "open",
+                "html_url": "https://github.com/o/r/issues/12",
+                "updated_at": "2026-09-02T10:00:00Z",
+                "repository": {"full_name": "o/r"}
+            },
+            {
+                "number": 13,
+                "title": "Add the tap",
+                "body": "",
+                "state": "closed",
+                "html_url": "https://github.com/o/r/pull/13",
+                "updated_at": "2026-09-01T10:00:00Z",
+                "repository": {"full_name": "o/r"},
+                "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/13"}
+            }
+        ]);
+        let docs = parse_issues(&payload);
+        assert_eq!(docs.len(), 2);
+        assert_eq!(
+            docs[0].title,
+            "o/r issue #12 (open): Recall drops timestamps"
+        );
+        assert_eq!(docs[0].id, "github:o/r#12");
+        assert!(docs[0].body.contains("order events"));
+        // A pull request must not be filed as an issue.
+        assert!(
+            docs[1].title.contains("pull request #13 (closed)"),
+            "{}",
+            docs[1].title
+        );
+        // An empty body still carries the header, so the memory is not blank.
+        assert!(docs[1].body.contains("Add the tap"));
+    }
+
+    #[test]
+    fn github_payload_garbage_never_panics() {
+        assert!(parse_issues(&serde_json::json!({})).is_empty());
+        assert!(parse_issues(&serde_json::json!([{"no_number": 1}])).is_empty());
+        let no_repo = serde_json::json!([{"number": 1, "title": "t", "state": "open"}]);
+        assert_eq!(parse_issues(&no_repo)[0].title, "issue #1 (open): t");
     }
 
     #[test]

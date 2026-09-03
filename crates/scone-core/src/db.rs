@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS spaces (
 CREATE TABLE IF NOT EXISTS episodes (
     id         INTEGER PRIMARY KEY,
     space_id   INTEGER NOT NULL REFERENCES spaces(id),
-    kind       TEXT NOT NULL CHECK (kind IN ('note','file','conversation','observation')),
+    kind       TEXT NOT NULL CHECK (kind IN ('note','file','conversation','observation','connector')),
     content    TEXT NOT NULL,
     hash       TEXT NOT NULL,
     source     TEXT,
@@ -99,6 +99,28 @@ CREATE TABLE IF NOT EXISTS episode_tags (
 CREATE INDEX IF NOT EXISTS episode_tags_by_tag ON episode_tags (tag_id, episode_id);
 ";
 
+/// Schema v4: widen the episode-kind constraint to admit "connector",
+/// for anything pulled from an outside service. SQLite cannot alter a
+/// CHECK in place, so the table is rebuilt. Four tables reference
+/// episodes(id) by name, and RENAME keeps those references pointed at
+/// the new table as long as legacy_alter_table stays off.
+const SCHEMA_V4: &str = "
+CREATE TABLE episodes_v4 (
+    id         INTEGER PRIMARY KEY,
+    space_id   INTEGER NOT NULL REFERENCES spaces(id),
+    kind       TEXT NOT NULL CHECK (kind IN ('note','file','conversation','observation','connector')),
+    content    TEXT NOT NULL,
+    hash       TEXT NOT NULL,
+    source     TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (space_id, hash)
+);
+INSERT INTO episodes_v4 (id, space_id, kind, content, hash, source, created_at)
+    SELECT id, space_id, kind, content, hash, source, created_at FROM episodes;
+DROP TABLE episodes;
+ALTER TABLE episodes_v4 RENAME TO episodes;
+";
+
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -135,6 +157,23 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         conn.execute_batch(SCHEMA_V3)?;
         conn.execute(
             "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version.as_str() < "4" {
+        // Foreign keys must be off while the table is swapped, or the
+        // DROP would be refused by the rows pointing at it.
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} COMMIT;"));
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        result?;
+        conn.execute(
+            "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
             [],
         )?;
     }
