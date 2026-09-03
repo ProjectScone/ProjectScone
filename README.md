@@ -28,6 +28,7 @@ entirely on your machine and embeds in anything.
 | 🧠 **Temporal memory** | Facts extracted from what you store, with validity intervals. A contradiction closes the old fact with a recorded reason, so history stays queryable. Stale facts decay; recalled facts strengthen. |
 | 🕰️ **Time travel** | `search --as-of 2026-03-15` answers "what did I believe in March?". Validity is a WHERE clause, not a version-chain walk. |
 | 🔍 **Hybrid search** | BM25, vectors, facts, and recency fused in one query, with provenance on every result. Local ONNX embeddings by default; it works on a plane. |
+| 🏷️ **Tags** | Tag anything on the way in (`--tag research`), then retrieve only that: papers, a client, one knowledge base. Works on the CLI, MCP, and HTTP surfaces. |
 | 👤 **Profiles** | Identity facts + recent activity in one call, on the CLI, MCP, and HTTP surfaces. |
 | 📉 **Context economy** | Every recall reports bytes returned vs stored ("97.7% saved"). Token optimization is a product surface, not a benchmark footnote. |
 | 📦 **Portable & embeddable** | `scone export` writes JSONL with full fact history. The C ABI (`include/scone.h`) embeds the engine in any language. Zero TypeScript. |
@@ -80,7 +81,11 @@ Building from source instead:
     scone distill                           # extract temporal facts (any LLM)
     scone facts list --all                  # history, with closure reasons
     scone search "tools" --as-of 2026-03-15T00:00:00Z
+    scone search "attention" --tag research # narrow to what you tagged
+    scone tags                              # tags in this space, with counts
+    scone ask "when did I switch deploy targets?"
     scone profile                           # identity + recent activity
+    scone status                            # stores, counts, index health
     scone export > memory.jsonl             # your memory is portable
 
 The semantic lane uses whatever LLM you configure (Ollama, OpenAI-compatible,
@@ -120,11 +125,20 @@ let your coding agent do the reading through the MCP server.
 | Tool | What it does |
 |---|---|
 | `memory_store` | Save an observation; duplicates are recognized, facts distill immediately when an LLM is configured. |
-| `memory_recall` | Hybrid recall with your profile prepended; `as_of` for time travel. |
+| `memory_recall` | Hybrid recall with your profile prepended, every line dated; `as_of` for time travel, `tags` to narrow it. |
 | `memory_facts_about` | What's currently known about an entity (aliases resolved). |
+| `memory_pending` | Episodes awaiting fact extraction. Your agent reads them. |
+| `memory_store_facts` | Your agent submits what it extracted; the engine applies contradiction closure and provenance. |
 | `memory_forget` | Close a fact with your reason. Recorded, never deleted. |
 
 Each `--space` is an isolated brain: one per project, per client, per team.
+
+The last two tools are how Scone extracts facts without an API key. Your
+agent already reads well and you already pay for it, so it does the
+distillation on your existing subscription: `memory_pending` hands it the
+episodes, it reasons over them, `memory_store_facts` submits the result.
+The engine still owns the invariants; the agent only proposes. Configure
+an LLM instead if you want extraction to run unattended.
 
 ## Build with Scone
 
@@ -157,9 +171,10 @@ let pack = engine.recall(&space, "what do I know about X", &RecallOpts::default(
 
     scone serve
 
-`POST /v1/episodes` · `GET /v1/recall` · `GET /v1/facts` ·
-`POST /v1/facts/{id}/close` · `GET /v1/profile` · `GET /v1/status`. Every
-key is bound to exactly one space, and the server refuses to start keyless.
+`POST /v1/episodes` · `GET /v1/recall` (`?as_of=`, `?tags=`) ·
+`GET /v1/facts` · `POST /v1/facts/{id}/close` · `GET /v1/profile` ·
+`GET /v1/status` · `GET /v1/tags`. Every key is bound to exactly one
+space, and the server refuses to start keyless.
 
 ## How it works
 
