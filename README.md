@@ -122,6 +122,26 @@ when you shrink their job, not when you add structure to it. For answer
 quality beyond that ceiling, point the answer step at a larger model, or
 let your coding agent do the reading through the MCP server.
 
+## Connect what you already write in
+
+    scone connect notion --token secret_abc     # or: github, slack, google-drive
+    scone sync                                  # pull everything connected
+    scone search "retention policy" --tag notion
+
+| Connector | What it pulls | Credential |
+|---|---|---|
+| `notion` | Pages you shared with the integration | Internal integration token |
+| `github` | Issues and pull requests the token can see | Personal access token |
+| `slack` | Messages from channels the bot is in | Bot token |
+| `google-drive` | Google Docs, exported as text | OAuth access token |
+
+Tokens are read from `SCONE_<PROVIDER>_TOKEN` first, so nothing has to
+touch disk; `connect` otherwise stores them in `~/.scone/connectors.toml`
+with 0600 permissions. Each sync is incremental, dated by the source's
+own timestamps rather than when the sync ran, and tagged with the
+provider so you can retrieve one source at a time. Re-syncing is cheap:
+content already stored is recognized and skipped.
+
 ## Give your AI memory
 
     claude mcp add scone -- scone --space myproject mcp

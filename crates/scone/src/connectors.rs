@@ -106,6 +106,8 @@ pub fn connector_for(provider: &str, token: String) -> Result<Box<dyn Connector>
     match provider {
         "notion" => Ok(Box::new(Notion { token })),
         "github" => Ok(Box::new(GitHub { token })),
+        "slack" => Ok(Box::new(Slack { token })),
+        "google-drive" => Ok(Box::new(GoogleDrive { token })),
         other => Err(format!(
             "unknown connector {other:?}: known connectors are {}",
             KNOWN.join(", ")
@@ -113,7 +115,268 @@ pub fn connector_for(provider: &str, token: String) -> Result<Box<dyn Connector>
     }
 }
 
-pub const KNOWN: &[&str] = &["notion", "github"];
+pub const KNOWN: &[&str] = &["notion", "github", "slack", "google-drive"];
+
+/// Convert Unix epoch seconds to RFC3339 UTC. Slack dates everything in
+/// epoch seconds, and memory is only as useful as its timeline, so this
+/// has to be right rather than approximate. Civil-from-days after
+/// Howard Hinnant's algorithm.
+pub fn rfc3339_from_epoch(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{sec:02}Z")
+}
+
+/// Best-effort epoch seconds from an RFC3339 date, for services that
+/// want a numeric cursor. Only the date part is required to be exact;
+/// a slightly early cursor re-reads, which dedup absorbs.
+pub fn epoch_from_rfc3339(ts: &str) -> Option<i64> {
+    let (date, time) = ts.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let mut t = time.trim_end_matches('Z').split(':');
+    let h: i64 = t.next().unwrap_or("0").parse().unwrap_or(0);
+    let mi: i64 = t.next().unwrap_or("0").parse().unwrap_or(0);
+    let sec: i64 = t
+        .next()
+        .unwrap_or("0")
+        .split('.')
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// Slack, via a bot token. One document per message, so a re-sync
+/// dedups per message instead of rewriting a whole channel.
+pub struct Slack {
+    pub token: String,
+}
+
+impl Connector for Slack {
+    fn name(&self) -> &'static str {
+        "slack"
+    }
+
+    fn fetch(&self, since: Option<&str>) -> Result<Vec<Document>, String> {
+        let channels = self.get(
+            "https://slack.com/api/conversations.list\
+             ?types=public_channel,private_channel&limit=200&exclude_archived=true",
+        )?;
+        let mut out = Vec::new();
+        for (id, name) in parse_channels(&channels) {
+            let mut url =
+                format!("https://slack.com/api/conversations.history?channel={id}&limit=200");
+            if let Some(oldest) = since.and_then(epoch_from_rfc3339) {
+                url.push_str(&format!("&oldest={oldest}"));
+            }
+            // One unreadable channel must not sink the whole sync.
+            let Ok(history) = self.get(&url) else {
+                continue;
+            };
+            out.extend(parse_messages(&history, &id, &name));
+        }
+        Ok(out)
+    }
+}
+
+impl Slack {
+    fn get(&self, url: &str) -> Result<serde_json::Value, String> {
+        let mut res = ureq::get(url)
+            .header("authorization", format!("Bearer {}", self.token))
+            .config()
+            .timeout_global(Some(TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| format!("slack: {e}"))?;
+        let value = read_json(res.body_mut().as_reader())?;
+        // Slack answers 200 with ok:false; treat that as the error it is.
+        if value["ok"] == serde_json::Value::Bool(false) {
+            return Err(format!(
+                "slack: {}",
+                value["error"].as_str().unwrap_or("request refused")
+            ));
+        }
+        Ok(value)
+    }
+}
+
+/// Channel id and name pairs from a conversations.list payload.
+pub fn parse_channels(value: &serde_json::Value) -> Vec<(String, String)> {
+    value["channels"]
+        .as_array()
+        .map(|cs| {
+            cs.iter()
+                .filter_map(|c| {
+                    Some((
+                        c["id"].as_str()?.to_owned(),
+                        c["name"].as_str().unwrap_or("channel").to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Messages from a conversations.history payload, one document each.
+/// Joins and leaves carry a subtype and are skipped as noise.
+pub fn parse_messages(value: &serde_json::Value, channel_id: &str, channel: &str) -> Vec<Document> {
+    let Some(messages) = value["messages"].as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for m in messages {
+        if m["subtype"].is_string() {
+            continue;
+        }
+        let (Some(ts), Some(text)) = (m["ts"].as_str(), m["text"].as_str()) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let who = m["user"]
+            .as_str()
+            .or(m["bot_id"].as_str())
+            .unwrap_or("someone");
+        let secs = ts.split('.').next().and_then(|s| s.parse::<i64>().ok());
+        out.push(Document {
+            id: format!("slack:{channel_id}:{ts}"),
+            title: format!("#{channel}"),
+            url: format!("slack://channel/{channel_id}"),
+            body: format!("#{channel} {who}: {text}"),
+            updated_at: secs.map(rfc3339_from_epoch),
+        });
+    }
+    out
+}
+
+/// Google Drive documents, via an OAuth access token. Docs are exported
+/// as plain text; binary files are left alone.
+pub struct GoogleDrive {
+    pub token: String,
+}
+
+impl Connector for GoogleDrive {
+    fn name(&self) -> &'static str {
+        "google-drive"
+    }
+
+    fn fetch(&self, since: Option<&str>) -> Result<Vec<Document>, String> {
+        let mut q =
+            String::from("mimeType='application/vnd.google-apps.document' and trashed=false");
+        if let Some(since) = since {
+            q.push_str(&format!(" and modifiedTime > '{since}'"));
+        }
+        let url = format!(
+            "https://www.googleapis.com/drive/v3/files\
+             ?q={}&fields=files(id,name,modifiedTime,webViewLink)&pageSize=100\
+             &orderBy=modifiedTime%20desc",
+            urlencode(&q)
+        );
+        let listing = self.get(&url)?;
+        let mut docs = parse_drive_files(&listing);
+        for doc in &mut docs {
+            let export = format!(
+                "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=text/plain",
+                doc.id
+            );
+            doc.body = self.get_text(&export).unwrap_or_default();
+        }
+        docs.retain(|d| !d.body.trim().is_empty());
+        Ok(docs)
+    }
+}
+
+impl GoogleDrive {
+    fn get(&self, url: &str) -> Result<serde_json::Value, String> {
+        let mut res = ureq::get(url)
+            .header("authorization", format!("Bearer {}", self.token))
+            .config()
+            .timeout_global(Some(TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| format!("google-drive: {e}"))?;
+        read_json(res.body_mut().as_reader())
+    }
+
+    fn get_text(&self, url: &str) -> Result<String, String> {
+        let mut res = ureq::get(url)
+            .header("authorization", format!("Bearer {}", self.token))
+            .config()
+            .timeout_global(Some(TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| format!("google-drive: {e}"))?;
+        let mut buf = String::new();
+        res.body_mut()
+            .as_reader()
+            .take(MAX_BODY_BYTES)
+            .read_to_string(&mut buf)
+            .map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+}
+
+/// Percent-encode a Drive query. Only the characters that actually
+/// appear in these queries need handling.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// File metadata from a Drive files.list payload.
+pub fn parse_drive_files(value: &serde_json::Value) -> Vec<Document> {
+    value["files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|f| {
+                    let id = f["id"].as_str()?;
+                    Some(Document {
+                        id: id.to_owned(),
+                        title: f["name"].as_str().unwrap_or("untitled").to_owned(),
+                        url: f["webViewLink"].as_str().unwrap_or_default().to_owned(),
+                        body: String::new(),
+                        updated_at: f["modifiedTime"].as_str().map(str::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// GitHub issues and pull requests across everything the token can see.
 /// A personal access token is enough; no OAuth app to register.
@@ -511,6 +774,95 @@ mod tests {
         assert!(parse_issues(&serde_json::json!([{"no_number": 1}])).is_empty());
         let no_repo = serde_json::json!([{"number": 1, "title": "t", "state": "open"}]);
         assert_eq!(parse_issues(&no_repo)[0].title, "issue #1 (open): t");
+    }
+
+    /// Known epochs, including a leap day and the boundary that broke
+    /// every naive implementation. A wrong clock here silently misdates
+    /// memory, which is worse than failing to store it.
+    #[test]
+    fn epoch_converts_to_the_right_calendar_day() {
+        assert_eq!(rfc3339_from_epoch(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_from_epoch(1), "1970-01-01T00:00:01Z");
+        assert_eq!(rfc3339_from_epoch(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_from_epoch(1_009_843_199), "2001-12-31T23:59:59Z");
+        assert_eq!(rfc3339_from_epoch(1_756_800_000), "2025-09-02T08:00:00Z");
+        // Before the epoch must not wrap into the future.
+        assert_eq!(rfc3339_from_epoch(-1), "1969-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn epoch_round_trips_through_rfc3339() {
+        for secs in [0_i64, 951_782_400, 1_009_843_199, 1_756_800_000] {
+            let text = rfc3339_from_epoch(secs);
+            assert_eq!(
+                epoch_from_rfc3339(&text),
+                Some(secs),
+                "round trip failed for {text}"
+            );
+        }
+        assert_eq!(epoch_from_rfc3339("not a date"), None);
+    }
+
+    #[test]
+    fn slack_messages_become_one_document_each() {
+        let channels = serde_json::json!({"channels": [
+            {"id": "C1", "name": "engineering"},
+            {"id": "C2"}
+        ]});
+        assert_eq!(
+            parse_channels(&channels),
+            vec![
+                ("C1".to_owned(), "engineering".to_owned()),
+                ("C2".to_owned(), "channel".to_owned())
+            ]
+        );
+
+        let history = serde_json::json!({"messages": [
+            {"ts": "1756800000.000100", "user": "U7", "text": "shipping the tap today"},
+            {"ts": "1756800100.000200", "subtype": "channel_join", "user": "U8", "text": "joined"},
+            {"ts": "1756800200.000300", "user": "U9", "text": "   "},
+            {"ts": "1756800300.000400", "bot_id": "B1", "text": "build passed"}
+        ]});
+        let docs = parse_messages(&history, "C1", "engineering");
+        assert_eq!(docs.len(), 2, "joins and blank messages are noise");
+        assert_eq!(docs[0].id, "slack:C1:1756800000.000100");
+        assert_eq!(docs[0].body, "#engineering U7: shipping the tap today");
+        assert_eq!(docs[0].updated_at.as_deref(), Some("2025-09-02T08:00:00Z"));
+        assert!(
+            docs[1].body.contains("B1: build passed"),
+            "bots are people too"
+        );
+    }
+
+    #[test]
+    fn drive_files_carry_their_modified_time() {
+        let payload = serde_json::json!({"files": [
+            {"id": "f1", "name": "Design doc", "modifiedTime": "2026-09-02T10:00:00.000Z",
+             "webViewLink": "https://docs.google.com/document/d/f1"},
+            {"name": "no id"}
+        ]});
+        let docs = parse_drive_files(&payload);
+        assert_eq!(docs.len(), 1, "a file without an id cannot be exported");
+        assert_eq!(docs[0].title, "Design doc");
+        assert_eq!(
+            docs[0].updated_at.as_deref(),
+            Some("2026-09-02T10:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn drive_query_encoding_survives_quotes_and_spaces() {
+        let encoded = urlencode("mimeType='x' and trashed=false");
+        assert!(!encoded.contains(' '), "{encoded}");
+        assert!(!encoded.contains('\''), "{encoded}");
+        assert!(encoded.contains("mimeType"), "{encoded}");
+    }
+
+    #[test]
+    fn slack_and_drive_payload_garbage_never_panics() {
+        assert!(parse_channels(&serde_json::json!({})).is_empty());
+        assert!(parse_messages(&serde_json::json!({}), "C", "c").is_empty());
+        assert!(parse_drive_files(&serde_json::json!({})).is_empty());
     }
 
     #[test]
