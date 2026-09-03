@@ -100,6 +100,19 @@ pub struct RecallItem {
     pub created_at: String,
 }
 
+impl RecallItem {
+    /// Calendar day of `created_at`, for dating a line of recalled
+    /// memory without spending tokens on the full timestamp. Readers
+    /// cannot order events or answer "when" without this; benchmarks
+    /// scored zero on temporal questions when the date was dropped.
+    pub fn day(&self) -> &str {
+        self.created_at
+            .split('T')
+            .next()
+            .unwrap_or(&self.created_at)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ContextPack {
     /// Semantic facts, first-class and budget-first (spec §7).

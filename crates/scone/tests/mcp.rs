@@ -331,3 +331,43 @@ async fn agent_driven_distillation_loop_works_without_any_llm() {
     assert!(text_of(&about).contains("9am"), "{:?}", text_of(&about));
     client.cancel().await.unwrap();
 }
+
+/// The host agent is the reader; it cannot order events or answer "when"
+/// if recall hands it undated lines. Benchmarks scored zero on temporal
+/// questions once dates were lost, so the date travels with every item.
+#[tokio::test]
+async fn recalled_memory_carries_its_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(SconeMcp::new(engine(dir.path()), "agent")).await;
+    client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_store");
+            p.arguments = serde_json::json!({"content": "switched the deploy target to fly.io"})
+                .as_object()
+                .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let recalled = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_recall");
+            p.arguments = serde_json::json!({"query": "deploy target"})
+                .as_object()
+                .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let text = text_of(&recalled);
+    let dated = text
+        .lines()
+        .find(|l| l.starts_with("memory ["))
+        .unwrap_or_default();
+    let day = &dated[8..18];
+    assert!(
+        day.len() == 10 && day.chars().filter(|c| *c == '-').count() == 2,
+        "recalled memory must be dated YYYY-MM-DD: {text}"
+    );
+    client.cancel().await.unwrap();
+}

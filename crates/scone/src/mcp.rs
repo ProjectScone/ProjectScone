@@ -259,8 +259,10 @@ impl SconeMcp {
                 }
                 for item in &pack.items {
                     out.push_str(&format!(
-                        "memory [episode {}] {}\n",
-                        item.episode_id, item.text
+                        "memory [{} | episode {}] {}\n",
+                        item.day(),
+                        item.episode_id,
+                        item.text
                     ));
                 }
                 for d in &pack.degraded {

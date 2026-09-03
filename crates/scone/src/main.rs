@@ -546,7 +546,12 @@ fn run() -> Result<(), String> {
                 ));
             }
             for item in &pack.items {
-                context.push_str(&format!("- [episode {}] {}\n", item.episode_id, item.text));
+                context.push_str(&format!(
+                    "- [{} | episode {}] {}\n",
+                    item.day(),
+                    item.episode_id,
+                    item.text
+                ));
             }
             if engine.has_llm() {
                 let answer = engine

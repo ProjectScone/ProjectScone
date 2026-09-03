@@ -61,7 +61,7 @@ pub fn user_prompt(engine: &mut Engine, space_name: &str, stdin: &str) -> String
         }
         for item in &pack.items {
             let text: String = item.text.chars().take(300).collect();
-            out.push_str(&format!("- {}\n", text.replace('\n', " ")));
+            out.push_str(&format!("- [{}] {}\n", item.day(), text.replace('\n', " ")));
         }
         Ok(out)
     };
