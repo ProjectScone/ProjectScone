@@ -39,19 +39,28 @@ pub fn date_windows(query: &str) -> Vec<DateWindow> {
     let lower = query.to_lowercase();
     let mut windows = Vec::new();
 
-    // Numeric dates: YYYY/MM/DD or YYYY-MM-DD.
+    // Numeric dates: YYYY/MM/DD or YYYY-MM-DD. Scanned over bytes, not
+    // string slices: a ten-byte window can land inside a multi-byte
+    // character, and slicing a str there panics. A question written in
+    // any language but English used to take the process down.
     let bytes = lower.as_bytes();
+    let ascii_digits = |b: &[u8]| b.iter().all(u8::is_ascii_digit);
+    let as_str = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut i = 0;
     while i + 10 <= bytes.len() {
-        let slice = &lower[i..i + 10];
-        let sep_ok = matches!(slice.as_bytes()[4], b'/' | b'-')
-            && slice.as_bytes()[7] == slice.as_bytes()[4];
+        let window = &bytes[i..i + 10];
+        let sep_ok = matches!(window[4], b'/' | b'-') && window[7] == window[4];
         if sep_ok
-            && slice[..4].chars().all(|c| c.is_ascii_digit())
-            && slice[5..7].chars().all(|c| c.is_ascii_digit())
-            && slice[8..10].chars().all(|c| c.is_ascii_digit())
+            && ascii_digits(&window[..4])
+            && ascii_digits(&window[5..7])
+            && ascii_digits(&window[8..10])
         {
-            let day = format!("{}-{}-{}", &slice[..4], &slice[5..7], &slice[8..10]);
+            let day = format!(
+                "{}-{}-{}",
+                as_str(&window[..4]),
+                as_str(&window[5..7]),
+                as_str(&window[8..10])
+            );
             windows.push(DateWindow {
                 start: format!("{day}T00:00:00Z"),
                 end: format!("{day}T23:59:59Z"),
@@ -88,6 +97,23 @@ pub fn date_windows(query: &str) -> Vec<DateWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ten-byte window can land inside a multi-byte character, and
+    /// slicing a str there panics. Recall must survive any text a
+    /// person can type, in any language.
+    #[test]
+    fn non_ascii_text_does_not_panic() {
+        // The accented vowel straddles the scan window boundary.
+        date_windows("qué pasó con la reunión del equipo en la oficina hoy día ó");
+        date_windows("日本語のテキストで日付を探す 2023/05/20 まで");
+        date_windows("emoji 🧠🥐 memory 2024-02-29 leap");
+        date_windows("ó");
+        date_windows("");
+        // Dates still parse when multi-byte characters surround them.
+        let w = date_windows("reunión del 2023-05-20 en Madrid");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].start, "2023-05-20T00:00:00Z");
+    }
 
     #[test]
     fn parses_numeric_and_month_references() {
