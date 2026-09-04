@@ -226,6 +226,9 @@ pub struct RunOpts {
     pub two_pass: bool,
     /// Retrieve for each clause of a multi-part question and fuse.
     pub decompose: bool,
+    /// Answer date arithmetic by computing it, falling back to the
+    /// reader when the question cannot be read as an operator.
+    pub compute_temporal: bool,
     /// How many items to hand the reader. The benchmark's own paper
     /// reports an 8B reader degrading sharply past roughly 3k retrieved
     /// tokens, so this is a first-class variable, not a constant.
@@ -240,6 +243,7 @@ impl Default for RunOpts {
             answer_system: None,
             two_pass: false,
             decompose: false,
+            compute_temporal: false,
             recall_limit: 15,
         }
     }
@@ -328,7 +332,29 @@ pub fn run_item_with(
     for i in &pack.items {
         retrieved.push_str(&format!("- {}\n", i.text));
     }
-    let model_answer = if engine.has_llm() {
+    // Computed before generation: a date subtraction is arithmetic, and
+    // asking a language model to do it is how this category became the
+    // worst one for every system that evaluates on it.
+    let computed = if opts.compute_temporal {
+        engine
+            .answer_temporally(
+                &space,
+                &item.question,
+                Some(&item.question_date)
+                    .filter(|d| !d.is_empty())
+                    .map(String::as_str),
+            )
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(answer) = &computed {
+        eprintln!("  computed: {} [{}]", answer.value, answer.derivation);
+    }
+    let model_answer = if let Some(answer) = computed {
+        answer.value
+    } else if engine.has_llm() {
         // Question date travels with the question (memorybench protocol;
         // temporal questions are unanswerable without it).
         let dated_question = if item.question_date.is_empty() {

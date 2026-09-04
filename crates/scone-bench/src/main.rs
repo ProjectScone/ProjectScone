@@ -118,6 +118,9 @@ enum Cmd {
         /// Retrieve for each clause of a multi-part question and fuse
         #[arg(long)]
         decompose: bool,
+        /// Compute date arithmetic instead of generating it
+        #[arg(long)]
+        compute_temporal: bool,
         /// How many retrieved items to hand the reader (default 15)
         #[arg(long, default_value_t = 15)]
         recall_limit: usize,
@@ -266,6 +269,7 @@ fn run() -> Result<(), String> {
             reranker,
             prompt,
             decompose,
+            compute_temporal,
             recall_limit,
             handoff,
             two_pass,
@@ -334,6 +338,7 @@ fn run() -> Result<(), String> {
                 answer_system,
                 two_pass,
                 decompose,
+                compute_temporal,
                 recall_limit,
             };
             match (&llm_url, &llm_model) {
