@@ -226,6 +226,10 @@ pub struct RunOpts {
     pub two_pass: bool,
     /// Retrieve for each clause of a multi-part question and fuse.
     pub decompose: bool,
+    /// How many items to hand the reader. The benchmark's own paper
+    /// reports an 8B reader degrading sharply past roughly 3k retrieved
+    /// tokens, so this is a first-class variable, not a constant.
+    pub recall_limit: usize,
 }
 
 impl Default for RunOpts {
@@ -236,6 +240,7 @@ impl Default for RunOpts {
             answer_system: None,
             two_pass: false,
             decompose: false,
+            recall_limit: 15,
         }
     }
 }
@@ -303,7 +308,7 @@ pub fn run_item_with(
             &space,
             &item.question,
             &RecallOpts {
-                limit: 15,
+                limit: opts.recall_limit,
                 budget_bytes: None,
                 as_of: None,
                 expand_neighbors: false,

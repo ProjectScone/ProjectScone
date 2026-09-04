@@ -118,6 +118,9 @@ enum Cmd {
         /// Retrieve for each clause of a multi-part question and fuse
         #[arg(long)]
         decompose: bool,
+        /// How many retrieved items to hand the reader (default 15)
+        #[arg(long, default_value_t = 15)]
+        recall_limit: usize,
         /// Write question and retrieved context per item to this JSONL
         /// file and skip answering. This is the subscription-native
         /// path: whatever agent you already pay for reads the pack and
@@ -263,6 +266,7 @@ fn run() -> Result<(), String> {
             reranker,
             prompt,
             decompose,
+            recall_limit,
             handoff,
             two_pass,
         } => {
@@ -330,6 +334,7 @@ fn run() -> Result<(), String> {
                 answer_system,
                 two_pass,
                 decompose,
+                recall_limit,
             };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
