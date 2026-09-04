@@ -3699,6 +3699,7 @@ version = "0.2.1"
 dependencies = [
  "assert_cmd",
  "axum",
+ "blake3",
  "clap",
  "htmd",
  "http-body-util",

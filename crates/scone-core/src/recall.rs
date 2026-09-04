@@ -95,7 +95,15 @@ pub struct RecallItem {
     pub chunk_id: i64,
     pub episode_id: i64,
     pub text: String,
+    /// Rank after fusion, normalized to the best hit in this query. It
+    /// says how this item compares to the others, not whether any of
+    /// them belong: the top hit scores ~1.0 even for a query nothing
+    /// in the store is about.
     pub score: f32,
+    /// Cosine similarity to the query from the vector lane, when that
+    /// lane found it. This is the absolute signal: unlike `score`, it
+    /// stays low when nothing relevant exists.
+    pub similarity: Option<f32>,
     pub source: Option<String>,
     pub created_at: String,
 }
@@ -176,6 +184,12 @@ impl Engine {
                 None => Vec::new(),
             }
         };
+
+        // Keep the vector lane's cosine similarity before fusion throws
+        // it away. Rank fusion answers "which of these is best", never
+        // "is any of this actually about the question", and only the
+        // second question can decide whether to inject anything at all.
+        let similarity: HashMap<u64, f32> = vec_hits.iter().copied().collect();
 
         // Reciprocal-rank fusion across both ranked lists.
         let mut fused: HashMap<u64, f32> = HashMap::new();
@@ -262,6 +276,7 @@ impl Engine {
                     episode_id,
                     text,
                     score,
+                    similarity: similarity.get(chunk_id).copied(),
                     source,
                     created_at,
                 });

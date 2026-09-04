@@ -95,6 +95,13 @@ impl Engine {
     /// Refuses to open when the store was embedded with a different
     /// provider (spec §9): switching embedders is an explicit
     /// `doctor --rebuild`, never a silent re-index.
+    /// Which embedder this store is pinned to. Callers that judge
+    /// absolute similarity need it: a threshold is only meaningful for
+    /// the model it was measured against.
+    pub fn embedder_id(&self) -> &str {
+        self.embedder.id()
+    }
+
     pub fn open(data_dir: &Path, embedder: Box<dyn embed::EmbeddingProvider>) -> Result<Engine> {
         Self::open_inner(data_dir, embedder, false)
     }

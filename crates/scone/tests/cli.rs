@@ -723,3 +723,69 @@ fn add_url_ingests_page_text_with_domain_tags() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(!stdout.contains("var junk = 1"), "{stdout}");
 }
+
+/// Re-injecting the same memory on every prompt is silent waste: the
+/// agent already has it, and the user pays for it again each turn.
+#[test]
+fn hook_user_prompt_does_not_repeat_itself_within_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "the deploy password rotates every monday"])
+        .assert()
+        .success();
+    let prompt = r#"{"session_id":"s1","prompt":"when does the deploy password rotate?"}"#;
+
+    let first = scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin(prompt)
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8_lossy(&first.get_output().stdout).contains("rotates every monday"),
+        "the first prompt of a session gets the memory"
+    );
+
+    let second = scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin(prompt)
+        .assert()
+        .success();
+    assert!(
+        second.get_output().stdout.is_empty(),
+        "the same memory must not be paid for twice: {:?}",
+        String::from_utf8_lossy(&second.get_output().stdout)
+    );
+
+    // A different session has its own context and starts fresh.
+    let other = scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin(r#"{"session_id":"s2","prompt":"when does the deploy password rotate?"}"#)
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8_lossy(&other.get_output().stdout).contains("rotates every monday"),
+        "a new session has not seen it yet"
+    );
+}
+
+/// A session id arrives from the host agent, so it is untrusted input
+/// and must never steer a write outside the data directory.
+#[test]
+fn hook_session_state_cannot_escape_the_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "the deploy password rotates every monday"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["hook", "user-prompt"])
+        .write_stdin(
+            r#"{"session_id":"../../../../tmp/scone-escape","prompt":"when does the deploy password rotate?"}"#,
+        )
+        .assert()
+        .success();
+    assert!(
+        !std::path::Path::new("/tmp/scone-escape.txt").exists(),
+        "a traversing session id must not write outside the data dir"
+    );
+}

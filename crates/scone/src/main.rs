@@ -481,7 +481,7 @@ fn run() -> Result<(), String> {
                 "user-prompt" => {
                     print!(
                         "{}",
-                        scone::hook::user_prompt(&mut engine, &cli.space, &stdin)
+                        scone::hook::user_prompt(&mut engine, &cli.space, &dir, &stdin)
                     );
                 }
                 "session-end" => {
