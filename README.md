@@ -170,6 +170,9 @@ content already stored is recognized and skipped.
 | `memory_forget` | Close a fact with your reason. Recorded, never deleted. |
 
 Each `--space` is an isolated brain: one per project, per client, per team.
+Pass `--space auto` and the name comes from the git remote, so everyone
+who clones a repo lands in the same memory without agreeing on a name,
+whether they cloned over ssh or https.
 
 The last two tools are how Scone extracts facts without an API key. Your
 agent already reads well and you already pay for it, so it does the

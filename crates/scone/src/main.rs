@@ -22,7 +22,9 @@ struct Cli {
     /// Data directory (default: ~/.scone)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// Space to operate in
+    /// Space to operate in. "auto" derives one from the current git
+    /// remote, so everyone on a repo shares its memory without
+    /// agreeing on a name.
     #[arg(long, global = true, default_value = "default")]
     space: String,
     /// Embedding provider: local ONNX model (default) or the model-free
@@ -339,7 +341,11 @@ fn data_dir(cli: &Cli) -> Result<PathBuf, String> {
 }
 
 fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if cli.space == "auto" {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        cli.space = scone::space::auto_space(&cwd);
+    }
     let dir = data_dir(&cli)?;
     let embedder = make_embedder(cli.embedder, &dir)?;
     let repair = matches!(cli.cmd, Cmd::Doctor { rebuild: true });
