@@ -43,6 +43,20 @@ enum Cmd {
         )]
         url: String,
     },
+    /// Grade answers produced by an outside reader against the dataset
+    Score {
+        /// The dataset the questions came from
+        #[arg(long, default_value = "bench-data/longmemeval_s.json")]
+        dataset: String,
+        /// JSONL of {question_id, answer} from whatever did the reading
+        answers: String,
+        /// Judge endpoint (OpenAI-compatible); omit for substring only
+        #[arg(long)]
+        llm_url: Option<String>,
+        /// Judge model at that endpoint
+        #[arg(long)]
+        llm_model: Option<String>,
+    },
     /// Run the harness over a dataset file
     Run {
         /// Path to a LongMemEval-format JSON file
@@ -104,6 +118,12 @@ enum Cmd {
         /// Retrieve for each clause of a multi-part question and fuse
         #[arg(long)]
         decompose: bool,
+        /// Write question and retrieved context per item to this JSONL
+        /// file and skip answering. This is the subscription-native
+        /// path: whatever agent you already pay for reads the pack and
+        /// answers, then `score` grades it.
+        #[arg(long)]
+        handoff: Option<String>,
         /// Two-pass reader: pass 1 extracts evidence, pass 2 answers
         /// from only that evidence (benchmarked 13 points WORSE than
         /// single-pass on an 8B reader; temporal questions collapse)
@@ -140,6 +160,68 @@ fn run() -> Result<(), String> {
             }
             std::fs::write(&out, &json).map_err(|e| e.to_string())?;
             println!("wrote {} items to {}", items, out.display());
+            Ok(())
+        }
+        Cmd::Score {
+            dataset,
+            answers,
+            llm_url,
+            llm_model,
+        } => {
+            let raw = std::fs::read_to_string(&dataset).map_err(|e| format!("{dataset}: {e}"))?;
+            let items = parse_dataset(&raw)?;
+            let by_id: std::collections::HashMap<&str, &scone_bench::BenchItem> =
+                items.iter().map(|i| (i.question_id.as_str(), i)).collect();
+            let judge = match (&llm_url, &llm_model) {
+                (Some(url), Some(model)) => {
+                    Some(scone_core::llm::OpenAiCompatible::new(url, model, None))
+                }
+                (None, None) => None,
+                _ => return Err("--llm-url and --llm-model go together".into()),
+            };
+            let given = std::fs::read_to_string(&answers).map_err(|e| format!("{answers}: {e}"))?;
+            let mut breakdown = scone_bench::TypeBreakdown::default();
+            let (mut n, mut substring, mut judged) = (0usize, 0usize, 0usize);
+            for line in given.lines().filter(|l| !l.trim().is_empty()) {
+                let row: serde_json::Value =
+                    serde_json::from_str(line).map_err(|e| format!("answers: {e}"))?;
+                let id = row["question_id"].as_str().unwrap_or_default();
+                let answer = row["answer"].as_str().unwrap_or_default();
+                let Some(item) = by_id.get(id) else {
+                    eprintln!("no such question in the dataset, skipped: {id}");
+                    continue;
+                };
+                n += 1;
+                let sub = scone_bench::substring_correct(&item.answer, answer);
+                substring += usize::from(sub);
+                let verdict = match &judge {
+                    Some(llm) => scone_bench::judge_correct_typed(
+                        llm,
+                        &item.question_type,
+                        &item.question,
+                        &item.answer,
+                        answer,
+                    )?,
+                    None => sub,
+                };
+                judged += usize::from(verdict);
+                breakdown.add(&item.question_type, false, sub, Some(verdict));
+                println!(
+                    "[{n}] {id} {} {}",
+                    if sub { "substring:YES" } else { "substring:NO" },
+                    if verdict { "judge:YES" } else { "judge:NO" }
+                );
+            }
+            if n == 0 {
+                return Err("no answers matched the dataset".into());
+            }
+            println!("scored {n} answers");
+            println!(
+                "accuracy(substring): {:.1}%",
+                substring as f64 / n as f64 * 100.0
+            );
+            println!("accuracy(judge): {:.1}%", judged as f64 / n as f64 * 100.0);
+            print!("{}", breakdown.report());
             Ok(())
         }
         Cmd::Fetch { url } => {
@@ -181,6 +263,7 @@ fn run() -> Result<(), String> {
             reranker,
             prompt,
             decompose,
+            handoff,
             two_pass,
         } => {
             let raw = std::fs::read_to_string(&dataset)
@@ -279,8 +362,24 @@ fn run() -> Result<(), String> {
             let mut recall_ms = Vec::new();
             let mut r_any = [0usize; 3];
             let mut r_all = [0usize; 3];
+            let mut handoff_out = String::new();
             for (i, item) in items.iter().enumerate() {
                 let outcome = scone_bench::run_item_with(&mut engine, item, i, &run_opts)?;
+                if handoff.is_some() {
+                    // The reader must not see the answer it is being
+                    // graded against, so only the question and what
+                    // retrieval actually found travel across.
+                    handoff_out.push_str(&format!(
+                        "{}\n",
+                        serde_json::json!({
+                            "question_id": item.question_id,
+                            "question_type": item.question_type,
+                            "question_date": item.question_date,
+                            "question": item.question,
+                            "context": outcome.retrieved,
+                        })
+                    ));
+                }
                 recall_ms.push(outcome.recall_ms);
                 for (slot, k) in [5usize, 10, 15].iter().enumerate() {
                     r_any[slot] += usize::from(outcome.recall_any_at(*k));
@@ -365,6 +464,13 @@ fn run() -> Result<(), String> {
             println!(
                 "note: substring scoring under-counts paraphrases; LLM-judge scoring is a follow-up"
             );
+            if let Some(path) = &handoff {
+                std::fs::write(path, &handoff_out).map_err(|e| format!("{path}: {e}"))?;
+                println!("handoff: wrote {} items to {path}", items.len());
+                println!(
+                    "answer each into a JSONL of {{question_id, answer}}, then: scone-bench score"
+                );
+            }
             Ok(())
         }
     }
