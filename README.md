@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <strong>94.0% Recall@15 on the full LongMemEval-S dataset (all 500 questions, every type) with 97.8% context reduction, fully on-device. No datacenter.</strong><br/>
-  <em>(Session-id ground truth, any-evidence; all-evidence 81.0%. Full per-type breakdown in the project ledger. Every number we publish comes from an executed run.)</em>
+  <strong>81.0% all-evidence Recall@15 on the full LongMemEval-S dataset (all 500 questions, every type) with 97.8% context reduction, fully on-device. No datacenter.</strong><br/>
+  <em>(Session-level, every evidence session required, the definition the benchmark's own harness reports. Any-evidence, the friendlier measure nobody publishes, is 94.0%. Denominator is all 500 including abstention items; the official script excludes those 30. Nothing published sits at k=15, so read this as our own baseline rather than a ranking. Every number here comes from an executed run.)</em>
 </p>
 
 ---
@@ -112,15 +112,23 @@ extraction calls or they return empty answers under token caps; scone
 sends Ollama's `think: false` when configured to.
 
 Expect a local model to retrieve well and answer imperfectly. Retrieval
-lands the right session for 90 to 100% of questions in our benchmarks
-while an 8B reader converts under half of them into a correct answer, and
-the gap is entirely reasoning over evidence, not finding it. Attempts to
-close it by asking more of the model backfired: an evidence-chaining
-prompt cost 10 points, and splitting the work into extract-then-answer
-passes cost 13 and zeroed out temporal questions. Small readers improve
-when you shrink their job, not when you add structure to it. For answer
-quality beyond that ceiling, point the answer step at a larger model, or
-let your coding agent do the reading through the MCP server.
+lands the right session for most questions while a small local reader
+converts far fewer of them into correct answers, and the gap is
+reasoning over evidence rather than finding it. Two attempts to close it
+by asking more of the model backfired and are recorded as failures: an
+evidence-chaining prompt cost 10 points, and splitting the work into
+extract-then-answer passes cost 13 and zeroed out temporal questions.
+Small readers improve when you shrink their job, not when you add
+structure to it.
+
+We are not quoting an end-task accuracy at the moment, because the
+figure we published was measured with a harness that handed the reader
+undated context. A quarter of that benchmark is arithmetic over dates,
+so those questions were unanswerable as served, by any reader. The
+packaging is fixed and the measurements are being re-run; the number
+will come back with the conditions stated. For answer quality beyond a
+small model's ceiling, point the answer step at a larger model, or let
+your coding agent do the reading through the MCP server.
 
 ## See what it remembers
 
