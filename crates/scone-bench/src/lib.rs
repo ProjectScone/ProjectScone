@@ -330,7 +330,11 @@ pub fn run_item_with(
         ));
     }
     for i in &pack.items {
-        retrieved.push_str(&format!("- {}\n", i.text));
+        // Dated, exactly as every product surface serves it. Without
+        // this the reader sees "today" and "last Saturday" with nothing
+        // to anchor them, so temporal questions are unanswerable by
+        // construction and the score measures the harness.
+        retrieved.push_str(&format!("- [{}] {}\n", i.day(), i.text));
     }
     // Computed before generation: a date subtraction is arithmetic, and
     // asking a language model to do it is how this category became the
