@@ -36,6 +36,61 @@ fn bm25_query(query: &str) -> String {
         kept.join(" ")
     }
 }
+/// A sub-query counts for less than the question actually asked, so a
+/// single clause cannot hijack the ranking on its own.
+const W_SUBQUERY: f32 = 0.5;
+/// Cost ceiling on decomposition. Two extra clauses cover the shape of
+/// nearly every multi-hop question without turning one recall into six.
+const MAX_SUBQUERIES: usize = 2;
+
+/// Split a question into the parts it is really asking, without a
+/// model. A multi-hop question mentions two things, and one embedding
+/// averages them into a point near neither, so the evidence for the
+/// weaker half never surfaces. Retrieving each part separately and
+/// fusing the results is the cheap fix.
+///
+/// Deterministic on purpose: answering must not require an API key,
+/// and a retrieval step that calls an LLM cannot run offline.
+pub fn decompose(query: &str) -> Vec<String> {
+    const SPLITS: [&str; 6] = [" and ", " or ", "; ", ", and ", ", but ", " as well as "];
+    let lower = query.to_lowercase();
+    let mut parts: Vec<&str> = vec![&lower];
+    for sep in SPLITS {
+        parts = parts.iter().flat_map(|p| p.split(sep)).collect();
+    }
+    let mut out = Vec::new();
+    for part in parts {
+        let part = part.trim().trim_end_matches(['?', '.', ',']);
+        // A fragment needs enough of its own meaning to retrieve on.
+        // Two words is not enough when both are function words: "or
+        // not" would cost an index pass and match nothing in
+        // particular, so at least one word must carry real weight.
+        let content: Vec<&str> = part
+            .split_whitespace()
+            .filter(|t| {
+                !QUERY_STOPWORDS.contains(
+                    &t.to_lowercase()
+                        .trim_matches(|c: char| !c.is_alphanumeric()),
+                )
+            })
+            .collect();
+        let substantial = content
+            .iter()
+            .any(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).len() >= 4);
+        if content.len() >= 2
+            && substantial
+            && part.len() < query.len()
+            && !out.iter().any(|o| o == part)
+        {
+            out.push(part.to_owned());
+        }
+        if out.len() == MAX_SUBQUERIES {
+            break;
+        }
+    }
+    out
+}
+
 const RRF_K: f32 = 60.0;
 const W_FUSED: f32 = 0.8;
 const W_RECENCY: f32 = 0.2;
@@ -61,6 +116,10 @@ pub struct RecallOpts {
     /// reader-facing surfaces (ask, MCP recall) where a downstream model
     /// benefits from surrounding context.
     pub expand_neighbors: bool,
+    /// Retrieve for each clause of a multi-part question as well as the
+    /// whole, and fuse. Costs one extra index pass per clause; the
+    /// embeddings are batched into the same call.
+    pub decompose: bool,
     /// Focus retrieval to episodes carrying ALL of these tags (facts
     /// narrow through provenance). Empty = no tag filter.
     pub tags: Vec<String>,
@@ -73,6 +132,7 @@ impl Default for RecallOpts {
             budget_bytes: None,
             as_of: None,
             expand_neighbors: false,
+            decompose: false,
             tags: Vec::new(),
         }
     }
@@ -164,38 +224,52 @@ impl Engine {
         // evaluated at `as_of` (spec §5 I2/I3 make this a WHERE clause).
         let facts = self.recall_facts(space, query, opts)?;
 
+        // The question as asked always leads; its clauses follow at a
+        // lower weight when decomposition is on.
+        let mut queries: Vec<String> = vec![query.to_owned()];
+        if opts.decompose {
+            queries.extend(decompose(query));
+        }
+        // One embedding call for every query, not one per query.
+        let query_vectors = self
+            .embedder
+            .embed(&queries.iter().map(String::as_str).collect::<Vec<_>>())?;
+
         // Candidate generation: each generator may degrade, never abort.
-        let fts_hits = match self.fts.search(
-            space.id() as u64,
-            &bm25_query(query),
-            CANDIDATES_PER_GENERATOR,
-        ) {
-            Ok(hits) => hits,
-            Err(SconeError::InvalidInput(msg)) => {
-                degraded.push(format!("fts: {msg}"));
-                Vec::new()
-            }
-            Err(other) => return Err(other),
-        };
-        let vec_hits = {
-            let q = self.embedder.embed(&[query])?;
-            match q.first() {
+        let mut fused: HashMap<u64, f32> = HashMap::new();
+        let mut similarity: HashMap<u64, f32> = HashMap::new();
+        for (i, sub) in queries.iter().enumerate() {
+            let weight = if i == 0 { 1.0 } else { W_SUBQUERY };
+            let fts_hits = match self.fts.search(
+                space.id() as u64,
+                &bm25_query(sub),
+                CANDIDATES_PER_GENERATOR,
+            ) {
+                Ok(hits) => hits,
+                Err(SconeError::InvalidInput(msg)) => {
+                    degraded.push(format!("fts: {msg}"));
+                    Vec::new()
+                }
+                Err(other) => return Err(other),
+            };
+            let vec_hits = match query_vectors.get(i) {
                 Some(qv) => self.vectors.search(qv, CANDIDATES_PER_GENERATOR)?,
                 None => Vec::new(),
+            };
+            // Keep the vector lane's cosine similarity before fusion
+            // throws it away. Rank fusion answers "which of these is
+            // best", never "is any of this about the question", and
+            // only the second question can decide whether to inject
+            // anything at all. A chunk keeps its strongest match.
+            for (chunk_id, sim) in &vec_hits {
+                let slot = similarity.entry(*chunk_id).or_insert(*sim);
+                *slot = slot.max(*sim);
             }
-        };
-
-        // Keep the vector lane's cosine similarity before fusion throws
-        // it away. Rank fusion answers "which of these is best", never
-        // "is any of this actually about the question", and only the
-        // second question can decide whether to inject anything at all.
-        let similarity: HashMap<u64, f32> = vec_hits.iter().copied().collect();
-
-        // Reciprocal-rank fusion across both ranked lists.
-        let mut fused: HashMap<u64, f32> = HashMap::new();
-        for hits in [&fts_hits, &vec_hits] {
-            for (rank, (chunk_id, _)) in hits.iter().enumerate() {
-                *fused.entry(*chunk_id).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            // Reciprocal-rank fusion across both ranked lists.
+            for hits in [&fts_hits, &vec_hits] {
+                for (rank, (chunk_id, _)) in hits.iter().enumerate() {
+                    *fused.entry(*chunk_id).or_insert(0.0) += weight / (RRF_K + rank as f32 + 1.0);
+                }
             }
         }
         let max_fused = fused

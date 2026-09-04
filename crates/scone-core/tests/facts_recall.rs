@@ -106,3 +106,33 @@ fn facts_are_space_scoped() {
     let pack = e.recall(&other, "mark", &RecallOpts::default()).unwrap();
     assert!(pack.facts.is_empty());
 }
+
+/// A multi-part question mentions two things, and one embedding
+/// averages them into a point near neither. Splitting the clauses and
+/// fusing is how the weaker half's evidence surfaces at all.
+#[test]
+fn decomposition_splits_multi_part_questions_and_leaves_simple_ones_alone() {
+    use scone_core::decompose;
+
+    let parts = decompose("what was the rate limit and what did we change it to");
+    assert_eq!(
+        parts.len(),
+        2,
+        "both clauses retrieve separately: {parts:?}"
+    );
+    assert!(parts[0].contains("rate limit"));
+    assert!(parts[1].contains("change"));
+
+    // A single question costs nothing extra.
+    assert!(
+        decompose("who is the office dog").is_empty(),
+        "one clause needs no decomposition"
+    );
+
+    // Fragments too thin to retrieve on are not worth an index pass.
+    assert!(decompose("is it and or not").is_empty());
+
+    // The cost is bounded however many clauses a question has.
+    let many = decompose("alpha beta and gamma delta and epsilon zeta and eta theta");
+    assert!(many.len() <= 2, "bounded: {many:?}");
+}

@@ -215,6 +215,7 @@ impl SconeMcp {
                     budget_bytes: None,
                     as_of: p.as_of.clone(),
                     expand_neighbors: true,
+                    decompose: true,
                     tags: p.tags.clone().unwrap_or_default(),
                 },
             )?;

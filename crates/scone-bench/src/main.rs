@@ -101,6 +101,9 @@ enum Cmd {
         /// on an 8B reader)
         #[arg(long, default_value = "v1")]
         prompt: String,
+        /// Retrieve for each clause of a multi-part question and fuse
+        #[arg(long)]
+        decompose: bool,
         /// Two-pass reader: pass 1 extracts evidence, pass 2 answers
         /// from only that evidence (benchmarked 13 points WORSE than
         /// single-pass on an 8B reader; temporal questions collapse)
@@ -177,6 +180,7 @@ fn run() -> Result<(), String> {
             granularity,
             reranker,
             prompt,
+            decompose,
             two_pass,
         } => {
             let raw = std::fs::read_to_string(&dataset)
@@ -242,6 +246,7 @@ fn run() -> Result<(), String> {
                 granularity,
                 answer_system,
                 two_pass,
+                decompose,
             };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {

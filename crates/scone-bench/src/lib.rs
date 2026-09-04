@@ -224,6 +224,8 @@ pub struct RunOpts {
     pub answer_system: Option<String>,
     /// Two-pass reading: extract evidence first, answer from only that.
     pub two_pass: bool,
+    /// Retrieve for each clause of a multi-part question and fuse.
+    pub decompose: bool,
 }
 
 impl Default for RunOpts {
@@ -233,6 +235,7 @@ impl Default for RunOpts {
             granularity: Granularity::Session,
             answer_system: None,
             two_pass: false,
+            decompose: false,
         }
     }
 }
@@ -304,6 +307,7 @@ pub fn run_item_with(
                 budget_bytes: None,
                 as_of: None,
                 expand_neighbors: false,
+                decompose: opts.decompose,
                 tags: Vec::new(),
             },
         )

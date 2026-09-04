@@ -28,7 +28,7 @@ pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome, ScanReport};
 pub use portability::ImportReport;
 pub use profile::Profile;
-pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts};
+pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts, decompose};
 
 #[derive(Debug)]
 pub struct DoctorReport {

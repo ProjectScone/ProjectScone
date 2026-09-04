@@ -217,6 +217,7 @@ async fn get_recall(
         budget_bytes: None,
         as_of: query.as_of.clone(),
         expand_neighbors: false,
+        decompose: true,
         tags: query
             .tags
             .as_deref()
