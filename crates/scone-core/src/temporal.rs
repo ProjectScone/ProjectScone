@@ -543,7 +543,23 @@ impl crate::Engine {
                 ..Default::default()
             },
         )?;
-        let Some(best) = pack.items.first() else {
+        // Pick the closest match, not the best-ranked result. Ranking
+        // folds in recency, which is right for recall and wrong here:
+        // grounding asks which episode this phrase describes, and the
+        // answer does not become more true for being recent. Measured
+        // on a two-episode store, "my visit to the Museum of Modern
+        // Art" ranked the later Met episode first and would have dated
+        // the wrong event.
+        let best = pack
+            .items
+            .iter()
+            .max_by(|a, b| {
+                a.similarity
+                    .unwrap_or(f32::MIN)
+                    .total_cmp(&b.similarity.unwrap_or(f32::MIN))
+            })
+            .or_else(|| pack.items.first());
+        let Some(best) = best else {
             return Ok(None);
         };
         // An anchor nothing in memory matches would put a confident

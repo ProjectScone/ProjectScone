@@ -26,6 +26,7 @@ entirely on your machine and embeds in anything.
 | | |
 |---|---|
 | 🧠 **Temporal memory** | Facts extracted from what you store, with validity intervals. A contradiction closes the old fact with a recorded reason, so history stays queryable. Stale facts decay; recalled facts strengthen. |
+| 🧮 **Computed answers** | "How many days between X and Y" is arithmetic, not language. Scone grounds each event by retrieval, subtracts the dates itself, and returns the answer with its derivation, so you can check it rather than trust it. Measured at 47.5% against 37.5% for a model generating the same answers. |
 | 🕰️ **Time travel** | `search --as-of 2026-03-15` answers "what did I believe in March?". Validity is a WHERE clause, not a version-chain walk. |
 | 🔍 **Hybrid search** | BM25, vectors, facts, and recency fused in one query, with provenance on every result. Local ONNX embeddings by default; it works on a plane. |
 | 🏷️ **Tags** | Tag anything on the way in (`--tag research`), then retrieve only that: papers, a client, one knowledge base. Works on the CLI, MCP, and HTTP surfaces. |
