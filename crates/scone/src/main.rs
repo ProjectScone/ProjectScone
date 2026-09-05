@@ -168,7 +168,9 @@ enum Cmd {
     /// Ask a question against your memory (recall + optional LLM answer)
     Ask {
         question: String,
-        #[arg(long, default_value_t = 10)]
+        /// Five by default: measured best for a small reader, and it
+        /// costs roughly half the tokens of ten for the same accuracy.
+        #[arg(long, default_value_t = 5)]
         limit: usize,
     },
     /// Distill pending episodes into temporal facts (needs --llm)

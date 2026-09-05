@@ -199,7 +199,11 @@ impl SconeMcp {
                 p.query.len()
             )));
         }
-        let limit = p.limit.unwrap_or(10).clamp(1, MAX_LIMIT);
+        // Five, not ten: on a 30-question sweep an 8B reader scored
+        // 40.0% at five against 36.7% at ten and fifteen, while five
+        // hands over roughly half the bytes. Callers who want more can
+        // still ask for it.
+        let limit = p.limit.unwrap_or(5).clamp(1, MAX_LIMIT);
         let include_profile = p.include_profile.unwrap_or(true);
         let result = self.with_space(&p.space, |engine, space| {
             let profile = if include_profile {
