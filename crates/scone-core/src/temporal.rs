@@ -576,6 +576,18 @@ impl crate::Engine {
     }
 }
 
+/// Today, as an RFC3339 instant. Relative references like "a week ago"
+/// mean nothing without an anchor, and when a caller does not supply
+/// one the only honest anchor is now.
+pub fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    format!("{}T00:00:00Z", civil_date(days))
+}
+
 /// A resolved span of days, inclusive, as calendar dates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {

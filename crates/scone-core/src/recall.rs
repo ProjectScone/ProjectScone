@@ -218,7 +218,22 @@ impl Engine {
         // Staged index writes become visible here (flush-on-recall).
         self.flush_indexes()?;
         let mut degraded = Vec::new();
-        let date_windows = crate::timeparse::date_windows(query);
+        // Explicit dates in the query, plus the relative ones. "On
+        // 2023-05-20" was already understood; "a week ago" was not, so
+        // those questions got no date signal at all and were left to
+        // topical similarity, which is how a question about last week
+        // comes back with the best-matching memory from any week.
+        let mut date_windows = crate::timeparse::date_windows(query);
+        let anchor = opts
+            .as_of
+            .clone()
+            .unwrap_or_else(crate::temporal::now_rfc3339);
+        if let Some(window) = crate::temporal::relative_window(query, &anchor) {
+            date_windows.push(crate::timeparse::DateWindow {
+                start: window.start,
+                end: window.end,
+            });
+        }
 
         // Fact generator: entity/predicate/object term match, validity
         // evaluated at `as_of` (spec §5 I2/I3 make this a WHERE clause).
