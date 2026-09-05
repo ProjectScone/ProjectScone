@@ -27,6 +27,9 @@ pub enum Unit {
 
 impl Unit {
     fn parse(word: &str) -> Option<Unit> {
+        // Words arrive with the punctuation people type: "weeks?" and
+        // "months," must read as units, not as unknown tokens.
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphabetic());
         match word.trim_end_matches('s') {
             "day" => Some(Unit::Days),
             "week" => Some(Unit::Weeks),
@@ -509,5 +512,165 @@ impl crate::Engine {
             date: best.created_at.clone(),
             similarity: best.similarity,
         }))
+    }
+}
+
+/// A resolved span of days, inclusive, as calendar dates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    pub start: String,
+    pub end: String,
+}
+
+/// Resolve a relative time reference against the day a question was
+/// asked: "a week ago", "last month", "in the past three days".
+///
+/// Explicit dates are already handled by [`crate::timeparse::date_windows`].
+/// This covers the other half, the references that only mean something
+/// relative to now, which a reader otherwise has to resolve by guessing
+/// which episode looks about right.
+///
+/// The window is deliberately generous. "A week ago" in speech means
+/// roughly a week, not exactly seven days, so a tight window would
+/// exclude the very episode being asked about.
+pub fn relative_window(question: &str, as_of: &str) -> Option<Window> {
+    let q = question.to_lowercase();
+    let today = day_number(as_of)?;
+
+    // "in the past N days/weeks/months" spans from then until now.
+    if let Some(idx) = q.find("past ").or_else(|| q.find("last ")) {
+        let rest = &q[idx + 5..];
+        let mut words = rest.split_whitespace();
+        let first = words.next().unwrap_or_default();
+        let count = number_word(first);
+        if let (Some(count), Some(unit)) = (count, words.next().and_then(Unit::parse)) {
+            let span = span_days(unit) * count;
+            return Some(window(today - span, today));
+        }
+        // "last week" / "last month" with no count.
+        if let Some(unit) = Unit::parse(first) {
+            let span = span_days(unit);
+            return Some(window(today - span, today));
+        }
+    }
+
+    // "N units ago" points at a moment, so allow slack either side.
+    if let Some(idx) = q.find(" ago") {
+        let before = &q[..idx];
+        let mut words: Vec<&str> = before.split_whitespace().collect();
+        let unit = words.pop().and_then(Unit::parse)?;
+        let count = words
+            .pop()
+            .and_then(number_word)
+            .or(Some(1))
+            .filter(|c| *c > 0)?;
+        let span = span_days(unit) * count;
+        let slack = (span / 4).max(2);
+        return Some(window(today - span - slack, today - span + slack));
+    }
+    None
+}
+
+fn span_days(unit: Unit) -> i64 {
+    match unit {
+        Unit::Days => 1,
+        Unit::Weeks => 7,
+        Unit::Months => 30,
+    }
+}
+
+/// Small counting words, plus digits. People say "three weeks ago" far
+/// more often than they say "3 weeks ago".
+fn number_word(word: &str) -> Option<i64> {
+    if let Ok(n) = word.parse::<i64>() {
+        return Some(n);
+    }
+    Some(match word {
+        "a" | "an" | "one" => 1,
+        "two" | "couple" => 2,
+        "three" => 3,
+        "four" => 4,
+        "five" => 5,
+        "six" => 6,
+        "seven" => 7,
+        "eight" => 8,
+        "nine" => 9,
+        "ten" => 10,
+        _ => return None,
+    })
+}
+
+fn window(start: i64, end: i64) -> Window {
+    Window {
+        start: format!("{}T00:00:00Z", civil_date(start)),
+        end: format!("{}T23:59:59Z", civil_date(end)),
+    }
+}
+
+/// Calendar date for a day number, the inverse of [`day_number`].
+fn civil_date(days: i64) -> String {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+#[cfg(test)]
+mod relative_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn a_date_survives_the_round_trip_through_day_numbers() {
+        for date in ["1970-01-01", "2000-02-29", "2023-05-20", "2026-12-31"] {
+            let n = day_number(&format!("{date}T00:00:00Z")).unwrap();
+            assert_eq!(civil_date(n), date);
+        }
+    }
+
+    #[test]
+    fn a_week_ago_lands_on_the_week_before() {
+        let w = relative_window(
+            "Which book did I finish a week ago?",
+            "2023-05-20T00:00:00Z",
+        )
+        .unwrap();
+        // Seven days back, with slack either side rather than a single day.
+        assert!(w.start.as_str() < "2023-05-13T00:00:00Z", "{w:?}");
+        assert!(w.end.as_str() > "2023-05-13T00:00:00Z", "{w:?}");
+        assert!(w.end.as_str() < "2023-05-20T00:00:00Z", "{w:?}");
+    }
+
+    #[test]
+    fn a_span_reaches_from_then_until_now() {
+        let w = relative_window(
+            "What did I buy in the past three weeks?",
+            "2023-05-22T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(w.start, "2023-05-01T00:00:00Z");
+        assert_eq!(w.end, "2023-05-22T23:59:59Z");
+    }
+
+    #[test]
+    fn counting_words_and_digits_both_work() {
+        let a = relative_window("what happened two months ago", "2023-06-15T00:00:00Z");
+        let b = relative_window("what happened 2 months ago", "2023-06-15T00:00:00Z");
+        assert_eq!(a, b);
+        assert!(a.is_some());
+    }
+
+    #[test]
+    fn questions_without_a_relative_reference_resolve_to_nothing() {
+        assert!(relative_window("what is my dog's name", "2023-05-20T00:00:00Z").is_none());
+        assert!(relative_window("how many days ago", "bad date").is_none());
+        assert!(relative_window("", "2023-05-20T00:00:00Z").is_none());
     }
 }
