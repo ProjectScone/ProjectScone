@@ -13,6 +13,7 @@ fn coverage_over_the_real_questions() {
     let data: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let items = data.as_array().unwrap();
     let (mut total, mut interval, mut since, mut order, mut declined) = (0, 0, 0, 0, 0);
+    let (mut category, mut span) = (0, 0);
     let mut misses = Vec::new();
     for item in items {
         if item["question_type"].as_str() != Some("temporal-reasoning") {
@@ -24,6 +25,8 @@ fn coverage_over_the_real_questions() {
             Some(Plan::Interval { .. }) => interval += 1,
             Some(Plan::Since { .. }) => since += 1,
             Some(Plan::Order { .. }) => order += 1,
+            Some(Plan::OrderCategory { .. }) => category += 1,
+            Some(Plan::Span { .. }) => span += 1,
             None => {
                 declined += 1;
                 if misses.len() < 12 {
@@ -34,7 +37,9 @@ fn coverage_over_the_real_questions() {
     }
     let covered = total - declined;
     println!("temporal questions: {total}");
-    println!("  interval {interval}  since {since}  order {order}");
+    println!(
+        "  interval {interval}  since {since}  order {order}  category {category}  span {span}"
+    );
     println!("  covered {covered} ({}%)", covered * 100 / total.max(1));
     println!("  declined {declined}");
     for m in &misses {

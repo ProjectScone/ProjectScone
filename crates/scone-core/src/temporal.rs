@@ -72,6 +72,36 @@ pub enum Plan {
     Since { event: String, unit: Unit },
     /// Put these events on a line, earliest first.
     Order { events: Vec<String> },
+    /// Order the members of a category the question does not list, as
+    /// in "the order of the six museums I visited". `expected` is the
+    /// count the question states, when it states one.
+    OrderCategory {
+        category: String,
+        expected: Option<usize>,
+    },
+    /// How long one thing took, from its earliest mention to its
+    /// latest: "how many days did it take me to finish the book".
+    Span { subject: String, unit: Unit },
+}
+
+/// Counting words a question uses to say how many members it expects.
+fn stated_count(q: &str) -> Option<usize> {
+    for (word, n) in [
+        ("two", 2usize),
+        ("three", 3),
+        ("four", 4),
+        ("five", 5),
+        ("six", 6),
+        ("seven", 7),
+        ("eight", 8),
+        ("nine", 9),
+        ("ten", 10),
+    ] {
+        if q.contains(&format!(" {word} ")) {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Whether ordering questions are planned at all. Off: see the note in
@@ -147,7 +177,29 @@ pub fn plan(question: &str) -> Option<Plan> {
         }
     }
 
+    // "the order of the six museums I visited": a category, not a list.
+    if ORDER_ENABLED && let Some((_, tail)) = q.split_once("order of") {
+        let category = tidy(tail.split(", from").next().unwrap_or(tail));
+        if category.split_whitespace().count() >= 2 {
+            return Some(Plan::OrderCategory {
+                expected: stated_count(q),
+                category,
+            });
+        }
+    }
+
     let unit = unit_of(q)?;
+
+    // "how many days did it take me to X" / "how long did I spend on X"
+    // is the distance from a thing's first mention to its last.
+    for marker in [" did it take me to ", " did i spend on ", " did i spend "] {
+        if let Some((_, tail)) = q.split_once(marker) {
+            let subject = tidy(tail);
+            if subject.split_whitespace().count() >= 2 {
+                return Some(Plan::Span { subject, unit });
+            }
+        }
+    }
 
     // Interval: "between A and B", "from A to B", "since A when B".
     if let Some(rest) = q.split_once(" between ").map(|(_, r)| r)
@@ -231,6 +283,13 @@ fn split_events(q: &str) -> Vec<String> {
         .collect();
     if quoted.len() >= 2 {
         return quoted;
+    }
+    // "among A, B and C" introduces a list just as a colon does.
+    if let Some((_, tail)) = q.split_once(" among ") {
+        let events = split_list(tail);
+        if events.len() >= 2 {
+            return events;
+        }
     }
     // A colon introduces the list: "...from first to last: A, B, and C".
     if let Some((_, tail)) = q.split_once(':') {
@@ -414,6 +473,8 @@ pub struct TemporalAnswer {
 #[derive(Debug, Clone)]
 pub struct Anchor {
     pub phrase: String,
+    /// What the episode actually says, for answers that name members.
+    pub text: String,
     pub episode_id: i64,
     pub date: String,
     pub similarity: Option<f32>,
@@ -489,6 +550,66 @@ impl crate::Engine {
                     ),
                 }))
             }
+            Plan::Span { subject, unit } => {
+                let found = self.ground_many(space, &subject, 8)?;
+                // One mention cannot bound a span, and a thing that
+                // started and finished on one day is not what the
+                // question is asking about.
+                if found.len() < 2 {
+                    return Ok(None);
+                }
+                let first = found.iter().min_by(|a, b| a.date.cmp(&b.date));
+                let last = found.iter().max_by(|a, b| a.date.cmp(&b.date));
+                let (Some(first), Some(last)) = (first, last) else {
+                    return Ok(None);
+                };
+                let Some(days) = days_between(&first.date, &last.date) else {
+                    return Ok(None);
+                };
+                if days <= 0 {
+                    return Ok(None);
+                }
+                Ok(Some(TemporalAnswer {
+                    value: format!("{} {}", unit.from_days(days), unit.label()),
+                    derivation: format!(
+                        "{subject} first on {} (episode {}), last on {} (episode {}): {days} days",
+                        first.date.split('T').next().unwrap_or(&first.date),
+                        first.episode_id,
+                        last.date.split('T').next().unwrap_or(&last.date),
+                        last.episode_id
+                    ),
+                }))
+            }
+            Plan::OrderCategory { category, expected } => {
+                let want = expected.unwrap_or(3).clamp(2, 8);
+                let mut found = self.ground_many(space, &category, want + 2)?;
+                // If the question says how many there were, finding a
+                // different number means the wrong things were found,
+                // and ordering them would be confident nonsense.
+                match expected {
+                    Some(n) if found.len() != n => return Ok(None),
+                    None if found.len() < 2 => return Ok(None),
+                    _ => {}
+                }
+                found.sort_by(|a, b| a.date.cmp(&b.date));
+                let value = found
+                    .iter()
+                    .map(|a| a.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(", then ");
+                let derivation = found
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "episode {} on {}",
+                            a.episode_id,
+                            a.date.split('T').next().unwrap_or(&a.date)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Ok(Some(TemporalAnswer { value, derivation }))
+            }
             Plan::Order { events } => {
                 let mut grounded = Vec::new();
                 for event in &events {
@@ -524,6 +645,49 @@ impl crate::Engine {
                 }))
             }
         }
+    }
+
+    /// Find several distinct episodes a phrase describes, best first.
+    /// Ordering a category or bounding a span needs the members, not
+    /// the single best match, and two chunks of one episode are one
+    /// event however well they both match.
+    fn ground_many(
+        &mut self,
+        space: &crate::auth::ScopedSpace,
+        phrase: &str,
+        limit: usize,
+    ) -> crate::Result<Vec<Anchor>> {
+        if phrase.split_whitespace().count() < 2 {
+            return Ok(Vec::new());
+        }
+        let pack = self.recall(
+            space,
+            phrase,
+            &crate::RecallOpts {
+                limit: limit * 3,
+                ..Default::default()
+            },
+        )?;
+        let mut out: Vec<Anchor> = Vec::new();
+        for item in &pack.items {
+            if item.similarity.is_some_and(|s| s < MIN_ANCHOR_SIMILARITY) {
+                continue;
+            }
+            if out.iter().any(|a| a.episode_id == item.episode_id) {
+                continue;
+            }
+            out.push(Anchor {
+                phrase: phrase.to_owned(),
+                text: item.text.chars().take(120).collect(),
+                episode_id: item.episode_id,
+                date: item.created_at.clone(),
+                similarity: item.similarity,
+            });
+            if out.len() == limit {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Find the dated episode an event phrase refers to.
@@ -569,6 +733,7 @@ impl crate::Engine {
         }
         Ok(Some(Anchor {
             phrase: phrase.to_owned(),
+            text: best.text.chars().take(120).collect(),
             episode_id: best.episode_id,
             date: best.created_at.clone(),
             similarity: best.similarity,
