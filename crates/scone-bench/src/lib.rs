@@ -226,6 +226,10 @@ pub struct RunOpts {
     pub two_pass: bool,
     /// Retrieve for each clause of a multi-part question and fuse.
     pub decompose: bool,
+    /// Prepend the space's profile, as the MCP surface does by
+    /// default. Preference questions are graded against a rubric about
+    /// the user's background, which passage retrieval does not surface.
+    pub include_profile: bool,
     /// Answer date arithmetic by computing it, falling back to the
     /// reader when the question cannot be read as an operator.
     pub compute_temporal: bool,
@@ -243,6 +247,7 @@ impl Default for RunOpts {
             answer_system: None,
             two_pass: false,
             decompose: false,
+            include_profile: false,
             compute_temporal: false,
             recall_limit: 15,
         }
@@ -323,6 +328,21 @@ pub fn run_item_with(
         .map_err(|e| e.to_string())?;
     let recall_ms = started.elapsed().as_secs_f64() * 1e3;
     let mut retrieved = String::new();
+    // The product leads with who the user is; a benchmark that omits it
+    // is measuring something the product does not ship.
+    if opts.include_profile
+        && let Ok(profile) = engine.profile(&space, 5)
+    {
+        for f in &profile.static_facts {
+            retrieved.push_str(&format!(
+                "- about me: {} {} {}\n",
+                f.subject, f.predicate, f.object
+            ));
+        }
+        for d in &profile.dynamic {
+            retrieved.push_str(&format!("- recently: {}\n", d.replace('\n', " ")));
+        }
+    }
     for f in &pack.facts {
         retrieved.push_str(&format!(
             "- fact: {} {} {}\n",

@@ -118,6 +118,9 @@ enum Cmd {
         /// Retrieve for each clause of a multi-part question and fuse
         #[arg(long)]
         decompose: bool,
+        /// Prepend the space profile, as the MCP surface does
+        #[arg(long)]
+        profile: bool,
         /// Compute date arithmetic instead of generating it
         #[arg(long)]
         compute_temporal: bool,
@@ -269,6 +272,7 @@ fn run() -> Result<(), String> {
             reranker,
             prompt,
             decompose,
+            profile,
             compute_temporal,
             recall_limit,
             handoff,
@@ -338,6 +342,7 @@ fn run() -> Result<(), String> {
                 answer_system,
                 two_pass,
                 decompose,
+                include_profile: profile,
                 compute_temporal,
                 recall_limit,
             };
