@@ -74,6 +74,11 @@ pub enum Plan {
     Order { events: Vec<String> },
 }
 
+/// Whether ordering questions are planned at all. Off: see the note in
+/// `plan`. The code stays so the fix has somewhere to land and the
+/// tests keep documenting the intended behaviour.
+const ORDER_ENABLED: bool = false;
+
 /// Phrases that mark the boundary between the question's framing and
 /// the event being asked about.
 const LEAD_INS: [&str; 10] = [
@@ -115,18 +120,26 @@ pub fn plan(question: &str) -> Option<Plan> {
     let q = question.to_lowercase();
     let q = q.trim();
 
-    // Ordering: several events, one line, earliest first.
-    if q.contains("order of")
-        || q.contains("from earliest to latest")
-        || q.contains("from first to last")
-        || q.contains("in the order from")
+    // Ordering is disabled. Measured on 40 temporal questions it
+    // answered with fragments of the question itself, because
+    // split_events cuts the whole sentence on commas and "and" and
+    // cannot tell an interrogative clause from an event. A wrong
+    // computed answer arrives stated as fact, which is worse than a
+    // hedged generated one, so it stays off until it earns its place.
+    if ORDER_ENABLED
+        && (q.contains("order of")
+            || q.contains("from earliest to latest")
+            || q.contains("from first to last")
+            || q.contains("in the order from"))
     {
         let events = split_events(q);
         if events.len() >= 2 {
             return Some(Plan::Order { events });
         }
     }
-    if (q.contains("which") || q.contains("what")) && (q.contains(" first") || q.contains(" last"))
+    if ORDER_ENABLED
+        && (q.contains("which") || q.contains("what"))
+        && (q.contains(" first") || q.contains(" last"))
     {
         let events = split_events(q);
         if events.len() >= 2 {
@@ -322,7 +335,12 @@ mod tests {
         }
     }
 
+    /// Ordering is gated off after E24 measured it answering with
+    /// fragments of the question. The test documents what the operator
+    /// must do before it can be switched back on, and is ignored until
+    /// then rather than deleted, so the requirement does not vanish.
     #[test]
+    #[ignore = "Order is disabled: split_events cannot separate an event from the question"]
     fn ordering_questions_are_recognized_with_their_events() {
         let p = plan(
             "Which three events happened in the order from first to last: \
