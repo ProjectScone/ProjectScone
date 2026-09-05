@@ -77,7 +77,7 @@ pub enum Plan {
 /// Whether ordering questions are planned at all. Off: see the note in
 /// `plan`. The code stays so the fix has somewhere to land and the
 /// tests keep documenting the intended behaviour.
-const ORDER_ENABLED: bool = false;
+const ORDER_ENABLED: bool = true;
 
 /// Phrases that mark the boundary between the question's framing and
 /// the event being asked about.
@@ -211,10 +211,17 @@ fn split_pair(rest: &str) -> Option<(String, String)> {
     (!a.is_empty() && !b.is_empty()).then_some((a, b))
 }
 
-/// Pull the listed events out of an ordering question. They arrive
-/// quoted, comma separated, or joined by "and".
+/// Pull the listed events out of an ordering question, or nothing.
+///
+/// Only questions that actually enumerate their events can be planned.
+/// "Which event happened first, my cousin's wedding or Michael's
+/// engagement party?" names both; "What is the order of the six museums
+/// I visited?" names none of them and needs a different operator that
+/// finds the members first. Splitting the whole sentence, which is what
+/// this used to do, turns "which trip did i take first" into an event
+/// and produces a confident answer built from the question itself.
 fn split_events(q: &str) -> Vec<String> {
-    // A quoted list is unambiguous, so prefer it when present.
+    // A quoted list is unambiguous, so prefer it.
     let quoted: Vec<String> = q
         .split('\'')
         .skip(1)
@@ -225,11 +232,32 @@ fn split_events(q: &str) -> Vec<String> {
     if quoted.len() >= 2 {
         return quoted;
     }
-    let tail = q
-        .split_once(':')
-        .map(|(_, r)| r)
-        .or_else(|| q.split_once(" order from first to last").map(|(_, r)| r))
-        .unwrap_or(q);
+    // A colon introduces the list: "...from first to last: A, B, and C".
+    if let Some((_, tail)) = q.split_once(':') {
+        let events = split_list(tail);
+        if events.len() >= 2 {
+            return events;
+        }
+    }
+    // "Which happened first, A or B?" puts the pair after the comma.
+    if let Some((_, tail)) = q.split_once(", ")
+        && tail.contains(" or ")
+    {
+        let events: Vec<String> = tail
+            .split(" or ")
+            .map(tidy)
+            .filter(|s| s.split_whitespace().count() >= 2)
+            .collect();
+        if events.len() >= 2 {
+            return events;
+        }
+    }
+    // Nothing delimited the events, so there is nothing to order.
+    Vec::new()
+}
+
+/// Split a delimited list on commas and a trailing "and".
+fn split_list(tail: &str) -> Vec<String> {
     let mut events: Vec<String> = tail
         .split(',')
         .flat_map(|part| part.split(" and "))
@@ -340,7 +368,6 @@ mod tests {
     /// must do before it can be switched back on, and is ignored until
     /// then rather than deleted, so the requirement does not vanish.
     #[test]
-    #[ignore = "Order is disabled: split_events cannot separate an event from the question"]
     fn ordering_questions_are_recognized_with_their_events() {
         let p = plan(
             "Which three events happened in the order from first to last: \
