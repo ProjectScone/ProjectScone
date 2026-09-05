@@ -182,9 +182,9 @@ fn run() -> Result<(), String> {
             let by_id: std::collections::HashMap<&str, &scone_bench::BenchItem> =
                 items.iter().map(|i| (i.question_id.as_str(), i)).collect();
             let judge = match (&llm_url, &llm_model) {
-                (Some(url), Some(model)) => {
-                    Some(scone_core::llm::OpenAiCompatible::new(url, model, None))
-                }
+                (Some(url), Some(model)) => Some(
+                    scone_core::llm::OpenAiCompatible::new(url, model, None).with_temperature(0.0),
+                ),
                 (None, None) => None,
                 _ => return Err("--llm-url and --llm-model go together".into()),
             };
@@ -348,7 +348,10 @@ fn run() -> Result<(), String> {
             };
             match (&llm_url, &llm_model) {
                 (Some(url), Some(model)) => {
-                    let mut llm = scone_core::llm::OpenAiCompatible::new(url, model, None);
+                    // Pinned so a run is repeatable and an A/B measures
+                    // the change rather than the sampler.
+                    let mut llm = scone_core::llm::OpenAiCompatible::new(url, model, None)
+                        .with_temperature(0.0);
                     if no_think {
                         llm = llm.with_think(false);
                         eprintln!("llm: {model} at {url} (think off)");
@@ -364,7 +367,10 @@ fn run() -> Result<(), String> {
                 match (&llm_url, judge_model.as_ref().or(llm_model.as_ref())) {
                     (Some(url), Some(model)) => {
                         eprintln!("judge: {model}");
-                        Some(scone_core::llm::OpenAiCompatible::new(url, model, None))
+                        Some(
+                            scone_core::llm::OpenAiCompatible::new(url, model, None)
+                                .with_temperature(0.0),
+                        )
                     }
                     _ => return Err("--judge needs --llm-url and --llm-model".into()),
                 }

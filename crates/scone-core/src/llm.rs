@@ -204,6 +204,7 @@ pub struct OpenAiCompatible {
     api_key: Option<String>,
     timeout: std::time::Duration,
     think: Option<bool>,
+    temperature: Option<f32>,
 }
 
 impl OpenAiCompatible {
@@ -214,11 +215,21 @@ impl OpenAiCompatible {
             api_key,
             timeout: DEFAULT_LLM_TIMEOUT,
             think: None,
+            temperature: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Pin the sampling temperature. Servers default to sampling, so
+    /// without this the same question answered twice gives different
+    /// answers, and an A/B between two configurations measures the
+    /// sampler as much as the change. Zero makes a run repeatable.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
         self
     }
 
@@ -244,6 +255,11 @@ impl OpenAiCompatible {
         });
         if let Some(think) = self.think {
             body["think"] = serde_json::Value::Bool(think);
+        }
+        if let Some(temperature) = self.temperature
+            && let Some(value) = serde_json::Number::from_f64(f64::from(temperature))
+        {
+            body["temperature"] = serde_json::Value::Number(value);
         }
         let value = http_json(req, self.timeout, body)?;
         value["choices"][0]["message"]["content"]
