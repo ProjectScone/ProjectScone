@@ -27,6 +27,10 @@ fn new_index(dim: usize) -> Result<Index> {
         dimensions: dim,
         metric: MetricKind::Cos,
         quantization: ScalarKind::F32,
+        // Widening expansion_add and expansion_search to 256 narrows
+        // the cross-build divergence described in tests/determinism.rs
+        // but does not remove it, and the latency it costs has not been
+        // measured. Left at the defaults until it is.
         ..Default::default()
     };
     usearch::new_index(&options).map_err(ix)

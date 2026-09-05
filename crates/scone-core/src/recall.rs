@@ -377,7 +377,17 @@ impl Engine {
             }
         }
 
-        items.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // Ties break by chunk id, never by whatever order the index
+        // happened to return. Scores tie often: a store holding many
+        // similar notes puts them within a rounding error of each
+        // other, and without a stable tie-break the ranking then turns
+        // on recency measured in microseconds, so two builds of the
+        // same corpus answer the same question differently.
+        items.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.chunk_id.cmp(&b.chunk_id))
+        });
 
         // Episode diversity: one strong episode must not hog the top slots
         // with many of its chunks; multi-evidence questions need distinct
