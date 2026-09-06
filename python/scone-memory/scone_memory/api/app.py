@@ -129,6 +129,18 @@ def create_app(
             raise Unauthorized("unknown key")
         return space
 
+    def actor_for(request: Request) -> str:
+        """Who judged: a fingerprint of the bearer key (never the key) plus an
+        optional label the caller sends in X-Scone-Actor, so a review event
+        can say "the console" or "playwright smoke" and can always be tied
+        to the key that made it."""
+        import hashlib
+
+        token = request.headers.get("authorization", "").partition(" ")[2].strip()
+        fingerprint = hashlib.sha256(token.encode()).hexdigest()[:12] if token else "anonymous"
+        label = request.headers.get("x-scone-actor", "").strip()[:64]
+        return f"key:{fingerprint}" + (f" {label}" if label else "")
+
     @app.exception_handler(Unauthorized)
     async def _unauthorized(_: Request, e: Unauthorized) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=401)
@@ -277,24 +289,24 @@ def create_app(
         return fact_json(fact)
 
     @app.post("/v1/facts/{fact_id}/approve")
-    async def post_fact_approve(fact_id: int, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.approve(space, fact_id))
+    async def post_fact_approve(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.approve(space, fact_id, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/decline")
-    async def post_fact_decline(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.decline(space, fact_id, body.reason))
+    async def post_fact_decline(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.decline(space, fact_id, body.reason, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/exclude")
-    async def post_fact_exclude(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.exclude(space, fact_id, body.reason))
+    async def post_fact_exclude(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.exclude(space, fact_id, body.reason, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/include")
-    async def post_fact_include(fact_id: int, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.include(space, fact_id))
+    async def post_fact_include(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.include(space, fact_id, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/close")
-    async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        closed = await engine.close_fact(space, fact_id, body.reason)
+    async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        closed = await engine.close_fact(space, fact_id, body.reason, actor=actor)
         return {"closed": closed.fact_id, "reason": closed.closed_reason}
 
     @app.get("/v1/profile")

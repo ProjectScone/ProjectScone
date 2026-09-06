@@ -10,15 +10,55 @@ Swap the two stores for ``MongoDocumentStore`` and ``QdrantVectorIndex``
 and nothing else changes.
 """
 
-from .backends import InMemoryDocumentStore, InMemoryVectorIndex
-from .distill import DistillError, Distiller, DistillOutcome
-from .events import InMemoryEventLog, MongoEventLog, SqliteEventLog
-from .embedders import HashEmbedder
-from .engine import ImportSummary, MemoryEngine, Profile, Record
-from .sync import SyncMemoryEngine
-from .errors import InvalidInput, NotFound, SconeError
-from .llm import ChatError, FakeChat, OpenAICompatibleChat
-from .models import Added, Chunk, Episode, Fact, RecallItem, RecallResult, Status
+# Attributes resolve lazily (PEP 562): `from scone_memory import MemoryEngine`
+# works as before, but importing one submodule, such as the agent hook that
+# runs on every prompt, no longer loads the engine, pydantic and every
+# backend. The hook's import cost is what the host waits on.
+_LAZY = {
+    "InMemoryDocumentStore": ".backends",
+    "InMemoryVectorIndex": ".backends",
+    "DistillError": ".distill",
+    "Distiller": ".distill",
+    "DistillOutcome": ".distill",
+    "InMemoryEventLog": ".events",
+    "MongoEventLog": ".events",
+    "SqliteEventLog": ".events",
+    "HashEmbedder": ".embedders",
+    "ImportSummary": ".engine",
+    "MemoryEngine": ".engine",
+    "Profile": ".engine",
+    "Record": ".engine",
+    "SyncMemoryEngine": ".sync",
+    "InvalidInput": ".errors",
+    "NotFound": ".errors",
+    "SconeError": ".errors",
+    "ChatError": ".llm",
+    "FakeChat": ".llm",
+    "OpenAICompatibleChat": ".llm",
+    "Added": ".models",
+    "Chunk": ".models",
+    "Episode": ".models",
+    "Fact": ".models",
+    "RecallItem": ".models",
+    "RecallResult": ".models",
+    "Status": ".models",
+}
+
+
+def __getattr__(name: str):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module 'scone_memory' has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(module, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY))
+
 
 __all__ = [
     "MemoryEngine",

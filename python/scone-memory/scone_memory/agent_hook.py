@@ -31,10 +31,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
-from .engine import redact_secrets
-from .timeutil import now_rfc3339
+from .redact import redact_secrets
 
 Transport = Callable[[str, dict, str], dict]
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    t = datetime.now(timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
 
 CLAUDE_EVENTS = {
     "SessionStart": "session_start",
@@ -126,12 +132,22 @@ def normalise_claude(payload: Mapping) -> Optional[dict]:
 
 
 def normalise_codex(payload: Mapping) -> Optional[dict]:
-    """Best effort until Codex's exact hook fields are confirmed: keyed on
-    which fields are present. Anything unrecognised is ignored."""
+    """Normalize documented hook events, retaining legacy field-only payloads."""
     session = str(payload.get("session_id") or payload.get("thread_id") or "")
     out: dict = {"agent": "codex", "session_id": session, "source_event_id": None, "text": None}
     turn = payload.get("turn_id")
-    if "prompt" in payload:
+    hook_event = payload.get("hook_event_name")
+    tool_id = payload.get("tool_use_id") or payload.get("call_id")
+    if hook_event == "PreToolUse":
+        out.update(event="tool_use", tool_name=payload.get("tool_name"), tool_use_id=tool_id,
+                   text=payload.get("tool_input"), source_event_id=f"pre:{tool_id}" if tool_id else None)
+    elif hook_event == "PostToolUse":
+        out.update(event="tool_result", tool_name=payload.get("tool_name"), tool_use_id=tool_id,
+                   text=payload.get("tool_response", payload.get("tool_output")),
+                   source_event_id=f"post:{tool_id}" if tool_id else None)
+        if "ok" in payload:
+            out["ok"] = payload["ok"]
+    elif "prompt" in payload:
         out.update(event="prompt", text=payload.get("prompt"), source_event_id=f"prompt:{turn}" if turn else None)
     elif "tool_response" in payload or "tool_output" in payload:
         out.update(event="tool_result", tool_name=payload.get("tool_name"), tool_use_id=payload.get("call_id") or payload.get("tool_use_id"),
@@ -176,7 +192,7 @@ def deliver(normalised: dict, config: HookConfig, project: str, transport: Trans
     event = build_event(normalised, project, config.feed)
     if config.capture and config.feed == "full" and normalised.get("event") in ("prompt", "response") and event.get("text"):
         added = transport("/v1/episodes", {
-            "content": event["text"], "kind": "conversation", "created_at": ts or now_rfc3339(),
+            "content": event["text"], "kind": "conversation", "created_at": ts or _now(),
             "source": f"{config.agent}://{normalised['session_id']}",
             "metadata": {"agent": config.agent, "session_id": normalised["session_id"][:256], "project": project},
         }, config.key)
@@ -257,3 +273,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     return run_hook(list(sys.argv[1:] if argv is None else argv), sys.stdin.read(), os.environ)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -228,19 +228,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command in ("approve", "decline", "exclude", "include"):
+        import getpass
+
+        actor = f"cli:{getpass.getuser()}"
         if args.command == "approve":
-            fact = await engine.approve(space, args.fact_id)
+            fact = await engine.approve(space, args.fact_id, actor=actor)
         elif args.command == "decline":
-            fact = await engine.decline(space, args.fact_id, args.reason)
+            fact = await engine.decline(space, args.fact_id, args.reason, actor=actor)
         elif args.command == "exclude":
-            fact = await engine.exclude(space, args.fact_id, args.reason)
+            fact = await engine.exclude(space, args.fact_id, args.reason, actor=actor)
         else:
-            fact = await engine.include(space, args.fact_id)
+            fact = await engine.include(space, args.fact_id, actor=actor)
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 
     if args.command == "close":
-        fact = await engine.close_fact(space, args.fact_id, args.reason)
+        import getpass
+
+        fact = await engine.close_fact(space, args.fact_id, args.reason, actor=f"cli:{getpass.getuser()}")
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 

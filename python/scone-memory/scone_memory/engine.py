@@ -28,6 +28,7 @@ from .models import (
     RecallResult,
     Status,
 )
+from .redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
 from .ports import (
     DocumentStore,
     DuplicateEvent,
@@ -84,18 +85,6 @@ MAX_EXTERNAL_PAYLOAD = 4096
 AGENTS = ("claude-code", "codex", "other")
 AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result", "stop", "session_end")
 MAX_AGENT_TEXT = 65_536
-#: Defence in depth for the agent feed: the hook redacts before posting,
-#: and the engine scrubs again. Patterns cover the common key shapes;
-#: this is a net, not a guarantee, and the docs say so.
-SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
-    re.compile(r"\b(?:sk|rk|pk)[-_](?:live|test|proj|ant|or)?[-_]?[A-Za-z0-9]{16,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
-    re.compile(r"\bnpg_[A-Za-z0-9]{12,}\b"),
-    re.compile(r"(?i)\b(bearer|token|api[_-]?key|secret|password)\b(\s*[:=]\s*|\s+)[\"']?([A-Za-z0-9._\-/+]{12,})"),
-    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@"),
-)
 
 
 @dataclass
@@ -838,7 +827,7 @@ class MemoryEngine:
                 rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason, "superseded_by": by_fact_id})
             )
 
-    async def approve(self, space: str, fact_id: int) -> Fact:
+    async def approve(self, space: str, fact_id: int, actor: Optional[str] = None) -> Fact:
         """A person accepts a proposed fact: it enters the ledger exactly as
         an assertion at its own valid_from would, truncating what it
         covers and bounded by what starts later. A proposal that restates
@@ -852,7 +841,7 @@ class MemoryEngine:
                 fact.model_copy(update={"status": "declined", "closed_reason": f"duplicate of fact {placement.restates.fact_id}"})
             )
             await self.documents.bump_revision(space)
-            await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id})
+            await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id, "actor": actor})
             return placement.restates
         accepted = fact.model_copy(update={
             "status": "closed" if placement.bound else "active",
@@ -864,11 +853,11 @@ class MemoryEngine:
         await self._truncate(placement.covering, fact.valid_from, fact.fact_id)
         await self.documents.bump_revision(space)
         await self._emit(space, "fact_review", {
-            "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering],
+            "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering], "actor": actor,
         })
         return accepted
 
-    async def decline(self, space: str, fact_id: int, reason: str) -> Fact:
+    async def decline(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         """A person rejects a proposed fact. It never held; the reason is kept."""
         check_space(space)
         reason = _reason(reason)
@@ -876,7 +865,7 @@ class MemoryEngine:
         declined = fact.model_copy(update={"status": "declined", "closed_reason": reason})
         await self.documents.update_fact(declined)
         await self.documents.bump_revision(space)
-        await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "declined"})
+        await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "declined", "actor": actor})
         return declined
 
     async def _proposed(self, space: str, fact_id: int) -> Fact:
@@ -887,7 +876,7 @@ class MemoryEngine:
             raise InvalidInput(f"fact {fact_id} is {fact.status}, not proposed")
         return fact
 
-    async def exclude(self, space: str, fact_id: int, reason: str) -> Fact:
+    async def exclude(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         """Suppress a ledger fact from recall without touching its interval
         or its history. The third operation beside close (it stopped
         holding) and forget (the data is gone)."""
@@ -901,10 +890,10 @@ class MemoryEngine:
         excluded = fact.model_copy(update={"excluded_reason": reason})
         await self.documents.update_fact(excluded)
         await self.documents.bump_revision(space)
-        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "exclude"})
+        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "exclude", "actor": actor})
         return excluded
 
-    async def include(self, space: str, fact_id: int) -> Fact:
+    async def include(self, space: str, fact_id: int, actor: Optional[str] = None) -> Fact:
         """Undo exclude."""
         check_space(space)
         fact = await self.documents.get_fact(space, fact_id)
@@ -915,10 +904,10 @@ class MemoryEngine:
         included = fact.model_copy(update={"excluded_reason": None})
         await self.documents.update_fact(included)
         await self.documents.bump_revision(space)
-        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "include"})
+        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "include", "actor": actor})
         return included
 
-    async def close_fact(self, space: str, fact_id: int, reason: str) -> Fact:
+    async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         check_space(space)
         reason = _reason(reason)
         fact = await self.documents.get_fact(space, fact_id)
@@ -933,7 +922,7 @@ class MemoryEngine:
         )
         await self.documents.update_fact(closed)
         await self.documents.bump_revision(space)
-        await self._emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual"})
+        await self._emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor})
         return closed
 
     async def facts(
@@ -1110,14 +1099,6 @@ class MemoryEngine:
 # -- validation helpers -----------------------------------------------------
 
 
-def redact_secrets(text: str) -> str:
-    """Replace key-shaped substrings with [redacted]. A net, not a proof."""
-    for pattern in SECRET_PATTERNS:
-        if pattern.groups >= 3:
-            text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
-        else:
-            text = pattern.sub("[redacted]", text)
-    return text
 
 
 def _reason(reason: str) -> str:

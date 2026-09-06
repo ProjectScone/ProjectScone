@@ -3,6 +3,8 @@ feedback refers to a real recall, and the sinks agree."""
 
 from __future__ import annotations
 
+import json
+
 import os
 import uuid
 
@@ -110,7 +112,7 @@ async def test_every_operation_leaves_one_event_with_measured_latency():
     assert first.payload["outcome"] == "new_active"
     assert restated.payload["outcome"] == "restated" and restated.payload["fact_id"] == fact.fact_id
     assert superseding.payload["outcome"] == "new_active" and superseding.payload["superseded"] == [fact.fact_id]
-    assert close.payload == {"fact_id": newer.fact_id, "reason_kind": "manual"}
+    assert close.payload == {"fact_id": newer.fact_id, "reason_kind": "manual", "actor": None}
     assert forget.payload["chunks_removed"] == 1
 
 
@@ -281,3 +283,43 @@ async def test_graph_has_only_recorded_edges():
     whole = await engine.graph("default")
     assert (f"claim:{austin.fact_id}", f"claim:{lisbon.fact_id}", "superseded_by") in {(e.source, e.target, e.kind) for e in whole.edges}
     assert whole.as_dict()["counts"]["claim"] == 3
+
+
+async def test_every_judgement_records_who_made_it():
+    engine = await fresh_engine()
+    p1 = await engine.assert_fact("default", "mark", "lives_in", "Lisbon", origin="extracted", proposed=True)
+    p2 = await engine.assert_fact("default", "mark", "drinks", "tea", origin="extracted", proposed=True)
+    held = await engine.assert_fact("default", "mark", "uses", "neovim")
+    await engine.approve("default", p1.fact_id, actor="key:abc123 console")
+    await engine.decline("default", p2.fact_id, "not about mark", actor="cli:mark")
+    await engine.exclude("default", held.fact_id, "private", actor="key:abc123")
+    await engine.include("default", held.fact_id, actor="key:abc123")
+    await engine.close_fact("default", held.fact_id, "stopped", actor="cli:mark")
+    events = [e for e in reversed(await engine.events.query("default", limit=100)) if e.kind in ("fact_review", "fact_exclude", "fact_close")]
+    assert [(e.kind, e.payload.get("decision") or e.payload.get("action") or e.payload.get("reason_kind"), e.payload["actor"]) for e in events] == [
+        ("fact_review", "approved", "key:abc123 console"),
+        ("fact_review", "declined", "cli:mark"),
+        ("fact_exclude", "exclude", "key:abc123"),
+        ("fact_exclude", "include", "key:abc123"),
+        ("fact_close", "manual", "cli:mark"),
+    ]
+    unlabelled = await engine.assert_fact("default", "mark", "likes", "rain", origin="extracted", proposed=True)
+    await engine.approve("default", unlabelled.fact_id)
+    assert (await engine.events.query("default", kind="fact_review", limit=1))[0].payload["actor"] is None, "no actor is recorded as None, never invented"
+
+
+def test_http_judgements_carry_a_key_fingerprint_and_optional_label():
+    import asyncio
+    import hashlib
+
+    engine = asyncio.run(fresh_engine())
+    with TestClient(create_app(engine, {"reviewer-key": "default"})) as c:
+        h = {"authorization": "Bearer reviewer-key"}
+        p = c.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon", "origin": "extracted", "proposed": True}, headers=h).json()
+        c.post(f"/v1/facts/{p['fact_id']}/approve", headers={**h, "x-scone-actor": "console"})
+        q = c.post("/v1/facts", json={"subject": "mark", "predicate": "drinks", "object": "tea", "origin": "extracted", "proposed": True}, headers=h).json()
+        c.post(f"/v1/facts/{q['fact_id']}/decline", json={"reason": "no"}, headers=h)
+        events = c.get("/v1/events", params={"kind": "fact_review"}, headers=h).json()["events"]
+        fp = hashlib.sha256(b"reviewer-key").hexdigest()[:12]
+        assert [e["payload"]["actor"] for e in events] == [f"key:{fp}", f"key:{fp} console"]
+        assert "reviewer-key" not in json.dumps(events), "the key itself never appears"
