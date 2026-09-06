@@ -47,6 +47,52 @@ async function fixture(t,{reopened=false,scoped=false}={}){
   return {page,base,errors,modelWaiting};
 }
 
+test('Documents browse native inventory, import retained text, and inspect saved image evidence',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
+  const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
+  for(let i=0;i<28;i++){
+    const response=await fetch(base+'/v1/episodes',{method:'POST',headers,body:JSON.stringify({kind:'file',source:`source-${i}.md`,content:`Native inventory document ${i}.`,created_at:i%2?'2020-01-01':'2026-09-06'})});
+    assert.equal(response.status,200);
+  }
+  await page.goto(base+'/memory#documents');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'Files',exact:true}).click();
+  await page.getByRole('button',{name:'Open source-27.md',exact:true}).waitFor();
+  assert.equal(await page.locator('.document-card').count(),25);
+  assert.equal(await page.locator('.document-card').first().getAttribute('aria-label'),'Open source-27.md','ID order is not a created-date or relevance sort');
+  await page.getByRole('button',{name:'Older sources',exact:true}).click();
+  await page.getByRole('button',{name:'Open source-2.md',exact:true}).waitFor();
+  assert.equal(await page.locator('.document-card').count(),3);
+  assert.equal(await page.getByRole('button',{name:'Older sources',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  await page.getByRole('button',{name:'Import text file',exact:true}).click();
+  const content='\ufeff# Atlas guide\r\nA preserved document from the source library.\r\n';
+  await page.getByLabel('Text file',{exact:true}).setInputFiles({name:'atlas.md',mimeType:'text/markdown',buffer:Buffer.from(content)});
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await page.getByRole('heading',{name:/Source saved · episode #/}).waitFor();
+  await page.getByRole('button',{name:'Open atlas.md',exact:true}).click();
+  const detail=page.getByRole('region',{name:'Retained source'});
+  await page.waitForFunction(()=>document.querySelector('.document-detail pre')?.textContent.includes('Atlas guide'));
+  assert.equal(await detail.locator('pre').textContent(),content);
+  const alpha=await(await fetch(base+'/v1/sources?limit=25',{headers})).json();
+  const id=alpha.items[0].episode_id;assert.equal(alpha.items[0].source,'atlas.md');
+  const betaHeaders={authorization:'Bearer conversation-fixture-beta'};
+  assert.deepEqual((await(await fetch(base+'/v1/sources',{headers:betaHeaders})).json()).items,[]);
+  assert.equal((await fetch(base+'/v1/episodes/'+id,{headers:betaHeaders})).status,404);
+  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=','base64');
+  const upload=await fetch(base+'/v1/attachments',{method:'POST',headers:{authorization:headers.authorization,'content-type':'image/png','x-filename':'atlas-original.png'},body:bytes});
+  assert.equal(upload.status,200);const attachment=await upload.json();
+  const attached=await fetch(base+'/v1/episodes',{method:'POST',headers,body:JSON.stringify({kind:'note',content:'Atlas reference image',source:'Atlas original',attachment_ids:[attachment.attachment_id]})});
+  assert.equal(attached.status,200);
+  await page.getByRole('button',{name:'Refresh sources',exact:true}).click();
+  await page.getByRole('button',{name:'Open Atlas original',exact:true}).click();
+  await detail.getByRole('button',{name:'View source images',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.document-detail img')?.naturalWidth===1);
+  assert.match(await detail.getByRole('img',{name:'atlas-original.png'}).getAttribute('src'),/^blob:/);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'documents-native.png'),fullPage:true});
+  assert.deepEqual(errors,[]);
+});
+
 for(const collection of ['manuals','missing'])test(`browser-selected scope reaches Pipecat and survives reload: ${collection}`,{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t,{scoped:true});page.setDefaultTimeout(8000);
   await page.goto(base+'/conversations');

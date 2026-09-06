@@ -52,6 +52,34 @@ an operation is unsupported. Deep links stay intact. See
 the versioned contract in `tests/fixtures/http-capabilities.json`. This is feature discovery,
 not a replacement for server-side authorization or an uptime guarantee.
 
+## Documents: retained-source library
+
+Open `/memory#documents` on a server advertising `episodes.list`. The library
+uses authenticated `GET /v1/sources`, not recall, to browse files, notes,
+conversations, observations and connector sources. Pages contain up to 25 entries
+ordered by descending stored episode ID. Type filters apply server-side before
+pagination; Newer/Older navigate the cursor history, and Refresh restarts at the
+newest IDs for the selected type. Page counts are not whole-library totals.
+
+Open a source to read its retained text literally. Filenames and local paths
+remain provenance labels; only absolute HTTP(S) source URLs become external
+links. Available original images use the existing authenticated, digest-checked
+preview. A source record is not an approved memory claim, and retained text is
+not a downloadable copy of the original file. Newly added or removed records can
+change the inventory; it is not a frozen export.
+
+On attachment-capable servers, Add source reuses the existing note/image and
+UTF-8 text-file import flow. A verified save refreshes All sources at the newest
+page. No delete controls or unsupported write operations are inferred from the
+read-only inventory capability. Older servers without `episodes.list` do not
+show the section or receive inventory requests.
+
+The browser boundary suite is `scripts/test-documents.cjs`, with
+`SCONE_DOCUMENTS_HTML` pointing to the isolated packaged artifact above.
+`scripts/test-conversations-native.cjs` also covers Documents pagination, import,
+literal readback, original images and cross-space denial against a disposable
+native Python service. Neither suite uses the live memory database.
+
 ## Current boundaries
 
 Source-image previews are implemented for Playground recall, graph source

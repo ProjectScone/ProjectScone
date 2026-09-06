@@ -4,6 +4,12 @@ import { readFileSync } from 'node:fs';
 import { parseCapabilities } from '../src/capabilities.ts';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../tests/fixtures/http-capabilities.json', import.meta.url), 'utf8'));
+test('source browsing requires an explicit valid optional inventory capability', () => {
+  for (const native of [fixtures.rust, fixtures.python]) assert.equal(parseCapabilities(native).features['episodes.list'], true);
+  const features = {...fixtures.python.features}; delete features['episodes.list'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['episodes.list'], false);
+  assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'episodes.list':'true'}}),/capabilit/i);
+});
 test('capability parser preserves explicit false and both native contracts', () => {
   assert.equal(parseCapabilities(fixtures.rust).features['facts.review'], false);
   assert.equal(parseCapabilities(fixtures.python).features['facts.review'], true);

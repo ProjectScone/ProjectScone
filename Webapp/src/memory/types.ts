@@ -118,7 +118,7 @@ export interface EventsResponse {
 /** What the shell hands the page. Matches the root-owned client. */
 export type { ApiClient } from '../api';
 
-export type View = "search" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status";
+export type View = "search" | "documents" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status";
 
 export interface SearchState {
   q: string;

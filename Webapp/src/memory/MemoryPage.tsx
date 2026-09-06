@@ -25,16 +25,18 @@ import { ReviewView } from "./ReviewView";
 import { SourceImages } from '../components/SourceImages';
 import { useSearchRecall } from './useSearchRecall';
 import { SourceComposer } from './SourceComposer';
-import { parseCapabilities, type Capabilities, type Feature } from '../capabilities';
+import { DocumentsView } from './DocumentsView';
+import { parseCapabilities, type Capabilities } from '../capabilities';
 import {claimGroups,filterClaimGroups,type ClaimFilter,type DisplayClaimGroup} from './claim-groups';
 
 const GROUPS: Array<{ label: string; views: Array<[View, string]> }> = [
-  { label: "Memory", views: [["search", "Search"], ["beliefs", "Beliefs"], ["review", "Review"]] },
+  { label: "Memory", views: [["search", "Search"], ["documents", "Documents"], ["beliefs", "Beliefs"], ["review", "Review"]] },
   { label: "Activity", views: [["live", "Live"], ["analytics", "Analytics"]] },
   { label: "System", views: [["scopes", "Scopes"], ["status", "Status"]] },
 ];
 const INTRO: Record<View, [string, string]> = {
   search: ["Search", "Ask in plain words. Every result is an excerpt of something stored, and says where it came from."],
+  documents: ["Documents", "Your memory starts here. Browse retained files, notes and conversations, then open the material behind them."],
   beliefs: ["Memory claims", "Inspect what Scone has recorded about a subject, check its source, and control whether it can appear in recall."],
   review: ["Review", "Claims a model read out of your memory. Nothing here counts until you approve it."],
   live: ["Live", "What the engine is doing, as it happens."],
@@ -70,8 +72,8 @@ function useAsync<T>(load: () => Promise<T>, deps: unknown[]) {
   return { ...state, reload: run };
 }
 
-const VIEW_FEATURES: Record<View, Feature> = {
-  search: 'recall', beliefs: 'facts.read', review: 'facts.review',
+const VIEW_FEATURES: Record<View, keyof Capabilities['features']> = {
+  search: 'recall', documents: 'episodes.list', beliefs: 'facts.read', review: 'facts.review',
   live: 'events.read', analytics: 'metrics.read', scopes: 'scopes.read', status: 'status.read',
 };
 
@@ -148,6 +150,7 @@ export function MemoryPage({ api }: { api: ApiClient }) {
           : !caps[VIEW_FEATURES[view]] ? <Empty>This server does not support this page. Choose an available section above.</Empty>
           : <>
             {view === "search" && <SearchView api={api} state={search} setState={setSearch} onScope={searchInScope} canAddSources={caps['episodes.attachments']} />}
+            {view === "documents" && <DocumentsView api={api} attachments={caps['episodes.attachments']} />}
             {view === "beliefs" && <BeliefsView api={api} onChanged={refreshPending} features={caps} />}
             {view === "review" && <ReviewView api={api} onChanged={refreshPending} />}
             {view === "live" && <LiveView api={api} />}

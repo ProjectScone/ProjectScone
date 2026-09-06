@@ -1,7 +1,7 @@
 export const FEATURE_KEYS = ['recall', 'facts.read', 'facts.review', 'facts.close',
   'facts.exclude', 'facts.include', 'events.read', 'metrics.read', 'scopes.read', 'status.read'] as const;
 export type Feature = typeof FEATURE_KEYS[number];
-type OptionalFeature = 'episodes.attachments';
+type OptionalFeature = 'episodes.attachments' | 'episodes.list';
 export interface Capabilities {
   schema_version: 1;
   implementation: string;
@@ -16,5 +16,6 @@ export function parseCapabilities(value: unknown): Capabilities {
   const features = data.features as Record<string, unknown>;
   if (FEATURE_KEYS.some(key => typeof features[key] !== 'boolean')) throw Error('Incomplete or invalid capability flags');
   if (features['episodes.attachments'] !== undefined && typeof features['episodes.attachments'] !== 'boolean') throw Error('Invalid upload capability flag');
-  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true} as Capabilities['features']};
+  if (features['episodes.list'] !== undefined && typeof features['episodes.list'] !== 'boolean') throw Error('Invalid inventory capability flag');
+  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true, 'episodes.list':features['episodes.list'] === true} as Capabilities['features']};
 }
