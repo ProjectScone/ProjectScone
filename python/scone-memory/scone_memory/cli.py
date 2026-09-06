@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--where", action="append", default=[], help="key=value scope filter, repeatable")
     p.add_argument("--history", action="store_true", help="also show the closed facts that preceded the matched ones")
+    p.add_argument("--kind", help="only episodes of this kind (note, file, conversation, ...)")
+    p.add_argument("--source-prefix", help="only episodes whose source starts with this text (literal)")
+    p.add_argument("--since", help="only episodes that happened at or after this instant")
+    p.add_argument("--until", help="only episodes that happened at or before this instant")
 
     p = sub.add_parser("forget", help="delete an episode")
     p.add_argument("episode_id", type=int)
@@ -177,7 +181,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "recall":
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
-            history=args.history,
+            history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
         )
         if args.json:
             emit(result.model_dump() | {"context_reduction": result.context_reduction})

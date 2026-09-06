@@ -248,11 +248,16 @@ def create_app(
         tags: Optional[str] = None,
         where: Optional[str] = None,
         history: bool = False,
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
         result = await engine.recall(
-            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history
+            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
+            kind=kind, source_prefix=source_prefix, since=since, until=until,
         )
         return {
             "event_id": result.event_id,

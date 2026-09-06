@@ -53,6 +53,7 @@ MAX_METADATA_VALUE = 256
 KINDS = ("note", "file", "conversation", "observation", "connector")
 MAX_QUERY = 1_000
 MAX_LIMIT = 50
+MAX_SOURCE = 1_000
 #: How many candidates each lane contributes before fusion.
 LANE_DEPTH = 4
 #: Chunk texts per embedding call during batch ingest.
@@ -416,11 +417,24 @@ class MemoryEngine:
         tags: Sequence[str] = (),
         where: Mapping[str, str] | None = None,
         history: bool = False,
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
         held before: what changed, when, and why. Off by default; the
-        reader gets only what holds at ``as_of`` unless asked for the chain."""
+        reader gets only what holds at ``as_of`` unless asked for the chain.
+
+        ``kind``, ``source_prefix``, ``since`` and ``until`` narrow the
+        candidates fusion produced by the episode's kind, the start of its
+        source (literal text), and inclusive bounds on when it happened,
+        the same way the Rust engine narrows: a filter that matches nothing
+        in the candidate window yields nothing rather than reaching past
+        it. ``tags`` and ``where`` are different: both lanes apply them
+        before ranking. ``as_of`` stays what it was, fact validity and the
+        upper bound the lanes already apply."""
         check_space(space)
         query = query.strip()
         if not query or len(query) > MAX_QUERY:
@@ -429,6 +443,13 @@ class MemoryEngine:
         boundary = normalise_time(as_of) if as_of else None
         clean_tags = normalise_tags(tags)
         clean_where = normalise_metadata(where or {})
+        if kind is not None and kind not in KINDS:
+            raise InvalidInput(f"kind must be one of {KINDS}, got {kind!r}")
+        if source_prefix is not None and len(source_prefix) > MAX_SOURCE:
+            raise InvalidInput(f"source_prefix must be at most {MAX_SOURCE} chars")
+        since_at = normalise_time(since) if since else None
+        until_at = normalise_time(until) if until else None
+        narrowing = kind is not None or source_prefix is not None or since_at is not None or until_at is not None
         depth = limit * LANE_DEPTH
         degraded: list[str] = []
         started = time.perf_counter()
@@ -442,6 +463,7 @@ class MemoryEngine:
             "embedder": self.embedder.id,
             "contextual_embeddings": self.contextual_embeddings,
             "similarity_floor": self.similarity_floor,
+            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at},
         }
 
         vector_lane: list[tuple[int, float]] = []
@@ -497,9 +519,23 @@ class MemoryEngine:
         ]
         items = fusion.order(items)
         items = fusion.cap_per_episode(items, {cid: c.episode_id for cid, c in chunks.items()})
+        episodes: dict[int, Episode] = {}
+        if narrowing:
+            # Read every candidate's episode and keep the ones that fit,
+            # before the limit is applied; the window is the lanes' depth.
+            for item in items:
+                eid = chunks[item.chunk_id].episode_id
+                if eid not in episodes:
+                    found = await self.documents.get_episode(space, eid)
+                    if found is not None:
+                        episodes[eid] = found
+            items = [
+                item for item in items
+                if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
+                and _fits(episode, kind, source_prefix, since_at, until_at)
+            ]
         items = fusion.normalise(items[:limit])
 
-        episodes: dict[int, Episode] = {}
         for item in items:
             eid = chunks[item.chunk_id].episode_id
             if eid not in episodes:
@@ -1284,6 +1320,19 @@ def normalise_time(value: str) -> str:
         return format_rfc3339(parse_rfc3339(value))
     except ValueError as e:
         raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
+
+
+def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str], until: Optional[str]) -> bool:
+    """The narrowing rule, shared with the Rust engine: kind equal, source
+    starting with the prefix as literal text (an episode without a source
+    matches no prefix), created_at inside the inclusive bounds."""
+    if kind is not None and episode.kind != kind:
+        return False
+    if source_prefix is not None and (episode.source is None or not episode.source.startswith(source_prefix)):
+        return False
+    if since is not None and episode.created_at < since:
+        return False
+    return not (until is not None and episode.created_at > until)
 
 
 def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:

@@ -366,3 +366,27 @@ def test_cli_recall_history_flag(tmp_path):
     lines = text.splitlines()
     assert any(l.startswith("fact  mark lives_in Lisbon") for l in lines)
     assert any(l.startswith("was   mark lives_in Austin  (2019-08-01 to 2024-03-02; superseded by fact 2)") for l in lines), lines
+
+
+def test_cli_recall_narrowing_flags(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    assert run("remember", "--kind", "note", "--created-at", "2024-01-10", stdin="deploy runbook: rotate the staging keys first")[0] == 0
+    assert run("remember", "--kind", "file", "--source", "/ops/runbooks/deploy.md", "--created-at", "2024-02-10", stdin="deploy runbook: rotate the staging keys, then restart")[0] == 0
+    assert run("remember", "--kind", "conversation", "--source", "session-42", "--created-at", "2024-04-10", stdin="user: where is the deploy runbook for staging keys?")[0] == 0
+
+    def got(*flags):
+        code, text = run("recall", "deploy runbook staging keys", "--json", *flags)
+        assert code == 0, text
+        return sorted({i["episode_id"] for i in json.loads(text)["items"]})
+
+    assert got() == [1, 2, 3]
+    assert got("--kind", "file") == [2]
+    assert got("--source-prefix", "session-") == [3]
+    assert got("--until", "2024-01-31") == [1]
+    assert got("--since", "2024-03-01") == [3]

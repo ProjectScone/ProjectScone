@@ -83,7 +83,7 @@ outside the space it was issued for.
 |---|---|
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |
-| `GET /v1/recall?q&limit&as_of&tags&where&history` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them |
+| `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
 

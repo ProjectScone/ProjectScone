@@ -279,3 +279,31 @@ def test_serve_builds_the_engine_on_the_loop_it_serves_from(monkeypatch, capsys)
     assert loops["built"] is loops["served"], "one loop for building and serving"
     assert loops["app"].state.engine.documents.name == "memory"
     assert "documents=memory" in capsys.readouterr().err
+
+
+def test_recall_narrows_over_http():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+
+    async def seed():
+        out = []
+        for kind, text, source, day in [
+            ("note", "deploy runbook: rotate the staging keys first", None, "2024-01-10"),
+            ("file", "deploy runbook: rotate the staging keys, then restart", "/ops/runbooks/deploy.md", "2024-02-10"),
+            ("conversation", "user: where is the deploy runbook for staging keys?", "session-42", "2024-04-10"),
+        ]:
+            out.append((await engine.remember("alpha", text, kind=kind, source=source, created_at=day)).episode_id)
+        return out
+
+    ids = asyncio.run(seed())
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        def got(**params):
+            r = client.get("/v1/recall", params={"q": "deploy runbook staging keys", **params}, headers=auth())
+            assert r.status_code == 200, r.text
+            return sorted({i["episode_id"] for i in r.json()["items"]})
+
+        assert got() == ids
+        assert got(kind="file") == [ids[1]]
+        assert got(source_prefix="session-") == [ids[2]]
+        assert got(until="2024-01-31") == [ids[0]]
+        assert got(since="2024-03-01") == [ids[2]]
+        assert client.get("/v1/recall", params={"q": "deploy", "kind": "chat"}, headers=auth()).status_code == 422

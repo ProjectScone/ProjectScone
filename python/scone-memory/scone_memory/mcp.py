@@ -266,6 +266,13 @@ def create_server(engine: MemoryEngine, space: str = "default") -> MCPServer:
             Optional[dict[str, str]],
             Field(description="Only episodes whose metadata carries every one of these key=value pairs"),
         ] = None,
+        kind: Annotated[Optional[str], Field(description="Only episodes of this kind (note, file, conversation, ...)")] = None,
+        source_prefix: Annotated[
+            Optional[str],
+            Field(description="Only episodes whose source starts with this text (a path, a session id, a URL origin); literal, not a pattern"),
+        ] = None,
+        since: Annotated[Optional[str], Field(description="Only episodes that happened at or after this RFC 3339 instant")] = None,
+        until: Annotated[Optional[str], Field(description="Only episodes that happened at or before this RFC 3339 instant")] = None,
     ) -> CallToolResult:
         """Recall relevant memory: temporal facts first, then episodic chunks,
         each with provenance. `as_of` answers what was true at a past time."""
@@ -284,6 +291,10 @@ def create_server(engine: MemoryEngine, space: str = "default") -> MCPServer:
             as_of=as_of,
             tags=tags or (),
             where=where or {},
+            kind=kind,
+            source_prefix=source_prefix,
+            since=since,
+            until=until,
         )
         lines.extend(recall_lines(result))
         return ok_text("\n".join(lines) if lines else "no matching memory")
