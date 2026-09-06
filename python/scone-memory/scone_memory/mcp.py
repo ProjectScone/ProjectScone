@@ -148,6 +148,12 @@ def recall_lines(result: RecallResult) -> list[str]:
         for item in result.items
     )
     lines.extend(f"degraded: {d}" for d in result.degraded)
+    if result.low_confidence:
+        # The reader is told, in the pack itself, that the evidence is weak
+        # (experiment 9): the whole point of the gate is that an agent can
+        # decline to answer from it.
+        best = "nothing was found" if result.top_similarity is None else f"best match similarity {result.top_similarity:.2f}"
+        lines.append(f"low confidence: {best}, below this memory's floor; treat the memories above as weak evidence or say you do not know")
     return lines
 
 

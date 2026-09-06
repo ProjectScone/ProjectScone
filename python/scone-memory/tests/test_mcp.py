@@ -290,3 +290,24 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
         assert not recalled.is_error
         assert "episode 1] Moved to Lisbon in March" in recalled.content[0].text
     assert (tmp_path / "memory.db").exists()
+
+
+async def test_recall_tells_the_agent_when_the_evidence_is_weak():
+    """Experiment 9 reaches the agent through the tool text: with a floor,
+    a weak recall carries a plain warning; a strong one and a server with
+    no floor carry nothing extra (the Rust server has no floor)."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock(), similarity_floor=0.5).open()
+    server = create_server(engine, "default")
+    error, text = await call(server, "memory_store", content="the deploy runbook lives in the ops wiki")
+    assert not error
+    error, weak = await call(server, "memory_recall", query="zebra quartz umbrella", include_profile=False)
+    assert not error and weak.splitlines()[-1].startswith("low confidence: best match similarity 0.") and "say you do not know" in weak
+    error, strong = await call(server, "memory_recall", query="the deploy runbook lives in the ops wiki", include_profile=False)
+    assert not error and "low confidence" not in strong
+    error, empty = await call(server, "memory_recall", query="anything", space="empty", include_profile=False)
+    assert not error and "low confidence: nothing was found" in empty
+
+    plain = create_server(await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open(), "default")
+    await call(plain, "memory_store", content="the deploy runbook lives in the ops wiki")
+    error, text = await call(plain, "memory_recall", query="zebra quartz umbrella", include_profile=False)
+    assert not error and "low confidence" not in text, "no floor, no verdict, no line"
