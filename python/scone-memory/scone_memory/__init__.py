@@ -12,6 +12,7 @@ and nothing else changes.
 
 from .backends import InMemoryDocumentStore, InMemoryVectorIndex
 from .distill import DistillError, Distiller, DistillOutcome
+from .events import InMemoryEventLog, SqliteEventLog
 from .embedders import HashEmbedder
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from .sync import SyncMemoryEngine
@@ -27,6 +28,8 @@ __all__ = [
     "ImportSummary",
     "InMemoryDocumentStore",
     "InMemoryVectorIndex",
+    "InMemoryEventLog",
+    "SqliteEventLog",
     "HashEmbedder",
     "SconeError",
     "Distiller",

@@ -11,6 +11,7 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.events import InMemoryEventLog, SqliteEventLog
 from scone_memory.testing import Clock
 
 MONGO_URL = os.environ.get("SCONE_TEST_MONGO_URL")
@@ -31,6 +32,7 @@ def backends():
 @pytest.fixture(params=list(backends()))
 async def engine(request, tmp_path):
     clock = Clock()
+    events = InMemoryEventLog()
     if request.param == "memory":
         documents, vectors = InMemoryDocumentStore(), InMemoryVectorIndex()
     elif request.param == "sqlite":
@@ -38,6 +40,7 @@ async def engine(request, tmp_path):
 
         path = tmp_path / "memory.db"
         documents, vectors = SqliteDocumentStore(path), SqliteVectorIndex(path)
+        events = SqliteEventLog(path, clock=clock)
     elif request.param.startswith("mongo"):
         from scone_memory.backends import MongoDocumentStore, QdrantVectorIndex
 
@@ -54,10 +57,10 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = QdrantVectorIndex(QDRANT_URL, f"scone_test_{uuid.uuid4().hex[:8]}")
-    e = await MemoryEngine(documents, vectors, HashEmbedder(), chunk_target=200, clock=clock).open()
+    e = await MemoryEngine(documents, vectors, HashEmbedder(), chunk_target=200, clock=clock, events=events).open()
     e.test_clock = clock  # type: ignore[attr-defined]
     yield e
-    for store in (documents, vectors):
+    for store in (documents, vectors, events):
         if hasattr(store, "drop"):
             await store.drop()
         if hasattr(store, "close"):

@@ -99,6 +99,9 @@ class RecallItem(BaseModel):
 
 
 class RecallResult(BaseModel):
+    #: Id of the evidence event recorded for this recall, when an event
+    #: log is attached; feedback refers to it.
+    event_id: Optional[int] = None
     items: list[RecallItem] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
     #: Lanes that failed and were left out, named so a caller can tell a

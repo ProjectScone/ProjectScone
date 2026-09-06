@@ -54,6 +54,15 @@ class CloseBody(BaseModel):
     reason: str
 
 
+class FeedbackBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recall_event_id: int
+    chunk_id: int
+    useful: bool
+    note: Optional[str] = None
+
+
 CONSOLE = Path(__file__).with_name("console.html")
 
 
@@ -140,6 +149,7 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where)
         )
         return {
+            "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
             "degraded": result.degraded,
@@ -179,6 +189,24 @@ def create_app(
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:
         return {"tags": [{"name": n, "count": c} for n, c in (await engine.tags(space)).items()]}
+
+    @app.get("/v1/events")
+    async def get_events(
+        kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100, space: str = Depends(space_for)
+    ) -> dict:
+        if engine.events is None:
+            return {"events": [], "evidence": "none: no event log attached"}
+        events = await engine.events.query(space, kind=kind, since=since, limit=max(1, min(limit, 1000)))
+        return {
+            "events": [event_json(e) for e in events],
+            "evidence": engine.events.name,
+            "queries_recorded": "text" if engine.record_queries else "hash",
+        }
+
+    @app.post("/v1/feedback")
+    async def post_feedback(body: FeedbackBody, space: str = Depends(space_for)) -> dict:
+        event = await engine.feedback(space, body.recall_event_id, body.chunk_id, body.useful, body.note)
+        return {"recorded": event.event_id}
 
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
@@ -228,6 +256,16 @@ def item_json(item: RecallItem) -> dict:
         "source": item.source,
         "tags": list(item.tags),
         "metadata": dict(item.metadata),
+    }
+
+
+def event_json(event) -> dict:
+    return {
+        "event_id": event.event_id,
+        "ts": event.ts,
+        "kind": event.kind,
+        "schema_version": event.schema_version,
+        "payload": dict(event.payload),
     }
 
 

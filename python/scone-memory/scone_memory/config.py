@@ -12,6 +12,11 @@
     SCONE_EMBED_API_KEY        remote: bearer, optional
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
+    SCONE_EVENTS      memory | sqlite | none    (default: sqlite when SCONE_DOCUMENTS=sqlite, else memory)
+    SCONE_EVENTS_QUERIES  text | hash           (default text; hash stores a sha256 of each query)
+    SCONE_EVENTS_MAX_AGE_DAYS                    sqlite sink retention, optional
+    SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
+
     SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
@@ -42,6 +47,10 @@ class Settings:
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
     embed_cache: Optional[str] = None
+    events: Optional[str] = None
+    events_queries: str = "text"
+    events_max_age_days: Optional[float] = None
+    events_max: int = 10_000
     keys: Mapping[str, str] = field(default_factory=dict)
     host: str = "127.0.0.1"
     port: int = 7437
@@ -62,6 +71,10 @@ class Settings:
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
             embed_cache=env.get("SCONE_EMBED_CACHE"),
+            events=env.get("SCONE_EVENTS"),
+            events_queries=env.get("SCONE_EVENTS_QUERIES", "text"),
+            events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
+            events_max=int(env.get("SCONE_EVENTS_MAX", "10000")),
             keys=parse_keys(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY")),
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
@@ -142,11 +155,34 @@ def build_vectors(settings: Settings):
     raise InvalidInput(f"unknown SCONE_VECTORS {settings.vectors!r}")
 
 
+def build_events(settings: Settings):
+    choice = settings.events or ("sqlite" if settings.documents == "sqlite" else "memory")
+    if choice == "none":
+        return None
+    if choice == "memory":
+        from .events import InMemoryEventLog
+
+        return InMemoryEventLog(settings.events_max)
+    if choice == "sqlite":
+        from .events import SqliteEventLog
+
+        return SqliteEventLog(settings.sqlite_path, settings.events_max_age_days)
+    raise InvalidInput(f"unknown SCONE_EVENTS {settings.events!r}")
+
+
 async def build_engine(settings: Settings) -> MemoryEngine:
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
-    engine = MemoryEngine(documents, build_vectors(settings), build_embedder(settings))
+    if settings.events_queries not in ("text", "hash"):
+        raise InvalidInput("SCONE_EVENTS_QUERIES must be text or hash")
+    engine = MemoryEngine(
+        documents,
+        build_vectors(settings),
+        build_embedder(settings),
+        events=build_events(settings),
+        record_queries=settings.events_queries == "text",
+    )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])
     return await engine.open()

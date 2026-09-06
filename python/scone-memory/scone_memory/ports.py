@@ -147,6 +147,51 @@ class VectorIndex(Protocol):
     async def delete(self, chunk_ids: Sequence[int]) -> None: ...
 
 
+#: Bumped when an event payload changes shape; readers check it before
+#: computing anything from a payload.
+EVENT_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class NewEvent:
+    ts: str
+    space: str
+    kind: str
+    payload: Mapping[str, object]
+    schema_version: int = EVENT_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class Event:
+    event_id: int
+    ts: str
+    space: str
+    kind: str
+    payload: Mapping[str, object]
+    schema_version: int = EVENT_SCHEMA_VERSION
+
+
+@runtime_checkable
+class EventLog(Protocol):
+    """Evidence: one record per engine operation, appended after the
+    operation finished or failed. Metrics are computed from these and
+    from nothing else."""
+
+    name: str
+
+    async def append(self, new: NewEvent) -> Event: ...
+    async def get(self, space: str, event_id: int) -> Optional[Event]: ...
+    async def query(
+        self,
+        space: str,
+        kind: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """Newest first. ``since`` is inclusive on the event timestamp."""
+        ...
+
+
 @runtime_checkable
 class Embedder(Protocol):
     #: Names the model; vectors from different ids are never compared.

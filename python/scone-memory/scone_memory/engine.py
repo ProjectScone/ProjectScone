@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -30,8 +31,11 @@ from .models import (
 from .ports import (
     DocumentStore,
     Embedder,
+    Event,
+    EventLog,
     NewChunk,
     NewEpisode,
+    NewEvent,
     NewFact,
     TextFilter,
     VectorIndex,
@@ -114,12 +118,29 @@ class MemoryEngine:
         embedder: Embedder,
         chunk_target: int = DEFAULT_TARGET,
         clock: Callable[[], str] = now_rfc3339,
+        events: Optional[EventLog] = None,
+        record_queries: bool = True,
     ) -> None:
         self.documents = documents
         self.vectors = vectors
         self.embedder = embedder
         self.chunk_target = chunk_target
         self.clock = clock
+        #: Evidence sink. None means no evidence is kept, and no metric
+        #: can be computed; that absence is reported, never filled in.
+        self.events = events
+        #: False stores a sha256 of each query instead of its text.
+        self.record_queries = record_queries
+
+    async def _emit(self, space: str, kind: str, payload: dict) -> Optional[Event]:
+        if self.events is None:
+            return None
+        return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload))
+
+    def _query_for_evidence(self, query: str) -> dict:
+        if self.record_queries:
+            return {"query": query, "query_hashed": False}
+        return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
@@ -155,6 +176,29 @@ class MemoryEngine:
         error is raised; a batch either lands whole or not at all.
         """
         check_space(space)
+        started = time.perf_counter()
+        records = list(records)
+        try:
+            resolved = await self._remember_many(space, records)
+        except Exception as e:
+            await self._emit(space, "remember", {
+                "records": len(records), "error": f"{type(e).__name__}: {e}",
+                "latency_ms": _ms(started),
+            })
+            raise
+        fresh_count = sum(1 for a in resolved if not a.deduplicated)
+        await self._emit(space, "remember", {
+            "records": len(records),
+            "fresh": fresh_count,
+            "deduplicated": len(resolved) - fresh_count,
+            "chunks": sum(a.chunks for a in resolved),
+            "bytes": sum(len(r.content.encode()) for r, a in zip(records, resolved) if not a.deduplicated),
+            "embedder": self.embedder.id,
+            "latency_ms": _ms(started),
+        })
+        return resolved
+
+    async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
         when = self.clock()
         results: list[Optional[Added]] = []
         fresh: list[_Pending] = []
@@ -268,11 +312,14 @@ class MemoryEngine:
 
     async def forget(self, space: str, episode_id: int) -> None:
         check_space(space)
+        started = time.perf_counter()
         removed = await self.documents.delete_episode(space, episode_id)
         if not removed and await self.documents.get_episode(space, episode_id) is None:
+            await self._emit(space, "forget", {"episode_id": episode_id, "error": "NotFound", "latency_ms": _ms(started)})
             raise NotFound(f"episode {episode_id} not found in {space!r}")
         await self.vectors.delete(removed)
         await self.documents.bump_revision(space)
+        await self._emit(space, "forget", {"episode_id": episode_id, "chunks_removed": len(removed), "latency_ms": _ms(started)})
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
@@ -302,23 +349,42 @@ class MemoryEngine:
         clean_where = normalise_metadata(where or {})
         depth = limit * LANE_DEPTH
         degraded: list[str] = []
+        started = time.perf_counter()
+        latency: dict[str, float] = {}
+        evidence = {
+            **self._query_for_evidence(query),
+            "limit": limit,
+            "as_of": boundary,
+            "tags": list(clean_tags),
+            "where": clean_where,
+            "embedder": self.embedder.id,
+        }
 
         vector_lane: list[tuple[int, float]] = []
         try:
+            t0 = time.perf_counter()
             [qvec] = await self.embedder.embed([query])
+            latency["embed"] = _ms(t0)
+            t0 = time.perf_counter()
             vector_lane = await self.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
+            latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
 
         text_lane: list[tuple[int, float]] = []
         try:
+            t0 = time.perf_counter()
             text_lane = await self.documents.search_text(
                 space, query, depth, TextFilter(as_of=boundary, tags=clean_tags, where=clean_where)
             )
+            latency["text"] = _ms(t0)
         except Exception as e:  # noqa: BLE001
             degraded.append(f"text: {type(e).__name__}: {e}")
 
         if len(degraded) == 2:
+            latency["total"] = _ms(started)
+            await self._emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
+                                               "error": "both lanes failed"})
             raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
 
         similarity = dict(vector_lane)
@@ -366,13 +432,56 @@ class MemoryEngine:
             )
         facts = await self._facts_for_query(space, query, boundary or now)
         counts = await self.documents.counts(space)
-        return RecallResult(
+        result = RecallResult(
             items=result_items,
             facts=facts,
             degraded=degraded,
             returned_bytes=sum(len(i.text.encode()) for i in result_items),
             space_bytes=counts.bytes,
         )
+        latency["total"] = _ms(started)
+        event = await self._emit(space, "recall", {
+            **evidence,
+            "latency_ms": latency,
+            "degraded": degraded,
+            # Only the returned items are recorded; candidates the lanes
+            # saw but fusion dropped are not, so coverage is "returned".
+            "items": [
+                {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
+                 "similarity": i.similarity, "lanes": i.lanes}
+                for i in result_items
+            ],
+            "items_coverage": "returned",
+            "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
+            "facts": len(facts),
+            "returned_bytes": result.returned_bytes,
+            "space_bytes": result.space_bytes,
+        })
+        if event is not None:
+            result.event_id = event.event_id
+        return result
+
+    async def feedback(
+        self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
+    ) -> Event:
+        """Record a person's judgement of one returned item. The only
+        relevance evidence that does not come from a benchmark. Latest
+        judgement per (recall, chunk) wins when metrics read these; the
+        earlier ones stay as events."""
+        check_space(space)
+        if self.events is None:
+            raise InvalidInput("no event log is attached, so feedback cannot be kept")
+        recall = await self.events.get(space, recall_event_id)
+        if recall is None or recall.kind != "recall":
+            raise NotFound(f"recall event {recall_event_id} not found in {space!r}")
+        returned = {int(i["chunk_id"]) for i in recall.payload.get("items", [])}
+        if chunk_id not in returned:
+            raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
+        if note is not None and len(note) > 500:
+            raise InvalidInput("note must be at most 500 chars")
+        return await self._emit(space, "feedback", {
+            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
+        })  # type: ignore[return-value]
 
     async def _facts_for_query(self, space: str, query: str, when: str, limit: int = 10) -> list[Fact]:
         terms = set(tokenize(query))
@@ -427,10 +536,15 @@ class MemoryEngine:
         start = normalise_time(valid_from) if valid_from else self.clock()
         start_dt = parse_rfc3339(start)
 
+        started = time.perf_counter()
         rivals = await self.documents.facts_for(space, subject, predicate)
         covering = [r for r in rivals if _covers(r, start_dt)]
         for rival in covering:
             if rival.object == object:
+                await self._emit(space, "fact_assert", {
+                    "fact_id": rival.fact_id, "subject": subject, "predicate": predicate,
+                    "outcome": "restated", "superseded": [], "latency_ms": _ms(started),
+                })
                 return rival
         later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
         successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
@@ -457,6 +571,13 @@ class MemoryEngine:
                 rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason})
             )
         await self.documents.bump_revision(space)
+        await self._emit(space, "fact_assert", {
+            "fact_id": fact.fact_id, "subject": subject, "predicate": predicate,
+            "outcome": "new_closed" if successor else "new_active",
+            "superseded": [r.fact_id for r in covering],
+            "source_episode_id": source_episode_id,
+            "latency_ms": _ms(started),
+        })
         return fact
 
     async def close_fact(self, space: str, fact_id: int, reason: str) -> Fact:
@@ -474,6 +595,7 @@ class MemoryEngine:
         )
         await self.documents.update_fact(closed)
         await self.documents.bump_revision(space)
+        await self._emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual"})
         return closed
 
     async def facts(
@@ -610,6 +732,10 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _ms(since: float) -> float:
+    return round((time.perf_counter() - since) * 1000, 3)
 
 
 def _fact_identity(fact: Fact) -> tuple:
