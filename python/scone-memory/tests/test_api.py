@@ -14,13 +14,20 @@ from fastapi.testclient import TestClient
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import create_app
 
-CLIENT_MODELS = pathlib.Path(__file__).resolve().parents[3] / "clients" / "python" / "scone" / "models.py"
+REPO = pathlib.Path(__file__).resolve().parents[3]
+#: The HTTP client lives at python/scone-client after the repository
+#: cleanup; the older location is checked second during the move.
+CLIENT_MODEL_PATHS = (
+    REPO / "python" / "scone-client" / "scone" / "models.py",
+    REPO / "clients" / "python" / "scone" / "models.py",
+)
 
 
 def load_client_models():
-    if not CLIENT_MODELS.exists():
+    found = next((path for path in CLIENT_MODEL_PATHS if path.exists()), None)
+    if found is None:
         pytest.skip("scone-client not checked out beside this package")
-    spec = importlib.util.spec_from_file_location("scone_client_models", CLIENT_MODELS)
+    spec = importlib.util.spec_from_file_location("scone_client_models", found)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # dataclasses resolve their module by name
     spec.loader.exec_module(module)  # type: ignore[union-attr]

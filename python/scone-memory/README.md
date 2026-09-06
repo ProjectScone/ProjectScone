@@ -62,8 +62,8 @@ scone-memory
 ```
 
 The HTTP surface is the same as the Rust `scone serve`, so the
-[`scone-client`](../../clients/python) package and the MCP setup work
-against either. The bearer key decides the space; a key can never read
+[`scone-client`](../scone-client) package (moving from `clients/python`) and
+the MCP setup work against either. The bearer key decides the space; a key can never read
 outside the space it was issued for.
 
 | Route | What |
