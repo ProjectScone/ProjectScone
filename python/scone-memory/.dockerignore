@@ -6,3 +6,5 @@ __pycache__
 .pytest_cache
 Dockerfile
 docker-compose.yml
+dist
+build
