@@ -16,6 +16,7 @@ into a data pipeline step.
 from __future__ import annotations
 
 import argparse
+import pathlib
 import asyncio
 import json
 import os
@@ -114,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
     p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("bench", help="measure retrieval on a LongMemEval-style file with the Rust harness's definitions")
+    p.add_argument("dataset", help="path to longmemeval_s.json or a same-shaped file")
+    p.add_argument("--k", default="5,10,15", help="comma-separated k values (default 5,10,15)")
+    p.add_argument("--limit", type=int, help="recall limit (default max k)")
+    p.add_argument("--first", type=int, help="only the first N items")
+    p.add_argument("--stratified", type=int, help="N items per question type, in file order")
+    p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
+    p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
                        add_help=False)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)
@@ -273,6 +282,55 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                   f"{report.closed} closed, {report.skipped} restated, {report.parked} parked"
                   + (f"; error: {report.error}" if report.error else ""), file=out)
         return 0 if report.error is None else 1
+
+    if args.command == "bench":
+        from collections import defaultdict
+
+        from .bench import load_items, run as run_bench
+        from .config import build_embedder, build_documents, build_events, build_vectors
+
+        items = load_items(args.dataset)
+        if args.stratified:
+            by_type: dict = defaultdict(list)
+            for it in items:
+                if len(by_type[it.question_type]) < args.stratified:
+                    by_type[it.question_type].append(it)
+            items = [it for group in by_type.values() for it in group]
+        if args.first:
+            items = items[: args.first]
+        ks = tuple(int(k) for k in args.k.split(",") if k.strip())
+        embedder = build_embedder(settings)  # one embedder (model load) shared across items
+
+        async def make():
+            # Fresh stores per item so nothing leaks between questions; the
+            # bench always uses in-process stores, so the number measures the
+            # engine, not a database.
+            from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+
+            return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+
+        def progress(n, total):
+            if not args.json:
+                print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+        report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
+                                 dataset=str(args.dataset), progress=progress)
+        if not args.json:
+            print("", file=sys.stderr)
+        if args.out:
+            pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
+        if args.json:
+            emit(report.as_dict(with_items=False))
+        else:
+            print(f"{report.scored} scored of {report.items} items ({'with' if report.include_abstention else 'without'} abstention), "
+                  f"embedder {report.embedder}, {report.errors} error(s)", file=out)
+            for k in report.ks:
+                print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
+            print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
+                  f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
+            for qt, row in report.by_type.items():
+                print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+        return 0
 
     if args.command == "export":
         async for record in engine.export(space):
