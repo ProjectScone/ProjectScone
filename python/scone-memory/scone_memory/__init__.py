@@ -12,13 +12,17 @@ and nothing else changes.
 
 from .backends import InMemoryDocumentStore, InMemoryVectorIndex
 from .embedders import HashEmbedder
-from .engine import MemoryEngine, Profile
+from .engine import ImportSummary, MemoryEngine, Profile, Record
+from .sync import SyncMemoryEngine
 from .errors import InvalidInput, NotFound, SconeError
 from .models import Added, Chunk, Episode, Fact, RecallItem, RecallResult, Status
 
 __all__ = [
     "MemoryEngine",
+    "SyncMemoryEngine",
     "Profile",
+    "Record",
+    "ImportSummary",
     "InMemoryDocumentStore",
     "InMemoryVectorIndex",
     "HashEmbedder",

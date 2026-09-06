@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Optional, Sequence
+from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import fusion
 from .chunker import DEFAULT_TARGET, chunk_spans
@@ -48,12 +48,40 @@ MAX_QUERY = 1_000
 MAX_LIMIT = 50
 #: How many candidates each lane contributes before fusion.
 LANE_DEPTH = 4
+#: Chunk texts per embedding call during batch ingest.
+EMBED_BATCH = 64
 
 
 @dataclass
 class Profile:
     static_facts: list[Fact] = field(default_factory=list)
     dynamic: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Record:
+    """One thing to remember, for batch ingest and for import."""
+
+    content: str
+    kind: str = "note"
+    source: Optional[str] = None
+    tags: Sequence[str] = ()
+    created_at: Optional[str] = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Mapping) -> "Record":
+        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata") if k in data}
+        if "content" not in known:
+            raise InvalidInput("a record needs content")
+        return cls(**known)
+
+
+@dataclass
+class ImportSummary:
+    episodes: int = 0
+    deduplicated: int = 0
+    facts: int = 0
 
 
 class MemoryEngine:
@@ -87,67 +115,106 @@ class MemoryEngine:
         created_at: Optional[str] = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Added:
-        check_space(space)
-        if not content.strip():
-            raise InvalidInput("content must not be empty")
-        if len(content.encode()) > MAX_CONTENT_BYTES:
-            raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-        if kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}, got {kind!r}")
-        clean_tags = normalise_tags(tags)
-        clean_meta = normalise_metadata(metadata or {})
-        when = self.clock()
-        happened = normalise_time(created_at) if created_at else when
-        digest = content_hash(space, content)
-        existing = await self.documents.episode_by_hash(space, digest)
-        if existing is not None:
-            return Added(episode_id=existing.episode_id, deduplicated=True, chunks=0)
+        [added] = await self.remember_many(
+            space,
+            [Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}))],
+        )
+        return added
 
-        episode = await self.documents.insert_episode(
-            NewEpisode(
-                space=space,
-                kind=kind,
-                content=content,
-                content_hash=digest,
-                created_at=happened,
-                ingested_at=when,
-                source=source,
-                tags=clean_tags,
-                metadata=clean_meta,
-            )
-        )
-        spans = chunk_spans(content, self.chunk_target)
-        chunks = await self.documents.insert_chunks(
-            [
-                NewChunk(
-                    episode_id=episode.episode_id,
+    async def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
+        """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
+        instead of one per record, and one revision bump. Outcomes come
+        back in input order; a record identical to an earlier one in the
+        same batch is deduplicated against it."""
+        check_space(space)
+        when = self.clock()
+        results: list[Optional[Added]] = []
+        pending: list[tuple[int, Episode, tuple[str, ...], dict[str, str]]] = []
+        seen_hashes: dict[str, int] = {}
+        for record in records:
+            content = record.content
+            if not isinstance(content, str) or not content.strip():
+                raise InvalidInput("content must not be empty")
+            if len(content.encode()) > MAX_CONTENT_BYTES:
+                raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
+            if record.kind not in KINDS:
+                raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
+            clean_tags = normalise_tags(record.tags)
+            clean_meta = normalise_metadata(record.metadata or {})
+            happened = normalise_time(record.created_at) if record.created_at else when
+            digest = content_hash(space, content)
+            if digest in seen_hashes:
+                results.append(Added(episode_id=seen_hashes[digest], deduplicated=True, chunks=0))
+                continue
+            existing = await self.documents.episode_by_hash(space, digest)
+            if existing is not None:
+                seen_hashes[digest] = existing.episode_id
+                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0))
+                continue
+            episode = await self.documents.insert_episode(
+                NewEpisode(
                     space=space,
-                    ordinal=i,
-                    start=s.start,
-                    end=s.end,
-                    text=content[s.start : s.end],
+                    kind=record.kind,
+                    content=content,
+                    content_hash=digest,
                     created_at=happened,
+                    ingested_at=when,
+                    source=record.source,
+                    tags=clean_tags,
+                    metadata=clean_meta,
                 )
-                for i, s in enumerate(spans)
-            ]
-        )
-        vectors = await self.embedder.embed([c.text for c in chunks])
+            )
+            seen_hashes[digest] = episode.episode_id
+            results.append(None)
+            pending.append((len(results) - 1, episode, clean_tags, clean_meta))
+
+        if not pending:
+            return [r for r in results if r is not None]
+
+        new_chunks: list[NewChunk] = []
+        owners: list[tuple[int, Episode, tuple[str, ...], dict[str, str]]] = []
+        for slot, episode, clean_tags, clean_meta in pending:
+            spans = chunk_spans(episode.content, self.chunk_target)
+            for i, span in enumerate(spans):
+                new_chunks.append(
+                    NewChunk(
+                        episode_id=episode.episode_id,
+                        space=space,
+                        ordinal=i,
+                        start=span.start,
+                        end=span.end,
+                        text=episode.content[span.start : span.end],
+                        created_at=episode.created_at,
+                    )
+                )
+                owners.append((slot, episode, clean_tags, clean_meta))
+        chunks = await self.documents.insert_chunks(new_chunks)
+
+        vectors: list[list[float]] = []
+        texts = [c.text for c in chunks]
+        for i in range(0, len(texts), EMBED_BATCH):
+            vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
         await self.vectors.upsert(
             [
                 VectorPoint(
                     chunk_id=c.chunk_id,
                     space=space,
                     episode_id=episode.episode_id,
-                    created_at=happened,
+                    created_at=episode.created_at,
                     vector=v,
                     tags=clean_tags,
                     metadata=clean_meta,
                 )
-                for c, v in zip(chunks, vectors)
+                for c, v, (_, episode, clean_tags, clean_meta) in zip(chunks, vectors, owners)
             ]
         )
+        per_episode: dict[int, int] = {}
+        for c in chunks:
+            per_episode[c.episode_id] = per_episode.get(c.episode_id, 0) + 1
+        for slot, episode, _, _ in pending:
+            results[slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=per_episode[episode.episode_id])
         await self.documents.bump_revision(space)
-        return Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
+        return [r for r in results if r is not None]
 
     async def forget(self, space: str, episode_id: int) -> None:
         check_space(space)
@@ -406,6 +473,69 @@ class MemoryEngine:
             document_store=self.documents.name,
             vector_index=self.vectors.name,
         )
+
+    # -- portability ------------------------------------------------------
+
+    async def export(self, space: str) -> AsyncIterator[dict]:
+        """Every episode and every fact in a space as plain dicts, the
+        shape `import_records` accepts. Chunks and vectors are derived
+        and are rebuilt on import, so a dump moves between stores and
+        between embedders."""
+        check_space(space)
+        counts = await self.documents.counts(space)
+        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
+            yield {
+                "type": "episode",
+                "episode_id": episode.episode_id,
+                "kind": episode.kind,
+                "content": episode.content,
+                "source": episode.source,
+                "tags": list(episode.tags),
+                "metadata": dict(episode.metadata),
+                "created_at": episode.created_at,
+            }
+        for fact in await self.documents.list_facts(space, include_closed=True):
+            yield {"type": "fact", **fact.model_dump(exclude={"space"})}
+
+    async def import_records(self, space: str, records: Iterable[Mapping]) -> ImportSummary:
+        """Load an export. Episodes go through the normal ingest, so they
+        are re-chunked, re-embedded and deduplicated; facts are stored as
+        they were, closed ones included, because the ledger's history is
+        part of what is being moved."""
+        check_space(space)
+        summary = ImportSummary()
+        episodes: list[Record] = []
+        facts: list[Mapping] = []
+        for record in records:
+            kind = record.get("type", "episode")
+            if kind == "episode":
+                episodes.append(Record.from_dict(record))
+            elif kind == "fact":
+                facts.append(record)
+            else:
+                raise InvalidInput(f"unknown record type {kind!r}")
+        for added in await self.remember_many(space, episodes):
+            summary.episodes += 0 if added.deduplicated else 1
+            summary.deduplicated += 1 if added.deduplicated else 0
+        for f in facts:
+            await self.documents.insert_fact(
+                NewFact(
+                    space=space,
+                    subject=normalise_term(str(f["subject"]), "subject"),
+                    predicate=normalise_term(str(f["predicate"]), "predicate"),
+                    object=str(f["object"]),
+                    valid_from=normalise_time(str(f["valid_from"])),
+                    confidence=float(f.get("confidence", 1.0)),
+                    valid_until=normalise_time(str(f["valid_until"])) if f.get("valid_until") else None,
+                    status=str(f.get("status", "active")),
+                    closed_reason=f.get("closed_reason"),
+                    source_episode_id=f.get("source_episode_id"),
+                )
+            )
+            summary.facts += 1
+        if facts:
+            await self.documents.bump_revision(space)
+        return summary
 
 
 # -- validation helpers -----------------------------------------------------
