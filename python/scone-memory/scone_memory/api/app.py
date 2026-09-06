@@ -178,6 +178,9 @@ def create_app(
                 headers["Cache-Control"] = "no-store"
             return HTMLResponse(body, headers=headers)
 
+        # /memory is the canonical address of the memory console (the
+        # playground lives at /playground); / stays as a compatible alias.
+        @app.api_route("/memory", methods=["GET", "HEAD"])
         @app.api_route("/", methods=["GET", "HEAD"])
         async def console_page() -> Response:
             return page_response(console_html if console_html is not None else render_console(), CONSOLE)

@@ -200,3 +200,12 @@ def test_reload_pages_serves_edits_without_a_restart(tmp_path, monkeypatch):
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         fake.write_text("<html>v3 __SCONE_TOKEN__</html>", encoding="utf-8")
         assert c.get("/playground").text == "<html>v2 solo</html>", "normal mode reads once at startup"
+
+
+def test_memory_is_the_canonical_console_address_and_root_still_works():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        a, b = c.get("/memory"), c.get("/")
+        assert a.status_code == b.status_code == 200 and a.text == b.text
+        assert c.head("/memory").status_code == 200
+        assert 'href="/memory"' in a.text and "data:image/png;base64," in a.text
