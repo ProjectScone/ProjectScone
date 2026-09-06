@@ -259,3 +259,29 @@ def test_cli_review_flow(tmp_path):
     assert json.loads(text)["excluded_reason"] is None
     assert run("decline", str(proposed["fact_id"]), "--reason", "no")[0] == 2  # not proposed any more
     assert run("review")[1].strip() == "nothing awaiting review"
+
+
+def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeypatch):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "d.db")}
+    out = io.StringIO()
+    assert cli.main(["distill"], env=env, stdin=io.StringIO(), out=out) == 2
+
+    from scone_memory import FakeChat
+    import scone_memory.config as config
+
+    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat([json.dumps([{"subject": "ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])]))
+    env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "d.db"), "SCONE_CHAT_URL": "http://x", "SCONE_CHAT_MODEL": "m"}
+    cli.main(["remember"], env=env2, stdin=io.StringIO("Ana moved to Lisbon."), out=io.StringIO())
+    out = io.StringIO()
+    assert cli.main(["distill", "--json"], env=env2, stdin=io.StringIO(), out=out) == 0
+    report = json.loads(out.getvalue())
+    assert (report["episodes"], report["proposed"], report["error"]) == (1, 1, None)
+    out = io.StringIO()
+    cli.main(["review"], env=env2, stdin=io.StringIO(), out=out)
+    assert "[proposed] [extracted] ana lives_in Lisbon" in out.getvalue()
+
+    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat(["not json"]))
+    cli.main(["remember"], env=env2, stdin=io.StringIO("Bob moved to Berlin."), out=io.StringIO())
+    out = io.StringIO()
+    assert cli.main(["distill", "--json"], env=env2, stdin=io.StringIO(), out=out) == 1, "a failed pass exits 1"
+    assert json.loads(out.getvalue())["error"].startswith("DistillError")

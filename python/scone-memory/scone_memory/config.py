@@ -18,6 +18,14 @@
     SCONE_EVENTS_MAX_AGE_DAYS                    sqlite sink retention, optional
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
+    SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
+    SCONE_CHAT_API_KEY                 optional bearer
+    SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
+    SCONE_DISTILL_INTERVAL_S           seconds between consolidation passes (default 30)
+    SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
+    SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
+                                       directly; unset = every extraction is proposed for review
+
     SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
@@ -48,6 +56,13 @@ class Settings:
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
     embed_cache: Optional[str] = None
+    chat_url: Optional[str] = None
+    chat_model: Optional[str] = None
+    chat_api_key: Optional[str] = None
+    chat_think: Optional[bool] = None
+    distill_interval_s: float = 30.0
+    distill_batch: int = 20
+    distill_accept_at: Optional[float] = None
     events: Optional[str] = None
     events_queries: str = "hash"
     events_max_age_days: Optional[float] = None
@@ -72,6 +87,13 @@ class Settings:
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
             embed_cache=env.get("SCONE_EMBED_CACHE"),
+            chat_url=env.get("SCONE_CHAT_URL"),
+            chat_model=env.get("SCONE_CHAT_MODEL"),
+            chat_api_key=env.get("SCONE_CHAT_API_KEY"),
+            chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
+            distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
+            distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
+            distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             events=env.get("SCONE_EVENTS"),
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
@@ -154,6 +176,31 @@ def build_vectors(settings: Settings):
             raise InvalidInput("SCONE_VECTORS=qdrant needs SCONE_QDRANT_URL")
         return QdrantVectorIndex(settings.qdrant_url, settings.qdrant_collection, settings.qdrant_api_key)
     raise InvalidInput(f"unknown SCONE_VECTORS {settings.vectors!r}")
+
+
+def build_chat(settings: Settings):
+    """The consolidation model, or None when none is configured."""
+    if not settings.chat_url and not settings.chat_model:
+        return None
+    if not (settings.chat_url and settings.chat_model):
+        raise InvalidInput("consolidation needs both SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    from .llm import OpenAICompatibleChat
+
+    return OpenAICompatibleChat(settings.chat_url, settings.chat_model, api_key=settings.chat_api_key, think=settings.chat_think)
+
+
+def build_worker(engine: MemoryEngine, settings: Settings, spaces):
+    """A ConsolidationWorker over the configured spaces, or None."""
+    chat = build_chat(settings)
+    if chat is None:
+        return None
+    from .distill import Distiller
+    from .worker import ConsolidationWorker
+
+    if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
+        raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
+    distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
+    return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s, batch=settings.distill_batch)
 
 
 def build_events(settings: Settings):

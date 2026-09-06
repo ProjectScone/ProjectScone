@@ -112,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
+    p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
+    p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
                        add_help=False)
     p.add_argument("hook_args", nargs=argparse.REMAINDER)
@@ -133,7 +135,7 @@ def fact_line(f) -> str:
     return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
 
 
-async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int:
+async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
 
@@ -255,6 +257,23 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
                 print(f"- {line}", file=out)
         return 0
 
+    if args.command == "distill":
+        from .config import build_worker
+
+        worker = build_worker(engine, settings, [space])
+        if worker is None:
+            print("error: no consolidation model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)", file=sys.stderr)
+            return 2
+        worker.batch = args.limit
+        report = await worker.run_once(space)
+        if args.json:
+            emit({"space": space, **report.as_payload()})
+        else:
+            print(f"read {report.episodes} episode(s): {report.proposed} proposed, {report.accepted} accepted, "
+                  f"{report.closed} closed, {report.skipped} restated, {report.parked} parked"
+                  + (f"; error: {report.error}" if report.error else ""), file=out)
+        return 0 if report.error is None else 1
+
     if args.command == "export":
         async for record in engine.export(space):
             emit(record)
@@ -288,8 +307,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
     async def go() -> int:
         engine = await build_engine(settings)
+
         try:
-            return await run(args, engine, stdin or sys.stdin, out or sys.stdout)
+            return await run(args, engine, stdin or sys.stdin, out or sys.stdout, settings)
         finally:
             for store in (engine.documents, engine.vectors):
                 if hasattr(store, "close"):

@@ -17,6 +17,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from contextlib import asynccontextmanager
+
 from .. import metrics
 from ..engine import MemoryEngine
 from ..errors import InvalidInput, NotFound
@@ -78,14 +80,26 @@ PLAYGROUND = Path(__file__).with_name("playground.html")
 
 
 def create_app(
-    engine: MemoryEngine, keys: Mapping[str, str], console: bool = True, console_key: Optional[str] = None
+    engine: MemoryEngine, keys: Mapping[str, str], console: bool = True, console_key: Optional[str] = None, worker=None
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
-    no baked key the page asks for one and keeps it in the tab."""
-    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None)
+    no baked key the page asks for one and keeps it in the tab.
+    ``worker`` is a ConsolidationWorker started with the app and stopped
+    with it; None means no distiller runs on this server."""
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if worker is not None:
+            worker.start()
+        yield
+        if worker is not None:
+            await worker.stop()
+
+    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.engine = engine
     app.state.keys = dict(keys)
+    app.state.worker = worker
 
     def space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -307,12 +321,19 @@ def create_app(
     @app.get("/v1/status")
     async def get_status(space: str = Depends(space_for)) -> dict:
         status = await engine.status(space)
+        pending = await engine.pending_distillation(space)
+        if worker is None:
+            lane = "manual"  # claims arrive through POST /v1/facts, MCP, or the CLI
+        elif worker.running:
+            lane = "active"
+        else:
+            lane = "stopped"
+        last = worker.last.get(space) if worker is not None else None
         return {
             **status.model_dump(),
-            # No distiller runs in this stack yet; facts arrive through
-            # POST /v1/facts. Named so the shared client can tell.
-            "semantic_lane": "manual",
-            "pending_distill": 0,
+            "semantic_lane": lane,
+            "pending_distill": pending,
+            "last_distill": last.as_payload() if last else None,
         }
 
     return app

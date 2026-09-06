@@ -948,6 +948,16 @@ class MemoryEngine:
         check_space(space)
         return dict(sorted((await self.documents.counts(space)).tags.items()))
 
+    async def pending_distillation(self, space: str) -> int:
+        """Episodes no claim cites yet. The same definition the distiller
+        and memory_pending use, so the three surfaces agree."""
+        check_space(space)
+        counts = await self.documents.counts(space)
+        if counts.episodes == 0:
+            return 0
+        referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
+        return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
+
     async def scopes(self, space: str) -> dict[str, dict[str, int]]:
         """Episode counts per metadata key and value: which users, agents
         and sessions have memory here. Walks the episodes, which is fine
