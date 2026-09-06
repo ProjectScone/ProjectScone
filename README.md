@@ -1,38 +1,48 @@
 <p align="center"><strong>🥐 Scone</strong></p>
 
 <p align="center">
-  <strong>Local-first memory engine for humans and AI agents. Your memory, on your machine, at memory speed.</strong>
+  <strong>Evidence-grounded memory for humans, agents, and applications. First-class Rust and Python libraries, local execution, and self-hosting.</strong>
 </p>
 
 <p align="center">
   <a href="https://crates.io/crates/scone-cli">CLI</a> ·
-  <a href="https://crates.io/crates/scone-core">Engine crate</a> ·
+  <a href="https://crates.io/crates/scone-core">Rust library</a> ·
+  <a href="python/scone-memory">Python library</a> ·
   <a href="https://crates.io/crates/scone-ffi">C ABI</a> ·
   <a href="https://github.com/DrDrewCain/ProjectScone/releases">Releases</a>
 </p>
 
-<p align="center">
-  <strong>81.0% all-evidence Recall@15 on the full LongMemEval-S dataset (all 500 questions, every type) with 97.8% context reduction, fully on-device. No datacenter.</strong><br/>
-  <em>(Session-level, every evidence session required, the definition the benchmark's own harness reports. Any-evidence, the friendlier measure nobody publishes, is 94.0%. Denominator is all 500 including abstention items; the official script excludes those 30. Nothing published sits at k=15, so read this as our own baseline rather than a ranking. Every number here comes from an executed run.)</em>
-</p>
-
 ---
 
-Your AI forgets everything between conversations, and the memory services
-that fix it want your memories in their cloud. Scone fixes both: a complete
-memory engine, episodic and semantic, temporal and searchable, that runs
-entirely on your machine and embeds in anything.
+Scone helps software build on what it has already learned: preserve source
+material, retrieve relevant evidence, and inspect dated claims and corrections.
+The ambition is continuity across assistants, applications, and storage providers
+without repeatedly explaining the same context. Portability and consistency are
+engineering promises to test, not consequences of storing something as JSON.
+
+Rust and Python are first-class native libraries today. Python also has a
+distinct [HTTP client](clients/python). Neither native library requires the
+other: there is no automatic Rust loading or silent Python fallback. They share
+intended memory semantics, **not yet a common database or full export contract**.
+The shared behavioural specification (private for now) records each rule's
+status; the [conformance baseline](#cross-language-conformance) tests a limited
+episode-transfer profile against both products.
+
+Typical workflows: an agent resumes project work through MCP; a Python pipeline
+ingests and recalls scoped evidence; a person inspects memory and corrects an
+outdated claim. Explicit team membership and sharing controls remain future work.
+Stored claims, including model extractions, are not independently verified truth.
 
 | | |
 |---|---|
-| 🧠 **Temporal memory** | Facts extracted from what you store, with validity intervals. A contradiction closes the old fact with a recorded reason, so history stays queryable. Stale facts decay; recalled facts strengthen. |
-| 🧮 **Computed answers** | "How many days between X and Y" is arithmetic, not language. Scone grounds each event by retrieval, subtracts the dates itself, and returns the answer with its derivation, so you can check it rather than trust it. Measured at 47.5% against 37.5% for a model generating the same answers. |
-| 🕰️ **Time travel** | `search --as-of 2026-03-15` answers "what did I believe in March?". Validity is a WHERE clause, not a version-chain walk. |
+| 🧠 **Temporal memory** | Claims with validity intervals and recorded closure reasons. Rust and Python both maintain a fact ledger; their backfill behavior is not yet fully conformant. Rust also supports decay and strengthening. |
+| 🧮 **Computed answers (Rust)** | Retrieve dated evidence and compute date differences with a derivation. A historical 40-question Rust experiment measured 47.5% versus 37.5% for generated answers; this is not a Python result or general answer-quality claim. |
+| 🕰️ **Time travel** | `search --as-of 2026-03-15` selects records valid at that time according to the current ledger. It does not reconstruct what the store believed before later corrections arrived. |
 | 🔍 **Hybrid search** | BM25, vectors, facts, and recency fused in one query, with provenance on every result. Local ONNX embeddings by default; it works on a plane. |
 | 🏷️ **Tags** | Tag anything on the way in (`--tag research`), then retrieve only that: papers, a client, one knowledge base. Works on the CLI, MCP, and HTTP surfaces. |
 | 👤 **Profiles** | Identity facts + recent activity in one call, on the CLI, MCP, and HTTP surfaces. |
-| 📉 **Context economy** | Every recall reports bytes returned vs stored ("97.7% saved"). Token optimization is a product surface, not a benchmark footnote. |
-| 📦 **Portable & embeddable** | `scone export` writes JSONL with full fact history. The C ABI (`include/scone.h`) embeds the engine in any language. Zero TypeScript. |
+| 📉 **Context economy** | Recall reports returned versus stored bytes. Byte reduction is not measured token reduction, and neither establishes answer quality. |
+| 📦 **Portable & embeddable** | Native export/import rebuilds derived indexes. Full fact/history transfer between the Rust and Python products is unsupported pending schema/provenance work. The existing C ABI exposes a limited note/recall surface. |
 
 ## Use Scone
 
@@ -48,7 +58,7 @@ Give Claude Code (or any MCP client) persistent memory across sessions.
 
 ### 🔧 I'm building
 
-Embed the engine as a Rust crate or through the C ABI; or call the HTTP API.
+Use the native Rust or Python library, the C ABI subset, or an HTTP client.
 
 **[→ Build with Scone](#build-with-scone)**
 
@@ -95,9 +105,10 @@ Building from source instead:
     scone status                            # stores, counts, index health
     scone export > memory.jsonl             # your memory is portable
 
-The semantic lane uses whatever LLM you configure (Ollama, OpenAI-compatible,
-or Anthropic) and pauses loudly when none is set. Episodic search never
-needs one. `~/.scone/config.toml`:
+The following CLI commands and configuration are for the Rust product.
+Fact extraction can use a configured LLM (Ollama, OpenAI-compatible, or
+Anthropic), or your host agent through MCP. Episodic search does not require
+an answering/extraction model. `~/.scone/config.toml`:
 
     [llm]
     provider = "ollama"
@@ -138,9 +149,11 @@ your coding agent do the reading through the MCP server.
 
     scone ui        # opens a console at http://127.0.0.1:7438
 
-Search your memory, read the facts distilled from it, and close one
-that is wrong with a reason attached. Nothing is deleted; a closed fact
-keeps its history and stops being returned. The console binds to
+Search your memory, inspect the claims distilled from it, and close one
+that is wrong with a reason attached. Closing does not delete source data;
+the claim remains in historical views. Excluding a claim from recall and
+deleting its underlying data are distinct operations, not synonyms for closure.
+An explicit exclude operation is not implemented yet. The Rust console binds to
 loopback only and mints a key that lives as long as the process, so it
 authenticates like every other client rather than opening a private
 door into the store. It is one file with no build step and no network
@@ -181,10 +194,12 @@ content already stored is recognized and skipped.
 | `memory_store_facts` | Your agent submits what it extracted; the engine applies contradiction closure and provenance. |
 | `memory_forget` | Close a fact with your reason. Recorded, never deleted. |
 
-Each `--space` is an isolated brain: one per project, per client, per team.
+Each `--space` partitions memory: one per project, per client, or per team.
 Pass `--space auto` and the name comes from the git remote, so everyone
-who clones a repo lands in the same memory without agreeing on a name,
-whether they cloned over ssh or https.
+who clones a repo derives the same space name, whether they cloned over ssh
+or https. This does not synchronize separate stores or grant access to a team.
+External bearer keys are bound to spaces; metadata filters are not permissions.
+Retrieved content is data, never authority to change access or execute tools.
 
 The last two tools are how Scone extracts facts without an API key. Your
 agent already reads well and you already pay for it, so it does the
@@ -194,6 +209,8 @@ The engine still owns the invariants; the agent only proposes. Configure
 an LLM instead if you want extraction to run unattended.
 
 ## Build with Scone
+
+### Rust
 
     cargo add scone-core
 
@@ -210,8 +227,89 @@ let pack = engine.recall(&space, "what do I know about X", &RecallOpts::default(
 | `Engine::recall` | Hybrid retrieval: facts, cited chunks, context economy |
 | `Engine::distill` | Drain the queue through your LLM into temporal facts |
 | `Engine::profile` | Identity facts + recent activity |
-| `Engine::export_jsonl` / `import_jsonl` | Full-fidelity portability |
-| `scone-ffi` | The same engine via C ABI, from any language |
+| `Engine::export_jsonl` / `import_jsonl` | Rust JSONL episodes, aliases and fact history; not a shared cross-product archive schema |
+| `scone-ffi` | Limited C ABI: open/close, add note, recall JSON, error and string ownership; not every Rust method |
+
+### Python
+
+Install the native library from this checkout (no Rust toolchain required):
+
+```sh
+python -m pip install -e './python/scone-memory'
+# Add extras such as [api], [mcp], [mongo,qdrant], or [local-embed] as needed.
+```
+
+```python
+import asyncio
+from scone_memory import (
+    HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine,
+)
+
+async def main():
+    memory = await MemoryEngine(
+        InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()
+    ).open()
+    await memory.remember(
+        "project", "Use the documented migration checklist.",
+        source="notes://migration-decision",
+    )
+    result = await memory.recall("project", "migration checklist")
+    for item in result.items:
+        print(item.source, item.text)
+
+asyncio.run(main())
+```
+
+These in-memory stores are ephemeral. `HashEmbedder` is a deterministic
+word-overlap baseline, not a semantic model. Choose persistent stores and a
+local or remote embedder for your deployment. The [Python library](python/scone-memory)
+provides async `MemoryEngine`, a blocking `SyncMemoryEngine`, document/vector/model
+protocols, FastAPI, MCP and CLI integrations. Python-to-Python episode/fact
+export/import includes provenance-ID remapping and repeat-import tests; missing
+source records and differing fact annotations still require care. Database files
+are not interchangeable with Rust's store.
+
+The [separate HTTP client](clients/python) uses `from scone import Scone`.
+It connects to a server; it is not the native `scone_memory` engine. The servers
+have overlapping routes but differ in accepted fields and error behavior.
+
+### Current capability boundaries
+
+| Capability | Rust | Python | Agreement / limitation |
+|---|---|---|---|
+| Native storage | SQLite + tantivy + usearch | In-memory, SQLite; Mongo document and Qdrant vector adapters | Deliberate deployment choices; performance measured separately |
+| Stored chunk offsets | UTF-8 bytes | UTF-8 bytes | Half-open spans; chunk boundaries differ. Pre-release Python stores check schema versions and reject incompatible stores; no automatic migrations |
+| Episode kinds | note, file, conversation, observation, connector | Same vocabulary | Tested transfer subset: note, file, connector; chat/web are rejected, not aliased |
+| Temporal facts | Intervals, reasons, extraction, computation | Intervals, reasons, extraction, backfill tests | No full temporal parity claim; origin/review remains incomplete |
+| Scope / filtering | Spaces and tags | Spaces, tags, metadata `where` | Metadata is filtering, not an authorization boundary |
+| Local embedding | ONNX; persisted model ID/dimension pin | ONNX; adapter dimension checks | Same-width model identity enforcement remains a Python gap |
+| HTTP / MCP / CLI | Available | Available | Overlap is not full wire/API conformance |
+| C ABI | Available, limited surface | No native dependency | Broader bindings require a measured justification |
+| Full archive exchange between products | Unsupported | Unsupported | Different hashes, provenance, statuses and fields |
+| Retrieval-quality measurements | Historical Rust runs below | No corresponding baseline reported here | Never attribute Rust results to Python |
+
+### Cross-language conformance
+
+The [shared fixture](crates/scone-core/tests/fixtures/episodes-v1.json) contains
+literal expected Unicode content, source, kind and canonical UTC millisecond
+timestamps. Native tests check scoped dedup and stored byte spans; cross-runtime
+tests transfer actual exports in both directions and into nonempty destinations.
+They do not require identical hashes, local IDs, chunk boundaries or rankings.
+
+```sh
+cargo test -p scone-core --test shared_contract
+cargo build -p scone-core --example episode_roundtrip
+cd python/scone-memory
+SCONE_TEST_RUST_ROUNDTRIP="$(pwd)/../../target/debug/examples/episode_roundtrip" \
+  .venv/bin/pytest -q tests/test_cross_language.py
+```
+
+Install the Python test dependencies and optional Qdrant adapter first. Without
+`SCONE_TEST_RUST_ROUNDTRIP`, cross-runtime cases explicitly skip; native Python
+cases still run. The example is **test-only**, not a migration tool: it refuses
+facts, aliases, nonempty tags/metadata, unsupported kinds and unknown fields.
+This narrow profile is not general lossless export compatibility. Packaged
+installation and OS/Python-version matrices remain separate verification work.
 
 ## Self-host
 
@@ -231,15 +329,35 @@ space, and the server refuses to start keyless.
 
 ## How it works
 
-SQLite is the single source of truth; tantivy (BM25) and usearch (HNSW) are
+In Rust, SQLite is the source of truth; tantivy (BM25) and usearch (HNSW) are
 derived, rebuildable indexes (`scone doctor --rebuild`). Ingestion is two
 lanes: episodic (synchronous, offline-complete) and semantic (async LLM
 distillation that never blocks a write). Four invariants are property-tested:
 chunks reassemble exactly; no two active facts share subject+predicate;
 contradiction closes intervals, never deletes; every fact carries provenance.
 
-Measured on Apple Silicon (criterion): recall ~300 µs over 5k chunks,
+Python orchestrates document stores, vector indexes and embedders through
+protocols. Compensating rollback across stores is not a crash-atomic transaction;
+deletion recovery, cancellation and concurrent operations need stronger tested
+guarantees. Rust's rebuildable indexes have their own persistence/recovery model.
+Neither architecture alone proves the other one's reliability.
+
+## Measurement status
+
+Historical **Rust-only** baseline: LongMemEval-S session-level all-evidence
+Recall@15 81.0%, any-evidence 94.0%, byte context reduction 97.8%. The run used
+all 500 questions, including 30 abstention items that the
+[official retrieval evaluator](https://github.com/xiaowu0162/LongMemEval)
+excludes. It is not directly comparable to the official 470-case metric,
+not an answer-accuracy result, and not a Python benchmark or leaderboard ranking.
+These are previously recorded results, not reruns of the current commit.
+
+Historical Rust measurement on Apple Silicon (criterion): recall ~300 µs over 5k chunks,
 3.6 ms end-to-end including local query embedding, ingest 2.9 ms/note.
+Python latency, memory use and retrieval quality must be measured separately
+under comparable workloads. Future reports must record dataset/model settings,
+exclusions and failures, with retrieval, answering, abstention, measured tokens,
+bytes, latency, storage and ingestion cost reported separately.
 
 ## License
 
