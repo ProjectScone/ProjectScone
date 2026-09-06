@@ -61,6 +61,49 @@ def load_items(path: str | Path) -> list[BenchItem]:
     return items
 
 
+def stratified_sample(items: Sequence[BenchItem], n: int, seed: int = 42) -> list[BenchItem]:
+    """The Rust harness's proportional stratified sample, item for item.
+
+    ``n`` items spread across question types by their population share,
+    drawn with the same xorshift64 generator in the same order (types
+    sorted bytewise, a swap-remove draw per pick, then a deterministic
+    top-up when rounding leaves the sample short), so the Python engine
+    is measured on exactly the items E21 and E22 ran on: seed 42, n=60
+    or n=200. Needed because longmemeval_s is ordered by type, so head
+    sampling measures one class (found 2026-08-28)."""
+    mask = (1 << 64) - 1
+    state = max(int(seed), 1) & mask
+
+    def next_draw() -> int:
+        nonlocal state
+        state ^= (state << 13) & mask
+        state ^= state >> 7
+        state ^= (state << 17) & mask
+        return state
+
+    def swap_remove(pool: list[BenchItem], idx: int) -> BenchItem:
+        picked = pool[idx]
+        pool[idx] = pool[-1]
+        pool.pop()
+        return picked
+
+    by_type: dict[str, list[BenchItem]] = {}
+    for it in items:
+        by_type.setdefault(it.question_type, []).append(it)
+    total = max(len(items), 1)
+    sample: list[BenchItem] = []
+    for question_type in sorted(by_type, key=lambda t: t.encode("utf-8")):
+        pool = list(by_type[question_type])
+        take = (n * len(pool) + total // 2) // total
+        for _ in range(min(take, len(pool))):
+            sample.append(swap_remove(pool, next_draw() % len(pool)))
+    chosen = {it.question_id for it in sample}
+    pool = [it for it in items if it.question_id not in chosen]
+    while len(sample) < n and pool:
+        sample.append(swap_remove(pool, next_draw() % len(pool)))
+    return sample[:n]
+
+
 @dataclass
 class ItemResult:
     question_id: str

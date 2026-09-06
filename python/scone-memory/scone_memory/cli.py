@@ -126,6 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="recall limit (default max k)")
     p.add_argument("--first", type=int, help="only the first N items")
     p.add_argument("--stratified", type=int, help="N items per question type, in file order")
+    p.add_argument("--sample", type=int, help="the Rust harness's proportional stratified sample of N items (E21 is --sample 60)")
+    p.add_argument("--seed", type=int, default=42, help="seed for --sample (default 42, the harness's default)")
     p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
     p.add_argument("--history", action="store_true", help="ask every recall for the closed chain behind matched facts (experiment 3)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
@@ -151,6 +153,76 @@ def fact_line(f) -> str:
     origin = "" if f.origin == "stated" else f" [{f.origin}]"
     excluded = f"  excluded: {f.excluded_reason}" if f.excluded_reason else ""
     return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
+
+
+async def bench_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """The bench never opens the configured store: it measures the engine on
+    fresh in-process stores per item, so running it must not touch, and
+    must not migrate, whatever SCONE_SQLITE_PATH points at."""
+    emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
+    from collections import defaultdict
+
+    from .bench import load_items, run as run_bench, stratified_sample
+    from .config import build_embedder
+
+    items = load_items(args.dataset)
+    if args.stratified:
+        by_type: dict = defaultdict(list)
+        for it in items:
+            if len(by_type[it.question_type]) < args.stratified:
+                by_type[it.question_type].append(it)
+        items = [it for group in by_type.values() for it in group]
+    if args.sample:
+        items = stratified_sample(items, args.sample, args.seed)
+    if args.first:
+        items = items[: args.first]
+    ks = tuple(int(k) for k in args.k.split(",") if k.strip())
+    embedder = build_embedder(settings)  # one embedder (model load) shared across items
+
+    async def make():
+        # Fresh stores per item so nothing leaks between questions; the
+        # bench always uses in-process stores, so the number measures the
+        # engine, not a database.
+        from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+
+    def progress(n, total):
+        if not args.json:
+            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+    report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
+                             dataset=str(args.dataset), progress=progress, history=args.history)
+    if not args.json:
+        print("", file=sys.stderr)
+    if args.out:
+        pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
+    if args.json:
+        emit(report.as_dict(with_items=False))
+    else:
+        print(f"{report.scored} scored of {report.items} items ({'with' if report.include_abstention else 'without'} abstention), "
+              f"embedder {report.embedder}, {report.errors} error(s)", file=out)
+        for k in report.ks:
+            print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
+        print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
+              f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
+        for qt, row in report.by_type.items():
+            print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+        if report.history:
+            print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
+                  + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
+        if report.similarity_floor is not None:
+            print(f"  similarity floor {report.similarity_floor}: " + ", ".join(f"{k} {v}" for k, v in sorted(report.low_confidence_counts.items())), file=out)
+        sweep = report.abstention
+        if sweep is None:
+            print("  abstention sweep: not measurable (no item without evidence ran)", file=out)
+        else:
+            print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence and {sweep['evidence_n']} evidence item(s): "
+                  "floor -> abstained / wrongly withheld", file=out)
+            for f in sweep["floors"]:
+                withheld = sweep["false_abstain_rate"][f]
+                print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)
+    return 0
 
 
 async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
@@ -304,69 +376,6 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                   + (f"; error: {report.error}" if report.error else ""), file=out)
         return 0 if report.error is None else 1
 
-    if args.command == "bench":
-        from collections import defaultdict
-
-        from .bench import load_items, run as run_bench
-        from .config import build_embedder, build_documents, build_events, build_vectors
-
-        items = load_items(args.dataset)
-        if args.stratified:
-            by_type: dict = defaultdict(list)
-            for it in items:
-                if len(by_type[it.question_type]) < args.stratified:
-                    by_type[it.question_type].append(it)
-            items = [it for group in by_type.values() for it in group]
-        if args.first:
-            items = items[: args.first]
-        ks = tuple(int(k) for k in args.k.split(",") if k.strip())
-        embedder = build_embedder(settings)  # one embedder (model load) shared across items
-
-        async def make():
-            # Fresh stores per item so nothing leaks between questions; the
-            # bench always uses in-process stores, so the number measures the
-            # engine, not a database.
-            from .backends import InMemoryDocumentStore, InMemoryVectorIndex
-
-            return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
-
-        def progress(n, total):
-            if not args.json:
-                print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
-
-        report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
-                                 dataset=str(args.dataset), progress=progress, history=args.history)
-        if not args.json:
-            print("", file=sys.stderr)
-        if args.out:
-            pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
-        if args.json:
-            emit(report.as_dict(with_items=False))
-        else:
-            print(f"{report.scored} scored of {report.items} items ({'with' if report.include_abstention else 'without'} abstention), "
-                  f"embedder {report.embedder}, {report.errors} error(s)", file=out)
-            for k in report.ks:
-                print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
-            print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
-                  f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
-            for qt, row in report.by_type.items():
-                print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
-            if report.history:
-                print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
-                      + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
-            if report.similarity_floor is not None:
-                print(f"  similarity floor {report.similarity_floor}: " + ", ".join(f"{k} {v}" for k, v in sorted(report.low_confidence_counts.items())), file=out)
-            sweep = report.abstention
-            if sweep is None:
-                print("  abstention sweep: not measurable (no item without evidence ran)", file=out)
-            else:
-                print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence and {sweep['evidence_n']} evidence item(s): "
-                      "floor -> abstained / wrongly withheld", file=out)
-                for f in sweep["floors"]:
-                    withheld = sweep["false_abstain_rate"][f]
-                    print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)
-        return 0
-
     if args.command == "export":
         async for record in engine.export(space):
             emit(record)
@@ -400,6 +409,12 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
+    if args.command == "bench":
+        try:
+            return asyncio.run(bench_command(args, settings, out or sys.stdout))
+        except SconeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
     async def go() -> int:
         engine = await build_engine(settings)

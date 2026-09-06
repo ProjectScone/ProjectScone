@@ -13,6 +13,6 @@ denominator only when ``include_abstention`` is set, matching the Rust
 run that reported on all 500; the official evaluator excludes them.
 """
 
-from .runner import BenchItem, ItemResult, RunReport, load_items, run
+from .runner import BenchItem, ItemResult, RunReport, load_items, run, stratified_sample
 
-__all__ = ["BenchItem", "ItemResult", "RunReport", "load_items", "run"]
+__all__ = ["BenchItem", "ItemResult", "RunReport", "load_items", "run", "stratified_sample"]

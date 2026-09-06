@@ -220,3 +220,56 @@ async def test_history_is_passed_through_and_counted_honestly(tmp_path):
     assert (asked.items_with_facts, asked.items_with_history) == (1, 1)
     by_id = {r.question_id: r for r in asked.results}
     assert (by_id["a"].facts, by_id["a"].history_facts, by_id["b"].facts) == (1, 1, 0)
+
+
+def synthetic(count, *splits):
+    def kind(i):
+        return "type-" + "abc"[sum(i >= s for s in splits)]
+
+    return [item(f"q{i}", kind(i), "q", [[("user", "x")]], ["s0"]) for i in range(count)]
+
+
+def test_the_sample_is_the_rust_harness_sample_item_for_item(tmp_path):
+    """Pinned to what crates/scone-bench's stratified_sample returned for
+    the same synthetic datasets (100 items, 80 type-a and 20 type-b; the
+    harness test's own shape), printed once from a throwaway Rust test at
+    f47e17a. Same seed, same n, same ids in the same order. The third
+    case has three types of 33, 33 and 34 items, where the per-type
+    rounding draws nine of ten and the top-up path picks the last."""
+    from scone_memory.bench import stratified_sample
+
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(synthetic(100, 80)))
+    items = load_items(path)
+    ids = [it.question_id for it in stratified_sample(items, 10, 42)]
+    assert ids == ["q74", "q48", "q66", "q38", "q26", "q27", "q71", "q23", "q96", "q88"]
+    assert sum(it.question_type == "type-b" for it in stratified_sample(items, 10, 42)) == 2
+    ids = [it.question_id for it in stratified_sample(items, 7, 7)]
+    assert ids == ["q7", "q31", "q9", "q19", "q62", "q25", "q85"]
+    assert [it.question_id for it in stratified_sample(items, 10, 42)] == [it.question_id for it in stratified_sample(items, 10, 42)]
+    path.write_text(json.dumps(synthetic(100, 33, 66)))
+    ids = [it.question_id for it in stratified_sample(load_items(path), 10, 42)]
+    assert ids == ["q25", "q31", "q30", "q49", "q35", "q60", "q87", "q81", "q82", "q84"]
+
+
+def test_the_cli_runs_the_sample_the_harness_would(tmp_path):
+    """--sample 10 --seed 42 on the 80/20 synthetic set runs the ten items
+    the Rust harness draws, in its order, and the --out report names them.
+    The configured store stays untouched: the bench measures the engine on
+    in-process stores, so it must neither create nor migrate the file at
+    SCONE_SQLITE_PATH (before 2026-09-06 it opened it, and a run with the
+    local embedder against a hash-embedded file failed on the dimension)."""
+    import io
+
+    from scone_memory import cli
+
+    dataset = tmp_path / "d.json"
+    dataset.write_text(json.dumps(synthetic(100, 80)))
+    report = tmp_path / "report.json"
+    untouched = tmp_path / "configured.db"
+    env = {"SCONE_EMBEDDER": "hash", "SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite", "SCONE_SQLITE_PATH": str(untouched)}
+    code = cli.main(["bench", str(dataset), "--sample", "10", "--out", str(report), "--json"], env=env, stdin=io.StringIO(), out=io.StringIO())
+    assert code == 0
+    ran = [r["question_id"] for r in json.loads(report.read_text())["results"]]
+    assert ran == ["q74", "q48", "q66", "q38", "q26", "q27", "q71", "q23", "q96", "q88"]
+    assert not untouched.exists(), "the bench opened the configured store"
