@@ -11,10 +11,12 @@ and nothing else changes.
 """
 
 from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+from .distill import DistillError, Distiller, DistillOutcome
 from .embedders import HashEmbedder
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from .sync import SyncMemoryEngine
 from .errors import InvalidInput, NotFound, SconeError
+from .llm import ChatError, FakeChat, OpenAICompatibleChat
 from .models import Added, Chunk, Episode, Fact, RecallItem, RecallResult, Status
 
 __all__ = [
@@ -27,6 +29,12 @@ __all__ = [
     "InMemoryVectorIndex",
     "HashEmbedder",
     "SconeError",
+    "Distiller",
+    "DistillError",
+    "DistillOutcome",
+    "ChatError",
+    "FakeChat",
+    "OpenAICompatibleChat",
     "InvalidInput",
     "NotFound",
     "Added",
