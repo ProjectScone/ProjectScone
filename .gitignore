@@ -11,3 +11,10 @@ bench-data/
 bench-runs/
 clients/python/**/__pycache__/
 clients/python/.pytest_cache/
+
+# python/scone-memory
+python/scone-memory/.venv/
+python/scone-memory/**/__pycache__/
+python/scone-memory/*.egg-info/
+python/scone-memory/dist/
+python/scone-memory/.pytest_cache/

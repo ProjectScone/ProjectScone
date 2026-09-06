@@ -1,0 +1,102 @@
+"""The HTTP surface, checked with the sibling ``scone-client`` models when
+that package is on disk so a drift between the two stacks fails here."""
+
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.api import create_app
+
+CLIENT_MODELS = pathlib.Path(__file__).resolve().parents[3] / "clients" / "python" / "scone" / "models.py"
+
+
+def load_client_models():
+    if not CLIENT_MODELS.exists():
+        pytest.skip("scone-client not checked out beside this package")
+    spec = importlib.util.spec_from_file_location("scone_client_models", CLIENT_MODELS)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve their module by name
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+@pytest.fixture
+async def client():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    app = create_app(engine, {"key-a": "alpha", "key-b": "beta"})
+    with TestClient(app) as c:
+        yield c
+
+
+def auth(key: str = "key-a") -> dict:
+    return {"authorization": f"Bearer {key}"}
+
+
+def test_no_key_or_wrong_key_is_401(client):
+    assert client.get("/v1/status").status_code == 401
+    r = client.get("/v1/status", headers=auth("nope"))
+    assert r.status_code == 401
+    assert r.json() == {"error": "unknown key"}
+
+
+def test_key_decides_the_space(client):
+    client.post("/v1/episodes", json={"content": "alpha's secret garden"}, headers=auth("key-a"))
+    seen_by_b = client.get("/v1/recall", params={"q": "secret garden"}, headers=auth("key-b")).json()
+    assert seen_by_b["items"] == []
+    assert client.get("/v1/status", headers=auth("key-b")).json()["space"] == "beta"
+
+
+def test_unknown_field_is_refused(client):
+    r = client.post("/v1/episodes", json={"content": "x", "colour": "red"}, headers=auth())
+    assert r.status_code == 422
+    assert "colour" in r.json()["error"]
+
+
+def test_engine_errors_map_to_status_codes(client):
+    assert client.post("/v1/episodes", json={"content": "   "}, headers=auth()).status_code == 422
+    assert client.post("/v1/facts/42/close", json={"reason": "gone"}, headers=auth()).status_code == 404
+    assert client.delete("/v1/episodes/42", headers=auth()).status_code == 404
+    assert client.get("/v1/recall", params={"q": ""}, headers=auth()).status_code == 422
+
+
+def test_round_trip_parses_with_the_shared_client(client):
+    models = load_client_models()
+    added = client.post(
+        "/v1/episodes",
+        json={"content": "Moved to Lisbon in March", "tags": ["life"], "created_at": "2024-03-02"},
+        headers=auth(),
+    )
+    assert added.status_code == 200
+    parsed_added = models.Added.from_json(added.json())
+    assert parsed_added.episode_id == 1 and parsed_added.chunks == 1
+
+    client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon"}, headers=auth())
+    recall = client.get("/v1/recall", params={"q": "lisbon", "limit": "3"}, headers=auth())
+    parsed = models.Recall.from_json(recall.json())
+    assert [m.episode_id for m in parsed.items] == [1]
+    assert parsed.items[0].created_at == "2024-03-02T00:00:00.000Z"
+    assert [f.object for f in parsed.facts] == ["Lisbon"]
+    assert parsed.context_reduction == 0.0
+
+    facts = models.Fact  # every fact field the client reads is present
+    for f in client.get("/v1/facts", headers=auth()).json()["facts"]:
+        facts.from_json(f)
+    closed = client.post("/v1/facts/1/close", json={"reason": "moved again"}, headers=auth()).json()
+    assert closed == {"closed": 1, "reason": "moved again"}
+
+    status = models.Status.from_json(client.get("/v1/status", headers=auth()).json())
+    assert (status.space, status.episodes, status.chunks) == ("alpha", 1, 1)
+    tags = [models.Tag.from_json(t) for t in client.get("/v1/tags", headers=auth()).json()["tags"]]
+    assert [(t.name, t.count) for t in tags] == [("life", 1)]
+    profile = models.Profile.from_json(client.get("/v1/profile", headers=auth()).json())
+    assert profile.dynamic == ["Moved to Lisbon in March"]
+
+
+def test_health_needs_no_key(client):
+    assert client.get("/healthz").json() == {"ok": True}
