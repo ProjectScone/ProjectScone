@@ -422,7 +422,7 @@ async def close_stores(engine: MemoryEngine) -> None:
 async def serve(settings: Settings, space: str) -> None:
     engine = await build_engine(settings)
     try:
-        await create_server(engine, space).run_stdio_async()
+        await create_server(engine, space, settings.mcp_propose_below).run_stdio_async()
     finally:
         await close_stores(engine)
 

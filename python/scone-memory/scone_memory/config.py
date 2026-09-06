@@ -33,6 +33,9 @@
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
                                        directly; unset = every extraction is proposed for review
+    SCONE_MCP_PROPOSE_BELOW            confidence below which a fact submitted over MCP is parked for
+                                       review; unset = every submitted fact is a ledger claim, which
+                                       is what the Rust server does without --propose-below
 
     SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
@@ -61,6 +64,9 @@ class Settings:
     #: Where attachment bytes live. Empty means beside the SQLite file
     #: when there is one, and in memory when there is not.
     blob_dir: str = ""
+    #: Confidence below which a fact an agent submits over MCP is parked
+    #: for a person instead of entering the ledger. Unset means none is.
+    mcp_propose_below: Optional[float] = None
     mongo_url: Optional[str] = None
     mongo_db: str = "scone"
     postgres_url: Optional[str] = None
@@ -110,6 +116,8 @@ class Settings:
             embedder=env.get("SCONE_EMBEDDER", "hash"),
             sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
             blob_dir=env.get("SCONE_BLOB_DIR", ""),
+            mcp_propose_below=(float(env["SCONE_MCP_PROPOSE_BELOW"])
+                               if env.get("SCONE_MCP_PROPOSE_BELOW") else None),
             mongo_url=env.get("SCONE_MONGO_URL"),
             mongo_db=env.get("SCONE_MONGO_DB", "scone"),
             postgres_url=env.get("SCONE_POSTGRES_URL"),

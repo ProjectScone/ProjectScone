@@ -380,3 +380,46 @@ async def test_without_a_gate_every_submitted_fact_still_enters_the_ledger():
     assert not error
     assert [f.object for f in await engine.facts("default")] == ["Lisbon"]
     assert await engine.facts("default", status="proposed") == []
+
+
+async def test_the_gate_can_be_turned_on_where_an_operator_can_reach_it(monkeypatch):
+    """A gate only the library can set is a gate no deployment has. The
+    server reads it from the environment, the same way every other store
+    and model setting arrives."""
+    from scone_memory import mcp
+    from scone_memory.cli import settings_for_cli
+
+    seen: dict = {}
+
+    def watching(engine, space, propose_below=None):
+        seen.update(space=space, propose_below=propose_below)
+        raise RuntimeError("stop before stdio")
+
+    monkeypatch.setattr(mcp, "create_server", watching)
+    # Both stores in memory on purpose: the CLI defaults vectors to sqlite,
+    # and a test must not open the machine's real ~/.scone-memory store.
+    settings = settings_for_cli({"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory",
+                                 "SCONE_EMBEDDER": "hash", "SCONE_MCP_PROPOSE_BELOW": "0.7"})
+
+    with pytest.raises(RuntimeError):
+        await mcp.serve(settings, "alpha")
+
+    assert seen == {"space": "alpha", "propose_below": 0.7}
+
+
+async def test_no_gate_in_the_environment_leaves_the_server_ungated(monkeypatch):
+    from scone_memory import mcp
+    from scone_memory.cli import settings_for_cli
+
+    seen: dict = {}
+
+    def watching(engine, space, propose_below=None):
+        seen.update(propose_below=propose_below)
+        raise RuntimeError("stop before stdio")
+
+    monkeypatch.setattr(mcp, "create_server", watching)
+    with pytest.raises(RuntimeError):
+        await mcp.serve(settings_for_cli({"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory",
+                                          "SCONE_EMBEDDER": "hash"}), "alpha")
+
+    assert seen == {"propose_below": None}
