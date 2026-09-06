@@ -80,9 +80,18 @@ The uncertain-write lock is local to this mounted form, not a durable receipt or
 cross-navigation guarantee. A reload/navigation can discard it; server-side
 operation tracking and recovery remain follow-up work.
 
+The same form offers **Import text file** for UTF-8 text, Markdown and code
+(up to 1 MB). Selection reads locally and shows a literal, non-executing preview;
+Save submits the complete decoded text with kind `file` and source basename.
+The read-back must match exactly, including line endings and any UTF-8 BOM,
+before success is shown. A deduplicated episode retains its earlier metadata;
+the saved-text inspection shows its recorded source. No separate binary file
+attachment or download is created. Invalid encodings, empty/binary content and
+unsupported formats are rejected; PDF parsing and URL fetching are not included.
+
 The native integration test uses the Python attachment API and an isolated
 in-memory store, not the live workspace. Rust attachment parity, automatic image
-capture from agent sessions, bulk/file/URL import, OCR and media-inclusive backup
+capture from agent sessions, bulk imports, broader file parsing, URL import, OCR and media-inclusive backup
 are still unfinished. Existing `[Image #1]` text cannot reconstruct missing bytes.
 Missing metadata, missing bytes and transport failures remain distinct states.
 This UI is staged until the running backend is reloaded with its required routes.

@@ -47,7 +47,8 @@ const day = (s?: string | null) => (s ?? "").slice(0, 10);
 const clock = (s?: string | null) => (s ?? "").slice(11, 19);
 const safeHref = (url: string) => {
   try {
-    const u = new URL(url, window.location.href);
+    // A source basename or native path is provenance, not a relative web link.
+    const u = new URL(url);
     return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
   } catch {
     return null;

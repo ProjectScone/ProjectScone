@@ -47,6 +47,32 @@ async function fixture(t,{reopened=false}={}){
   return {page,base,errors,modelWaiting};
 }
 
+test('a browser text-file import is retained and recalled by the native engine',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
+  await page.goto(base+'/memory');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  await page.getByRole('button',{name:'Import text file',exact:true}).click();
+  const content='\ufeff# Nebulaforge\r\nUse the amber dial for calibration.\r\n';
+  await page.getByLabel('Text file',{exact:true}).setInputFiles({name:'nebulaforge.md',mimeType:'text/markdown',buffer:Buffer.from(content)});
+  await page.getByRole('region',{name:'File preview'}).waitFor();
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await page.getByRole('heading',{name:/Source saved · episode #/}).waitFor();
+  const id=Number((await page.getByRole('heading',{name:/Source saved · episode #/}).textContent()).match(/#(\d+)/)[1]);
+  const headers={authorization:'Bearer conversation-fixture-alpha'};
+  const saved=await(await fetch(base+'/v1/episodes/'+id,{headers})).json();
+  assert.equal(saved.content,content);assert.equal(saved.kind,'file');assert.equal(saved.source,'nebulaforge.md');
+  assert.equal((await fetch(base+'/v1/episodes/'+id,{headers:{authorization:'Bearer conversation-fixture-beta'}})).status,404);
+  await page.getByText('Read saved text',{exact:true}).click();
+  assert.equal(await page.locator('.source-saved pre').textContent(),content);
+  await page.locator('.source-composer').getByRole('button',{name:'Close',exact:true}).click();
+  await page.getByPlaceholder('What have we decided about this project?').fill('Nebulaforge');
+  await page.getByPlaceholder('What have we decided about this project?').press('Enter');
+  await page.locator('.rows .row').filter({hasText:'amber dial'}).first().waitFor();
+  assert.equal(await page.locator('.rows .row').getByRole('link',{name:'nebulaforge.md',exact:true}).count(),0,'a local filename is provenance, not a website URL');
+  assert.deepEqual(errors,[]);
+});
+
 test('the browser pages a native transcript and opens an older original source',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
   const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
