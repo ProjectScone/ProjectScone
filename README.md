@@ -116,11 +116,14 @@ Expect a local model to retrieve well and answer imperfectly. Retrieval
 lands the right session for most questions while a small local reader
 converts far fewer of them into correct answers, and the gap is
 reasoning over evidence rather than finding it. Two attempts to close it
-by asking more of the model backfired and are recorded as failures: an
-evidence-chaining prompt cost 10 points, and splitting the work into
-extract-then-answer passes cost 13 and zeroed out temporal questions.
-Small readers improve when you shrink their job, not when you add
-structure to it.
+by asking more of the model, an evidence-chaining prompt and an
+extract-then-answer reader, measured as losses of 10 and 13 points.
+Those runs sampled at the server's default temperature, and a later
+check found that noise alone moves results by about that much, so both
+verdicts are withdrawn until they are repeated with sampling pinned.
+What has held up under that stricter measurement is the opposite move:
+handing the reader fewer, better memories, and doing arithmetic for it
+rather than asking it to.
 
 We are not quoting an end-task accuracy at the moment, because the
 figure we published was measured with a harness that handed the reader
