@@ -300,3 +300,49 @@ def test_cli_agent_hook_accepts_its_own_flags_first(tmp_path):
     with pytest.raises(SystemExit) as exit_info:  # other commands still reject unknown flags
         cli.main(["status", "--bogus"], env={"SCONE_SQLITE_PATH": str(tmp_path / "x.db")}, stdin=io.StringIO(), out=io.StringIO())
     assert exit_info.value.code == 2
+
+
+class SeeingEmbedder(HashEmbedder):
+    """Records exactly what it was asked to embed."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen: list[str] = []
+
+    async def embed(self, texts):
+        self.seen.extend(texts)
+        return await super().embed(texts)
+
+
+async def test_contextual_embeddings_change_what_is_embedded_not_what_is_stored():
+    from scone_memory.engine import contextual_prefix
+    from scone_memory.ports import NewEpisode
+
+    plain, ctx = SeeingEmbedder(), SeeingEmbedder()
+    off = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), plain).open()
+    on = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), ctx, contextual_embeddings=True).open()
+    text = "the harbour crane was repainted"
+    for engine in (off, on):
+        await engine.remember("default", text, created_at="2024-05-01", source="notes://harbour", metadata={"user_id": "ana"})
+    assert plain.seen == [text]
+    assert ctx.seen == ["2024-05-01 | notes://harbour | user id ana\n" + text], "the prefix names date, source and scope"
+    for engine in (off, on):
+        [item] = (await engine.recall("default", "harbour crane", limit=1)).items
+        assert item.text == text, "stored and returned text is the raw span either way"
+        [chunk] = await engine.documents.get_chunks("default", [item.chunk_id])
+        assert chunk.text == text and chunk.end - chunk.start == len(text.encode())
+    # queries are embedded as written in both modes; only chunks get the prefix
+    assert ctx.seen[-1] == "harbour crane" and plain.seen[-1] == "harbour crane"
+    [ev] = await on.events.query("default", kind="recall") if on.events else [None]
+    bare = NewEpisode(space="s", kind="note", content="x", content_hash="h", created_at="", ingested_at="")
+    assert contextual_prefix(bare) == "", "nothing to say means no prefix"
+
+
+async def test_recall_events_record_the_embedding_mode():
+    from scone_memory import InMemoryEventLog
+
+    on = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog(), contextual_embeddings=True).open()
+    await on.remember("default", "one note")
+    await on.recall("default", "note")
+    [ev] = await on.events.query("default", kind="recall")
+    assert ev.payload["contextual_embeddings"] is True

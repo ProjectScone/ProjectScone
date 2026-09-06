@@ -12,6 +12,7 @@
     SCONE_EMBED_API_KEY        remote: bearer, optional
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
+    SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_EVENTS      memory | sqlite | mongo | none
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -65,6 +66,7 @@ class Settings:
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
+    contextual_embeddings: bool = False
     events: Optional[str] = None
     events_queries: str = "hash"
     events_max_age_days: Optional[float] = None
@@ -97,6 +99,7 @@ class Settings:
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
+            contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             events=env.get("SCONE_EVENTS"),
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
@@ -243,6 +246,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         build_embedder(settings),
         events=events,
         record_queries=settings.events_queries == "text",
+        contextual_embeddings=settings.contextual_embeddings,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])

@@ -55,6 +55,25 @@ MAX_LIMIT = 50
 LANE_DEPTH = 4
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
+
+
+def contextual_prefix(episode: "NewEpisode") -> str:
+    """The context a chunk loses when cut from its episode: when it
+    happened, where it came from, and whose it is. Prepended to the text
+    that is embedded (research experiment 8, Anthropic's contextual
+    retrieval without the LLM), never to the text that is stored, so
+    invariant I1 holds and recall still returns exact excerpts. Only
+    fields that exist are named; an empty prefix means no change."""
+    parts = []
+    if episode.created_at:
+        parts.append(episode.created_at[:10])
+    if episode.source:
+        parts.append(episode.source)
+    for key in ("user_id", "agent_id", "session_id"):
+        value = episode.metadata.get(key) if episode.metadata else None
+        if value:
+            parts.append(f"{key.replace('_', ' ')} {value}")
+    return " | ".join(parts)
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job", "agent")
@@ -152,6 +171,7 @@ class MemoryEngine:
         clock: Callable[[], str] = now_rfc3339,
         events: Optional[EventLog] = None,
         record_queries: bool = False,
+        contextual_embeddings: bool = False,
     ) -> None:
         self.documents = documents
         self.vectors = vectors
@@ -165,6 +185,11 @@ class MemoryEngine:
         #: of its text: a memory store is private, which is not consent to
         #: a second log of everything asked of it.
         self.record_queries = record_queries
+        #: Experiment 8: embed "<date> | <source> | <scopes>\n<chunk>" while
+        #: storing the raw chunk. Off until the bench shows a gain; an
+        #: engine's setting is recorded on every recall event so a number is
+        #: never quoted without it.
+        self.contextual_embeddings = contextual_embeddings
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
@@ -283,7 +308,7 @@ class MemoryEngine:
             )
 
         if fresh:
-            texts = [t for p in fresh for t in p.texts]
+            texts = [self._embed_text(p.new, t) for p in fresh for t in p.texts]
             vectors: list[list[float]] = []
             for i in range(0, len(texts), EMBED_BATCH):
                 vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
@@ -298,6 +323,13 @@ class MemoryEngine:
             else:
                 resolved.append(r)  # type: ignore[arg-type]
         return resolved
+
+    def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
+        """What the embedder sees for a chunk. Stored text is never changed."""
+        if not self.contextual_embeddings:
+            return chunk_text
+        prefix = contextual_prefix(episode)
+        return f"{prefix}\n{chunk_text}" if prefix else chunk_text
 
     async def _write_batch(
         self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list
@@ -393,6 +425,7 @@ class MemoryEngine:
             "tags": list(clean_tags),
             "where": clean_where,
             "embedder": self.embedder.id,
+            "contextual_embeddings": self.contextual_embeddings,
         }
 
         vector_lane: list[tuple[int, float]] = []
