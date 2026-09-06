@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scone memory</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #1c1a17; --muted: #6b655c;
+    --line: #e6e1d8; --accent: #8a5a2b; --accent-soft: #f3ece2;
+    --warn: #8a2b2b; --ok: #2f6b3a; --lane-v: #3b5f8a; --lane-t: #7a5a1e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --panel: #1f1e1b; --ink: #ece8e1; --muted: #9a938a;
+      --line: #33302b; --accent: #d9a066; --accent-soft: #2a251e;
+      --warn: #e08585; --ok: #8cc79a; --lane-v: #8db1dd; --lane-t: #d9b26a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 16px 24px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button { font: inherit; background: none; border: 1px solid transparent; color: var(--muted);
+               padding: 5px 11px; border-radius: 7px; cursor: pointer; }
+  nav button:hover { color: var(--ink); }
+  nav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
+  main { padding: 22px 24px 60px; max-width: 980px; }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  input, select { font: inherit; padding: 8px 11px; border-radius: 8px; border: 1px solid var(--line);
+                  background: var(--panel); color: var(--ink); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #q { flex: 1; min-width: 240px; }
+  .narrow { width: 180px; }
+  button.go { font: inherit; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+              border: 1px solid var(--line); background: var(--accent); color: #fff; }
+  button.go:hover { filter: brightness(1.08); }
+  button.quiet { font: inherit; font-size: 12.5px; background: none; cursor: pointer; border: 1px solid var(--line);
+                 border-radius: 6px; padding: 2px 9px; color: var(--muted); }
+  button.quiet.warn { color: var(--warn); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; margin-bottom: 10px; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+  .tag { background: var(--accent-soft); color: var(--accent); border-radius: 5px; padding: 1px 7px; font-size: 11.5px; }
+  .scope { border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; font-size: 11.5px; color: var(--ink); cursor: pointer; }
+  .scope b { color: var(--muted); font-weight: 500; }
+  .lane { border-radius: 5px; padding: 1px 7px; font-size: 11.5px; color: #fff; }
+  .lane.v { background: var(--lane-v); } .lane.t { background: var(--lane-t); }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .muted { color: var(--muted); }
+  .err { color: var(--warn); }
+  .empty { color: var(--muted); padding: 26px 0; }
+  .bar { height: 5px; border-radius: 3px; background: var(--accent-soft); margin: 4px 0 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .chain { margin-bottom: 14px; }
+  .chain h3 { font-size: 14px; margin: 0 0 6px; font-weight: 600; }
+  .chain h3 span { color: var(--muted); font-weight: 400; }
+  .timeline { display: flex; height: 26px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+  .seg { display: flex; align-items: center; padding: 0 8px; font-size: 12px; white-space: nowrap; overflow: hidden;
+         text-overflow: ellipsis; border-right: 1px solid var(--line); background: var(--accent-soft); color: var(--muted); }
+  .seg.active { background: var(--accent); color: #fff; }
+  .seg:last-child { border-right: 0; }
+  .legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .reason { color: var(--muted); font-size: 12.5px; margin-top: 5px; }
+  .stat { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .stat:last-child { border-bottom: 0; }
+  .topo { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 8px; align-items: center; margin: 6px 0 14px; }
+  .node { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--panel); text-align: center; }
+  .node small { display: block; color: var(--muted); font-size: 11.5px; }
+  .arrow { color: var(--muted); text-align: center; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
+  .kv .scope { justify-self: start; }
+  .kv .bar { margin: 0; width: 100%; }
+  .keyform { max-width: 420px; margin: 60px auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥐 Scone <span id="space">memory</span></h1>
+  <nav>
+    <button data-view="search" aria-current="true">Memory</button>
+    <button data-view="ledger">Ledger</button>
+    <button data-view="scopes">Scopes</button>
+    <button data-view="status">Status</button>
+  </nav>
+</header>
+<main>
+  <div id="controls">
+    <div class="row">
+      <input type="search" id="q" placeholder="Ask your memory" autocomplete="off">
+      <button class="go" id="run">Recall</button>
+    </div>
+    <div class="row">
+      <input type="text" id="where" class="narrow" placeholder="scope  user_id:alice" autocomplete="off" title="key:value, comma-separated">
+      <input type="date" id="asof" class="narrow" title="as of this date">
+      <input type="text" id="tags" class="narrow" placeholder="tags  work,planning" autocomplete="off">
+    </div>
+  </div>
+  <div id="out"><p class="empty">Ask, or press Enter to see what is here.</p></div>
+</main>
+<script>
+const BAKED = document.currentScript.dataset.token || "__SCONE_TOKEN__";
+let TOKEN = BAKED.startsWith("__") ? (sessionStorage.getItem("scone-key") || "") : BAKED;
+const out = document.getElementById("out");
+const q = document.getElementById("q");
+const controls = document.getElementById("controls");
+let view = "search";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const day = (s) => (s || "").slice(0, 10);
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: {
+    authorization: "Bearer " + TOKEN, "content-type": "application/json", ...(opts.headers || {}) } });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401) { TOKEN = ""; sessionStorage.removeItem("scone-key"); askKey(); throw new Error("key needed"); }
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+}
+function show(html) { out.innerHTML = html; }
+function fail(e) { if (e.message !== "key needed") show('<p class="err">' + esc(e.message) + "</p>"); }
+function none(what) { return '<p class="empty">No ' + what + " yet.</p>"; }
+
+function askKey() {
+  controls.style.display = "none";
+  show(`<form class="card keyform" id="keyform">
+    <p>This server has more than one key, so the console needs to know which space you mean.</p>
+    <div class="row"><input type="password" id="key" placeholder="bearer key" style="flex:1"><button class="go">Open</button></div>
+    <p class="muted">Kept in this tab only.</p></form>`);
+  document.getElementById("keyform").onsubmit = (e) => {
+    e.preventDefault();
+    TOKEN = document.getElementById("key").value.trim();
+    sessionStorage.setItem("scone-key", TOKEN);
+    controls.style.display = view === "search" ? "block" : "none";
+    views[view]();
+  };
+}
+
+const scopeChips = (meta) => Object.entries(meta || {}).map(([k, v]) =>
+  `<span class="scope" data-where="${esc(k)}:${esc(v)}"><b>${esc(k)}</b> ${esc(v)}</span>`).join("");
+
+async function search() {
+  const term = q.value.trim();
+  const params = new URLSearchParams({ q: term || "*", limit: "25" });
+  const where = document.getElementById("where").value.trim();
+  const asof = document.getElementById("asof").value;
+  const tags = document.getElementById("tags").value.trim();
+  if (where) params.set("where", where);
+  if (asof) params.set("as_of", asof);
+  if (tags) params.set("tags", tags);
+  try {
+    const r = await api("/v1/recall?" + params.toString());
+    const items = r.items || [], facts = r.facts || [];
+    if (!items.length && !facts.length) return show(none("matching memory"));
+    const factsHtml = facts.length ? `<div class="card"><div class="meta">Facts that hold${asof ? " as of " + esc(asof) : ""}</div>` +
+      facts.map((f) => `<div class="body"><strong>${esc(f.subject)}</strong> ${esc(f.predicate)} ${esc(f.object)}
+        <span class="muted">since ${esc(day(f.valid_from))}</span></div>`).join("") + "</div>" : "";
+    const saved = r.context_reduction != null
+      ? `<p class="muted">${items.length} item(s); ${Math.round(r.context_reduction * 100)}% of the space's bytes left behind.` +
+        (r.degraded && r.degraded.length ? ` <span class="err">Degraded: ${esc(r.degraded.join("; "))}</span>` : "") + "</p>" : "";
+    show(saved + factsHtml + items.map((i) => `
+      <div class="card">
+        <div class="meta">
+          <span>${esc(day(i.created_at))}</span>
+          <span>episode ${esc(i.episode_id)}</span>
+          ${i.lanes && i.lanes.vector ? `<span class="lane v">vector #${i.lanes.vector}${i.similarity != null ? " · " + i.similarity.toFixed(2) : ""}</span>` : ""}
+          ${i.lanes && i.lanes.text ? `<span class="lane t">text #${i.lanes.text}</span>` : ""}
+          ${(i.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}
+          ${scopeChips(i.metadata)}
+          ${i.source ? `<a href="${esc(i.source)}" target="_blank" rel="noreferrer">source</a>` : ""}
+        </div>
+        <div class="bar"><i style="width:${Math.round((i.score || 0) * 100)}%"></i></div>
+        <div class="body">${esc(i.text)}</div>
+      </div>`).join(""));
+  } catch (e) { fail(e); }
+}
+
+function chains(facts) {
+  const groups = new Map();
+  for (const f of facts) {
+    const key = f.subject + " → " + f.predicate;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  for (const list of groups.values()) list.sort((a, b) => a.valid_from.localeCompare(b.valid_from) || a.fact_id - b.fact_id);
+  return groups;
+}
+
+async function ledger() {
+  try {
+    const r = await api("/v1/facts?all=true");
+    const list = r.facts || [];
+    if (!list.length) return show(none("facts in the ledger"));
+    const now = Date.now();
+    let html = `<p class="muted">${list.length} fact(s), ${list.filter((f) => f.status === "active").length} active. Each row is one subject and predicate over time; the highlighted segment is what holds now.</p>`;
+    for (const [key, facts] of chains(list)) {
+      const start = Math.min(...facts.map((f) => Date.parse(f.valid_from)));
+      const span = Math.max(now - start, 86400000);
+      const segs = facts.map((f) => {
+        const from = Date.parse(f.valid_from), to = f.valid_until ? Date.parse(f.valid_until) : now;
+        const width = Math.max(((to - from) / span) * 100, 6);
+        return `<div class="seg ${f.status === "active" ? "active" : ""}" style="flex:${width.toFixed(2)} 0 0" title="${esc(f.object)} ${esc(day(f.valid_from))} → ${f.valid_until ? esc(day(f.valid_until)) : "now"}${f.closed_reason ? "\n" + esc(f.closed_reason) : ""}">${esc(f.object)}</div>`;
+      }).join("");
+      const closedReasons = facts.filter((f) => f.closed_reason && !/^superseded by fact/.test(f.closed_reason))
+        .map((f) => `<div class="reason">${esc(f.object)} closed ${esc(day(f.valid_until))}: ${esc(f.closed_reason)}</div>`).join("");
+      const active = facts.filter((f) => f.status === "active");
+      html += `<div class="card chain">
+        <h3>${esc(key.split(" → ")[0])} <span>${esc(key.split(" → ")[1])}</span>
+          ${active.map((f) => `<button class="quiet warn" data-close="${f.fact_id}" style="float:right">Close #${f.fact_id}</button>`).join("")}
+        </h3>
+        <div class="timeline">${segs}</div>
+        <div class="legend"><span>${esc(day(facts[0].valid_from))}</span><span>now</span></div>
+        ${closedReasons}
+      </div>`;
+    }
+    show(html);
+  } catch (e) { fail(e); }
+}
+
+async function scopes() {
+  try {
+    const r = await api("/v1/scopes");
+    const keys = Object.entries(r.scopes || {});
+    if (!keys.length) return show(none("scoped memory. Store episodes with metadata such as user_id or agent_id to see who has memory here"));
+    show(`<p class="muted">Episodes per scope value. Click a value to recall inside it.</p>` + keys.map(([key, values]) => {
+      const max = Math.max(...Object.values(values));
+      return `<div class="card"><div class="meta">${esc(key)}</div><div class="kv">` +
+        Object.entries(values).map(([v, n]) => `<span class="scope" data-where="${esc(key)}:${esc(v)}"><b>${esc(key)}</b> ${esc(v)}</span>
+          <div style="display:flex;align-items:center;gap:8px;min-width:200px"><div class="bar" style="flex:1"><i style="width:${Math.round((n / max) * 100)}%"></i></div><span class="muted">${n}</span></div>`).join("") +
+        "</div></div>";
+    }).join(""));
+  } catch (e) { fail(e); }
+}
+
+async function status() {
+  try {
+    const r = await api("/v1/status");
+    const topo = `<div class="topo">
+      <div class="node">episodes<small>${esc(r.episodes)} stored, ${esc(r.chunks)} chunks</small></div><div class="arrow">→</div>
+      <div class="node">${esc(r.embedder)}<small>embedder</small></div><div class="arrow">→</div>
+      <div class="node">${esc(r.vector_index)}<small>vector index</small></div>
+    </div>
+    <div class="topo" style="grid-template-columns:1fr auto 1fr"><div></div><div class="arrow">documents, facts, lexical lane in</div>
+      <div class="node">${esc(r.document_store)}<small>document store</small></div></div>`;
+    const rows = [["Space", r.space], ["Episodes", r.episodes], ["Chunks", r.chunks], ["Bytes", r.bytes],
+                  ["Revision", r.revision], ["Facts", r.semantic_lane === "manual" ? "asserted explicitly (no distiller configured)" : r.semantic_lane]];
+    show(topo + '<div class="card">' + rows.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><span class="muted">${esc(v)}</span></div>`).join("") + "</div>");
+  } catch (e) { fail(e); }
+}
+
+const views = { search, ledger, scopes, status };
+
+document.querySelectorAll("nav button").forEach((b) => {
+  b.onclick = () => {
+    view = b.dataset.view;
+    document.querySelectorAll("nav button").forEach((o) => o.setAttribute("aria-current", String(o === b)));
+    controls.style.display = view === "search" ? "block" : "none";
+    show('<p class="empty">Loading…</p>');
+    views[view]();
+  };
+});
+
+out.addEventListener("click", async (e) => {
+  const chip = e.target.closest(".scope");
+  if (chip) {
+    document.getElementById("where").value = chip.dataset.where;
+    document.querySelector('nav button[data-view="search"]').click();
+    return;
+  }
+  const btn = e.target.closest("[data-close]");
+  if (!btn) return;
+  const reason = prompt("Why does this stop holding?", "closed from the console");
+  if (!reason) return;
+  btn.disabled = true;
+  try {
+    await api("/v1/facts/" + encodeURIComponent(btn.dataset.close) + "/close", { method: "POST", body: JSON.stringify({ reason }) });
+    ledger();
+  } catch (err) { btn.disabled = false; fail(err); }
+});
+
+document.getElementById("run").onclick = search;
+q.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+if (!TOKEN) askKey(); else search();
+</script>
+</body>
+</html>

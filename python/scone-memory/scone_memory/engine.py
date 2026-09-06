@@ -272,6 +272,10 @@ class MemoryEngine:
             raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
 
         similarity = dict(vector_lane)
+        ranks = {
+            "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
+            "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
+        }
         fused = fusion.rrf([vector_lane, text_lane])
         chunks = {c.chunk_id: c for c in await self.documents.get_chunks(space, list(fused))}
         now = self.clock()
@@ -303,6 +307,7 @@ class MemoryEngine:
                     text=chunk.text,
                     score=round(item.score, 6),
                     similarity=None if item.similarity is None else round(item.similarity, 6),
+                    lanes={lane: r[chunk.chunk_id] for lane, r in ranks.items() if chunk.chunk_id in r},
                     created_at=chunk.created_at,
                     source=episode.source if episode else None,
                     tags=episode.tags if episode else (),
@@ -459,6 +464,19 @@ class MemoryEngine:
     async def tags(self, space: str) -> dict[str, int]:
         check_space(space)
         return dict(sorted((await self.documents.counts(space)).tags.items()))
+
+    async def scopes(self, space: str) -> dict[str, dict[str, int]]:
+        """Episode counts per metadata key and value: which users, agents
+        and sessions have memory here. Walks the episodes, which is fine
+        for an overview and avoids asking every store for a new query."""
+        check_space(space)
+        counts = await self.documents.counts(space)
+        out: dict[str, dict[str, int]] = {}
+        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
+            for key, value in episode.metadata.items():
+                out.setdefault(key, {})
+                out[key][value] = out[key].get(value, 0) + 1
+        return {k: dict(sorted(v.items())) for k, v in sorted(out.items())}
 
     async def status(self, space: str) -> Status:
         check_space(space)

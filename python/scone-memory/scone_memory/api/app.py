@@ -9,11 +9,12 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Mapping, Optional
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..engine import MemoryEngine
@@ -53,7 +54,15 @@ class CloseBody(BaseModel):
     reason: str
 
 
-def create_app(engine: MemoryEngine, keys: Mapping[str, str]) -> FastAPI:
+CONSOLE = Path(__file__).with_name("console.html")
+
+
+def create_app(
+    engine: MemoryEngine, keys: Mapping[str, str], console: bool = True, console_key: Optional[str] = None
+) -> FastAPI:
+    """``console_key`` is baked into the page served at ``/`` so the key
+    stays out of the URL and out of anything the user might paste; with
+    no baked key the page asks for one and keeps it in the tab."""
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None)
     app.state.engine = engine
     app.state.keys = dict(keys)
@@ -89,6 +98,15 @@ def create_app(engine: MemoryEngine, keys: Mapping[str, str]) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True}
+
+    if console:
+        page = CONSOLE.read_text(encoding="utf-8")
+        if console_key:
+            page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
+
+        @app.get("/", response_class=HTMLResponse)
+        async def console_page() -> str:
+            return page
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
@@ -162,6 +180,10 @@ def create_app(engine: MemoryEngine, keys: Mapping[str, str]) -> FastAPI:
     async def get_tags(space: str = Depends(space_for)) -> dict:
         return {"tags": [{"name": n, "count": c} for n, c in (await engine.tags(space)).items()]}
 
+    @app.get("/v1/scopes")
+    async def get_scopes(space: str = Depends(space_for)) -> dict:
+        return {"scopes": await engine.scopes(space)}
+
     @app.get("/v1/status")
     async def get_status(space: str = Depends(space_for)) -> dict:
         status = await engine.status(space)
@@ -201,6 +223,7 @@ def item_json(item: RecallItem) -> dict:
         "text": item.text,
         "score": item.score,
         "similarity": item.similarity,
+        "lanes": item.lanes,
         "created_at": item.created_at,
         "source": item.source,
         "tags": list(item.tags),

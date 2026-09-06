@@ -88,6 +88,9 @@ class RecallItem(BaseModel):
     score: float
     #: Cosine from the vector lane when that lane saw the chunk, else None.
     similarity: Optional[float] = None
+    #: 1-based rank in each lane that returned this chunk ("vector",
+    #: "text"), so a caller can see why an item is here.
+    lanes: dict[str, int] = Field(default_factory=dict)
     created_at: str
     source: Optional[str] = None
     tags: tuple[str, ...] = ()

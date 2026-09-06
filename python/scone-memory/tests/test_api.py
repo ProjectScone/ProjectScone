@@ -3,6 +3,7 @@ that package is on disk so a drift between the two stacks fails here."""
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import pathlib
 import sys
@@ -112,3 +113,15 @@ def test_where_filter_over_http(client):
     r = client.get("/v1/recall", params={"q": "seat", "where": "user_id:bob"}, headers=auth()).json()
     assert [i["metadata"]["user_id"] for i in r["items"]] == ["bob"]
     assert client.get("/v1/recall", params={"q": "seat", "where": "user_id"}, headers=auth()).status_code == 422
+
+
+def test_console_is_served_with_the_key_baked_in():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        page = c.get("/")
+        assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+        assert 'data-token="solo"' in page.text
+    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
+        assert 'data-token="' not in c.get("/").text  # more than one key: the page asks
+    with TestClient(create_app(engine, {"a": "x"}, console=False)) as c:
+        assert c.get("/").status_code == 404

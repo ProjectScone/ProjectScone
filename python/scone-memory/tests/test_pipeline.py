@@ -118,3 +118,24 @@ def test_cli_jsonl_batch_ingest(tmp_path):
     out = io.StringIO()
     assert cli.main(["remember", "--jsonl", "--json"], env=env, stdin=io.StringIO(lines), out=out) == 0
     assert [json.loads(l)["chunks"] for l in out.getvalue().splitlines()] == [1, 1, 1, 1, 1]
+
+
+async def test_recall_names_the_lanes_that_found_each_item():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.remember("default", "the lighthouse keeper logs the tide twice a day")
+    await engine.remember("default", "quarterly revenue exceeded expectations")
+    [top, *_] = (await engine.recall("default", "lighthouse tide log", limit=1)).items
+    assert top.lanes == {"vector": 1, "text": 1}
+
+
+async def test_scopes_count_episodes_per_metadata_value():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.remember("default", "a", metadata={"user_id": "alice", "agent_id": "planner"})
+    await engine.remember("default", "b", metadata={"user_id": "alice", "session_id": "s1"})
+    await engine.remember("default", "c", metadata={"user_id": "bob"})
+    await engine.remember("default", "d")
+    assert await engine.scopes("default") == {
+        "agent_id": {"planner": 1},
+        "session_id": {"s1": 1},
+        "user_id": {"alice": 2, "bob": 1},
+    }

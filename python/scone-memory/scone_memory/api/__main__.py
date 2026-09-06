@@ -22,7 +22,10 @@ def main() -> None:
         print("serving needs uvicorn: pip install 'scone-memory[api]'", file=sys.stderr)
         sys.exit(2)
     engine = asyncio.run(build_engine(settings))
-    app = create_app(engine, settings.keys)
+    # One configured key means one space; bake it so the console opens
+    # without a prompt. Several keys: the console asks which.
+    only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
+    app = create_app(engine, settings.keys, console_key=only_key)
     print(
         f"scone-memory on http://{settings.host}:{settings.port} "
         f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
