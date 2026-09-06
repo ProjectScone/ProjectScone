@@ -958,3 +958,83 @@ fn contextual_code_is_the_default_widens_the_vector_margin_and_stores_raw_bytes(
          {switched_off} against {by_default}\n{out}"
     );
 }
+
+/// search narrows by kind, source prefix and a date window, the same four
+/// filters the core, both MCP servers and the Python CLI already take.
+/// Seeded through import so every episode has a real created_at: --since
+/// and --until bound that, while --as-of stays about fact validity.
+#[test]
+fn search_narrows_by_kind_source_and_date_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("seed.jsonl");
+    std::fs::write(
+        &dump,
+        concat!(
+            r#"{"type":"episode","kind":"note","content":"the harbour crane was repainted","source":"notes://town","created_at":"2024-01-10T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"episode","kind":"file","content":"the harbour crane needs paint","source":"file:///docs/harbour.md","created_at":"2024-06-10T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"episode","kind":"file","content":"the harbour crane was inspected","source":"file:///archive/harbour.md","created_at":"2023-01-10T00:00:00Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    scone(dir.path())
+        .args(["import"])
+        .arg(&dump)
+        .assert()
+        .success();
+
+    let found = |args: &[&str]| -> String {
+        let out = scone(dir.path())
+            .args(["search", "harbour crane"])
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+
+    let all = found(&[]);
+    for needle in ["repainted", "needs paint", "inspected"] {
+        assert!(
+            all.contains(needle),
+            "unnarrowed search misses {needle}: {all}"
+        );
+    }
+
+    let notes = found(&["--kind", "note"]);
+    assert!(notes.contains("repainted"), "{notes}");
+    assert!(
+        !notes.contains("needs paint") && !notes.contains("inspected"),
+        "{notes}"
+    );
+
+    let docs = found(&["--source-prefix", "file:///docs/"]);
+    assert!(docs.contains("needs paint"), "{docs}");
+    assert!(
+        !docs.contains("repainted") && !docs.contains("inspected"),
+        "{docs}"
+    );
+
+    let recent = found(&["--since", "2024-01-01T00:00:00Z"]);
+    assert!(
+        recent.contains("repainted") && recent.contains("needs paint"),
+        "{recent}"
+    );
+    assert!(!recent.contains("inspected"), "{recent}");
+
+    let window = found(&[
+        "--since",
+        "2024-01-01T00:00:00Z",
+        "--until",
+        "2024-03-01T00:00:00Z",
+    ]);
+    assert!(window.contains("repainted"), "{window}");
+    assert!(
+        !window.contains("needs paint") && !window.contains("inspected"),
+        "{window}"
+    );
+}

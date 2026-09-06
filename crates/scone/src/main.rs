@@ -83,6 +83,20 @@ enum Cmd {
         /// Focus on episodes carrying ALL of these tags (repeatable)
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Only episodes of this kind (note, file, conversation, ...)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only episodes whose source starts with this text: a path
+        /// prefix, a session id, a URL origin. Literal, not a pattern
+        #[arg(long)]
+        source_prefix: Option<String>,
+        /// Only episodes that happened at or after this RFC 3339 instant
+        /// (bounds created_at; --as-of is about fact validity)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only episodes that happened at or before this RFC 3339 instant
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Claude Code hook handler (reads hook JSON on stdin, fail-open)
     Hook {
@@ -474,6 +488,10 @@ fn run() -> Result<(), String> {
             limit,
             as_of,
             tags,
+            kind,
+            source_prefix,
+            since,
+            until,
         } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let opts = RecallOpts {
@@ -481,6 +499,10 @@ fn run() -> Result<(), String> {
                 budget_bytes: None,
                 as_of: as_of.clone(),
                 tags: tags.clone(),
+                kind: kind.clone(),
+                source_prefix: source_prefix.clone(),
+                since: since.clone(),
+                until: until.clone(),
                 ..Default::default()
             };
             let pack = engine
@@ -757,7 +779,6 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-
         Cmd::Watch {
             dir: watch_dir,
             once,
