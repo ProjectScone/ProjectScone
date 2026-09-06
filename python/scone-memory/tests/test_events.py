@@ -35,6 +35,8 @@ def sink_params():
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
     if os.environ.get("SCONE_TEST_POSTGRES_URL"):
         yield pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
+    if os.environ.get("SCONE_TEST_ELASTICSEARCH_URL"):
+        yield pytest.param("elasticsearch", id="elasticsearch", marks=pytest.mark.elasticsearch)
 
 
 @pytest.fixture(params=list(sink_params()))
@@ -48,6 +50,10 @@ async def sink(request, tmp_path):
         from scone_memory.backends import PostgresEventLog
 
         log = await PostgresEventLog(os.environ["SCONE_TEST_POSTGRES_URL"], f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=30, clock=clock).open()
+    elif request.param == "elasticsearch":
+        from scone_memory.backends import ElasticsearchEventLog
+
+        log = await ElasticsearchEventLog(os.environ["SCONE_TEST_ELASTICSEARCH_URL"], prefix=f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=30, clock=clock).open()
     else:
         from scone_memory.events import MongoEventLog
 
@@ -57,6 +63,8 @@ async def sink(request, tmp_path):
     if request.param == "postgres":  # the log drops its table; the throwaway schema goes too
         async with log.pool.connection() as conn:
             await conn.execute(f"DROP SCHEMA IF EXISTS {log.schema} CASCADE")
+    if request.param == "elasticsearch":  # the counters index is shared with a document store; here it is throwaway
+        await log.client.indices.delete(index=log.shared.index("counters"), ignore_unavailable=True)
     if hasattr(log, "drop"):
         await log.drop()
     if hasattr(log, "close"):
@@ -77,7 +85,7 @@ async def test_retention_is_a_stated_policy(sink):
         e = await sink.append(ev("alpha", "recall", query="dated"))
         doc = await sink.events.find_one({"_id": e.event_id})
         assert doc["ts_date"].year == 2025
-    elif sink.name == "postgres":
+    elif sink.name in ("postgres", "elasticsearch"):
         await sink.append(ev("alpha", "recall", "2024-11-01T00:00:00.000Z", query="old"))
         await sink.append(ev("alpha", "recall", "2024-12-20T00:00:00.000Z", query="recent"))
         sink.test_clock.now = "2025-01-01T00:00:00.000Z"

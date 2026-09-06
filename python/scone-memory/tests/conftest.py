@@ -19,6 +19,7 @@ MONGO_URL = os.environ.get("SCONE_TEST_MONGO_URL")
 QDRANT_URL = os.environ.get("SCONE_TEST_QDRANT_URL")
 POSTGRES_URL = os.environ.get("SCONE_TEST_POSTGRES_URL")
 REDIS_URL = os.environ.get("SCONE_TEST_REDIS_URL")
+ELASTIC_URL = os.environ.get("SCONE_TEST_ELASTICSEARCH_URL")
 
 
 def backends():
@@ -36,6 +37,8 @@ def backends():
         yield pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
     if REDIS_URL:
         yield pytest.param("redis", id="redis", marks=pytest.mark.redis)
+    if ELASTIC_URL:
+        yield pytest.param("elasticsearch", id="elasticsearch", marks=pytest.mark.elasticsearch)
 
 
 @pytest.fixture(params=list(backends()))
@@ -65,6 +68,13 @@ async def engine(request, tmp_path):
         from scone_memory.backends import PostgresDocumentStore
 
         documents = PostgresDocumentStore(POSTGRES_URL, schema=f"scone_test_{uuid.uuid4().hex[:8]}")
+        await documents.open()
+        vectors = documents.vectors()
+        events = await documents.events(clock=clock).open()
+    elif request.param == "elasticsearch":
+        from scone_memory.backends import ElasticsearchDocumentStore
+
+        documents = ElasticsearchDocumentStore(ELASTIC_URL, prefix=f"scone_test_{uuid.uuid4().hex[:8]}")
         await documents.open()
         vectors = documents.vectors()
         events = await documents.events(clock=clock).open()

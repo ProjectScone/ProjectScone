@@ -1,7 +1,7 @@
 """Assemble an engine from environment variables.
 
-    SCONE_DOCUMENTS   memory | sqlite | mongo | postgres   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres | redis  (default memory)
+    SCONE_DOCUMENTS   memory | sqlite | mongo | postgres | elasticsearch   (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres | redis | elasticsearch  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
@@ -11,13 +11,14 @@
     SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
     SCONE_LANCEDB_PATH (database directory, required for lancedb)
     SCONE_REDIS_URL (required for redis; needs the RediSearch module), SCONE_REDIS_PREFIX (default scone_chunks)
+    SCONE_ELASTICSEARCH_URL, SCONE_ELASTICSEARCH_API_KEY, SCONE_ELASTICSEARCH_PREFIX (default scone); one client for all three
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
     SCONE_EMBED_API_KEY        remote: bearer, optional
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
-    SCONE_EVENTS      memory | sqlite | mongo | postgres | none  (default follows SCONE_DOCUMENTS)
+    SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
     SCONE_EVENTS_MAX_AGE_DAYS                    sqlite, mongo and postgres sink retention, optional
@@ -66,6 +67,9 @@ class Settings:
     lancedb_path: Optional[str] = None
     redis_url: Optional[str] = None
     redis_prefix: str = "scone_chunks"
+    elasticsearch_url: Optional[str] = None
+    elasticsearch_api_key: Optional[str] = None
+    elasticsearch_prefix: str = "scone"
     embed_model: Optional[str] = None
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
@@ -107,6 +111,9 @@ class Settings:
             lancedb_path=env.get("SCONE_LANCEDB_PATH"),
             redis_url=env.get("SCONE_REDIS_URL"),
             redis_prefix=env.get("SCONE_REDIS_PREFIX", "scone_chunks"),
+            elasticsearch_url=env.get("SCONE_ELASTICSEARCH_URL"),
+            elasticsearch_api_key=env.get("SCONE_ELASTICSEARCH_API_KEY"),
+            elasticsearch_prefix=env.get("SCONE_ELASTICSEARCH_PREFIX", "scone"),
             embed_model=env.get("SCONE_EMBED_MODEL"),
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
@@ -190,12 +197,26 @@ def build_documents(settings: Settings):
         if not settings.postgres_url:
             raise InvalidInput("SCONE_DOCUMENTS=postgres needs SCONE_POSTGRES_URL")
         return PostgresDocumentStore(settings.postgres_url, settings.postgres_schema)
+    if settings.documents == "elasticsearch":
+        from .backends import ElasticsearchDocumentStore
+
+        if not settings.elasticsearch_url:
+            raise InvalidInput("SCONE_DOCUMENTS=elasticsearch needs SCONE_ELASTICSEARCH_URL")
+        return ElasticsearchDocumentStore(settings.elasticsearch_url, settings.elasticsearch_prefix, settings.elasticsearch_api_key)
     raise InvalidInput(f"unknown SCONE_DOCUMENTS {settings.documents!r}")
 
 
 def build_vectors(settings: Settings, documents=None):
     """``documents`` lets a Postgres vector index share the document
     store's pool when both live in the same database."""
+    if settings.vectors == "elasticsearch":
+        from .backends import ElasticsearchDocumentStore, ElasticsearchVectorIndex
+
+        if isinstance(documents, ElasticsearchDocumentStore):
+            return documents.vectors()
+        if not settings.elasticsearch_url:
+            raise InvalidInput("SCONE_VECTORS=elasticsearch needs SCONE_ELASTICSEARCH_URL")
+        return ElasticsearchVectorIndex(settings.elasticsearch_url, settings.elasticsearch_prefix, settings.elasticsearch_api_key)
     if settings.vectors == "postgres":
         from .backends import PostgresDocumentStore, PostgresVectorIndex
 
@@ -263,9 +284,18 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
 
 
 def build_events(settings: Settings, documents=None):
-    choice = settings.events or {"sqlite": "sqlite", "mongo": "mongo", "postgres": "postgres"}.get(settings.documents, "memory")
+    choice = settings.events or {"sqlite": "sqlite", "mongo": "mongo", "postgres": "postgres", "elasticsearch": "elasticsearch"}.get(settings.documents, "memory")
     if choice == "none":
         return None
+    if choice == "elasticsearch":
+        from .backends import ElasticsearchDocumentStore, ElasticsearchEventLog
+
+        if isinstance(documents, ElasticsearchDocumentStore):
+            return documents.events(settings.events_max_age_days)
+        if not settings.elasticsearch_url:
+            raise InvalidInput("SCONE_EVENTS=elasticsearch needs SCONE_ELASTICSEARCH_URL")
+        return ElasticsearchEventLog(settings.elasticsearch_url, settings.elasticsearch_prefix, settings.elasticsearch_api_key,
+                                     max_age_days=settings.events_max_age_days)
     if choice == "postgres":
         from .backends import PostgresDocumentStore, PostgresEventLog
 

@@ -18,6 +18,9 @@ __all__ = [
     "PostgresVectorIndex",
     "PostgresEventLog",
     "RedisVectorIndex",
+    "ElasticsearchDocumentStore",
+    "ElasticsearchVectorIndex",
+    "ElasticsearchEventLog",
 ]
 
 
@@ -42,6 +45,10 @@ def __getattr__(name: str):
         from .redis import RedisVectorIndex
 
         return RedisVectorIndex
+    if name in ("ElasticsearchDocumentStore", "ElasticsearchVectorIndex", "ElasticsearchEventLog"):
+        from . import elastic
+
+        return getattr(elastic, name)
     if name in ("PostgresDocumentStore", "PostgresVectorIndex", "PostgresEventLog"):
         from . import postgres
 
