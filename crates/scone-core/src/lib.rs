@@ -80,6 +80,10 @@ pub struct Engine {
     /// Chunking granularity for future ingests (tuning knob; benchmarked
     /// sweeps live in memory/benchmarks.md).
     chunk_target: usize,
+    /// Extracted facts below this confidence land as `proposed`, kept
+    /// out of recall until a person approves them. None: every
+    /// extracted fact is active on arrival, as before.
+    propose_below: Option<f32>,
 }
 
 impl Drop for Engine {
@@ -159,6 +163,7 @@ impl Engine {
             vectors,
             indexes_dirty: false,
             chunk_target: ingest::CHUNK_TARGET_BYTES,
+            propose_below: None,
         };
         if engine.fts.writable() {
             engine.catch_up_indexes()?;
@@ -169,6 +174,26 @@ impl Engine {
     /// Set the chunking granularity (bytes) for future ingests.
     pub fn set_chunk_target(&mut self, bytes: usize) {
         self.chunk_target = bytes.max(64);
+    }
+
+    /// Extracted facts with confidence below `threshold` land as
+    /// `proposed` and stay out of recall until approved. None turns
+    /// the gate off. Rejects anything outside 0..=1.
+    pub fn set_propose_below(&mut self, threshold: Option<f32>) -> Result<()> {
+        if let Some(t) = threshold
+            && !(0.0..=1.0).contains(&t)
+        {
+            return Err(SconeError::InvalidInput(format!(
+                "propose_below must be within 0..=1, got {t}"
+            )));
+        }
+        self.propose_below = threshold;
+        Ok(())
+    }
+
+    /// The confidence gate, if any (see `set_propose_below`).
+    pub fn propose_below(&self) -> Option<f32> {
+        self.propose_below
     }
 
     /// True when another scone process holds the index write lock: search

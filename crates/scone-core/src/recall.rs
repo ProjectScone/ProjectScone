@@ -596,6 +596,7 @@ impl Engine {
                  FROM facts f
                  JOIN entities en ON en.id = f.subject_entity
                  WHERE f.space_id = ?1
+                   AND f.status NOT IN ('proposed', 'declined')
                    AND f.valid_from <= ?2
                    AND (f.valid_until IS NULL OR f.valid_until > ?2)
                    AND (en.canonical LIKE ?3 OR f.predicate LIKE ?3 OR f.object LIKE ?3

@@ -121,6 +121,38 @@ DROP TABLE episodes;
 ALTER TABLE episodes_v4 RENAME TO episodes;
 ";
 
+/// Schema v5: a fact may be `proposed` (model output below the
+/// engine's confidence threshold, kept out of recall until a person
+/// approves it) or `declined`. SQLite cannot widen a CHECK in place, so
+/// the facts table is rebuilt the way v4 rebuilt episodes: rows and ids
+/// copied, the old table dropped, the new one renamed into place so
+/// fact_provenance keeps pointing at it, and the index recreated.
+const SCHEMA_V5: &str = "
+CREATE TABLE facts_v5 (
+    id             INTEGER PRIMARY KEY,
+    space_id       INTEGER NOT NULL REFERENCES spaces(id),
+    subject_entity INTEGER NOT NULL REFERENCES entities(id),
+    predicate      TEXT NOT NULL,
+    object         TEXT NOT NULL,
+    confidence     REAL NOT NULL DEFAULT 0.5,
+    valid_from     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    valid_until    TEXT,
+    status         TEXT NOT NULL DEFAULT 'active'
+                   CHECK (status IN ('active','closed','expired','proposed','declined')),
+    status_reason  TEXT,
+    last_accessed  TEXT,
+    access_count   INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO facts_v5 (id, space_id, subject_entity, predicate, object, confidence, valid_from,
+                      valid_until, status, status_reason, last_accessed, access_count)
+    SELECT id, space_id, subject_entity, predicate, object, confidence, valid_from,
+           valid_until, status, status_reason, last_accessed, access_count FROM facts;
+DROP TABLE facts;
+ALTER TABLE facts_v5 RENAME TO facts;
+CREATE INDEX IF NOT EXISTS facts_subject_predicate
+    ON facts (space_id, subject_entity, predicate, status);
+";
+
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -174,6 +206,21 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         result?;
         conn.execute(
             "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version.as_str() < "5" {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} COMMIT;"));
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        result?;
+        conn.execute(
+            "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
             [],
         )?;
     }
