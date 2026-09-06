@@ -75,20 +75,28 @@ async def audit_grounding(engine, space: str, statuses: Sequence[str] = ("active
     against the text it came from. Facts a person stated are left out:
     grounding is a question about extraction."""
     findings: list[Finding] = []
+    sources: dict[int, Optional[str]] = {}
     for status in statuses:
         for fact in await engine.facts(space, status=status):
             if fact.origin != "extracted":
                 continue
-            findings.append(await _judge(engine, space, fact))
+            findings.append(await _judge(engine, space, fact, sources))
     return findings
 
 
-async def _judge(engine, space: str, fact) -> Finding:
+async def _judge(engine, space: str, fact, sources: dict) -> Finding:
+    """One fact against its source. ``sources`` holds the episodes already
+    read: one episode commonly backs many claims, and a ledger of hundreds
+    would otherwise read the same text hundreds of times."""
     if fact.source_episode_id is None:
         return _finding(fact, "no_source")
-    try:
-        source = (await engine.episode(space, fact.source_episode_id)).content
-    except NotFound:
+    if fact.source_episode_id not in sources:
+        try:
+            sources[fact.source_episode_id] = (await engine.episode(space, fact.source_episode_id)).content
+        except NotFound:
+            sources[fact.source_episode_id] = None
+    source = sources[fact.source_episode_id]
+    if source is None:
         return _finding(fact, "source_missing")
     if fact.quote is not None:
         return _judge_quote(fact, source)

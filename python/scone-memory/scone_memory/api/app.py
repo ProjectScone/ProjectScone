@@ -326,6 +326,28 @@ def create_app(
         )
         return fact_json(fact)
 
+    @app.get("/v1/facts/audit")
+    async def get_facts_audit(status: str = "active", flagged: bool = False,
+                              space: str = Depends(space_for)) -> dict:
+        """Every extracted fact judged against the text it came from. Read
+        only: a flagged claim is one whose own source cannot support it,
+        which is a question for a person, and the repair is exclude with a
+        reason through the decision routes."""
+        from collections import Counter
+        from dataclasses import asdict
+
+        from ..audit import audit_grounding
+
+        findings = await audit_grounding(engine, space, statuses=(status,))
+        shown = [f for f in findings if f.flagged] if flagged else findings
+        return {
+            "findings": [asdict(f) for f in shown],
+            # Always the whole picture for these statuses, so a filtered
+            # page can still say how much of the ledger it is showing.
+            "counts": dict(Counter(f.verdict for f in findings).most_common()),
+            "revision": await engine.revision(space),
+        }
+
     @app.post("/v1/facts/decide")
     async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         """One reviewed batch, settled together: applied oldest first, and

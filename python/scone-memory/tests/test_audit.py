@@ -28,6 +28,16 @@ async def engine():
     return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
 
+@pytest.fixture
+def client(engine):
+    from fastapi.testclient import TestClient
+
+    from scone_memory.api import create_app
+
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as c:
+        yield c
+
+
 async def test_a_claim_taken_from_a_denial_is_flagged_with_the_clause_that_denies_it(engine):
     added = await engine.remember(SPACE, DENIAL)
     await engine.assert_fact(
@@ -167,3 +177,38 @@ def test_the_cli_reports_a_flagged_claim_with_its_evidence(tmp_path):
     })
     assert run("import", stdin="\n".join([dump, second]))[0] == 0
     assert "2 of 2 claims need a person" in run("audit-grounding")[1]
+
+
+def test_the_audit_is_readable_over_http(client):
+    """The repair path is a review screen, so the verdicts have to reach a
+    page: which claims, on what evidence, and the revision the list was
+    read at, so a batch built from it can be refused if the space moves."""
+    head = {"authorization": "Bearer key-a"}
+    episode = client.post("/v1/episodes", json={"content": DENIAL}, headers=head).json()["episode_id"]
+    for subject, object in (("claude code", "nothing"), ("ana", "Lisbon")):
+        client.post("/v1/facts", json={
+            "subject": subject, "predicate": "is_installed", "object": object,
+            "source_episode_id": episode, "origin": "extracted",
+        }, headers=head)
+
+    # A third claim the audit cannot settle, so the filter has something to
+    # leave out and the counts have something to count that is not a problem.
+    plain = client.post("/v1/episodes", json={"content": "Ana moved to Lisbon in March."},
+                        headers=head).json()["episode_id"]
+    client.post("/v1/facts", json={"subject": "ana", "predicate": "moved_to", "object": "Lisbon",
+                                   "source_episode_id": plain, "origin": "extracted"}, headers=head)
+
+    body = client.get("/v1/facts/audit", headers=head).json()
+    assert body["counts"] == {"object_only_in_non_asserted_context": 1, "object_not_in_source": 1,
+                              "unverifiable_without_a_quote": 1}
+    assert body["revision"] == client.get("/v1/facts", headers=head).json()["revision"]
+    assert len(body["findings"]) == 3
+    denied = next(f for f in body["findings"] if f["subject"] == "claude code")
+    assert "says nothing about whether" in denied["evidence"]
+
+    only = client.get("/v1/facts/audit", params={"flagged": "true"}, headers=head).json()
+    assert [f["verdict"] for f in only["findings"]] == [
+        "object_only_in_non_asserted_context", "object_not_in_source",
+    ]
+    assert only["counts"] == body["counts"]  # what is shown is filtered, what is counted is not
+    assert client.get("/v1/facts/audit", params={"status": "proposed"}, headers=head).json()["findings"] == []
