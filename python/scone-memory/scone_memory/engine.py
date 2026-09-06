@@ -8,6 +8,8 @@ answers, because a thin answer that says it is thin beats a 500.
 
 from __future__ import annotations
 
+import dataclasses
+
 import hashlib
 import math
 import re
@@ -1249,6 +1251,7 @@ class MemoryEngine:
         for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
             yield {
                 "type": "episode",
+                "space": space,
                 "episode_id": episode.episode_id,
                 "kind": episode.kind,
                 "content": episode.content,
@@ -1265,7 +1268,15 @@ class MemoryEngine:
         """Load an export. Episodes go through the normal ingest, so they
         are re-chunked, re-embedded and deduplicated; facts are stored as
         they were, closed ones included, because the ledger's history is
-        part of what is being moved."""
+        part of what is being moved.
+
+        Identity is bound to the space name (see content_hash). A line
+        whose content_hash is the default derivation under the space it
+        names is re-derived for this space, so a dump moved into a space
+        of another name still deduplicates against what is remembered
+        there next. A keyed identity (dedup_key) has no content to derive
+        from and is passed through as the source made it; it keeps
+        deduplicating a same-space move and not a renamed one."""
         check_space(space)
         summary = ImportSummary()
         episodes: list[Record] = []
@@ -1274,7 +1285,7 @@ class MemoryEngine:
         for record in records:
             kind = record.get("type", "episode")
             if kind == "episode":
-                episodes.append(Record.from_dict(record))
+                episodes.append(_rederived(Record.from_dict(record), record.get("space"), space))
                 source_ids.append(record.get("episode_id"))
             elif kind == "fact":
                 facts.append(record)
@@ -1414,6 +1425,17 @@ def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], s
     if since is not None and episode.created_at < since:
         return False
     return not (until is not None and episode.created_at > until)
+
+
+def _rederived(record: Record, source_space: Optional[str], space: str) -> Record:
+    """The record with its content_hash dropped when it is the default
+    derivation under the source space, so ingest derives it for the
+    target space instead."""
+    if record.content_hash is None or not source_space or source_space == space:
+        return record
+    if record.content_hash == content_hash(str(source_space), record.content):
+        return dataclasses.replace(record, content_hash=None)
+    return record
 
 
 def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:
