@@ -25,12 +25,15 @@ CONTEXT = """Here is a list of facts:
 2. Nobuhiro Watsuki is famous for Rurouni Kenshin.
 3. pesäpallo was created in the country of Philippines.
 4. goaltender is associated with the sport of pesäpallo.
+5. Ferdowsi is famous for Shahnameh.
+6. Rand al'Thor was created by Ferdowsi.
+7. Stephen Crane is famous for Shahnameh.
 """
 
 
 def test_facts_are_the_numbered_lines_in_order_and_a_gap_is_an_error():
     facts = parse_facts(CONTEXT)
-    assert facts[0] == "pesäpallo was created in the country of Finland." and len(facts) == 5
+    assert facts[0] == "pesäpallo was created in the country of Finland." and len(facts) == 8
     with pytest.raises(ValueError):
         parse_facts("0. a.\n2. b.")
 
@@ -45,20 +48,27 @@ def test_rows_load_from_json_with_source_and_hops(tmp_path):
     path.write_text(json.dumps(rows))
     items = load_conflict_resolution(path)
     assert [(i.source, i.hops, len(i.facts)) for i in items] == [
-        ("factconsolidation_sh_6k", "single", 5), ("factconsolidation_mh_6k", "multi", 5)]
+        ("factconsolidation_sh_6k", "single", 8), ("factconsolidation_mh_6k", "multi", 8)]
     assert items[0].questions == (("Which sport is goaltender associated with?", ("pesäpallo",)),)
 
 
-def test_the_gold_fact_is_the_last_one_with_the_answer_and_stale_ones_share_its_words():
+def test_the_gold_fact_answers_the_question_and_is_the_last_such_and_stale_ones_share_its_words():
     facts = parse_facts(CONTEXT)
     # "Philippines" is only in fact 3; fact 0 says the same thing about Finland.
-    assert gold_fact(facts, ["Philippines"]) == 3
+    assert gold_fact(facts, ["Philippines"], "In which country was pesäpallo created?") == 3
     assert stale_facts(facts, 3, ["Philippines"]) == [0]
-    # "pesäpallo" appears in 0, 3 and 4; the last is 4, and the earlier
-    # facts about pesäpallo's country are not about the goaltender.
-    assert gold_fact(facts, ["pesäpallo"]) == 4
+    # "pesäpallo" appears in 0, 3 and 4; the question is about the goaltender,
+    # so 4 is the gold, and the facts about pesäpallo's country are not stale
+    # versions of it.
+    assert gold_fact(facts, ["pesäpallo"], "Which sport is goaltender associated with?") == 4
     assert stale_facts(facts, 4, ["pesäpallo"]) == [1]
-    assert gold_fact(facts, ["Belgium"]) is None
+    # "Shahnameh" recurs in a later fact about someone else (a real pattern
+    # in the split): the gold is the fact that shares the question's words.
+    assert gold_fact(facts, ["Shahnameh"], "What is Ferdowsi famous for?") == 5
+    assert gold_fact(facts, ["Shahnameh"], "What is Stephen Crane famous for?") == 7
+    # With no question words to go on, the last carrier wins.
+    assert gold_fact(facts, ["Shahnameh"]) == 7
+    assert gold_fact(facts, ["Belgium"], "anything") is None
 
 
 def test_judge_ranking_reads_gold_and_stale_off_the_ranked_sources():

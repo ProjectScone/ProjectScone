@@ -89,15 +89,28 @@ def load_conflict_resolution(path: str | Path) -> list[ConflictItem]:
     return items
 
 
-def gold_fact(facts: Sequence[str], answers: Sequence[str]) -> Optional[int]:
-    """Index of the last fact carrying a gold answer: the one that stands
-    at the end of the list, the others having been superseded."""
+def content_words(text: str) -> set[str]:
+    return {w for w in re.split(r"[^0-9a-zA-Z\u00c0-\u024f']+", text.lower()) if len(w) > 3}
+
+
+def gold_fact(facts: Sequence[str], answers: Sequence[str], question: str = "") -> Optional[int]:
+    """Index of the gold fact: among the facts carrying a gold answer, the
+    ones sharing the most of the question's words (an answer string such
+    as "India" or "Shahnameh" recurs in unrelated facts, so the answer
+    alone does not name the fact), and of those the last, since a later
+    fact about the same thing supersedes an earlier one."""
     wanted = [a.lower() for a in answers if a.strip()]
-    for i in range(len(facts) - 1, -1, -1):
-        low = facts[i].lower()
-        if any(a in low for a in wanted):
-            return i
-    return None
+    asked = content_words(question) - {w for a in wanted for w in content_words(a)}
+    best: Optional[int] = None
+    best_score = -1
+    for i, fact in enumerate(facts):
+        low = fact.lower()
+        if not any(a in low for a in wanted):
+            continue
+        score = len(asked & content_words(fact))
+        if score >= best_score:
+            best, best_score = i, score
+    return best
 
 
 def stale_facts(facts: Sequence[str], gold: int, answers: Sequence[str]) -> list[int]:
@@ -209,7 +222,7 @@ async def run_conflict_resolution(
     asked = list(item.questions)[:questions] if questions else list(item.questions)
     results: list[QuestionResult] = []
     for n, (question, answers) in enumerate(asked, 1):
-        gold = gold_fact(item.facts, answers)
+        gold = gold_fact(item.facts, answers, question)
         stale = stale_facts(item.facts, gold, answers) if gold is not None else []
         t0 = time.perf_counter()
         pack = await engine.recall(space, question, limit=k)
