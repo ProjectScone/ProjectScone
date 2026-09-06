@@ -11,7 +11,7 @@ protocol and passes the contract tests; nothing in the engine changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, Sequence, runtime_checkable
+from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from .models import Chunk, Episode, Fact
 
@@ -26,6 +26,7 @@ class NewEpisode:
     ingested_at: str
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,8 @@ class TextFilter:
 
     as_of: Optional[str] = None
     tags: tuple[str, ...] = ()
+    #: Every key must match the episode's metadata exactly.
+    where: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class VectorPoint:
     created_at: str
     vector: Sequence[float]
     tags: tuple[str, ...] = ()
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +139,7 @@ class VectorIndex(Protocol):
         limit: int,
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
+        where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
         """Ranked (chunk_id, cosine similarity), best first."""
         ...

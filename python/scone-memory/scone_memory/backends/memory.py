@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from itertools import count
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from ..lexical import Bm25
 from ..models import Chunk, Episode, Fact
@@ -80,7 +80,7 @@ class InMemoryDocumentStore:
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
         allowed = None
-        if filter.as_of or filter.tags:
+        if filter.as_of or filter.tags or filter.where:
             allowed = [
                 c.chunk_id
                 for c in self._chunks.values()
@@ -91,9 +91,13 @@ class InMemoryDocumentStore:
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):
             return False
-        if filter.tags:
+        if filter.tags or filter.where:
             episode = self._episodes.get(chunk.episode_id)
-            if episode is None or not set(filter.tags) <= set(episode.tags):
+            if episode is None:
+                return False
+            if filter.tags and not set(filter.tags) <= set(episode.tags):
+                return False
+            if any(episode.metadata.get(k) != v for k, v in filter.where.items()):
                 return False
         return True
 
@@ -173,6 +177,7 @@ class InMemoryVectorIndex:
         limit: int,
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
+        where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
         scored = []
         for point in self._points.values():
@@ -181,6 +186,8 @@ class InMemoryVectorIndex:
             if as_of and not is_before_or_at(point.created_at, as_of):
                 continue
             if tags and not set(tags) <= set(point.tags):
+                continue
+            if where and any(point.metadata.get(k) != v for k, v in where.items()):
                 continue
             scored.append((point.chunk_id, _cosine(vector, point.vector)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))

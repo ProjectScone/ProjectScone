@@ -33,6 +33,7 @@ class EpisodeBody(BaseModel):
     source: Optional[str] = None
     created_at: Optional[str] = None
     kind: str = "note"
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class FactBody(BaseModel):
@@ -98,6 +99,7 @@ def create_app(engine: MemoryEngine, keys: Mapping[str, str]) -> FastAPI:
             source=body.source,
             tags=body.tags,
             created_at=body.created_at,
+            metadata=body.metadata,
         )
         return added.model_dump()
 
@@ -112,10 +114,13 @@ def create_app(engine: MemoryEngine, keys: Mapping[str, str]) -> FastAPI:
         limit: int = 5,
         as_of: Optional[str] = None,
         tags: Optional[str] = None,
+        where: Optional[str] = None,
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
-        result = await engine.recall(space, q, limit=limit, as_of=as_of, tags=tag_list)
+        result = await engine.recall(
+            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where)
+        )
         return {
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
@@ -175,6 +180,20 @@ class Unauthorized(Exception):
     pass
 
 
+def parse_where(text: Optional[str]) -> dict[str, str]:
+    """``user_id:alice,agent_id:planner`` from the query string."""
+    where: dict[str, str] = {}
+    for entry in (text or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        key, sep, value = entry.partition(":")
+        if not sep:
+            raise InvalidInput(f"where entries are key:value, got {entry!r}")
+        where[key.strip()] = value.strip()
+    return where
+
+
 def item_json(item: RecallItem) -> dict:
     return {
         "chunk_id": item.chunk_id,
@@ -185,6 +204,7 @@ def item_json(item: RecallItem) -> dict:
         "created_at": item.created_at,
         "source": item.source,
         "tags": list(item.tags),
+        "metadata": dict(item.metadata),
     }
 
 

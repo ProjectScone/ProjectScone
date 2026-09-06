@@ -100,3 +100,15 @@ def test_round_trip_parses_with_the_shared_client(client):
 
 def test_health_needs_no_key(client):
     assert client.get("/healthz").json() == {"ok": True}
+
+
+def test_where_filter_over_http(client):
+    for user, seat in (("alice", "window"), ("bob", "aisle")):
+        client.post(
+            "/v1/episodes",
+            json={"content": f"{user} prefers the {seat} seat", "metadata": {"user_id": user}},
+            headers=auth(),
+        )
+    r = client.get("/v1/recall", params={"q": "seat", "where": "user_id:bob"}, headers=auth()).json()
+    assert [i["metadata"]["user_id"] for i in r["items"]] == ["bob"]
+    assert client.get("/v1/recall", params={"q": "seat", "where": "user_id"}, headers=auth()).status_code == 422

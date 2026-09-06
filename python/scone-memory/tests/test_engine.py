@@ -106,3 +106,27 @@ async def test_status_names_the_parts(engine):
     assert status.revision == 0
     await engine.remember("default", "one")
     assert (await engine.status("default")).revision == 1
+
+
+async def test_where_scopes_recall_inside_a_space(engine):
+    alice = await engine.remember(
+        "default", "alice prefers the window seat on flights", metadata={"user_id": "alice", "agent_id": "travel"}
+    )
+    await engine.remember(
+        "default", "bob prefers the aisle seat on flights", metadata={"user_id": "bob", "agent_id": "travel"}
+    )
+    result = await engine.recall("default", "seat preference on flights", where={"user_id": "alice"})
+    assert [i.episode_id for i in result.items] == [alice.episode_id]
+    assert result.items[0].metadata == {"user_id": "alice", "agent_id": "travel"}
+    both = await engine.recall("default", "seat preference on flights", where={"agent_id": "travel"})
+    assert len(both.items) == 2
+    assert (await engine.recall("default", "seat preference", where={"user_id": "carol"})).items == []
+
+
+async def test_metadata_is_bounded(engine):
+    with pytest.raises(InvalidInput):
+        await engine.remember("default", "x", metadata={"User-Id": "alice"})
+    with pytest.raises(InvalidInput):
+        await engine.remember("default", "x", metadata={"k": ""})
+    with pytest.raises(InvalidInput):
+        await engine.remember("default", "x", metadata={f"k{i}": "v" for i in range(17)})

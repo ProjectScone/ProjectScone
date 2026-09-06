@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from . import fusion
 from .chunker import DEFAULT_TARGET, chunk_spans
@@ -40,6 +40,9 @@ from .ports import (
 from .timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
 SPACE_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
+METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+MAX_METADATA_KEYS = 16
+MAX_METADATA_VALUE = 256
 KINDS = ("note", "chat", "file", "web", "connector")
 MAX_QUERY = 1_000
 MAX_LIMIT = 50
@@ -82,6 +85,7 @@ class MemoryEngine:
         source: Optional[str] = None,
         tags: Sequence[str] = (),
         created_at: Optional[str] = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Added:
         check_space(space)
         if not content.strip():
@@ -91,6 +95,7 @@ class MemoryEngine:
         if kind not in KINDS:
             raise InvalidInput(f"kind must be one of {KINDS}, got {kind!r}")
         clean_tags = normalise_tags(tags)
+        clean_meta = normalise_metadata(metadata or {})
         when = self.clock()
         happened = normalise_time(created_at) if created_at else when
         digest = content_hash(space, content)
@@ -108,6 +113,7 @@ class MemoryEngine:
                 ingested_at=when,
                 source=source,
                 tags=clean_tags,
+                metadata=clean_meta,
             )
         )
         spans = chunk_spans(content, self.chunk_target)
@@ -135,6 +141,7 @@ class MemoryEngine:
                     created_at=happened,
                     vector=v,
                     tags=clean_tags,
+                    metadata=clean_meta,
                 )
                 for c, v in zip(chunks, vectors)
             ]
@@ -166,6 +173,7 @@ class MemoryEngine:
         limit: int = 5,
         as_of: Optional[str] = None,
         tags: Sequence[str] = (),
+        where: Mapping[str, str] | None = None,
     ) -> RecallResult:
         check_space(space)
         query = query.strip()
@@ -174,20 +182,21 @@ class MemoryEngine:
         limit = max(1, min(limit, MAX_LIMIT))
         boundary = normalise_time(as_of) if as_of else None
         clean_tags = normalise_tags(tags)
+        clean_where = normalise_metadata(where or {})
         depth = limit * LANE_DEPTH
         degraded: list[str] = []
 
         vector_lane: list[tuple[int, float]] = []
         try:
             [qvec] = await self.embedder.embed([query])
-            vector_lane = await self.vectors.search(space, qvec, depth, boundary, clean_tags)
+            vector_lane = await self.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
 
         text_lane: list[tuple[int, float]] = []
         try:
             text_lane = await self.documents.search_text(
-                space, query, depth, TextFilter(as_of=boundary, tags=clean_tags)
+                space, query, depth, TextFilter(as_of=boundary, tags=clean_tags, where=clean_where)
             )
         except Exception as e:  # noqa: BLE001
             degraded.append(f"text: {type(e).__name__}: {e}")
@@ -230,6 +239,7 @@ class MemoryEngine:
                     created_at=chunk.created_at,
                     source=episode.source if episode else None,
                     tags=episode.tags if episode else (),
+                    metadata=dict(episode.metadata) if episode else {},
                 )
             )
         facts = await self._facts_for_query(space, query, boundary or now)
@@ -417,6 +427,19 @@ def normalise_tags(tags: Sequence[str]) -> tuple[str, ...]:
         if clean not in seen:
             seen.append(clean)
     return tuple(seen)
+
+
+def normalise_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
+    if len(metadata) > MAX_METADATA_KEYS:
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys")
+    clean: dict[str, str] = {}
+    for key, value in metadata.items():
+        if not METADATA_KEY.match(key or ""):
+            raise InvalidInput(f"metadata key must match [a-z][a-z0-9_]{{0,31}}, got {key!r}")
+        if not isinstance(value, str) or not value or len(value) > MAX_METADATA_VALUE:
+            raise InvalidInput(f"metadata value for {key!r} must be 1..={MAX_METADATA_VALUE} chars")
+        clean[key] = value
+    return clean
 
 
 def normalise_term(value: str, what: str) -> str:

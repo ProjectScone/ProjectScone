@@ -30,6 +30,10 @@ class Episode(BaseModel):
     content_hash: str
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
+    #: Scope dimensions the caller filters on: ``user_id``, ``agent_id``,
+    #: ``session_id`` by convention, any short string key in practice.
+    #: The space is the hard boundary; metadata partitions inside it.
+    metadata: dict[str, str] = Field(default_factory=dict)
     #: When it happened. Facts distilled from it inherit this.
     created_at: str
     #: When the engine first saw it; the ordering key for "recent".
@@ -87,6 +91,7 @@ class RecallItem(BaseModel):
     created_at: str
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class RecallResult(BaseModel):
