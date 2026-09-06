@@ -111,6 +111,49 @@ async def test_multi_turn_context_and_memory_preserve_only_public_messages(memor
     await conversation.close()
 
 
+async def test_each_turn_uses_the_original_full_scope_despite_caller_metadata_mutation(memory):
+    allowed = await memory.remember("alpha", "Juniper calibration approved manual", kind="file", source="manuals/one",
+                                    created_at="2026-09-02T10:00:00Z", metadata={"team": "science"})
+    await memory.remember("alpha", "Juniper calibration other department", kind="file", source="manuals/two",
+                          created_at="2026-09-02T10:00:00Z", metadata={"team": "legal"})
+    await memory.remember("alpha", "Juniper calibration wrong source", kind="file", source="private/one",
+                          created_at="2026-09-02T10:00:00Z", metadata={"team": "science"})
+    await memory.remember("alpha", "Juniper calibration old manual", kind="file", source="manuals/old",
+                          created_at="2026-08-02T10:00:00Z", metadata={"team": "science"})
+    models = []
+    def factory():
+        model = ScriptedModel("Juniper calibration public reply")
+        models.append(model)
+        return model
+    where = {"team": "science"}
+    conversation = PipecatTextConversation(memory, "alpha", "fixed-scope", factory, where=where,
+                                           kind="file", source_prefix="manuals/",
+                                           since="2026-09-01T00:00:00Z", until="2026-09-06T23:59:59Z")
+    where["team"] = "legal"
+    try:
+        for question in ["Juniper calibration?", "Juniper calibration follow-up?"]:
+            result = await conversation.reply(question)
+            assert {r["episode_id"] for r in result["memory_context"]["references"]} == {allowed.episode_id}
+        for model in models:
+            source = next(m["content"] for m in model.requests[0] if m["content"].startswith("Scone retrieved"))
+            assert "approved manual" in source
+            assert all(text not in source for text in ["other department", "wrong source", "old manual", "public reply"])
+        assert len(await memory.episodes("alpha", {"session_id": "fixed-scope"})) == 4
+    finally:
+        await conversation.close()
+
+
+@pytest.mark.parametrize("scope", [{"kind": "unknown"}, {"source_prefix": False}, {"since": ""}, {"until": "tomorrow"},
+                                  {"where": []}, {"where": {2: "invalid"}},
+                                  {"since": "2026-09-06T00:00:00Z", "until": "2026-09-01T00:00:00Z"}])
+async def test_invalid_text_scope_fails_before_factory_or_capture(memory, scope):
+    def must_not_start():
+        raise AssertionError("invalid scope must not start a model")
+    with pytest.raises(ValueError):
+        PipecatTextConversation(memory, "alpha", "invalid-scope", must_not_start, **scope)
+    assert await memory.episodes("alpha", {"session_id": "invalid-scope"}) == []
+
+
 @pytest.mark.parametrize("mode,text", [("partial", "Unfinished"), ("error", ""), ("normal", "")])
 async def test_failed_or_incomplete_reply_never_becomes_completed_memory(memory, mode, text):
     conversation = PipecatTextConversation(memory, "alpha", "failed", lambda: ScriptedModel(text, mode=mode), turn_timeout=1)

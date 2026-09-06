@@ -397,6 +397,8 @@ from scone_memory.integrations.pipecat_text import PipecatTextConversation
 conversation = PipecatTextConversation(
     memory, "default", "conversation-1", model_factory,
     where={"collection": "manuals"},
+    kind="file", source_prefix="manuals/",
+    since="2026-01-01T00:00:00Z", until="2026-12-31T23:59:59Z",
 )
 try:
     first = await conversation.reply("What does the calibration manual say?")
@@ -404,6 +406,22 @@ try:
 finally:
     await conversation.close()
 ```
+
+Both `PipecatTextConversation` and `SconeMemoryContextProcessor` accept `where`,
+`kind`, `source_prefix`, `since`, and `until`. They validate and copy these filters
+at construction; later caller mutations cannot change the session's recall scope.
+Dates are inclusive RFC3339 bounds on source creation time, and source prefixes
+are literal strings, not glob patterns. Invalid values or reversed dates fail
+before retrieval, capture, or model startup. These filters narrow the authorized
+space, never grant access to another one, and do not filter out saved user/reply
+messages from the transcript.
+
+The native engine applies kind/source/date narrowing to its bounded candidate
+window; a matching source outside that window is not guaranteed to be returned.
+An empty scoped result supplies no source block, not a broader fallback search.
+This native adapter support is separate from user-configurable session scope in
+the HTTP service and webapp; those surfaces must negotiate and persist their own
+scope contract before exposing controls.
 
 Each result contains `turn_id`, `text`, `user_episode_id`,
 `assistant_episode_id`, `memory_context`, and `provider_completion="unverified"`.

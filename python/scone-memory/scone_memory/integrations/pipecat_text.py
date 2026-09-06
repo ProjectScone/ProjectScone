@@ -30,8 +30,9 @@ try:
 except ImportError as exc:
     raise ImportError("Text conversations require Python 3.11+ and scone-memory[pipecat]") from exc
 
-from ..engine import MemoryEngine, Record, check_space, normalise_metadata
+from ..engine import MemoryEngine, Record, check_space
 from .pipecat_context import SconeMemoryContextProcessor
+from ._pipecat_scope import RecallScope
 
 
 def _bytes(messages) -> int:
@@ -108,6 +109,8 @@ class PipecatTextConversation:
         model_factory: Callable[[], FrameProcessor], *,
         system_prompt: str = "You are a helpful assistant.",
         where: Mapping[str, str] | None = None,
+        kind: str | None = None, source_prefix: str | None = None,
+        since: str | None = None, until: str | None = None,
         turn_timeout: float = 30.0, max_reply_bytes: int = 64000,
         max_history_bytes: int = 128000,
     ):
@@ -127,7 +130,8 @@ class PipecatTextConversation:
         if _bytes(self._history) > max_history_bytes:
             raise ValueError("system prompt exceeds history byte limit")
         self._memory, self._space, self._session_id = memory, space, session_id
-        self._factory, self._where = model_factory, normalise_metadata(where or {})
+        self._factory = model_factory
+        self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task | None = None
         self._closed = False
@@ -202,7 +206,7 @@ class PipecatTextConversation:
         done = asyncio.get_running_loop().create_future()
         started = asyncio.Event()
         pipeline_failed = False
-        recall = SconeMemoryContextProcessor(self._memory, self._space, self._session_id, where=self._where)
+        recall = SconeMemoryContextProcessor(self._memory, self._space, self._session_id, **self._scope.kwargs())
         model = self._factory()
         if not isinstance(model, FrameProcessor):
             raise TypeError("model_factory must return a Pipecat FrameProcessor")
