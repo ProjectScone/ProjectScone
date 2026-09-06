@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS vectors (
     created_at TEXT NOT NULL, tags TEXT NOT NULL, metadata TEXT NOT NULL, vector BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS vectors_space ON vectors(space, created_at);
 CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+#: Schema versions (shared spec 3.6). 1: chunk spans were code-point
+#: indexes. 2: chunk spans are UTF-8 byte offsets.
+SCHEMA_VERSION = 2
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -65,7 +70,52 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if row:
+        return int(row["value"])
+    # No version recorded: a file written before versioning existed holds
+    # version-1 rows if it holds any chunks at all; an empty file is new.
+    has_rows = conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
+    return 1 if has_rows else SCHEMA_VERSION
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Bring the file to SCHEMA_VERSION; returns the number of rows changed."""
+    version = schema_version(conn)
+    changed = 0
+    if version < 2:
+        changed += _spans_to_bytes(conn)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+    conn.commit()
+    return changed
+
+
+def _spans_to_bytes(conn: sqlite3.Connection) -> int:
+    """v1 -> v2: recompute every span as UTF-8 byte offsets from the
+    stored chunk text, which was always exact."""
+    changed = 0
+    rows = conn.execute(
+        'SELECT c.id AS id, c.start AS start, c.text AS text, e.content AS content'
+        " FROM chunks c JOIN episodes e ON e.id = c.episode_id"
+    ).fetchall()
+    for row in rows:
+        content, text = row["content"], row["text"]
+        raw = content.encode()
+        start = len(content[: row["start"]].encode())
+        if raw[start : start + len(text.encode())].decode(errors="replace") != text:
+            start = raw.find(text.encode())
+            if start < 0:
+                continue  # text no longer addressable; left as it was
+        end = start + len(text.encode())
+        if (start, end) != (row["start"], None):
+            conn.execute('UPDATE chunks SET start = ?, "end" = ? WHERE id = ?', (start, end, row["id"]))
+            changed += 1
+    return changed
 
 
 def _episode(row: sqlite3.Row) -> Episode:

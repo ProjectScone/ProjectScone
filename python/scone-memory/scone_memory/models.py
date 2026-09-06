@@ -14,7 +14,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-EpisodeKind = Literal["note", "chat", "file", "web", "connector"]
+#: The same vocabulary as the Rust product's schema CHECK, so an episode
+#: means the same thing on both sides (shared spec, section 1).
+EpisodeKind = Literal["note", "file", "conversation", "observation", "connector"]
 FactStatus = Literal["active", "closed", "proposed"]
 
 MAX_CONTENT_BYTES = 2_000_000

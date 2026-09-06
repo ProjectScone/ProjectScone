@@ -13,7 +13,7 @@
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
     SCONE_EVENTS      memory | sqlite | none    (default: sqlite when SCONE_DOCUMENTS=sqlite, else memory)
-    SCONE_EVENTS_QUERIES  text | hash           (default text; hash stores a sha256 of each query)
+    SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
     SCONE_EVENTS_MAX_AGE_DAYS                    sqlite sink retention, optional
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
@@ -48,7 +48,7 @@ class Settings:
     embed_api_key: Optional[str] = None
     embed_cache: Optional[str] = None
     events: Optional[str] = None
-    events_queries: str = "text"
+    events_queries: str = "hash"
     events_max_age_days: Optional[float] = None
     events_max: int = 10_000
     keys: Mapping[str, str] = field(default_factory=dict)
@@ -72,7 +72,7 @@ class Settings:
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
             embed_cache=env.get("SCONE_EMBED_CACHE"),
             events=env.get("SCONE_EVENTS"),
-            events_queries=env.get("SCONE_EVENTS_QUERIES", "text"),
+            events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
             events_max=int(env.get("SCONE_EVENTS_MAX", "10000")),
             keys=parse_keys(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY")),

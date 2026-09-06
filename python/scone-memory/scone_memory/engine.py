@@ -47,7 +47,7 @@ SPACE_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
 METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 MAX_METADATA_KEYS = 16
 MAX_METADATA_VALUE = 256
-KINDS = ("note", "chat", "file", "web", "connector")
+KINDS = ("note", "file", "conversation", "observation", "connector")
 MAX_QUERY = 1_000
 MAX_LIMIT = 50
 #: How many candidates each lane contributes before fusion.
@@ -119,7 +119,7 @@ class MemoryEngine:
         chunk_target: int = DEFAULT_TARGET,
         clock: Callable[[], str] = now_rfc3339,
         events: Optional[EventLog] = None,
-        record_queries: bool = True,
+        record_queries: bool = False,
     ) -> None:
         self.documents = documents
         self.vectors = vectors
@@ -129,7 +129,9 @@ class MemoryEngine:
         #: Evidence sink. None means no evidence is kept, and no metric
         #: can be computed; that absence is reported, never filled in.
         self.events = events
-        #: False stores a sha256 of each query instead of its text.
+        #: False (the default) stores a sha256 prefix of each query instead
+        #: of its text: a memory store is private, which is not consent to
+        #: a second log of everything asked of it.
         self.record_queries = record_queries
 
     async def _emit(self, space: str, kind: str, payload: dict) -> Optional[Event]:
@@ -719,7 +721,10 @@ class MemoryEngine:
                 closed_reason=f.get("closed_reason"),
                 source_episode_id=id_map.get(int(source)) if source is not None else None,
             )
-            identity = (new.subject, new.predicate, new.object, new.valid_from, new.valid_until, new.status)
+            identity = (
+                new.subject, new.predicate, new.object, new.valid_from, new.valid_until,
+                new.status, new.closed_reason, new.confidence,
+            )
             if identity in existing:
                 summary.facts_skipped += 1
                 continue
@@ -739,7 +744,12 @@ def _ms(since: float) -> float:
 
 
 def _fact_identity(fact: Fact) -> tuple:
-    return (fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until, fact.status)
+    """Two facts are the same record only when every stored field agrees;
+    a different reason or confidence is a different record."""
+    return (
+        fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until,
+        fact.status, fact.closed_reason, fact.confidence,
+    )
 
 
 def _covers(fact: Fact, instant) -> bool:

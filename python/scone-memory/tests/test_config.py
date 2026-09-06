@@ -20,6 +20,7 @@ def test_settings_read_the_environment():
     env = {"SCONE_DOCUMENTS": "sqlite", "SCONE_API_KEY": "k", "SCONE_PORT": "9000"}
     s = Settings.from_env(env)
     assert (s.documents, s.vectors, s.embedder, s.port, s.keys) == ("sqlite", "memory", "hash", 9000, {"k": "default"})
+    assert s.events_queries == "hash", "query text is never logged unless asked"
 
 
 async def test_build_engine_wires_the_named_parts(tmp_path):

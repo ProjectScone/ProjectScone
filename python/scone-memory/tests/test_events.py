@@ -64,6 +64,7 @@ async def test_retention_is_a_stated_policy(sink):
 
 
 async def fresh_engine(record_queries=True):
+    # Tests opt in to plain-text queries; the engine default is hashing.
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock(),
         events=InMemoryEventLog(), record_queries=record_queries,
@@ -119,8 +120,10 @@ async def test_failures_are_evidence_too():
     assert kinds == [("forget", "NotFound"), ("recall", "both lanes failed")]
 
 
-async def test_queries_can_be_kept_as_hashes():
-    engine = await fresh_engine(record_queries=False)
+async def test_queries_are_hashed_unless_asked_otherwise():
+    engine = await MemoryEngine(
+        InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog()
+    ).open()
     await engine.remember("default", "a private note about the harbour")
     await engine.recall("default", "harbour")
     [recall] = await engine.events.query("default", kind="recall")
@@ -166,7 +169,7 @@ def test_events_and_feedback_over_http():
         assert r.status_code == 200 and "recorded" in r.json()
         events = c.get("/v1/events", headers=h).json()
         assert [e["kind"] for e in events["events"]] == ["feedback", "recall", "remember"]
-        assert events["evidence"] == "memory" and events["queries_recorded"] == "text"
+        assert events["evidence"] == "memory" and events["queries_recorded"] == "text"  # fresh_engine opts in
         only = c.get("/v1/events", params={"kind": "recall", "limit": 1}, headers=h).json()["events"]
         assert [e["payload"]["query"] for e in only] == ["harbour crane"]
         bad = c.post("/v1/feedback", json={"recall_event_id": recall["event_id"], "chunk_id": 9999, "useful": True}, headers=h)

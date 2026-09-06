@@ -11,6 +11,7 @@ import pytest
 
 from scone_memory import (
     HashEmbedder,
+    InvalidInput,
     InMemoryDocumentStore,
     InMemoryVectorIndex,
     MemoryEngine,
@@ -223,3 +224,12 @@ async def test_import_into_a_populated_store_remaps_provenance_and_does_not_doub
     again = await target.import_records("default", dump)
     assert (again.episodes, again.facts, again.deduplicated, again.facts_skipped) == (0, 0, 1, 1)
     assert len(await target.facts("default", include_closed=True)) == 1
+
+
+async def test_episode_kinds_are_the_rust_vocabulary():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for kind in ("note", "file", "conversation", "observation", "connector"):
+        await engine.remember("default", f"a {kind}", kind=kind)  # type: ignore[arg-type]
+    for kind in ("chat", "web", "memo"):
+        with pytest.raises(InvalidInput):
+            await engine.remember("default", f"a {kind}", kind=kind)  # type: ignore[arg-type]
