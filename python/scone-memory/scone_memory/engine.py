@@ -1235,6 +1235,12 @@ class MemoryEngine:
                 out[key][value] = out[key].get(value, 0) + 1
         return {k: dict(sorted(v.items())) for k, v in sorted(out.items())}
 
+    async def revision(self, space: str) -> int:
+        """The space's write counter. A page that renders a list can record
+        the revision it read at and tell later whether the space moved."""
+        check_space(space)
+        return await self.documents.revision(space)
+
     async def status(self, space: str) -> Status:
         check_space(space)
         counts = await self.documents.counts(space)

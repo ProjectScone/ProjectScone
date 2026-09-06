@@ -307,3 +307,49 @@ def test_recall_narrows_over_http():
         assert got(until="2024-01-31") == [ids[0]]
         assert got(since="2024-03-01") == [ids[2]]
         assert client.get("/v1/recall", params={"q": "deploy", "kind": "chat"}, headers=auth()).status_code == 422
+
+
+def test_the_facts_list_carries_the_space_revision(client):
+    """A review page freezes the list it renders, so it needs the revision
+    the list was read at: the same counter /v1/status reports, read in the
+    same request as the facts. A different revision later means the space
+    moved and the frozen set no longer matches the screen."""
+    h = auth()
+    first = client.get("/v1/facts", headers=h).json()
+    assert first["revision"] == client.get("/v1/status", headers=h).json()["revision"]
+
+    client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon"}, headers=h)
+    after = client.get("/v1/facts", headers=h).json()
+    assert after["revision"] > first["revision"]
+    assert after["revision"] == client.get("/v1/status", headers=h).json()["revision"]
+
+
+def test_many_episodes_read_in_one_request(client):
+    """The review page's source panel asks for one episode per row. One
+    request answers them all: episodes in the order asked for, and ids that
+    are confirmed gone listed separately, so a missing source stays
+    distinguishable from a failed request."""
+    h = auth()
+    ids = [client.post("/v1/episodes", json={"content": f"note {n}"}, headers=h).json()["episode_id"] for n in (1, 2, 3)]
+    other_space = client.post("/v1/episodes", json={"content": "beta's own"}, headers=auth("key-b")).json()["episode_id"]
+
+    body = client.get("/v1/episodes", params={"ids": f"{ids[1]},{ids[2]},999,{ids[0]},{other_space}"}, headers=h).json()
+    assert [e["episode_id"] for e in body["episodes"]] == [ids[1], ids[2], ids[0]]
+    assert [e["content"] for e in body["episodes"]] == ["note 2", "note 3", "note 1"]
+    # 999 never existed and other_space belongs to beta: from alpha both are
+    # simply absent, the same answer the single-episode read gives with a 404.
+    assert body["missing"] == [999, other_space]
+
+    # Proposed facts share a source, so a page of rows asks for the same
+    # episode many times; it is read once, at the position first asked for.
+    repeated = client.get("/v1/episodes", params={"ids": f"{ids[1]},{ids[0]},{ids[1]}"}, headers=h).json()
+    assert [e["episode_id"] for e in repeated["episodes"]] == [ids[1], ids[0]]
+
+
+def test_a_batch_episode_read_is_bounded(client):
+    """A page cannot ask for the whole space in one request: over the bound
+    the answer is a refusal, never a silent truncation."""
+    h = auth()
+    too_many = ",".join(str(n) for n in range(1, 102))
+    assert client.get("/v1/episodes", params={"ids": too_many}, headers=h).status_code == 422
+    assert client.get("/v1/episodes", params={"ids": ""}, headers=h).status_code == 422

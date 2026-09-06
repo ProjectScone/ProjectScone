@@ -226,14 +226,24 @@ def create_app(
         )
         return added.model_dump()
 
+    @app.get("/v1/episodes")
+    async def get_episodes(ids: str, space: str = Depends(space_for)) -> dict:
+        """Several episodes in one request, so a page showing the source of
+        each row does not fan out one request per row. Episodes come back in
+        the order asked for; ids that are confirmed gone are listed under
+        ``missing``, which keeps a missing source distinguishable from a
+        request that failed."""
+        found, missing = [], []
+        for episode_id in parse_ids(ids):
+            try:
+                found.append(episode_json(await engine.episode(space, episode_id)))
+            except NotFound:
+                missing.append(episode_id)
+        return {"episodes": found, "missing": missing}
+
     @app.get("/v1/episodes/{episode_id}")
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
-        episode = await engine.episode(space, episode_id)
-        return {
-            "episode_id": episode.episode_id, "kind": episode.kind, "content": episode.content,
-            "source": episode.source, "tags": list(episode.tags), "metadata": dict(episode.metadata),
-            "created_at": episode.created_at, "ingested_at": episode.ingested_at,
-        }
+        return episode_json(await engine.episode(space, episode_id))
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
@@ -281,7 +291,7 @@ def create_app(
         space: str = Depends(space_for),
     ) -> dict:
         facts = await engine.facts(space, include_closed=all, as_of=as_of, status=status, include_excluded=excluded)
-        return {"facts": [fact_json(f) for f in facts]}
+        return {"facts": [fact_json(f) for f in facts], "revision": await engine.revision(space)}
 
     @app.post("/v1/facts")
     async def post_fact(body: FactBody, space: str = Depends(space_for)) -> dict:
@@ -413,6 +423,28 @@ class Unauthorized(Exception):
     pass
 
 
+#: Ids one batch episode read may ask for. A review page asks for the
+#: sources of the rows on screen, not for the space.
+MAX_IDS = 100
+
+
+def parse_ids(text: str) -> list[int]:
+    """``3,9,14`` from the query string, in the order asked for, each id
+    read once. Over the bound the answer is a refusal, never a truncation."""
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        raise InvalidInput("ids needs at least one episode id")
+    if len(parts) > MAX_IDS:
+        raise InvalidInput(f"ids takes at most {MAX_IDS} ids, got {len(parts)}")
+    seen: dict[int, None] = {}
+    for part in parts:
+        try:
+            seen.setdefault(int(part), None)
+        except ValueError:
+            raise InvalidInput(f"ids are whole numbers, got {part!r}") from None
+    return list(seen)
+
+
 def parse_where(text: Optional[str]) -> dict[str, str]:
     """``user_id:alice,agent_id:planner`` from the query string."""
     where: dict[str, str] = {}
@@ -439,6 +471,14 @@ def item_json(item: RecallItem) -> dict:
         "source": item.source,
         "tags": list(item.tags),
         "metadata": dict(item.metadata),
+    }
+
+
+def episode_json(episode) -> dict:
+    return {
+        "episode_id": episode.episode_id, "kind": episode.kind, "content": episode.content,
+        "source": episode.source, "tags": list(episode.tags), "metadata": dict(episode.metadata),
+        "created_at": episode.created_at, "ingested_at": episode.ingested_at,
     }
 
 
