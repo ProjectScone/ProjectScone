@@ -192,6 +192,9 @@ class RunReport:
     abstention: Optional[dict] = None
     #: The floor the engines ran with, if any, and how many items each verdict got.
     similarity_floor: Optional[float] = None
+    #: Whether the engines embedded the date/source prefix (experiment 8), read
+    #: from the engine itself so the report says what ran, not what was asked.
+    contextual_embeddings: bool = False
     low_confidence_counts: dict[str, int] = field(default_factory=dict)
     #: Experiment 3: whether history was asked for, and how many items got any facts / any history back.
     history: bool = False
@@ -237,12 +240,14 @@ async def run(
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     engine_meta = {"embedder": "", "document_store": "", "vector_index": ""}
     floor: Optional[float] = None
+    contextual = False
     for n, item in enumerate(items, 1):
         engine = make_engine()
         if asyncio.iscoroutine(engine) or isinstance(engine, asyncio.Future):
             engine = await engine
         engine_meta = {"embedder": engine.embedder.id, "document_store": engine.documents.name, "vector_index": engine.vectors.name}
         floor = getattr(engine, "similarity_floor", None)
+        contextual = bool(getattr(engine, "contextual_embeddings", False))
         space = "item"
         result = ItemResult(item.question_id, item.question_type, item.has_evidence, [], 0, 0, 0.0, answer_sessions=list(item.answer_session_ids))
         try:
@@ -303,6 +308,7 @@ async def run(
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         results=results, abstention=abstention_sweep(results), similarity_floor=floor, low_confidence_counts=verdicts,
+        contextual_embeddings=contextual,
         history=history, items_with_facts=sum(1 for r in results if r.facts), items_with_history=sum(1 for r in results if r.history_facts),
         **engine_meta,
     )

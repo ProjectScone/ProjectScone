@@ -273,3 +273,31 @@ def test_the_cli_runs_the_sample_the_harness_would(tmp_path):
     ran = [r["question_id"] for r in json.loads(report.read_text())["results"]]
     assert ran == ["q74", "q48", "q66", "q38", "q26", "q27", "q71", "q23", "q96", "q88"]
     assert not untouched.exists(), "the bench opened the configured store"
+
+
+def test_the_bench_engine_takes_the_contextual_and_floor_settings(tmp_path):
+    """SCONE_CONTEXTUAL_EMBEDDINGS=1 and SCONE_SIMILARITY_FLOOR reach the
+    per-item engines the bench builds, and the report states both from the
+    engine. Until 2026-09-06 the bench built its engines without either,
+    so an experiment 8 leg would have measured the baseline again under
+    the other name; the hash embedder makes the prefix visible as a
+    changed similarity."""
+    import io
+
+    from scone_memory import cli
+
+    dataset = tmp_path / "d.json"
+    dataset.write_text(json.dumps(DATASET))
+
+    def bench(env, name):
+        report = tmp_path / name
+        code = cli.main(["bench", str(dataset), "--out", str(report), "--json"], env=env, stdin=io.StringIO(), out=io.StringIO())
+        assert code == 0
+        return json.loads(report.read_text())
+
+    plain = bench({"SCONE_EMBEDDER": "hash"}, "plain.json")
+    prefixed = bench({"SCONE_EMBEDDER": "hash", "SCONE_CONTEXTUAL_EMBEDDINGS": "1", "SCONE_SIMILARITY_FLOOR": "0.9"}, "prefixed.json")
+    assert plain["contextual_embeddings"] is False and plain["similarity_floor"] is None
+    assert prefixed["contextual_embeddings"] is True and prefixed["similarity_floor"] == 0.9
+    sims = lambda r: [x["top_similarity"] for x in r["results"]]  # noqa: E731
+    assert sims(plain) != sims(prefixed), "the prefix never reached the embedded text"

@@ -185,7 +185,9 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         # engine, not a database.
         from .backends import InMemoryDocumentStore, InMemoryVectorIndex
 
-        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
+                                  contextual_embeddings=settings.contextual_embeddings,
+                                  similarity_floor=settings.similarity_floor).open()
 
     def progress(n, total):
         if not args.json:
@@ -201,7 +203,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         emit(report.as_dict(with_items=False))
     else:
         print(f"{report.scored} scored of {report.items} items ({'with' if report.include_abstention else 'without'} abstention), "
-              f"embedder {report.embedder}, {report.errors} error(s)", file=out)
+              f"embedder {report.embedder}, contextual embeddings {'on' if report.contextual_embeddings else 'off'}, "
+              f"{report.errors} error(s)", file=out)
         for k in report.ks:
             print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
         print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
