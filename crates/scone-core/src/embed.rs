@@ -76,6 +76,9 @@ pub struct OnnxEmbedder {
 }
 
 #[cfg(feature = "local-embed")]
+static DOWNLOAD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(feature = "local-embed")]
 impl OnnxEmbedder {
     pub fn new(cache_dir: &std::path::Path) -> Result<Self> {
         Self::with_model(cache_dir, "bge-small-en-v1.5")
@@ -98,6 +101,14 @@ impl OnnxEmbedder {
         let options = fastembed::InitOptions::new(model)
             .with_cache_dir(cache_dir.to_path_buf())
             .with_show_download_progress(false);
+        // A missing model is downloaded here, and two constructors
+        // racing for the same cache corrupt it: on CI three test
+        // threads shared one download and two failed with "Failed to
+        // retrieve model file". Serialising construction costs nothing
+        // once the files exist.
+        let _one_download_at_a_time = DOWNLOAD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let model = fastembed::TextEmbedding::try_new(options)
             .map_err(|e| crate::SconeError::Embed(e.to_string()))?;
         Ok(Self {
