@@ -112,6 +112,31 @@ would wrongly withhold, and that sweep is where a floor comes from.
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
 
+## Any LangChain VectorStore as the vector index
+
+```python
+from langchain_community.vectorstores import FAISS   # or Pinecone, Weaviate, PGVector, Azure Search, ...
+from scone_memory.backends import LangChainVectorIndex
+
+index = LangChainVectorIndex(score="unit_l2_squared", filter_builder=None)
+index.bind(FAISS.from_texts([], embedding=index.embeddings))   # the store must embed through the bridge
+engine = MemoryEngine(documents, index, embedder)
+```
+
+The bridge makes the three things that differ between stores explicit
+rather than guessing: vectors reach the store through `index.embeddings`
+(or `add_embeddings` where the store has it); scope filters need a
+`filter_builder(space, as_of_ts, tags, where)` that returns the store's
+own filter, and without one the bridge over-fetches and filters on its
+metadata, refusing (the lane reads as degraded, the lexical lane still
+answers) whenever the window filled with out-of-scope candidates before
+`limit` matches were found; and `score` names what the store's number
+means (`cosine_similarity`, `cosine_distance`, `unit_l2_squared`, or the
+default `unknown`, under which the order still drives fusion but no
+similarity is shown and no confidence verdict is derived). The contract
+runs through the bridge over `langchain_core`'s `InMemoryVectorStore`,
+filtered and post-filtered.
+
 ## Using it from a framework
 
 Three adapters live under `scone_memory.integrations`; each needs its

@@ -19,6 +19,7 @@ __all__ = [
     "PostgresEventLog",
     "RedisVectorIndex",
     "MilvusVectorIndex",
+    "LangChainVectorIndex",
     "ElasticsearchDocumentStore",
     "ElasticsearchVectorIndex",
     "ElasticsearchEventLog",
@@ -50,6 +51,10 @@ def __getattr__(name: str):
         from .milvus import MilvusVectorIndex
 
         return MilvusVectorIndex
+    if name == "LangChainVectorIndex":
+        from .langchain import LangChainVectorIndex
+
+        return LangChainVectorIndex
     if name in ("ElasticsearchDocumentStore", "ElasticsearchVectorIndex", "ElasticsearchEventLog"):
         from . import elastic
 

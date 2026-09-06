@@ -29,6 +29,9 @@ def backends():
     yield pytest.param("chroma", id="chroma", marks=pytest.mark.skipif(importlib.util.find_spec("chromadb") is None, reason="chromadb not installed"))
     yield pytest.param("lancedb", id="lancedb", marks=pytest.mark.skipif(importlib.util.find_spec("lancedb") is None, reason="lancedb not installed"))
     yield pytest.param("milvus-lite", id="milvus-lite", marks=pytest.mark.skipif(importlib.util.find_spec("milvus_lite") is None, reason="milvus-lite not installed"))
+    needs_langchain = pytest.mark.skipif(importlib.util.find_spec("langchain_core") is None, reason="langchain-core not installed")
+    yield pytest.param("langchain-filtered", id="langchain-filtered", marks=needs_langchain)
+    yield pytest.param("langchain-postfilter", id="langchain-postfilter", marks=needs_langchain)
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
         yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
@@ -99,6 +102,21 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = MilvusVectorIndex(str(tmp_path / "milvus.db"))
+    elif request.param.startswith("langchain"):
+        # The bridge over langchain_core's InMemoryVectorStore, once with a
+        # filter_builder (the store filters) and once without (the bridge
+        # over-fetches and filters on its own metadata).
+        from langchain_core.vectorstores import InMemoryVectorStore
+
+        from scone_memory.backends import LangChainVectorIndex
+        from scone_memory.backends.langchain import LangChainVectorIndex as Bridge
+
+        def builder(space, as_of_ts, tags, where):
+            return lambda doc: Bridge._matches(doc.metadata, space, as_of_ts, tags, where)
+
+        documents = InMemoryDocumentStore()
+        vectors = LangChainVectorIndex(score="cosine_similarity", filter_builder=builder if request.param.endswith("filtered") else None)
+        vectors.bind(InMemoryVectorStore(embedding=vectors.embeddings))
     else:
         from scone_memory.backends import QdrantVectorIndex
 

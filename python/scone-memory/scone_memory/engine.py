@@ -9,6 +9,7 @@ answers, because a thin answer that says it is thin beats a 500.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -470,14 +471,17 @@ class MemoryEngine:
                                                "error": "both lanes failed"})
             raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
 
-        similarity = dict(vector_lane)
+        # An index that ranks without a cosine (a bridged store with an
+        # unknown score) reports NaN: its order counts for fusion, but no
+        # similarity is shown and no confidence is judged from it.
+        similarity = {cid: (None if math.isnan(score) else score) for cid, score in vector_lane}
         # The best cosine the vector lane saw, before fusion, is the
         # confidence signal. A degraded vector lane cannot judge (None); a
         # lane that ran and found nothing is as weak as evidence gets.
-        top_similarity = round(vector_lane[0][1], 6) if vector_lane else None
+        top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
         vector_ran = not any(d.startswith("vectors:") for d in degraded)
         low_confidence: Optional[bool] = None
-        if self.similarity_floor is not None and vector_ran:
+        if self.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
             low_confidence = top_similarity is None or top_similarity < self.similarity_floor
         ranks = {
             "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
