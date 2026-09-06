@@ -67,6 +67,7 @@ class Settings:
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
     contextual_embeddings: bool = False
+    similarity_floor: Optional[float] = None
     events: Optional[str] = None
     events_queries: str = "hash"
     events_max_age_days: Optional[float] = None
@@ -100,6 +101,7 @@ class Settings:
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
+            similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             events=env.get("SCONE_EVENTS"),
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
@@ -247,6 +249,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         events=events,
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
+        similarity_floor=settings.similarity_floor,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])

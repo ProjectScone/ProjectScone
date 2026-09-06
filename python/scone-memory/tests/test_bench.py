@@ -109,3 +109,85 @@ async def test_each_item_gets_a_fresh_engine(tmp_path):
     assert len(made) == 3 and len({id(e) for e in made}) == 3
     # The first engine holds only item 1's sessions; nothing leaked forward.
     assert (await made[0].status("item")).episodes == 3 and (await made[2].status("item")).episodes == 1
+
+
+class Stub:
+    """An engine whose recall reports a chosen top similarity per question,
+    so the sweep's expectations can be worked out by hand."""
+
+    class _Meta:
+        def __init__(self, name):
+            self.name = name
+            self.id = name
+
+    def __init__(self, tops: dict[str, float | None], floor=None):
+        self.tops, self.similarity_floor = tops, floor
+        self.embedder = self._Meta("stub")
+        self.documents = self._Meta("stub")
+        self.vectors = self._Meta("stub")
+        self.events = None
+
+    async def remember_many(self, space, records):
+        return []
+
+    async def recall(self, space, question, limit):
+        from scone_memory.models import RecallResult
+
+        top = self.tops[question]
+        verdict = None if self.similarity_floor is None else (top is None or top < self.similarity_floor)
+        return RecallResult(items=[], facts=[], degraded=[], top_similarity=top, low_confidence=verdict, returned_bytes=0, space_bytes=1)
+
+
+def sweep_items():
+    return [
+        item("a", "single-session-user", "a?", [[("user", "x")]], ["s0"]),
+        item("b", "multi-session", "b?", [[("user", "x")]], ["s0"]),
+        item("c", "abstention", "c?", [[("user", "x")]], []),
+        item("d", "abstention", "d?", [[("user", "x")]], []),
+    ]
+
+
+async def test_the_abstention_sweep_counts_caught_and_wrongly_withheld_per_floor(tmp_path):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(sweep_items()))
+    tops = {"a?": 0.8, "b?": 0.4, "c?": 0.35, "d?": None}
+    report = await run(lambda: Stub(tops), load_items(path), ks=(1,))
+    sweep = report.abstention
+    assert sweep is not None and (sweep["no_evidence_n"], sweep["evidence_n"]) == (2, 2)
+    assert sweep["floors"][0] == 0.3 and sweep["floors"][-1] == 0.9 and len(sweep["floors"]) == 13
+    # No-evidence items: d found nothing (flagged at every floor); c's 0.35 clears 0.30 and 0.35, falls at 0.40.
+    assert sweep["abstain_rate"][0.3] == 0.5 and sweep["abstain_rate"][0.35] == 0.5 and sweep["abstain_rate"][0.4] == 1.0
+    # Evidence items: b's 0.40 is not below 0.40; it is withheld from 0.45; a's 0.80 falls at 0.85.
+    assert sweep["false_abstain_rate"][0.4] == 0.0 and sweep["false_abstain_rate"][0.45] == 0.5
+    assert sweep["false_abstain_rate"][0.8] == 0.5 and sweep["false_abstain_rate"][0.85] == 1.0
+    by_id = {r.question_id: r for r in report.results}
+    assert (by_id["a"].top_similarity, by_id["d"].top_similarity) == (0.8, None)
+    assert report.similarity_floor is None and report.low_confidence_counts == {}, "no floor: no verdicts to count"
+
+    gated = await run(lambda: Stub(tops, floor=0.5), load_items(path), ks=(1,))
+    assert gated.similarity_floor == 0.5
+    assert gated.low_confidence_counts == {"evidence_cleared": 1, "evidence_flagged": 1, "no_evidence_flagged": 2}
+
+
+async def test_the_sweep_is_absent_when_no_abstention_item_ran(tmp_path):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(sweep_items()[:2]))
+    report = await run(lambda: Stub({"a?": 0.8, "b?": 0.4}), load_items(path), ks=(1,))
+    assert report.abstention is None, "abstention accuracy cannot be measured without an item to abstain on"
+
+
+async def test_a_degraded_vector_lane_is_outside_the_sweep(tmp_path):
+    class Degraded(Stub):
+        async def recall(self, space, question, limit):
+            r = await super().recall(space, question, limit)
+            if question == "c?":
+                r.degraded = ["vectors: RuntimeError: offline"]
+                r.top_similarity = None
+            return r
+
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(sweep_items()))
+    report = await run(lambda: Degraded({"a?": 0.8, "b?": 0.4, "c?": None, "d?": 0.1}), load_items(path), ks=(1,))
+    sweep = report.abstention
+    assert sweep["no_evidence_n"] == 1, "c saw no similarity because its lane failed, not because the evidence was weak"
+    assert sweep["abstain_rate"][0.3] == 1.0

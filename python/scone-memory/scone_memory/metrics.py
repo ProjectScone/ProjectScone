@@ -163,6 +163,15 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
     degraded = sum(1 for e in recalls if e.payload.get("degraded"))
     out.append(Metric("recall.degraded_count", degraded, len(recalls), "successful recalls", "recalls",
                       "Recalls that answered with one lane after the other failed."))
+    judged = [e for e in recalls if e.payload.get("low_confidence") is not None]
+    flagged = sum(1 for e in judged if e.payload["low_confidence"])
+    floors = sorted({float(e.payload["similarity_floor"]) for e in judged if e.payload.get("similarity_floor") is not None})
+    out.append(Metric("recall.low_confidence_share", _share(flagged, len(judged)), len(judged),
+                      "successful recalls judged against a similarity floor", "share",
+                      "Recalls flagged low_confidence (best vector hit below the engine's floor, or nothing found) over recalls that had "
+                      "a floor and a working vector lane." + (f" Floors seen: {floors}." if floors else ""),
+                      "Says how often the reader was told the evidence is weak, not whether that was right; abstention accuracy "
+                      "needs labelled questions (the bench sweep)."))
     return out
 
 

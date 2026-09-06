@@ -73,6 +73,10 @@ class ItemResult:
     degraded: list[str] = field(default_factory=list)
     error: Optional[str] = None
     answer_sessions: list[str] = field(default_factory=list)
+    #: Experiment 9: the best cosine the vector lane saw, and the engine's
+    #: verdict when it had a floor (None when it had none or could not judge).
+    top_similarity: Optional[float] = None
+    low_confidence: Optional[bool] = None
 
     def any_at(self, k: int) -> bool:
         seen = set(self.retrieved_sessions[:k])
@@ -81,6 +85,37 @@ class ItemResult:
     def all_at(self, k: int) -> bool:
         seen = set(self.retrieved_sessions[:k])
         return bool(self.answer_sessions) and all(a in seen for a in self.answer_sessions)
+
+
+#: Candidate floors for the abstention sweep, 0.30 to 0.90 by 0.05.
+FLOOR_GRID: tuple[float, ...] = tuple(round(0.30 + 0.05 * i, 2) for i in range(13))
+
+
+def flagged(top_similarity: Optional[float], floor: float) -> bool:
+    """The engine's rule, restated for the sweep: nothing found, or the best
+    hit below the floor, is weak evidence."""
+    return top_similarity is None or top_similarity < floor
+
+
+def abstention_sweep(results: Sequence["ItemResult"], floors: Sequence[float] = FLOOR_GRID) -> Optional[dict]:
+    """For each candidate floor: the share of no-evidence items that would be
+    flagged (abstention caught) and the share of evidence items that would be
+    flagged (answers wrongly withheld). Items whose recall errored or whose
+    vector lane was degraded are outside both denominators, and the counts
+    say so. None when no no-evidence item ran, because then the first
+    number cannot be measured at all."""
+    judged = [r for r in results if r.error is None and not any(d.startswith("vectors:") for d in r.degraded)]
+    without = [r for r in judged if not r.has_evidence]
+    with_ev = [r for r in judged if r.has_evidence]
+    if not without:
+        return None
+    return {
+        "floors": list(floors),
+        "no_evidence_n": len(without),
+        "evidence_n": len(with_ev),
+        "abstain_rate": {f: round(sum(flagged(r.top_similarity, f) for r in without) / len(without), 4) for f in floors},
+        "false_abstain_rate": {f: (round(sum(flagged(r.top_similarity, f) for r in with_ev) / len(with_ev), 4) if with_ev else None) for f in floors},
+    }
 
 
 @dataclass
@@ -105,6 +140,11 @@ class RunReport:
     started_at: str
     finished_at: str
     results: list[ItemResult] = field(default_factory=list)
+    #: Experiment 9 sweep (see abstention_sweep); None when it cannot be measured.
+    abstention: Optional[dict] = None
+    #: The floor the engines ran with, if any, and how many items each verdict got.
+    similarity_floor: Optional[float] = None
+    low_confidence_counts: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -141,11 +181,13 @@ async def run(
     results: list[ItemResult] = []
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     engine_meta = {"embedder": "", "document_store": "", "vector_index": ""}
+    floor: Optional[float] = None
     for n, item in enumerate(items, 1):
         engine = make_engine()
         if asyncio.iscoroutine(engine) or isinstance(engine, asyncio.Future):
             engine = await engine
         engine_meta = {"embedder": engine.embedder.id, "document_store": engine.documents.name, "vector_index": engine.vectors.name}
+        floor = getattr(engine, "similarity_floor", None)
         space = "item"
         result = ItemResult(item.question_id, item.question_type, item.has_evidence, [], 0, 0, 0.0, answer_sessions=list(item.answer_session_ids))
         try:
@@ -167,6 +209,8 @@ async def run(
             result.retrieved_sessions = [i.source or "" for i in pack.items]
             result.returned_bytes = pack.returned_bytes
             result.degraded = list(pack.degraded)
+            result.top_similarity = pack.top_similarity
+            result.low_confidence = pack.low_confidence
         except Exception as e:  # noqa: BLE001 - one bad item must not lose the run; it is counted
             result.error = f"{type(e).__name__}: {e}"
         results.append(result)
@@ -189,6 +233,11 @@ async def run(
         by_type[qt] = {"n": len(rows), **{f"any@{k}": round(sum(r.any_at(k) for r in rows) / len(rows), 4) for k in ks},
                        **{f"all@{k}": round(sum(r.all_at(k) for r in rows) / len(rows), 4) for k in ks}}
     reductions = [1 - r.returned_bytes / r.stored_bytes for r in results if r.error is None and r.stored_bytes]
+    verdicts: dict[str, int] = {}
+    for r in results:
+        if r.error is None and r.low_confidence is not None:
+            key = ("no_evidence" if not r.has_evidence else "evidence") + ("_flagged" if r.low_confidence else "_cleared")
+            verdicts[key] = verdicts.get(key, 0) + 1
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention, ks=list(ks),
@@ -196,5 +245,6 @@ async def run(
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        results=results, **engine_meta,
+        results=results, abstention=abstention_sweep(results), similarity_floor=floor, low_confidence_counts=verdicts,
+        **engine_meta,
     )

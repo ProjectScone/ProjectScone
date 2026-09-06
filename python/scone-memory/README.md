@@ -70,7 +70,7 @@ outside the space it was issued for.
 |---|---|
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |
-| `GET /v1/recall?q&limit&as_of&tags` | hybrid recall plus the facts that held at `as_of` |
+| `GET /v1/recall?q&limit&as_of&tags&where&history` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
 
@@ -84,6 +84,20 @@ chunk). Two lanes, vector and lexical, are fused by reciprocal rank with a
 small recency term, capped at two chunks per episode. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
+
+`top_similarity` is the best cosine the vector lane saw for the query.
+With `SCONE_SIMILARITY_FLOOR` set (a cosine, e.g. `0.45`), a recall whose
+best hit falls below it, or that finds nothing, carries
+`low_confidence: true` so the reader can decline to answer from weak
+evidence; without a floor the field is `null` and nothing is judged. The
+floor has no default because the right value depends on the embedder:
+`scone-memory bench` prints, for each candidate floor, how many
+no-evidence questions it would catch and how many answerable ones it
+would wrongly withhold, and that sweep is where a floor comes from.
+
+`history=true` (CLI `--history`) adds, for every matched fact, the closed
+facts that held before it for the same subject and predicate, oldest
+first, each with its interval and closing reason, bounded by `as_of`.
 
 ## Tests
 

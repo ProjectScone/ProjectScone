@@ -161,7 +161,10 @@ class MemoryEngine:
         events: Optional[EventLog] = None,
         record_queries: bool = False,
         contextual_embeddings: bool = False,
+        similarity_floor: Optional[float] = None,
     ) -> None:
+        if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
+            raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         self.documents = documents
         self.vectors = vectors
         self.embedder = embedder
@@ -179,6 +182,12 @@ class MemoryEngine:
         #: engine's setting is recorded on every recall event so a number is
         #: never quoted without it.
         self.contextual_embeddings = contextual_embeddings
+        #: Experiment 9: with a floor, a recall whose best vector hit sits
+        #: below it is flagged low_confidence so a reader can abstain
+        #: instead of answering from weak evidence. None (the default) means
+        #: no judgement; the floor is chosen from a measured sweep, never
+        #: guessed here.
+        self.similarity_floor = similarity_floor
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
@@ -420,6 +429,7 @@ class MemoryEngine:
             "where": clean_where,
             "embedder": self.embedder.id,
             "contextual_embeddings": self.contextual_embeddings,
+            "similarity_floor": self.similarity_floor,
         }
 
         vector_lane: list[tuple[int, float]] = []
@@ -450,6 +460,14 @@ class MemoryEngine:
             raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
 
         similarity = dict(vector_lane)
+        # The best cosine the vector lane saw, before fusion, is the
+        # confidence signal. A degraded vector lane cannot judge (None); a
+        # lane that ran and found nothing is as weak as evidence gets.
+        top_similarity = round(vector_lane[0][1], 6) if vector_lane else None
+        vector_ran = not any(d.startswith("vectors:") for d in degraded)
+        low_confidence: Optional[bool] = None
+        if self.similarity_floor is not None and vector_ran:
+            low_confidence = top_similarity is None or top_similarity < self.similarity_floor
         ranks = {
             "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
             "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
@@ -500,6 +518,8 @@ class MemoryEngine:
             facts=facts,
             history=previous,
             degraded=degraded,
+            top_similarity=top_similarity,
+            low_confidence=low_confidence,
             returned_bytes=sum(len(i.text.encode()) for i in result_items),
             space_bytes=counts.bytes,
         )
@@ -517,6 +537,8 @@ class MemoryEngine:
             ],
             "items_coverage": "returned",
             "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
+            "top_similarity": top_similarity,
+            "low_confidence": low_confidence,
             "facts": len(facts),
             "fact_ids": [f.fact_id for f in facts],
             "returned_bytes": result.returned_bytes,

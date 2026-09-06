@@ -148,6 +148,14 @@ class RecallResult(BaseModel):
     #: With ``history``: the closed facts that preceded the matched ones for
     #: the same subject and predicate, oldest first. Empty otherwise.
     history: list[Fact] = Field(default_factory=list)
+    #: Best cosine the vector lane saw for this query, before fusion; None
+    #: when the lane was degraded or the space had nothing to compare.
+    top_similarity: Optional[float] = None
+    #: Experiment 9. True when the engine has a similarity floor and
+    #: top_similarity fell below it (or nothing was found): the reader is
+    #: told the evidence is weak. False when it cleared the floor. None
+    #: when no floor is configured or the vector lane could not judge.
+    low_confidence: Optional[bool] = None
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)

@@ -259,6 +259,8 @@ def create_app(
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
             "history": [fact_json(f) for f in result.history],
+            "top_similarity": result.top_similarity,
+            "low_confidence": result.low_confidence,
             "degraded": result.degraded,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,

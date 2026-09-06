@@ -191,6 +191,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.low_confidence:
+            top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
+            print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
         if not result.items and not result.facts:
             print("nothing matched", file=out)
         return 0
@@ -343,6 +346,17 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                   f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
             for qt, row in report.by_type.items():
                 print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+            if report.similarity_floor is not None:
+                print(f"  similarity floor {report.similarity_floor}: " + ", ".join(f"{k} {v}" for k, v in sorted(report.low_confidence_counts.items())), file=out)
+            sweep = report.abstention
+            if sweep is None:
+                print("  abstention sweep: not measurable (no item without evidence ran)", file=out)
+            else:
+                print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence and {sweep['evidence_n']} evidence item(s): "
+                      "floor -> abstained / wrongly withheld", file=out)
+                for f in sweep["floors"]:
+                    withheld = sweep["false_abstain_rate"][f]
+                    print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)
         return 0
 
     if args.command == "export":
