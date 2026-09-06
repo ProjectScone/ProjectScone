@@ -28,6 +28,7 @@ class Clock:
 
 def backends():
     yield pytest.param("memory", id="memory")
+    yield pytest.param("sqlite", id="sqlite")
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
     if QDRANT_URL:
@@ -35,10 +36,15 @@ def backends():
 
 
 @pytest.fixture(params=list(backends()))
-async def engine(request):
+async def engine(request, tmp_path):
     clock = Clock()
     if request.param == "memory":
         documents, vectors = InMemoryDocumentStore(), InMemoryVectorIndex()
+    elif request.param == "sqlite":
+        from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
+
+        path = tmp_path / "memory.db"
+        documents, vectors = SqliteDocumentStore(path), SqliteVectorIndex(path)
     elif request.param == "mongo":
         from scone_memory.backends import MongoDocumentStore
 
@@ -53,6 +59,10 @@ async def engine(request):
     e = await MemoryEngine(documents, vectors, HashEmbedder(), chunk_target=200, clock=clock).open()
     e.test_clock = clock  # type: ignore[attr-defined]
     yield e
+    if hasattr(documents, "close"):
+        await documents.close()
+    if hasattr(vectors, "close"):
+        await vectors.close()
     if hasattr(documents, "drop"):
         await documents.drop()
     if hasattr(vectors, "drop"):
