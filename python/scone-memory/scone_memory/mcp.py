@@ -207,15 +207,30 @@ def clamp_confidence(value: Optional[float]) -> float:
 
 
 async def fact_ids_by_status(engine: MemoryEngine, space: str) -> dict[int, str]:
-    return {f.fact_id: f.status for f in await engine.facts(space, include_closed=True)}
+    """Every fact this space holds and what it is. Proposals are included
+    on purpose: a parked fact is not in the ledger, but it did land, and
+    counting it as deduplicated would tell an agent its claim was already
+    known when nobody has looked at it yet."""
+    found = {f.fact_id: f.status for f in await engine.facts(space, include_closed=True)}
+    found.update({f.fact_id: f.status for f in await engine.facts(space, status="proposed")})
+    return found
 
 
 # -- the server ---------------------------------------------------------------
 
 
-def create_server(engine: MemoryEngine, space: str = "default") -> MCPServer:
+def create_server(engine: MemoryEngine, space: str = "default",
+                  propose_below: Optional[float] = None) -> MCPServer:
     """The six tools of mcp.rs, closing over one engine and a default
-    space that any call may override with its ``space`` argument."""
+    space that any call may override with its ``space`` argument.
+
+    ``propose_below`` is the Rust server's ``--propose-below``: a fact an
+    agent submits under that confidence is parked as a proposal for a
+    person instead of entering the ledger. Unset, as there, means every
+    submitted fact is a ledger claim.
+    """
+    if propose_below is not None and not 0.0 <= propose_below <= 1.0:
+        raise InvalidInput(f"propose_below must be a confidence in 0..=1, got {propose_below}")
     server = MCPServer(
         name="scone-memory",
         title="Scone memory engine",
@@ -329,31 +344,46 @@ def create_server(engine: MemoryEngine, space: str = "default") -> MCPServer:
         facts: Annotated[list[SubmittedFact], Field(description="Extracted facts (max 50)")],
         space: Annotated[Optional[str], Field(description="Space of the episode; defaults to the server's space")] = None,
     ) -> CallToolResult:
-        """Submit facts you extracted from a pending episode. The engine
-        applies contradiction closure and provenance; you only propose."""
+        """Submit facts you extracted from a pending episode.
+
+        The engine applies contradiction closure and provenance: it
+        decides what each fact supersedes and when it stopped holding,
+        not you. What it does NOT do here is wait for a person. These
+        become active ledger claims immediately unless this server runs
+        with a propose gate, which parks them for review instead. If you
+        are unsure of a fact, do not submit it: a wrong claim is easier to
+        make than to find later.
+        """
         if len(facts) > MAX_FACTS:
             return tool_error(f"at most {MAX_FACTS} facts per submission")
         target = space or default_space
         episode = await engine.episode(target, episode_id)
         before = await fact_ids_by_status(engine, target)
         for fact in facts:
+            confidence = clamp_confidence(fact.confidence)
             await engine.assert_fact(
                 target,
                 fact.subject,
                 fact.predicate,
                 fact.object,
                 valid_from=fact.valid_from or episode.created_at,
-                confidence=clamp_confidence(fact.confidence),
+                confidence=confidence,
                 source_episode_id=episode_id,
                 origin="extracted",  # the host agent is a model reading an episode
+                proposed=propose_below is not None and confidence < propose_below,
             )
         after = await fact_ids_by_status(engine, target)
-        added = len(after.keys() - before.keys())
+        fresh = after.keys() - before.keys()
+        # A proposal is not an addition to the ledger, and saying so would
+        # tell an agent its claim is held when a person has not seen it.
+        proposed = sum(1 for fid in fresh if after[fid] == "proposed")
+        added = len(fresh) - proposed
         closed = sum(1 for fid, status in before.items() if status == "active" and after.get(fid) == "closed")
-        return ok_text(
-            f"episode {episode_id} distilled: {plural(added, 'fact')} added, "
-            f"{closed} closed, {len(facts) - added} deduplicated"
-        )
+        counted = [f"{plural(added, 'fact')} added"]
+        if proposed:  # silent when no gate is configured, which is the default
+            counted.append(f"{proposed} proposed")
+        counted += [f"{closed} closed", f"{len(facts) - len(fresh)} deduplicated"]
+        return ok_text(f"episode {episode_id} distilled: " + ", ".join(counted))
 
     @tool(server, "memory_forget")
     async def memory_forget(

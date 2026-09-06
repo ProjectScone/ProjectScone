@@ -340,3 +340,43 @@ async def test_recall_narrows_by_kind_source_prefix_and_dates():
     assert await recalled(source_prefix="session-") == [ids[2]]
     assert await recalled(until="2024-01-31") == [ids[0]]
     assert await recalled(since="2024-03-01") == [ids[2]]
+
+
+async def test_a_propose_gate_parks_low_confidence_agent_facts_for_review():
+    """The Rust server can be started with --propose-below so an agent's
+    less certain claims wait for a person instead of entering the ledger.
+    The Python server runs the live console and could not do that at all,
+    which made the safer configuration unavailable exactly where the
+    ledger is real."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock()).open()
+    gated = create_server(engine, "default", propose_below=0.7)
+    await call(gated, "memory_store", content="Ana moved to Lisbon in March and joined Farfetch.")
+
+    error, text = await call(gated, "memory_store_facts", episode_id=1, facts=[
+        {"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9},
+        {"subject": "Ana", "predicate": "works_at", "object": "Farfetch", "confidence": 0.4},
+    ])
+
+    assert not error
+    assert [f.object for f in await engine.facts("default")] == ["Lisbon"]
+    waiting = await engine.facts("default", status="proposed")
+    assert [(f.object, f.confidence) for f in waiting] == [("Farfetch", 0.4)]
+    assert "1 proposed" in text
+
+
+async def test_without_a_gate_every_submitted_fact_still_enters_the_ledger():
+    """The default is unchanged, and stays the same as the Rust server's:
+    no gate means no parking. Changing that is a policy decision, not
+    something this surface should decide on its own."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock()).open()
+    plain = create_server(engine, "default")
+    await call(plain, "memory_store", content="Ana moved to Lisbon in March.")
+    error, _ = await call(plain, "memory_store_facts", episode_id=1, facts=[
+        {"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.1},
+    ])
+
+    assert not error
+    assert [f.object for f in await engine.facts("default")] == ["Lisbon"]
+    assert await engine.facts("default", status="proposed") == []
