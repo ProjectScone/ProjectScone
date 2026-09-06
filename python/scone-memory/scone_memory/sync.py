@@ -13,7 +13,7 @@ import threading
 from typing import Iterable, Mapping, Optional, Sequence
 
 from .engine import ImportSummary, MemoryEngine, Profile, Record
-from .models import Added, Fact, RecallResult, Status
+from .models import Added, Episode, Fact, RecallResult, Status
 
 
 class SyncMemoryEngine:
@@ -68,6 +68,9 @@ class SyncMemoryEngine:
 
     def recall(self, space: str, query: str, **kwargs) -> RecallResult:
         return self._run(self._engine.recall(space, query, **kwargs))
+
+    def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
+        return self._run(self._engine.episodes(space, where, limit))
 
     def forget(self, space: str, episode_id: int) -> None:
         return self._run(self._engine.forget(space, episode_id))

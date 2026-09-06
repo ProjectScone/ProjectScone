@@ -103,10 +103,19 @@ class Record:
     tags: Sequence[str] = ()
     created_at: Optional[str] = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    #: Identity for deduplication. By default two records with the same
+    #: text in a space are one episode. A transcript is different: the
+    #: second "ok" in a conversation is a second turn, so a chat adapter
+    #: keys each turn ("<session>#<n>") and identical text under different
+    #: keys is stored twice, while a retried write of the same key is not.
+    dedup_key: Optional[str] = None
+    #: The identity a dump carries. Import passes it through so a moved
+    #: store deduplicates exactly as its source did; callers leave it None.
+    content_hash: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":
-        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata") if k in data}
+        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash") if k in data}
         if "content" not in known:
             raise InvalidInput("a record needs content")
         return cls(**known)
@@ -272,7 +281,9 @@ class MemoryEngine:
             clean_tags = normalise_tags(record.tags)
             clean_meta = normalise_metadata(record.metadata or {})
             happened = normalise_time(record.created_at) if record.created_at else when
-            digest = content_hash(space, content)
+            digest = record.content_hash or content_hash(space, content, record.dedup_key)
+            if not digest or len(digest) > 128:
+                raise InvalidInput("content_hash must be 1..=128 chars")
             if digest in seen:
                 results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
                 fresh_or_dup = seen[digest]
@@ -1059,6 +1070,23 @@ class MemoryEngine:
         referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
         return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
 
+    async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
+        """The episodes whose metadata matches every ``where`` pair, oldest
+        first by (created_at, episode_id); with ``limit``, the newest N of
+        them in that same order. This is a walk over the space's episodes,
+        fine for a session's turns, not a query language."""
+        check_space(space)
+        clean = normalise_metadata(where)
+        if not clean:
+            raise InvalidInput("episodes() needs at least one where pair")
+        counts = await self.documents.counts(space)
+        found = [
+            e for e in await self.documents.recent_episodes(space, max(counts.episodes, 1))
+            if all(e.metadata.get(k) == v for k, v in clean.items())
+        ]
+        found.sort(key=lambda e: (e.created_at, e.episode_id))
+        return found[-limit:] if limit else found
+
     async def scopes(self, space: str) -> dict[str, dict[str, int]]:
         """Episode counts per metadata key and value: which users, agents
         and sessions have memory here. Walks the episodes, which is fine
@@ -1103,6 +1131,7 @@ class MemoryEngine:
                 "episode_id": episode.episode_id,
                 "kind": episode.kind,
                 "content": episode.content,
+                "content_hash": episode.content_hash,
                 "source": episode.source,
                 "tags": list(episode.tags),
                 "metadata": dict(episode.metadata),
@@ -1253,5 +1282,9 @@ def normalise_time(value: str) -> str:
         raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
 
 
-def content_hash(space: str, content: str) -> str:
+def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:
+    if dedup_key is not None:
+        if not dedup_key or len(dedup_key) > 256:
+            raise InvalidInput("dedup_key must be 1..=256 chars")
+        return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
     return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()

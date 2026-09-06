@@ -99,6 +99,38 @@ would wrongly withhold, and that sweep is where a floor comes from.
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
 
+## Using it from a framework
+
+Three adapters live under `scone_memory.integrations`; each needs its
+framework installed (`pip install 'scone-memory[langchain]'`,
+`[llamaindex]`, `[openai-agents]`) and says so if it is missing.
+
+```python
+from scone_memory import SyncMemoryEngine
+from scone_memory.integrations.langchain import SconeRetriever, SconeChatMessageHistory
+
+memory = SyncMemoryEngine.from_env()
+retriever = SconeRetriever(memory=memory, space="default", limit=5, where={"user_id": "mark"}, include_facts=True)
+docs = retriever.invoke("where is the deploy runbook")   # Documents with episode_id, score, similarity, lanes in metadata
+history = SconeChatMessageHistory(memory, "default", session_id="chat-1", extra={"user_id": "mark"})
+history.add_messages([...])                              # one episode per message, in order, recallable like any memory
+```
+
+`scone_memory.integrations.llamaindex.SconeRetriever(memory, space, ...)`
+returns `NodeWithScore` nodes (`retrieve` needs a `SyncMemoryEngine`,
+`aretrieve` takes either); `scone_memory.integrations.openai_agents.SconeSession(engine, space, session_id)`
+is a `Session` for the Agents SDK runner (`get_items`, `add_items`,
+`pop_item`, `clear_session`).
+
+Conversation turns are stored one episode each with `session_id`, `role`
+and `seq` metadata. A plain text message is stored as its text so recall
+reads well over the transcript; anything else (tool calls, structured
+content, extra fields) is stored verbatim as JSON. Either way what was
+added is what comes back. Turns are deduplicated by position, not text
+(`Record.dedup_key`), so the second "ok" in a conversation is a second
+turn; a dump carries each episode's identity, so a re-imported transcript
+keeps its repeats.
+
 ## Tests
 
 ```sh
