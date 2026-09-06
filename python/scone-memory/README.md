@@ -112,6 +112,34 @@ would wrongly withhold, and that sweep is where a floor comes from.
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
 
+## Stores and what each one promises
+
+Every store below runs the same 37 contract tests (`tests/test_contract.py`)
+and every evidence sink the same 8 (`tests/test_events.py`). "Verified"
+says how: embedded means in-process in the test suite and CI; container
+means against a real server in Docker locally and as a CI service.
+
+| Store | Documents | Vectors | Evidence | Verified | Notes |
+|---|---|---|---|---|---|
+| in-memory | yes | yes | yes | embedded | reference implementation |
+| SQLite | yes | yes | yes | embedded | FTS5 lexical lane; WAL; schema stamped, one additive step from v5 |
+| MongoDB | yes | | yes | container (local; CI when `SCONE_TEST_MONGO_URL` is set) | `$text` lexical lane; TTL retention |
+| PostgreSQL + pgvector | yes | yes | yes | container | tsvector lexical lane, HNSW cosine, one pool for all three |
+| Elasticsearch 8 | yes | yes | yes | container | BM25 lexical lane, float32 HNSW (int8 would round cosine), refresh per write |
+| Qdrant | | yes | | embedded (local mode) and container | payload filters server-side |
+| Redis Stack | | yes | | container | TAG/NUMERIC prefilters inside the KNN query |
+| Chroma | | yes | | embedded; server by URL | width recorded in collection metadata |
+| LanceDB | | yes | | embedded | SQL predicates, quotes doubled |
+| Milvus | | yes | | embedded (Milvus Lite); server by URI | filter expressions with JSON literals |
+| any LangChain VectorStore | | yes | | embedded (`InMemoryVectorStore`, FAISS) | needs a `filter_builder` and a stated `score`; see below |
+
+Intentional differences: lexical scores are each store's own (BM25,
+`$text`, `ts_rank`); only their order reaches the fusion, so ranking
+agrees across stores while the raw numbers do not. Retention is a TTL
+index on MongoDB and a clock-driven sweep elsewhere. No store migrates
+another build's data: each stamps a schema version and refuses a
+mismatch, SQLite excepted for the one recorded step.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
