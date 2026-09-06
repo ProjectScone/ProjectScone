@@ -233,7 +233,19 @@ fn contextual_code_embedding_probe() {
     let (b5, b10, ranks_b) = run(true);
     println!("plain:      R@5 {a5}/20  R@10 {a10}/20");
     println!("contextual: R@5 {b5}/20  R@10 {b10}/20");
-    for (i, (question, _, name)) in QUESTIONS.iter().enumerate() {
+    // How much each question borrows from the doc comment it is scored
+    // against: the share of the question's words that also appear in
+    // that comment. The questions and the comments have the same author,
+    // so a high share means the probe is measuring paraphrase of the
+    // documentation, not a developer's independent phrasing.
+    let words = |s: &str| -> std::collections::HashSet<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(|w| w.to_lowercase())
+            .collect()
+    };
+    let mut overlaps = Vec::new();
+    for (i, (question, file, name)) in QUESTIONS.iter().enumerate() {
         let ra = ranks_a[i]
             .1
             .map(|r| (r + 1).to_string())
@@ -242,6 +254,33 @@ fn contextual_code_embedding_probe() {
             .1
             .map(|r| (r + 1).to_string())
             .unwrap_or_else(|| "-".into());
-        println!("  {name:<22} plain {ra:>2}  contextual {rb:>2}  ({question})");
+        let target = files
+            .iter()
+            .find(|f| {
+                f.path.ends_with(&format!("/{file}")) && function_span(&f.content, name).is_some()
+            })
+            .unwrap();
+        let (start, _) = function_span(&target.content, name).unwrap();
+        let comment =
+            scone_core::chunker::doc_comment_above(&target.content, start).unwrap_or_default();
+        let q = words(question);
+        let c = words(&comment);
+        let share = if q.is_empty() {
+            0.0
+        } else {
+            q.intersection(&c).count() as f64 / q.len() as f64
+        };
+        overlaps.push(share);
+        println!(
+            "  {name:<22} plain {ra:>2}  contextual {rb:>2}  overlap {:.0}%  ({question})",
+            share * 100.0
+        );
     }
+    overlaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "question/doc-comment word overlap: median {:.0}%, min {:.0}%, max {:.0}%",
+        overlaps[overlaps.len() / 2] * 100.0,
+        overlaps[0] * 100.0,
+        overlaps[overlaps.len() - 1] * 100.0
+    );
 }

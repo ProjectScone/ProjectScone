@@ -44,6 +44,13 @@ struct Cli {
     /// fact is active on arrival
     #[arg(long, global = true, value_name = "CONFIDENCE")]
     propose_below: Option<f32>,
+    /// Embed code chunks with their file name, enclosing declaration and
+    /// doc comment in front (stored bytes unchanged). Measured on a
+    /// 20-question probe of this repository as 19/20 against 14/20 at
+    /// Recall@5, but the questions paraphrased the doc comments; off
+    /// until held-out phrasing confirms it (E31)
+    #[arg(long, global = true)]
+    contextual_code: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -386,6 +393,7 @@ fn run() -> Result<(), String> {
     engine
         .set_propose_below(cli.propose_below)
         .map_err(|e| e.to_string())?;
+    engine.set_contextual_code(cli.contextual_code);
     #[cfg(feature = "local-embed")]
     if cli.reranker {
         engine.set_reranker(Some(Box::new(

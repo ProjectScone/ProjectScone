@@ -5,7 +5,10 @@
 //! default; prose never gets a prefix.
 use std::sync::{Arc, Mutex};
 
-use scone_core::chunker::{ChunkSpan, contextual_code_text, enclosing_declaration};
+use scone_core::chunker::{
+    ChunkSpan, contextual_code_text, doc_comment_above, enclosing_declaration,
+    enclosing_doc_comment,
+};
 use scone_core::embed::EmbeddingProvider;
 use scone_core::{Engine, auth};
 
@@ -169,4 +172,52 @@ fn code_is_embedded_with_context_only_when_asked_and_only_for_code() {
         "{:?}",
         seen.lock().unwrap()
     );
+}
+
+const DOCUMENTED: &str = "use std::fmt;\n\n/// Turn a relative date phrase into a window.\n/// Anchored at now when no anchor is given.\n#[inline]\npub fn window(phrase: &str) -> u32 {\n    let n = phrase.len();\n    n as u32\n}\n\n// plain comment, not documentation\nfn helper() {}\n\nfn bare() {\n    let z = 1;\n    z\n}\n";
+
+#[test]
+fn the_doc_comment_above_a_declaration_is_read_with_attributes_skipped() {
+    let window = DOCUMENTED.find("pub fn window").unwrap();
+    assert_eq!(
+        doc_comment_above(DOCUMENTED, window).as_deref(),
+        Some("Turn a relative date phrase into a window. Anchored at now when no anchor is given.")
+    );
+    let helper = DOCUMENTED.find("fn helper").unwrap();
+    assert_eq!(
+        doc_comment_above(DOCUMENTED, helper).as_deref(),
+        Some("plain comment, not documentation")
+    );
+    let bare = DOCUMENTED.find("fn bare").unwrap();
+    assert_eq!(
+        doc_comment_above(DOCUMENTED, bare),
+        None,
+        "a blank line ends the block; nothing above bare"
+    );
+    // Through the enclosing declaration of a body offset.
+    let inside = DOCUMENTED.find("    let n = phrase").unwrap();
+    assert_eq!(
+        enclosing_doc_comment(DOCUMENTED, inside).as_deref(),
+        Some("Turn a relative date phrase into a window. Anchored at now when no anchor is given.")
+    );
+    let in_bare = DOCUMENTED.find("let z").unwrap();
+    assert_eq!(enclosing_doc_comment(DOCUMENTED, in_bare), None);
+    // The contextual text carries file, declaration, then the comment.
+    let span = ChunkSpan {
+        start: inside,
+        end: DOCUMENTED.find("\n\n// plain").unwrap(),
+    };
+    let text = contextual_code_text(Some("src/t.rs"), DOCUMENTED, span);
+    assert!(
+        text.starts_with("t.rs | pub fn window(phrase: &str) -> u32\nTurn a relative date phrase into a window. Anchored at now when no anchor is given.\n    let n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_long_comment_is_capped() {
+    let essay = format!("/// {}\nfn f() {{\n    1\n}}\n", "word ".repeat(200));
+    let inside = essay.find("    1").unwrap();
+    let c = enclosing_doc_comment(&essay, inside).unwrap();
+    assert_eq!(c.chars().count(), 300);
 }
