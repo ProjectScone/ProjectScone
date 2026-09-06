@@ -77,6 +77,17 @@ class FeedbackBody(BaseModel):
 
 CONSOLE = Path(__file__).with_name("console.html")
 PLAYGROUND = Path(__file__).with_name("playground.html")
+MARK = Path(__file__).with_name("scone-mark.png")
+
+
+def mark_data_uri() -> str:
+    """The Scone mark, embedded so the page loads nothing external. The
+    packaged playground carries its own copy; the console shares the file."""
+    import base64
+
+    if not MARK.exists():
+        return ""
+    return "data:image/png;base64," + base64.b64encode(MARK.read_bytes()).decode()
 
 
 def create_app(
@@ -142,7 +153,7 @@ def create_app(
 
     if console:
         def render_console() -> str:
-            page = CONSOLE.read_text(encoding="utf-8")
+            page = CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
             if console_key:
                 page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
             return page
