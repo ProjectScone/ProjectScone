@@ -1,16 +1,19 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {NavLink,useNavigate,useParams} from 'react-router-dom';
-import type {ApiClient} from '../api';
+import {ApiError,type ApiClient} from '../api';
 import {Modal} from '../components/Modal';
 import {capabilities,idPattern,session,sessionPage,type Capabilities,type ConversationSession as Session} from './contracts';
 import {ConversationSession} from './ConversationSession';
+import {RecallScopeEditor} from './RecallScopeControls';
+import {emptyScopeDraft,scopeFromDraft,sameScope,type RecallScope} from './recall-scope';
 import './conversations.css';
 
 export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
   const {sid}=useParams(),navigate=useNavigate();
   const [cap,setCap]=useState<Capabilities|null>(null),[items,setItems]=useState<Session[]>([]),[after,setAfter]=useState<string|null>(null);
   const [error,setError]=useState(''),[attempt,setAttempt]=useState(0),[dialog,setDialog]=useState(false),[consent,setConsent]=useState(false),[starting,setStarting]=useState(false);
-  const createId=useRef<string|null>(null),lifetime=useRef(new AbortController()),locked=useRef(false);
+  const pendingCreate=useRef<{request_id:string;capture:true;recall_scope?:RecallScope}|null>(null),lifetime=useRef(new AbortController()),locked=useRef(false);
+  const [scopeDraft,setScopeDraft]=useState(emptyScopeDraft),[scopeError,setScopeError]=useState('');
   const removed=useRef(new Set<string>()),[notice,setNotice]=useState('');
   const deleted=useCallback((id:string,acknowledged:boolean)=>{
     removed.current.add(id);setItems(previous=>previous.filter(item=>item.session_id!==id));
@@ -30,12 +33,20 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
   },[api,enabled,attempt]);
   async function start(){
     if(!consent||!cap?.text_configured||locked.current)return;
-    createId.current??=crypto.randomUUID();locked.current=true;setStarting(true);setError('');const controller=lifetime.current;
+    if(!pendingCreate.current){
+      try{pendingCreate.current={request_id:crypto.randomUUID(),capture:true,...(cap.recall_scope?{recall_scope:scopeFromDraft(scopeDraft)}:{})};}
+      catch(error){setScopeError(error instanceof Error?error.message:'Check the memory filters.');return;}
+    }
+    const body=pendingCreate.current;locked.current=true;setStarting(true);setError('');setScopeError('');const controller=lifetime.current;
     try{
-      const next=session(await api.request('/v1/conversations',{method:'POST',body:JSON.stringify({request_id:createId.current,capture:true}),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])}));
+      const next=session(await api.request('/v1/conversations',{method:'POST',body:JSON.stringify(body),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])}));
+      if(body.recall_scope!==undefined&&!sameScope(body.recall_scope,next.recall_scope))throw Error('The server did not confirm the requested recall scope.');
       if(controller.signal.aborted)return;
-      setItems(previous=>[next,...previous.filter(item=>item.session_id!==next.session_id)]);setDialog(false);setConsent(false);createId.current=null;navigate('/conversations/'+encodeURIComponent(next.session_id));
-    }catch{if(!controller.signal.aborted)setError('Start was not confirmed. Retry uses the same request ID and will not create a second session.');}
+      setItems(previous=>[next,...previous.filter(item=>item.session_id!==next.session_id)]);setDialog(false);setConsent(false);pendingCreate.current=null;setScopeDraft(emptyScopeDraft());navigate('/conversations/'+encodeURIComponent(next.session_id));
+    }catch(error){if(!controller.signal.aborted){
+      if(error instanceof ApiError&&[400,422].includes(error.status)){pendingCreate.current=null;setScopeError('The server rejected these settings. Check your memory filters and try again.');}
+      else setError('Start was not confirmed. Retry uses the same request ID and memory selection. No message will be sent automatically.');
+    }}
     finally{locked.current=false;if(!controller.signal.aborted)setStarting(false);}
   }
   async function more(){
@@ -62,6 +73,9 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
     </section>}
     </div>
     {dialog&&<Modal title="Start a conversation" onClose={()=>{if(!starting)setDialog(false);}}><p className="setup-intro">Your configured text model can receive context retrieved from this memory space. Public messages and replies will be saved as sources.</p>
+      {cap?.recall_scope?<RecallScopeEditor draft={scopeDraft} disabled={starting||Boolean(pendingCreate.current)} onChange={value=>{setScopeDraft(value);setScopeError('');}}/>:<p className="conversation-caption">Memory selection is managed by this server.</p>}
+      {scopeError&&<p role="alert" className="conversation-notice">{scopeError}</p>}
+      {pendingCreate.current&&!starting&&<p className="conversation-caption">Memory selection is locked while this start request is unresolved.</p>}
       <label className="conversation-consent"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/>Save my public messages and replies to this memory space</label>
       {error&&<p role="alert" className="conversation-notice">{error}</p>}<button className="primary" disabled={!consent||starting} onClick={start}>{starting?'Starting…':'Start text conversation'}</button></Modal>}
   </main>;

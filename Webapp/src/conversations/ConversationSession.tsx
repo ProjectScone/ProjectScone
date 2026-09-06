@@ -2,6 +2,7 @@ import {useEffect,useRef,useState} from 'react';
 import {ApiError,type ApiClient} from '../api';
 import {ConversationEvidence} from './ConversationEvidence';
 import {DeleteConversation} from './DeleteConversation';
+import {RecallScopeSummary} from './RecallScopeControls';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
 export function ConversationSession({api,sid,onSession,textConfigured,deletionSupported,cancellationSupported,paginationSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
@@ -120,6 +121,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
   return <><section className="conversation-thread" aria-label="Text conversation">
     <header className="conversation-thread-header"><div><span className="eyebrow">Text session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
       {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
+    {current&&<RecallScopeSummary scope={current.recall_scope}/>}
     {error&&<div className="conversation-notice" role="alert">{error}<button onClick={()=>setAttempt(n=>n+1)}>Check connection</button></div>}
     {!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
     {paginationSupported&&<nav className="conversation-transcript-nav" aria-label="Transcript pages">

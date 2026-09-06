@@ -517,8 +517,10 @@ server configuration: custom runtimes must actually enforce the constraints,
 and any additional server policy must remain enforced rather than be replaced
 by client filters. Two-argument factories remain supported but reject nonempty
 scope with HTTP 422. The additive `recall_scope: true` capability is advertised
-only for an explicitly configured scoped factory. Browser scope controls are
-not included in this API checkpoint.
+only for an explicitly configured scoped factory. A freshly packaged webapp
+uses that capability to offer memory selection at session creation and display
+the persisted filters afterward. Older deployed bundles need a separate rebuild
+and deployment; backend capability alone does not update the browser UI.
 
 With `console=True`, the service serves `/memory`, `/playground`,
 `/conversations` and `/conversations/{session_id}` directly, including browser

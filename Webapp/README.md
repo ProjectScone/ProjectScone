@@ -160,6 +160,18 @@ Playwright or set `SCONE_PLAYWRIGHT_MODULE` to an installed module; optionally s
 `SCONE_BROWSER_PATH` and `SCONE_SCREENSHOT_DIR`. Fixtures use temporary localhost
 services, never the live memory store. No screenshots are written by default.
 
+When the conversation service explicitly advertises `recall_scope: true`, the
+start dialog offers source type, literal source prefix, inclusive creation-date
+bounds and exact metadata matches. All selected filters must match; an empty
+result never broadens recall. Dates without times mean midnight UTC. Filters
+are fixed when the start request is submitted, retained for uncertain retries,
+and checked against the server's acknowledgement before opening the session.
+Validation rejections allow correction; uncertain outcomes do not automatically
+create another session. Saved conversations expose a read-only Memory selection
+summary, distinguishing no extra filters from unreported scope on older servers.
+These controls narrow retrieved knowledge, not transcript capture, the session's
+own history or server-side access policy.
+
 `scripts/test-conversations-native.cjs` additionally exercises the actual Python
 conversation API, native memory and Pipecat scheduler through the browser. Set
 `SCONE_TEST_PYTHON` to an environment with Scone's `api` and Pipecat dependencies,

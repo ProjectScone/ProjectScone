@@ -47,10 +47,31 @@ class ScriptedModel(FrameProcessor):
         await self.push_frame(LLMFullResponseEndFrame())
 
 
+class ScopedModel(FrameProcessor):
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if not isinstance(frame, LLMContextFrame):
+            await self.push_frame(frame, direction)
+            return
+        messages = frame.context.get_messages()
+        context = repr(messages)
+        no_matches = "No matching" in messages[-1]["content"]
+        assert ("scope-eligible-guide" in context) is not no_matches
+        assert "scope-excluded-guide" not in context
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(LLMTextFrame("Scoped answer: no retrieved context." if no_matches else "Scoped answer: the selected guide."))
+        await self.push_frame(LLMFullResponseEndFrame())
+
+
 async def run():
     conversations.PLAYGROUND = Path(sys.argv[1])
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await memory.remember("alpha", "Juniper is calibrated with Polaris.", metadata={"collection": "manuals"})
+    if "--scoped" in sys.argv[2:]:
+        await memory.remember("alpha", "Juniper scope-eligible-guide.", kind="file", source="docs/guide.md",
+                              created_at="2026-09-02", metadata={"collection": "manuals"})
+        await memory.remember("alpha", "Juniper scope-excluded-guide.", kind="file", source="private/guide.md",
+                              created_at="2026-09-02", metadata={"collection": "manuals"})
     with TemporaryDirectory(prefix="scone-browser-conversations-") as temporary:
         app = conversations.create_conversation_app(
             memory, {"conversation-fixture-alpha": "alpha", "conversation-fixture-beta": "beta"},
@@ -58,6 +79,8 @@ async def run():
             lambda space, sid: PipecatTextConversation(memory, space, sid, ScriptedModel,
                                                       where={"collection": "manuals"}),
             console=True,
+            **({"scoped_runtime_factory": lambda space, sid, scope: PipecatTextConversation(
+                memory, space, sid, ScopedModel, **scope.kwargs())} if "--scoped" in sys.argv[2:] else {}),
         )
         if "--reopened" in sys.argv[2:]:
             # Exercise real service teardown/recreation with a retained

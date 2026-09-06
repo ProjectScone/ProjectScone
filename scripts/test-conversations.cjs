@@ -8,22 +8,23 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
-  let turn=null,posts=0,checks=0;const requested=[];
+  let turn=null,posts=0,checks=0;const requested=[],creates=new Map();
   const server=http.createServer(async(req,res)=>{
     requested.push(req.url);res.setHeader('content-type','application/json');
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped}));
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
-      assert.equal(data.capture,true);const value={...sessions[0],session_id:'current',state:'running',revision:2};sessions.push(value);saved.current=[];return res.end(JSON.stringify(value));
+      assert.equal(data.capture,true);if(creates.has(data.request_id))return res.end(JSON.stringify(creates.get(data.request_id)));
+      const value={...sessions[0],session_id:'current',state:'running',revision:2,...(scoped?{recall_scope:data.recall_scope||{}}:{})};creates.set(data.request_id,value);sessions.push(value);saved.current=[];return res.end(JSON.stringify(value));
     }
     if(req.url.startsWith('/v1/conversations?'))return res.end(JSON.stringify({items:sessions,has_more:false,next_after:null}));
     if(req.url==='/v1/episodes/7')return res.end(JSON.stringify({episode_id:7,content:'Juniper is calibrated with Polaris. <script>not executable</script>',metadata:{},attachments:[]}));
@@ -68,6 +69,95 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
+
+for(const mobile of [false,true])test(`session scope is chosen before capture and visible afterward, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{scoped:true,mobile});const writes=[];
+  page.on('request',r=>{if(r.method()==='POST')writes.push(r.postDataJSON());});
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('button',{name:'Files',exact:true}).click();
+  await dialog.getByLabel('Source prefix',{exact:true}).fill('docs/');
+  await dialog.getByText('Dates & metadata',{exact:true}).click();
+  await dialog.getByLabel('Created on or after (UTC)',{exact:true}).fill('2026-09-01');
+  await dialog.getByRole('button',{name:'Add metadata filter',exact:true}).click();
+  await dialog.getByLabel('Metadata key 1',{exact:true}).fill('collection');
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await dialog.getByRole('alert').waitFor();assert.equal(writes.length,0);
+  await dialog.getByLabel('Metadata value 1',{exact:true}).fill('manuals');
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`scone-scope-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).waitFor();
+  assert.deepEqual(writes[0].recall_scope,{kind:'file',source_prefix:'docs/',since:'2026-09-01T00:00:00.000Z',where:{collection:'manuals'}});
+  await page.getByText('Memory selection',{exact:true}).click();
+  await page.getByText('collection = manuals',{exact:true}).waitFor();
+  assert.equal(await page.getByText('docs/',{exact:true}).count(),1);
+});
+
+test('an uncertain session start freezes and replays the same scope',async t=>{
+  const {page}=await fixture(t,{scoped:true});const bodies=[];let first=true;
+  await page.route('**/v1/conversations',async route=>{
+    bodies.push(route.request().postDataJSON());
+    if(first){first=false;await route.fetch();return route.abort();}return route.continue();
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('button',{name:'Files',exact:true}).click();
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await dialog.getByText(/Start was not confirmed/).waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Notes',exact:true}).isDisabled(),true);
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).waitFor();assert.deepEqual(bodies[0],bodies[1]);
+});
+
+test('unsupported scope remains unknown and cannot be selected',async t=>{
+  const {page}=await fixture(t);await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Memory selection',{exact:true}).click();
+  await page.getByText('This server did not report the session’s recall filters.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  assert.equal(await dialog.getByLabel('Source prefix',{exact:true}).count(),0);
+  await dialog.getByText('Memory selection is managed by this server.',{exact:true}).waitFor();
+});
+
+for(const missing of [false,true])test(`unconfirmed recall scope prevents navigation and retains retry payload, missing=${missing}`,async t=>{
+  const {page}=await fixture(t,{scoped:true});const bodies=[];let first=true;
+  await page.route('**/v1/conversations',async route=>{
+    bodies.push(route.request().postDataJSON());const response=await route.fetch(),json=await response.json();
+    if(first){first=false;if(missing)delete json.recall_scope;else json.recall_scope={};}
+    return route.fulfill({json});
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('button',{name:'Files',exact:true}).click();
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await dialog.getByText(/Start was not confirmed/).waitFor();
+  assert.match(page.url(),/\/conversations$/);assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
+  assert.equal(await dialog.getByRole('button',{name:'Notes',exact:true}).isDisabled(),true);
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).waitFor();assert.deepEqual(bodies[0],bodies[1]);
+});
+
+test('definitive scope rejection permits correction with a new request',async t=>{
+  const {page}=await fixture(t,{scoped:true});const bodies=[];
+  await page.route('**/v1/conversations',route=>{
+    bodies.push(route.request().postDataJSON());
+    return bodies.length===1?route.fulfill({status:422,json:{detail:'Rejected filter'}}):route.continue();
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('button',{name:'Files',exact:true}).click();
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await dialog.getByText(/The server rejected these settings/).waitFor();
+  await dialog.getByRole('button',{name:'Notes',exact:true}).click();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).waitFor();
+  assert.notEqual(bodies[0].request_id,bodies[1].request_id);assert.deepEqual(bodies[1].recall_scope,{kind:'note'});
+});
 
 for(const mobile of [false,true])test(`transcript navigation reaches older messages and keeps the page during polling, mobile=${mobile}`,async t=>{
   const {page,requested}=await fixture(t,{pagination:true,mobile});

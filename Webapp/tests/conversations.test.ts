@@ -2,6 +2,17 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {capabilities, session, transcript, turnReceipt} from '../src/conversations/contracts.ts';
 
+test('recall scope requires explicit support and missing scope remains unknown',()=>{
+  const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
+  for(const value of [undefined,false,'true',1])assert.equal(capabilities({...wire,recall_scope:value}).recall_scope,false);
+  assert.equal(capabilities({...wire,recall_scope:true}).recall_scope,true);
+  const saved={session_id:'scoped',space:'alpha',state:'running',revision:2,created_at:'2026-09-06T12:00:00Z'};
+  assert.equal(session(saved).recall_scope,undefined);
+  assert.deepEqual(session({...saved,recall_scope:{}}).recall_scope,{});
+  assert.deepEqual(session({...saved,recall_scope:{source_prefix:''}}).recall_scope,{source_prefix:''});
+  for(const scope of [null,[],{space:'beta'},{kind:'invented'},{where:{collection:2}},{since:'tomorrow'}])assert.throws(()=>session({...saved,recall_scope:scope}));
+});
+
 test('conversation deletion requires an explicit true capability',()=>{
   const wire={schema_version:1,text_configured:false,reply_transport:'poll',reply_replay:'durable_receipts'};
   for(const value of [undefined,false,'true',1,null])assert.equal(capabilities({...wire,session_deletion:value}).session_deletion,false);

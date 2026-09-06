@@ -7,11 +7,11 @@ const path=require('node:path');
 const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
 
-async function fixture(t,{reopened=false}={}){
+async function fixture(t,{reopened=false,scoped=false}={}){
   const html=process.env.SCONE_CONVERSATIONS_HTML;
   assert.ok(html,'SCONE_CONVERSATIONS_HTML must name the verified isolated webapp artifact');
   const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(root,'python/scone-memory/.venv/bin/python'),
-    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[]),...(scoped?['--scoped']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
   let browser,logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
   const closed=once(server,'close');
   let modelEntered;const modelWaiting=new Promise(resolve=>{modelEntered=resolve;});
@@ -46,6 +46,44 @@ async function fixture(t,{reopened=false}={}){
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   return {page,base,errors,modelWaiting};
 }
+
+for(const collection of ['manuals','missing'])test(`browser-selected scope reaches Pipecat and survives reload: ${collection}`,{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t,{scoped:true});page.setDefaultTimeout(8000);
+  await page.goto(base+'/conversations');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('button',{name:'Files',exact:true}).click();
+  await dialog.getByLabel('Source prefix',{exact:true}).fill('docs/');
+  await dialog.getByText('Dates & metadata',{exact:true}).click();
+  await dialog.getByLabel('Created on or after (UTC)',{exact:true}).fill('2026-09-01');
+  await dialog.getByLabel('Created on or before (UTC)',{exact:true}).fill('2026-09-03');
+  await dialog.getByRole('button',{name:'Add metadata filter',exact:true}).click();
+  await dialog.getByLabel('Metadata key 1',{exact:true}).fill('collection');
+  await dialog.getByLabel('Metadata value 1',{exact:true}).fill(collection);
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).waitFor();
+  const sid=new URL(page.url()).pathname.split('/').at(-1),headers={authorization:'Bearer conversation-fixture-alpha'};
+  const expected={kind:'file',source_prefix:'docs/',where:{collection},since:'2026-09-01T00:00:00.000Z',until:'2026-09-03T00:00:00.000Z'};
+  for(let turn=0;turn<2;turn++){
+    await page.getByLabel('Message',{exact:true}).fill(`${collection==='missing'?'No matching':'Find'} Juniper guide ${turn}`);
+    await page.getByRole('button',{name:'Send message',exact:true}).click();
+    await page.getByText(collection==='missing'?'Scoped answer: no retrieved context.':'Scoped answer: the selected guide.',{exact:true}).nth(turn).waitFor();
+    const current=await(await fetch(base+'/v1/conversations/'+sid,{headers})).json();
+    assert.deepEqual(current.recall_scope,expected);
+    const receipt=await(await fetch(base+'/v1/conversations/'+sid+'/turns/'+current.latest_request_id,{headers})).json();
+    assert.equal(receipt.status,'completed');assert.equal(receipt.result.memory_context.references.length,collection==='missing'?0:1);
+    for(const ref of receipt.result.memory_context.references){
+      const source=await(await fetch(base+'/v1/episodes/'+ref.episode_id,{headers})).json();
+      assert.equal(source.source,'docs/guide.md');assert.equal(source.content,'Juniper scope-eligible-guide.');
+    }
+  }
+  await page.reload();await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByText('Memory selection',{exact:true}).click();
+  await page.getByText(`collection = ${collection}`,{exact:true}).waitFor();
+  assert.deepEqual(errors,[]);
+});
 
 test('a browser text-file import is retained and recalled by the native engine',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
