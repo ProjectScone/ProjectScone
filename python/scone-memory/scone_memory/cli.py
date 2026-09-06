@@ -278,7 +278,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     if args.command == "agent-hook":
         from .agent_hook import run_hook
 
-        return run_hook(args.hook_args, (stdin or sys.stdin).read(), env)
+        return run_hook(args.hook_args, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve

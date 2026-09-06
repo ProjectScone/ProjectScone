@@ -45,7 +45,7 @@ CLAUDE_EVENTS = {
     "PostToolUseFailure": "tool_result",
     "SessionEnd": "session_end",
 }
-MAX_TEXT = 60_000
+MAX_TEXT_BYTES = 60_000
 
 
 @dataclass(frozen=True)
@@ -83,9 +83,13 @@ def project_for(cwd: Optional[str], projects: Mapping[str, str]) -> Optional[str
     return None
 
 
-def clip(text: object, limit: int = MAX_TEXT) -> str:
+def clip(text: object, limit: int = MAX_TEXT_BYTES) -> tuple[str, bool]:
+    """Cut on UTF-8 bytes, never inside a character; says whether it cut."""
     s = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str)
-    return s if len(s) <= limit else s[:limit] + "…"
+    raw = s.encode()
+    if len(raw) <= limit:
+        return s, False
+    return raw[:limit].decode(errors="ignore"), True
 
 
 def normalise_claude(payload: Mapping) -> Optional[dict]:
@@ -100,7 +104,7 @@ def normalise_claude(payload: Mapping) -> Optional[dict]:
         "text": None,
     }
     if event == "prompt":
-        out["text"] = payload.get("user_input")
+        out["text"] = payload.get("user_input", payload.get("prompt"))  # newer docs, older versions
         out["source_event_id"] = f"prompt:{payload.get('prompt_id') or ''}" if payload.get("prompt_id") else None
     elif event == "response":
         out["text"] = payload.get("last_assistant_message")
@@ -113,7 +117,7 @@ def normalise_claude(payload: Mapping) -> Optional[dict]:
     elif event == "tool_result":
         out["tool_name"] = payload.get("tool_name")
         out["tool_use_id"] = payload.get("tool_use_id")
-        out["text"] = payload.get("tool_output")
+        out["text"] = payload.get("tool_output", payload.get("tool_response"))
         out["ok"] = payload.get("hook_event_name") != "PostToolUseFailure"
         out["source_event_id"] = f"post:{payload.get('tool_use_id')}" if payload.get("tool_use_id") else None
     if payload.get("model"):
@@ -151,7 +155,10 @@ def build_event(normalised: dict, project: str, feed: str) -> dict:
     event = {k: v for k, v in normalised.items() if v is not None and k != "text"}
     event["project"] = project
     if feed == "full" and normalised.get("text") is not None:
-        event["text"] = redact_secrets(clip(normalised["text"]))
+        text, truncated = clip(normalised["text"])
+        event["text"] = redact_secrets(text)
+        if truncated:
+            event["text_truncated"] = True
     return event
 
 
@@ -178,12 +185,27 @@ def deliver(normalised: dict, config: HookConfig, project: str, transport: Trans
     return transport("/v1/events", {"kind": "agent", "payload": event}, config.key)
 
 
-def run_hook(argv: Sequence[str], stdin_text: str, env: Mapping[str, str], transport: Optional[Transport] = None) -> int:
+def run_hook(
+    argv: Sequence[str], stdin_text: str, env: Mapping[str, str], transport: Optional[Transport] = None, stdout=None
+) -> int:
     """Everything that can go wrong exits 0: the hook observes, it never
-    gets in the agent's way."""
+    gets in the agent's way. Stdout is always one JSON object, because the
+    host parses it: {} for an observation, or the compiled prompt context
+    for UserPromptSubmit (SCONE_HOOK_COMPILE=1). Diagnostics name only
+    the exception type, so a malformed payload cannot echo secrets."""
+    out = stdout or sys.stdout
     debug = env.get("SCONE_HOOK_DEBUG") == "1"
+    emitted = False
     try:
         args = _parser().parse_args(argv)
+        payload = json.loads(stdin_text or "{}")
+        if env.get("SCONE_HOOK_COMPILE", "1") == "1" and payload.get("hook_event_name") == "UserPromptSubmit":
+            request = payload.get("user_input", payload.get("prompt"))
+            if isinstance(request, str) and request.strip():
+                from .prompting import hook_output
+
+                print(json.dumps(hook_output(request), ensure_ascii=False), file=out)
+                emitted = True
         agent = args.agent or env.get("SCONE_HOOK_AGENT") or "claude-code"
         server = args.server or env.get("SCONE_HOOK_SERVER") or "http://127.0.0.1:7437"
         key_env = args.key_env or env.get("SCONE_HOOK_KEY_ENV") or "SCONE_API_KEY"
@@ -197,22 +219,27 @@ def run_hook(argv: Sequence[str], stdin_text: str, env: Mapping[str, str], trans
             raise ValueError(f"no key in ${key_env}")
         if not projects:
             raise ValueError("no projects allowlisted; nothing is sent")
-        payload = json.loads(stdin_text or "{}")
         normalised = normalise_claude(payload) if agent == "claude-code" else normalise_codex(payload)
         if normalised is None or not normalised.get("session_id"):
             return 0
         project = project_for(payload.get("cwd"), projects)
         if project is None:
             return 0
+        wanted_sessions = env.get("SCONE_HOOK_SESSIONS", "")
+        if wanted_sessions and normalised["session_id"] not in {s.strip() for s in wanted_sessions.split(",") if s.strip()}:
+            return 0
         config = HookConfig(agent, server, key, feed, projects, capture)
         send = transport or (lambda path, body, k: http_transport(path, body, k, server))
         deliver(normalised, config, project, send)
-    except (SystemExit,) as e:  # argparse error
+    except SystemExit:  # argparse error
         if debug:
-            print(f"agent-hook: bad arguments ({e})", file=sys.stderr)
+            print("agent-hook: bad arguments", file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - fail open by design
         if debug:
-            print(f"agent-hook: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"agent-hook: {type(e).__name__}", file=sys.stderr)
+    finally:
+        if not emitted:
+            print("{}", file=out)
     return 0
 
 

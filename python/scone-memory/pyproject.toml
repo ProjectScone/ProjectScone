@@ -34,6 +34,9 @@ Source = "https://github.com/DrDrewCain/ProjectScone/tree/main/python/scone-memo
 [tool.setuptools.packages.find]
 include = ["scone_memory*"]
 
+[tool.setuptools.package-data]
+"scone_memory.api" = ["console.html", "playground.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

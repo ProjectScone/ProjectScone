@@ -165,3 +165,13 @@ def test_an_episode_can_be_read_back_verbatim(client):
     assert (body["content"], body["kind"], body["created_at"], body["metadata"]) == ("  Café ☕ verbatim\n", "note", "2024-01-02T00:00:00.000Z", {"user_id": "ana"})
     assert client.get("/v1/episodes/999", headers=h).status_code == 404
     assert client.get(f"/v1/episodes/{added['episode_id']}", headers=auth("key-b")).status_code == 404
+
+
+def test_playground_is_served_with_the_same_key_handling():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        page = c.get("/playground")
+        assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+        assert "__SCONE_TOKEN__" not in page.text and "solo" in page.text
+    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
+        assert "__SCONE_TOKEN__" in c.get("/playground").text  # several keys: the page asks

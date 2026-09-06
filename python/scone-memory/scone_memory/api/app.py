@@ -74,6 +74,7 @@ class FeedbackBody(BaseModel):
 
 
 CONSOLE = Path(__file__).with_name("console.html")
+PLAYGROUND = Path(__file__).with_name("playground.html")
 
 
 def create_app(
@@ -126,6 +127,17 @@ def create_app(
         @app.get("/", response_class=HTMLResponse)
         async def console_page() -> str:
             return page
+
+        if PLAYGROUND.exists():
+            # Shared asset owned in ui/playground.html and copied here by
+            # scripts/sync-playground.cjs; same key placeholder as the console.
+            playground = PLAYGROUND.read_text(encoding="utf-8")
+            if console_key:
+                playground = playground.replace("__SCONE_TOKEN__", console_key)
+
+            @app.get("/playground", response_class=HTMLResponse)
+            async def playground_page() -> str:
+                return playground
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
