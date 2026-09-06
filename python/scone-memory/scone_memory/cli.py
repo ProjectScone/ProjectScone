@@ -133,6 +133,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
+    p = sub.add_parser("bench-conflicts",
+                       help="MemoryAgentBench Conflict Resolution (FactConsolidation): retrieval of the latest fact, and accuracy with a reader")
+    p.add_argument("dataset", help="the Conflict_Resolution parquet (needs pyarrow) or a JSON export of its rows")
+    p.add_argument("--k", type=int, default=10, help="recall limit and the k of the retrieval numbers (default 10)")
+    p.add_argument("--sources", help="comma-separated item sources to run, e.g. factconsolidation_sh_6k (default all)")
+    p.add_argument("--questions", type=int, help="only the first N questions of each item")
+    p.add_argument("--reader", action="store_true",
+                   help="answer with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL); without it only retrieval is measured")
+    p.add_argument("--out", help="write every item's report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
     # is used at the call site because REMAINDER does not capture a flag
@@ -228,6 +237,53 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
             for f in sweep["floors"]:
                 withheld = sweep["false_abstain_rate"][f]
                 print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)
+    return 0
+
+
+async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Like bench: in-process stores per item, the configured store untouched."""
+    from .bench.memoryagentbench import load_conflict_resolution, run_conflict_resolution
+    from .config import build_chat, build_embedder
+
+    items = load_conflict_resolution(args.dataset)
+    if args.sources:
+        wanted = {s.strip() for s in args.sources.split(",") if s.strip()}
+        items = [it for it in items if it.source in wanted]
+    embedder = build_embedder(settings)
+    reader = build_chat(settings) if args.reader else None
+    if args.reader and reader is None:
+        print("error: --reader needs SCONE_CHAT_URL and SCONE_CHAT_MODEL", file=sys.stderr)
+        return 2
+    reader_name = f"{settings.chat_model} at {settings.chat_url}" if reader is not None else None
+
+    async def make():
+        from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
+                                  contextual_embeddings=settings.contextual_embeddings,
+                                  similarity_floor=settings.similarity_floor).open()
+
+    def progress(n, total):
+        if not args.json:
+            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+    reports = []
+    for item in items:
+        if not args.json:
+            print(f"{item.source}: {len(item.facts)} facts, {len(item.questions)} questions", file=sys.stderr)
+        report = await run_conflict_resolution(make, item, reader=reader, reader_name=reader_name, k=args.k,
+                                               questions=args.questions, progress=progress)
+        if not args.json:
+            print("", file=sys.stderr)
+        reports.append(report)
+        if args.json:
+            print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
+        else:
+            acc = "no reader" if report.accuracy is None else f"accuracy {report.accuracy * 100:.1f}% ({report.correct}/{report.answered}, {report.reader})"
+            print(f"{report.source:<28} {report.hops:<6} n={report.questions:<4} gold@{report.k} {report.gold_at_k * 100:5.1f}%  "
+                  f"stale above gold {report.stale_above_gold * 100:5.1f}%  {acc}  {report.errors} error(s)", file=out)
+    if args.out:
+        pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
     return 0
 
 
@@ -415,9 +471,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command == "bench":
+    if args.command in ("bench", "bench-conflicts"):
+        command = bench_command if args.command == "bench" else conflicts_command
         try:
-            return asyncio.run(bench_command(args, settings, out or sys.stdout))
+            return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
