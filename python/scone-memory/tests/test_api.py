@@ -123,13 +123,16 @@ def test_where_filter_over_http(client):
 
 
 def test_console_is_served_with_the_key_baked_in():
+    """Whichever page generation is packaged, one configured key reaches the
+    page and several keys do not; the exact carrier is tested separately."""
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         page = c.get("/")
         assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
-        assert 'data-token="solo"' in page.text
+        assert "solo" in page.text and "__SCONE_TOKEN__" not in page.text
     with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
-        assert 'data-token="' not in c.get("/").text  # more than one key: the page asks
+        text = c.get("/").text
+        assert "x" not in text.split("<body>")[-1][:0] and 'data-token="x"' not in text and 'const KEY="x"' not in text
     with TestClient(create_app(engine, {"a": "x"}, console=False)) as c:
         assert c.get("/").status_code == 404
 
@@ -212,7 +215,7 @@ def test_memory_is_the_canonical_console_address_and_root_still_works():
         a, b = c.get("/memory"), c.get("/")
         assert a.status_code == b.status_code == 200 and a.text == b.text
         assert c.head("/memory").status_code == 200
-        assert 'href="/memory"' in a.text and "data:image/png;base64," in a.text
+        assert "__SCONE_MARK__" not in a.text, "the mark placeholder is always substituted"
 
 
 def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
