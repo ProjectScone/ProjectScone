@@ -149,7 +149,9 @@ def create_app(
             if console_key:
                 playground = playground.replace("__SCONE_TOKEN__", console_key)
 
-            @app.get("/playground", response_class=HTMLResponse)
+            # GET and HEAD: the console probes with HEAD to decide whether
+            # to show its Playground link.
+            @app.api_route("/playground", methods=["GET", "HEAD"], response_class=HTMLResponse)
             async def playground_page() -> str:
                 return playground
 

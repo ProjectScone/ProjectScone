@@ -175,3 +175,4 @@ def test_playground_is_served_with_the_same_key_handling():
         assert "__SCONE_TOKEN__" not in page.text and "solo" in page.text
     with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
         assert "__SCONE_TOKEN__" in c.get("/playground").text  # several keys: the page asks
+        assert c.head("/playground").status_code == 200, "the console probes with HEAD"
