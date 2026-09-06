@@ -80,6 +80,29 @@ async def test_forget_removes_from_recall(engine):
         await engine.forget("default", added.episode_id)
 
 
+async def test_forget_removes_all_vectors_and_preserves_other_memories(engine):
+    """Recall's document join must not mask orphaned vector points."""
+    text = "\n\n".join(f"memory paragraph {i} about planning the deployment schedule" for i in range(12))
+    victim = await engine.remember("alpha", text)
+    assert victim.chunks > 1
+    await engine.remember("alpha", "memory to keep in alpha")
+    await engine.remember("beta", text)
+    [query] = await engine.embedder.embed(["memory"])
+    before = {cid for cid, _ in await engine.vectors.search("alpha", query, 50)}
+    other_space = {cid for cid, _ in await engine.vectors.search("beta", query, 50)}
+    chunks = await engine.documents.get_chunks("alpha", list(before))
+    removed = {chunk.chunk_id for chunk in chunks if chunk.episode_id == victim.episode_id}
+    assert len(removed) == victim.chunks
+    assert len(before - removed) == 1
+    assert other_space
+
+    await engine.forget("alpha", victim.episode_id)
+
+    remaining = {cid for cid, _ in await engine.vectors.search("alpha", query, 50)}
+    assert remaining == before - removed
+    assert {cid for cid, _ in await engine.vectors.search("beta", query, 50)} == other_space
+
+
 async def test_bad_input_is_refused_loudly(engine):
     with pytest.raises(InvalidInput):
         await engine.remember("Bad Space!", "x")
@@ -200,7 +223,59 @@ async def test_profile_is_identity_plus_recent_activity(engine):
     assert profile.dynamic == ["newer note", "older note"]
 
 
+@pytest.mark.parametrize("arrival", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)])
+async def test_backfilled_fact_splits_a_previously_closed_interval(engine, arrival):
+    """Ignoring closed rivals makes two locations true after a backfill."""
+    history = (("Austin", "2022-01-01"), ("Berlin", "2023-01-01"), ("Lisbon", "2024-01-01"))
+    for index in arrival:
+        city, since = history[index]
+        await engine.assert_fact("default", "mark", "lives_in", city, valid_from=since)
+    for when, expected in (
+        ("2021-12-31", []),
+        ("2022-01-01", ["Austin"]),
+        ("2022-12-31", ["Austin"]),
+        ("2023-01-01", ["Berlin"]),
+        ("2023-12-31", ["Berlin"]),
+        ("2024-01-01", ["Lisbon"]),
+    ):
+        assert [fact.object for fact in await engine.facts("default", as_of=when)] == expected
+        assert [fact.object for fact in (await engine.recall("default", "mark lives", as_of=when)).facts] == expected
+    assert [fact.object for fact in await engine.facts("default")] == ["Lisbon"]
+
+
+async def test_backfill_preserves_a_manual_closure_and_gap(engine):
+    """A historical insertion must not reopen a manually ended interval."""
+    old = await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2022-01-01")
+    engine.test_clock.now = "2023-01-01T00:00:00.000Z"
+    await engine.close_fact("default", old.fact_id, "moved away, next address unknown")
+    await engine.assert_fact("default", "mark", "lives_in", "Lisbon", valid_from="2024-01-01")
+    await engine.assert_fact("default", "mark", "lives_in", "Berlin", valid_from="2021-01-01")
+    assert [f.object for f in await engine.facts("default", as_of="2021-06-01")] == ["Berlin"]
+    assert [f.object for f in await engine.facts("default", as_of="2022-06-01")] == ["Austin"]
+    assert await engine.facts("default", as_of="2023-06-01") == []
+    retained = await engine.documents.get_fact("default", old.fact_id)
+    assert retained.closed_reason == "moved away, next address unknown"
+    assert retained.valid_until == "2023-01-01T00:00:00.000Z"
+
+
+async def test_backfill_truncates_manual_interval_without_rewriting_reason(engine):
+    """Shortening history must retain the person's explanation."""
+    old = await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2022-01-01")
+    engine.test_clock.now = "2023-01-01T00:00:00.000Z"
+    await engine.close_fact("default", old.fact_id, "moved away, next address unknown")
+    await engine.assert_fact("default", "mark", "lives_in", "Lisbon", valid_from="2024-01-01")
+    await engine.assert_fact("default", "mark", "lives_in", "Berlin", valid_from="2022-06-01")
+    retained = await engine.documents.get_fact("default", old.fact_id)
+    assert retained.closed_reason == "moved away, next address unknown"
+    assert retained.valid_until == "2022-06-01T00:00:00.000Z"
+    assert [f.object for f in await engine.facts("default", as_of="2022-05-31")] == ["Austin"]
+    assert [f.object for f in await engine.facts("default", as_of="2022-06-01")] == ["Berlin"]
+
+
 __all__ = [
+    "test_backfilled_fact_splits_a_previously_closed_interval",
+    "test_backfill_preserves_a_manual_closure_and_gap",
+    "test_backfill_truncates_manual_interval_without_rewriting_reason",
     "test_remember_then_recall_finds_it",
     "test_same_content_is_deduplicated",
     "test_spaces_do_not_leak",
@@ -209,6 +284,7 @@ __all__ = [
     "test_a_broken_vector_lane_is_reported_not_fatal",
     "test_at_most_two_chunks_per_episode",
     "test_forget_removes_from_recall",
+    "test_forget_removes_all_vectors_and_preserves_other_memories",
     "test_bad_input_is_refused_loudly",
     "test_recall_reports_bytes_left_behind",
     "test_vector_index_rejects_a_width_change",
