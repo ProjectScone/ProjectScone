@@ -14,7 +14,7 @@ from typing import Mapping, Optional
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from contextlib import asynccontextmanager
@@ -156,16 +156,28 @@ def create_app(
         console_html = None if reload_pages else render_console()
         playground_html = None if (reload_pages or not PLAYGROUND.exists()) else render_playground()
 
-        @app.get("/", response_class=HTMLResponse)
-        async def console_page() -> str:
-            return console_html if console_html is not None else render_console()
+        def revision(path: Path) -> str:
+            # File identity only (mtime and size): says "changed", carries no content or key.
+            st = path.stat()
+            return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+
+        def page_response(body: str, path: Path) -> Response:
+            headers = {"ETag": revision(path)}
+            if reload_pages:
+                headers["Cache-Control"] = "no-store"
+            return HTMLResponse(body, headers=headers)
+
+        @app.api_route("/", methods=["GET", "HEAD"])
+        async def console_page() -> Response:
+            return page_response(console_html if console_html is not None else render_console(), CONSOLE)
 
         if PLAYGROUND.exists():
-            # GET and HEAD: the console probes with HEAD to decide whether
-            # to show its Playground link.
-            @app.api_route("/playground", methods=["GET", "HEAD"], response_class=HTMLResponse)
-            async def playground_page() -> str:
-                return playground_html if playground_html is not None else render_playground()
+            # GET and HEAD: the console probes with HEAD to decide whether to
+            # show its Playground link; in development the page polls HEAD
+            # and reloads when the ETag changes.
+            @app.api_route("/playground", methods=["GET", "HEAD"])
+            async def playground_page() -> Response:
+                return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND)
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:

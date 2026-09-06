@@ -186,9 +186,17 @@ def test_reload_pages_serves_edits_without_a_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "PLAYGROUND", fake)
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo", reload_pages=True)) as c:
-        assert c.get("/playground").text == "<html>v1 solo</html>"
+        first = c.get("/playground")
+        assert first.text == "<html>v1 solo</html>"
+        assert first.headers["cache-control"] == "no-store" and first.headers["etag"].startswith('"')
+        assert c.head("/playground").headers["etag"] == first.headers["etag"]
+        import os, time
         fake.write_text("<html>v2 __SCONE_TOKEN__</html>", encoding="utf-8")
-        assert c.get("/playground").text == "<html>v2 solo</html>", "development mode re-reads the file"
+        os.utime(fake, ns=(time.time_ns(), time.time_ns() + 5_000_000))  # a distinct mtime even on a coarse clock
+        second = c.get("/playground")
+        assert second.text == "<html>v2 solo</html>", "development mode re-reads the file"
+        assert second.headers["etag"] != first.headers["etag"], "HEAD pollers see a new revision"
+        assert "solo" not in second.headers["etag"], "the revision carries no key"
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         fake.write_text("<html>v3 __SCONE_TOKEN__</html>", encoding="utf-8")
         assert c.get("/playground").text == "<html>v2 solo</html>", "normal mode reads once at startup"

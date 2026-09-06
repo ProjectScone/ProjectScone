@@ -29,7 +29,8 @@
     SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
-    SCONE_RELOAD_PAGES=1                         re-read console.html and playground.html per request (development)
+    SCONE_RELOAD_PAGES=1 (alias SCONE_UI_DEV=1)  re-read console.html and playground.html per request, ETag from
+                                                 file mtime and size, Cache-Control no-store (development)
 """
 
 from __future__ import annotations
@@ -103,7 +104,7 @@ class Settings:
             keys=parse_keys(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY")),
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
-            reload_pages=env.get("SCONE_RELOAD_PAGES") == "1",
+            reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
         )
 
 
