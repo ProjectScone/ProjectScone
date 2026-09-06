@@ -153,9 +153,16 @@ def create_app(
 
     if console:
         def render_console() -> str:
+            # Two page generations share this route: the packaged React app,
+            # which carries a __SCONE_TOKEN__ placeholder like the playground,
+            # and the earlier inline page, which took the key on its first
+            # <script> as data-token. Both get the key; neither logs it.
             page = CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
             if console_key:
-                page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
+                if "__SCONE_TOKEN__" in page:
+                    page = page.replace("__SCONE_TOKEN__", console_key)
+                else:
+                    page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
             return page
 
         def render_playground() -> str:

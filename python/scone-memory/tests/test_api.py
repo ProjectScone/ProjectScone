@@ -213,3 +213,22 @@ def test_memory_is_the_canonical_console_address_and_root_still_works():
         assert a.status_code == b.status_code == 200 and a.text == b.text
         assert c.head("/memory").status_code == 200
         assert 'href="/memory"' in a.text and "data:image/png;base64," in a.text
+
+
+def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
+    import scone_memory.api.app as app_module
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    react = tmp_path / "console.html"
+    react.write_text('<html><script type="module">const KEY="__SCONE_TOKEN__";</script></html>', encoding="utf-8")
+    monkeypatch.setattr(app_module, "CONSOLE", react)
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        text = c.get("/memory").text
+        assert 'const KEY="solo"' in text and "__SCONE_TOKEN__" not in text and "data-token" not in text
+    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
+        assert "__SCONE_TOKEN__" in c.get("/memory").text, "several keys: the page asks"
+    legacy = tmp_path / "legacy.html"
+    legacy.write_text("<html><script>const TOKEN = document.currentScript.dataset.token;</script></html>", encoding="utf-8")
+    monkeypatch.setattr(app_module, "CONSOLE", legacy)
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        assert '<script data-token="solo">' in c.get("/memory").text
