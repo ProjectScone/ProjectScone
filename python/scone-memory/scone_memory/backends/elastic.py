@@ -356,6 +356,16 @@ class ElasticsearchDocumentStore:
                                   sort=[{"created_at": "desc"}, {"episode_id": "desc"}])
         return [_episode(h) for h in hits]
 
+    async def page_episodes(self, space, before, limit, kind):
+        filters = [{"term": {"space": space}}]
+        if before is not None:
+            filters.append({"range": {"episode_id": {"lt": before}}})
+        if kind is not None:
+            filters.append({"term": {"kind": kind}})
+        hits = await self._search("episodes", query={"bool": {"filter": filters}},
+                                  size=limit, sort=[{"episode_id": "desc"}])
+        return [_episode(h) for h in hits]
+
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
         response = await self.client.search(

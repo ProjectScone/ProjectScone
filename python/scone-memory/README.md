@@ -464,6 +464,35 @@ explicitly scripted processor—not live inference. Provider-specific completion
 retry policy and client cleanup, the authenticated service, React controls and
 Rust HTTP interoperability remain release gates.
 
+### Browsing retained sources
+
+`GET /v1/sources?limit=25&kind=file&before=123` enumerates retained episodes in
+descending episode-ID order. Omit `kind` to browse all kinds; omit `before` to
+start at the newest ID. This is inventory, not semantic search, source-date order,
+or a frozen database snapshot. Newer inserts appear on refresh; deleting a page's
+boundary record does not invalidate its `before` value. Keep the same kind filter
+while following `next_before`.
+
+The response has `items`, `has_more` and nullable `next_before`. Each item contains
+`episode_id`, `kind`, `source`, `created_at`, `byte_count` (UTF-8 stored text),
+`preview` (at most 500 Unicode scalar values), and `preview_truncated`. A preview
+is not an original file; retrieve retained text with `GET /v1/episodes/{id}` and
+original media through the separate attachment routes. The bearer key selects
+the space; query/body fields cannot change it. Page limits are 1–100; an invalid
+or unknown query field is rejected. Existing `GET /v1/episodes?ids=...` remains a
+separate bounded batch read.
+
+Native async and sync engines expose `source_page(space, before=None, limit=25,
+kind=None)`, returning a `SourcePage` of full episode records. Built-in document
+stores implement the optional `EpisodeInventory.page_episodes` port. Custom
+stores without it advertise `episodes.list: false` and HTTP returns 501; there is
+no fallback that scans the whole export or disguises ranked recall as inventory.
+Adapters can run `scone_memory.testing.contract_inventory` with their usual
+engine fixture. In-memory inventory scans resident entries with bounded selection;
+database adapters apply scope, kind, ID boundary, ordering and limit in their
+native queries. Read cost and remote-store certification are separate from the
+bounded response contract. The Documents browser UI is subsequent work.
+
 ### Authenticated conversation API (optional, single-process)
 
 `scone_memory.api.conversations.create_conversation_app` exposes the journal and

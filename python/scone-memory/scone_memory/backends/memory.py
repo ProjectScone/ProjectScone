@@ -121,6 +121,12 @@ class InMemoryDocumentStore:
         mine.sort(key=lambda e: (e.created_at, e.episode_id), reverse=True)
         return mine[:limit]
 
+    async def page_episodes(self, space, before, limit, kind):
+        from heapq import nlargest
+        return nlargest(limit, (e for e in self._episodes.values()
+            if e.space == space and (before is None or e.episode_id < before)
+            and (kind is None or e.kind == kind)), key=lambda e: e.episode_id)
+
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
         for episode in self._episodes.values():

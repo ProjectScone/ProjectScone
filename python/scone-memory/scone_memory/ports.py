@@ -89,6 +89,25 @@ class SpaceCounts:
 
 
 @runtime_checkable
+class EpisodeInventory(Protocol):
+    """Optional bounded inventory, newest ID first; apply filters before LIMIT.
+
+    Existing custom DocumentStore implementations can omit this operation.
+    The engine validates arguments; stores receive limits from 1 through 101.
+    """
+
+    async def page_episodes(self, space: str, before: Optional[int], limit: int,
+                            kind: Optional[str]) -> list[Episode]: ...
+
+
+@dataclass(frozen=True)
+class SourcePage:
+    episodes: list[Episode]
+    has_more: bool
+    next_before: Optional[int]
+
+
+@runtime_checkable
 class DocumentStore(Protocol):
     """Truth: episodes, their chunks, and facts. Also the lexical lane,
     because full-text search wants to live next to the text."""

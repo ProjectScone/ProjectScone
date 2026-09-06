@@ -15,6 +15,7 @@ from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from .models import Added, Episode, Fact, RecallResult, Status
+from .ports import SourcePage
 
 
 class SyncMemoryEngine:
@@ -93,6 +94,10 @@ class SyncMemoryEngine:
 
     def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         return self._run(self._engine.episodes(space, where, limit))
+
+    def source_page(self, space: str, *, before: Optional[int] = None,
+                    limit: int = 25, kind: Optional[str] = None) -> SourcePage:
+        return self._run(self._engine.source_page(space, before=before, limit=limit, kind=kind))
 
     def forget(self, space: str, episode_id: int) -> None:
         return self._run(self._engine.forget(space, episode_id))

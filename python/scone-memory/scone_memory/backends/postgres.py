@@ -305,6 +305,18 @@ class PostgresDocumentStore:
         )
         return [_episode(r) for r in rows]
 
+    async def page_episodes(self, space, before, limit, kind):
+        sql, params = f"SELECT * FROM {self.schema}.episodes WHERE space = %s", [space]
+        if before is not None:
+            sql += " AND id < %s"
+            params.append(before)
+        if kind is not None:
+            sql += " AND kind = %s"
+            params.append(kind)
+        sql += " ORDER BY id DESC LIMIT %s"
+        params.append(limit)
+        return [_episode(r) for r in await self._rows(sql, params)]
+
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
         row = await self._row(

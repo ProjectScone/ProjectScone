@@ -262,6 +262,63 @@ impl Engine {
             json!({"episode_id":id,"kind":kind,"content":content,"source":source,"created_at":created_at,"metadata":metadata.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!({}))}),
         )
     }
+    /// Inventory summaries in descending episode-ID order, independent of
+    /// relevance and source timestamps. A deleted boundary remains usable.
+    /// This is a live keyset walk, not a transactionally frozen snapshot.
+    pub fn source_page(
+        &self,
+        space: &ScopedSpace,
+        before: Option<i64>,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> Result<Value> {
+        if !(1..=100).contains(&limit) || before.is_some_and(|id| id < 1) {
+            return Err(invalid(
+                "limit must be 1..=100 and before a positive episode ID",
+            ));
+        }
+        if kind.is_some_and(|k| {
+            !["note", "file", "conversation", "observation", "connector"].contains(&k)
+        }) {
+            return Err(invalid("unknown episode kind"));
+        }
+        // Do not load every content body merely to build a navigation page.
+        // Read enough UTF-8 bytes for 501 scalar values, including embedded NULs
+        // (SQLite's text substr stops at NUL). A cut final codepoint is beyond
+        // the first 500 characters and is never included in the preview.
+        let mut sql = String::from(
+            "SELECT id,kind,source,created_at,length(CAST(content AS BLOB)),substr(CAST(content AS BLOB),1,2004) FROM episodes WHERE space_id=?",
+        );
+        let mut parameters = vec![rusqlite::types::Value::Integer(space.id())];
+        if let Some(id) = before {
+            sql.push_str(" AND id < ?");
+            parameters.push(id.into());
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            parameters.push(k.to_owned().into());
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        parameters.push(((limit + 1) as i64).into());
+        let mut statement = self.conn.prepare(&sql)?;
+        let mut items = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+            let bytes: Vec<u8> = row.get(5)?;
+            let preview = String::from_utf8_lossy(&bytes);
+            Ok(json!({"episode_id":row.get::<_,i64>(0)?,"kind":row.get::<_,String>(1)?,
+                "source":row.get::<_,Option<String>>(2)?,"created_at":row.get::<_,String>(3)?,
+                "byte_count":row.get::<_,i64>(4)?,"preview":preview.chars().take(500).collect::<String>(),
+                "preview_truncated":preview.chars().count()>500}))
+        })?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_before = if has_more {
+            items.last().map(|item| item["episode_id"].clone())
+        } else {
+            None
+        };
+        Ok(json!({"items":items,"has_more":has_more,"next_before":next_before}))
+    }
+
     pub fn evidence_graph(&self, space: &ScopedSpace, limit: usize) -> Result<Value> {
         let limit = limit.clamp(1, 400);
         let mut nodes = BTreeMap::<String, Value>::new();

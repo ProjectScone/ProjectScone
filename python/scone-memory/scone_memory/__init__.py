@@ -48,6 +48,7 @@ _LAZY = {
     "RecallItem": ".models",
     "RecallResult": ".models",
     "Status": ".models",
+    "SourcePage": ".ports",
 }
 
 
@@ -68,6 +69,7 @@ def __dir__():
 
 __all__ = [
     "MemoryEngine",
+    "SourcePage",
     "SyncMemoryEngine",
     "Profile",
     "Record",

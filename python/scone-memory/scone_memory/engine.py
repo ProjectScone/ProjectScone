@@ -46,6 +46,7 @@ from .ports import (
     NewEpisode,
     NewEvent,
     NewFact,
+    SourcePage,
     TextFilter,
     VectorIndex,
     VectorPoint,
@@ -1332,6 +1333,27 @@ class MemoryEngine:
             return 0
         referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
         return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
+
+    async def source_page(self, space: str, *, before: Optional[int] = None,
+                          limit: int = 25, kind: Optional[str] = None) -> SourcePage:
+        """Browse retained sources by descending ID, not relevance or source date.
+
+        Newer inserts are found by restarting the walk. Deleting the boundary
+        record does not invalidate the next page. This is not a frozen snapshot.
+        """
+        check_space(space)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise InvalidInput("limit must be an integer from 1 through 100")
+        if before is not None and (isinstance(before, bool) or not isinstance(before, int) or not 1 <= before <= 2**63-1):
+            raise InvalidInput("before must be a positive signed 64-bit episode ID")
+        if kind is not None and kind not in KINDS:
+            raise InvalidInput(f"kind must be one of {KINDS}")
+        page = getattr(self.documents, "page_episodes", None)
+        if not callable(page):
+            raise InvalidInput("this document store does not implement source inventory")
+        rows = await page(space, before, limit + 1, kind)
+        more = len(rows) > limit
+        return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest

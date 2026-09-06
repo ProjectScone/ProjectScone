@@ -490,6 +490,23 @@ installation and OS/Python-version matrices remain separate verification work.
 `GET /v1/status` · `GET /v1/tags`. Every key is bound to exactly one
 space, and the server refuses to start keyless.
 
+Both native APIs additionally expose `GET /v1/sources` when their authenticated
+capabilities advertise `episodes.list`. It is a retained-source inventory, not
+ranked recall: `limit=1..100` (default 25), optional exact `kind`, and an optional
+positive `before` episode ID page through records in descending ID order. Follow
+`next_before` while `has_more` is true, keeping the same filter. The walk is not
+a frozen snapshot; refresh from the beginning to see newer inserts. Deleting a
+boundary record does not invalidate that boundary.
+
+Items include record ID, kind, source, stored creation time, UTF-8 text byte count,
+and a literal preview of at most 500 Unicode scalar values with an explicit
+truncation flag. `GET /v1/episodes/{id}` retrieves the retained full text; the
+preview is not an original file or a generated summary. Rust also exposes
+`Engine::source_page(&space, before, limit, kind)`; native Python async/sync
+engines return a `SourcePage`. See the Python package README for custom-backend
+capability behavior. The Documents UI and full source synchronization remain
+subsequent work.
+
 ## How it works
 
 In Rust, SQLite is the source of truth; tantivy (BM25) and usearch (HNSW) are

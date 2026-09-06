@@ -224,6 +224,15 @@ class MongoDocumentStore:
         cursor = self.episodes.find({"space": space}).sort([("created_at", -1), ("_id", -1)]).limit(limit)
         return [_episode(doc) async for doc in cursor]
 
+    async def page_episodes(self, space, before, limit, kind):
+        query = {"space": space}
+        if before is not None:
+            query["_id"] = {"$lt": before}
+        if kind is not None:
+            query["kind"] = kind
+        cursor = self.episodes.find(query).sort("_id", -1).limit(limit)
+        return [_episode(doc) async for doc in cursor]
+
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
         pipeline = [

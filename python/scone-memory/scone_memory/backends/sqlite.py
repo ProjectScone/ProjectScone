@@ -365,6 +365,18 @@ class SqliteDocumentStore:
         ).fetchall()
         return [_episode(r) for r in rows]
 
+    async def page_episodes(self, space, before, limit, kind):
+        sql, params = "SELECT * FROM episodes WHERE space = ?", [space]
+        if before is not None:
+            sql += " AND id < ?"
+            params.append(before)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return [_episode(r) for r in self.conn.execute(sql, params).fetchall()]
+
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
         row = self.conn.execute(

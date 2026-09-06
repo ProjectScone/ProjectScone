@@ -12,7 +12,8 @@
       "events.read": true,
       "metrics.read": false,
       "scopes.read": false,
-      "status.read": true
+      "status.read": true,
+      "episodes.list": true
     }
   },
   "python": {
@@ -29,7 +30,8 @@
       "metrics.read": true,
       "scopes.read": true,
       "status.read": true,
-      "episodes.attachments": true
+      "episodes.attachments": true,
+      "episodes.list": true
     }
   }
 }

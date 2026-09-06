@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Mapping, Optional
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -63,6 +63,13 @@ class EpisodeBody(BaseModel):
     created_at: Optional[str] = None
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class SourceQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    before: Optional[int] = Field(default=None, ge=1, le=2**63-1)
+    limit: int = Field(default=25, ge=1, le=100)
+    kind: Optional[str] = None
 
 
 class FactBody(BaseModel):
@@ -201,6 +208,7 @@ def create_app(
             "facts.close": True, "facts.exclude": True, "facts.include": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
+            "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
         }}
 
     if console:
@@ -322,6 +330,16 @@ def create_app(
             except NotFound:
                 missing.append(episode_id)
         return {"episodes": found, "missing": missing}
+
+    @app.get("/v1/sources")
+    async def get_sources(query: SourceQuery = Query(), space: str = Depends(space_for)):
+        if not callable(getattr(engine.documents, "page_episodes", None)):
+            return JSONResponse({"error": "this document store does not implement source inventory"}, status_code=501)
+        page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind)
+        return {"items": [{"episode_id": e.episode_id, "kind": e.kind, "source": e.source,
+                           "created_at": e.created_at, "byte_count": len(e.content.encode("utf-8")),
+                           "preview": e.content[:500], "preview_truncated": len(e.content) > 500}
+                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
 
     @app.get("/v1/episodes/{episode_id}")
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:

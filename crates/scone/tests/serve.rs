@@ -28,6 +28,179 @@ fn app(dir: &std::path::Path) -> axum::Router {
 }
 
 #[tokio::test]
+async fn source_inventory_matches_shared_literal_contract() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/source-inventory.json"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    for record in fixture["records"].as_array().unwrap() {
+        let key = if record["owner"] == "alpha" {
+            "sk-alice"
+        } else {
+            "sk-bob"
+        };
+        assert_eq!(
+            call(
+                &server,
+                "POST",
+                "/v1/episodes",
+                Some(key),
+                Some(record["body"].clone())
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+    }
+    for page in fixture["pages"].as_array().unwrap() {
+        let (status, body) = call(
+            &server,
+            "GET",
+            &format!("/v1/sources?{}", page["query"].as_str().unwrap()),
+            Some("sk-alice"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, page["expected"]);
+    }
+    for query in fixture["invalid_queries"].as_array().unwrap() {
+        assert_eq!(
+            call(
+                &server,
+                "GET",
+                &format!("/v1/sources?{}", query.as_str().unwrap()),
+                Some("sk-alice"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_inventory_pages_are_scoped_and_not_ranked() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let mut ids = Vec::new();
+    for i in 0..7 {
+        let (status, added) = call(
+            &server,
+            "POST",
+            "/v1/episodes",
+            Some("sk-alice"),
+            Some(serde_json::json!({
+                "content": format!("source {i}"), "kind": if i % 2 == 0 {"file"} else {"note"},
+                "created_at": format!("2024-01-{:02}",9-i)
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        ids.push(added["episode_id"].as_i64().unwrap());
+        call(
+            &server,
+            "POST",
+            "/v1/episodes",
+            Some("sk-bob"),
+            Some(serde_json::json!({"content":format!("private {i}")})),
+        )
+        .await;
+    }
+    let (status, first) = call(
+        &server,
+        "GET",
+        "/v1/sources?limit=2&kind=file",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["episode_id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![ids[6], ids[4]]
+    );
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["next_before"], ids[4]);
+    let (_, second) = call(
+        &server,
+        "GET",
+        &format!("/v1/sources?limit=2&kind=file&before={}", ids[4]),
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        second["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["episode_id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![ids[2], ids[0]]
+    );
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_before"].is_null());
+    for query in [
+        "limit=0",
+        "limit=101",
+        "before=0",
+        "before=-1",
+        "kind=",
+        "kind=unknown",
+    ] {
+        assert_eq!(
+            call(
+                &server,
+                "GET",
+                &format!("/v1/sources?{query}"),
+                Some("sk-alice"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        call(&server, "GET", "/v1/sources", None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&server, "GET", "/v1/sources", Some("wrong"), None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn source_inventory_has_literal_unicode_previews_and_byte_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let text = format!("prefix\0{}", "猫🙂".repeat(300));
+    let (_, added) = call(&server,"POST","/v1/episodes",Some("sk-alice"),Some(serde_json::json!({
+        "content": text, "kind":"file", "source":"original.txt", "created_at":"2024-01-01T00:00:00.000Z"
+    }))).await;
+    let (status, page) = call(&server, "GET", "/v1/sources", Some("sk-alice"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page,
+        serde_json::json!({"items":[{"episode_id":added["episode_id"],"kind":"file","source":"original.txt",
+        "created_at":"2024-01-01T00:00:00.000Z","byte_count":text.len(),"preview":text.chars().take(500).collect::<String>(),"preview_truncated":true}],
+        "has_more":false,"next_before":null})
+    );
+}
+
+#[tokio::test]
 async fn capabilities_are_authenticated_explicit_and_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let server = app(dir.path());

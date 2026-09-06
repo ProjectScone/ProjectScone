@@ -77,6 +77,7 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         .route("/v1/events", get(get_events).post(post_event))
         .route("/v1/episodes/{id}", get(get_episode))
         .route("/v1/episodes", post(post_episode))
+        .route("/v1/sources", get(get_sources))
         .route("/v1/recall", get(get_recall))
         .route("/v1/facts", get(get_facts))
         .route("/v1/facts/{id}/close", post(post_fact_close))
@@ -102,7 +103,7 @@ async fn get_capabilities(
             "recall": true, "facts.read": true, "facts.review": false,
             "facts.close": true, "facts.exclude": false, "facts.include": false,
             "events.read": true, "metrics.read": false, "scopes.read": false,
-            "status.read": true
+            "status.read": true, "episodes.list": true
         }
     }))
     .into_response()
@@ -383,6 +384,45 @@ async fn get_episode(
     }) {
         Ok(v) => Json(v).into_response(),
         Err(e) => e,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceQuery {
+    before: Option<i64>,
+    limit: Option<usize>,
+    kind: Option<String>,
+}
+
+async fn get_sources(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    query: Result<Query<SourceQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    // Authenticate before returning query diagnostics. The key always selects scope.
+    if let Err(response) = space_for(&headers, &state.config) {
+        return response;
+    }
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid source page query",
+            );
+        }
+    };
+    match with_engine(&state, &headers, |engine, space| {
+        engine.source_page(
+            space,
+            query.before,
+            query.limit.unwrap_or(25),
+            query.kind.as_deref(),
+        )
+    }) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error,
     }
 }
 
