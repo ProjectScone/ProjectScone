@@ -59,10 +59,23 @@ async def test_since_accepts_any_rfc3339_form(sink):
     assert len(await sink.query("alpha", since="2025-01-01")) == 2
 
 
+async def test_after_id_is_a_stable_forward_cursor(sink):
+    """Five events at most, so a small ring in a test fixture keeps them all."""
+    ids = [(await sink.append(ev("alpha", "recall", f"2025-01-0{i}T00:00:00.000Z", n=i))).event_id for i in range(1, 5)]
+    await sink.append(ev("beta", "recall", n=99))
+    page = await sink.query("alpha", after_id=ids[0], limit=2)
+    assert [e.event_id for e in page] == [ids[1], ids[2]]  # oldest first, strictly after the cursor
+    rest = await sink.query("alpha", after_id=page[-1].event_id, limit=10)
+    assert [e.event_id for e in rest] == [ids[3]]
+    assert await sink.query("alpha", after_id=ids[3]) == []
+    assert [e.event_id for e in await sink.query("alpha", after_id=0, kind="recall", limit=100)] == ids
+
+
 __all__ = [
     "test_events_come_back_newest_first_with_increasing_ids",
     "test_kind_since_and_limit_compose",
     "test_spaces_are_isolated",
     "test_payloads_round_trip_with_nesting_and_unicode",
     "test_since_accepts_any_rfc3339_form",
+    "test_after_id_is_a_stable_forward_cursor",
 ]

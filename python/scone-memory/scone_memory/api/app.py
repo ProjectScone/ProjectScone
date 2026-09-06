@@ -235,16 +235,26 @@ def create_app(
 
     @app.get("/v1/events")
     async def get_events(
-        kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100, space: str = Depends(space_for)
+        kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100, after_id: Optional[int] = None,
+        space: str = Depends(space_for),
     ) -> dict:
+        """Newest first by default. With after_id, oldest first and strictly
+        after that id: a cursor a live reader can follow without losing a
+        burst. next_after_id is the last id returned, or the cursor itself
+        when nothing new arrived."""
         if engine.events is None:
             return {"events": [], "evidence": "none: no event log attached"}
-        events = await engine.events.query(space, kind=kind, since=since, limit=max(1, min(limit, 1000)))
-        return {
+        limit = max(1, min(limit, 1000))
+        events = await engine.events.query(space, kind=kind, since=since, limit=limit, after_id=after_id)
+        body = {
             "events": [event_json(e) for e in events],
             "evidence": engine.events.name,
             "queries_recorded": "text" if engine.record_queries else "hash",
+            "truncated": len(events) >= limit,
         }
+        if after_id is not None:
+            body["next_after_id"] = events[-1].event_id if events else after_id
+        return body
 
     @app.post("/v1/events")
     async def post_event(body: ExternalEventBody, space: str = Depends(space_for)) -> dict:
@@ -268,6 +278,15 @@ def create_app(
         events = await engine.events.query(space, since=since, limit=limit)
         report = metrics.compute(events, since=since, until=until, truncated=len(events) >= limit)
         return {"evidence": engine.events.name, **report.as_dict()}
+
+    @app.get("/v1/graph")
+    async def get_graph(
+        session_id: Optional[str] = None, episode_id: Optional[int] = None, since: Optional[str] = None,
+        limit: int = 400, space: str = Depends(space_for),
+    ) -> dict:
+        """Recorded relations only; see scone_memory/graph.py."""
+        g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit)
+        return {"evidence": engine.events.name if engine.events else "none", **g.as_dict()}
 
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
@@ -344,4 +363,5 @@ def fact_json(fact: Fact) -> dict:
         "source_episode_id": fact.source_episode_id,
         "origin": fact.origin,
         "excluded_reason": fact.excluded_reason,
+        "superseded_by": fact.superseded_by,
     }

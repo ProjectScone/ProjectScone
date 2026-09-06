@@ -218,3 +218,61 @@ def test_job_events_over_http():
         forged = c.post("/v1/events", json={"kind": "recall", "payload": {"job_id": "j1", "name": "x", "status": "running"}}, headers=h)
         assert forged.status_code == 422
         assert [e["kind"] for e in c.get("/v1/events", headers=h).json()["events"]] == ["job"]
+
+
+async def test_agent_events_are_validated_scrubbed_and_idempotent():
+    engine = await fresh_engine()
+    ep = await engine.remember("default", "the user asked about the harbour crane")
+    first = await engine.record("default", "agent", {
+        "agent": "claude-code", "session_id": "s-1", "project": "scone", "event": "prompt",
+        "text": "please rotate token sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ and see https://user:hunter2pass@host/db",
+        "episode_id": ep.episode_id, "source_event_id": "p-1",
+    })
+    assert first.kind == "agent"
+    assert "sk-live-" not in first.payload["text"] and "hunter2pass" not in first.payload["text"]
+    assert "[redacted]" in first.payload["text"]
+    again = await engine.record("default", "agent", {"agent": "claude-code", "session_id": "s-1", "event": "prompt", "source_event_id": "p-1"})
+    assert again.event_id == first.event_id, "a retried connector event is not duplicated"
+    for bad in (
+        {"agent": "hal", "session_id": "s", "event": "prompt"},
+        {"agent": "codex", "session_id": "s", "event": "thinking"},
+        {"agent": "codex", "session_id": "s", "event": "prompt", "episode_id": 999},  # not in this space
+        {"agent": "codex", "session_id": "s", "event": "prompt", "reasoning": "hidden"},  # unknown field
+        {"agent": "codex", "session_id": "s", "event": "tool_use", "text": "x" * 70000},
+    ):
+        with pytest.raises(InvalidInput):
+            await engine.record("default", "agent", bad)
+
+
+async def test_graph_has_only_recorded_edges():
+    engine = await fresh_engine()
+    ep = await engine.remember("default", "Ana moved to Lisbon in March 2024 for the harbour job.", created_at="2024-03-02")
+    other = await engine.remember("default", "Quarterly revenue exceeded expectations.")
+    turn = await engine.record("default", "agent", {"agent": "claude-code", "session_id": "s-9", "event": "prompt",
+                                                    "text": "where did ana move", "episode_id": ep.episode_id})
+    tool = await engine.record("default", "agent", {"agent": "claude-code", "session_id": "s-9", "event": "tool_use", "tool_name": "memory_recall", "ok": True})
+    austin = await engine.assert_fact("default", "ana", "lives_in", "Austin", valid_from="2022-01-01")
+    lisbon = await engine.assert_fact("default", "ana", "lives_in", "Lisbon", valid_from="2024-03-02", origin="extracted", source_episode_id=ep.episode_id)
+    unrelated = await engine.assert_fact("default", "bob", "drinks", "tea")
+    result = await engine.recall("default", "where did ana move", limit=2)
+    await engine.feedback("default", result.event_id, result.items[0].chunk_id, useful=True)
+
+    g = await engine.graph("default", session_id="s-9")
+    ids = set(g.nodes)
+    assert f"session:claude-code:s-9" in ids and f"turn:{turn.event_id}" in ids and f"tool:{tool.event_id}" in ids
+    assert f"episode:{ep.episode_id}" in ids and f"episode:{other.episode_id}" not in ids
+    assert f"claim:{lisbon.fact_id}" in ids and f"claim:{unrelated.fact_id}" not in ids
+    kinds = {(e.source, e.target, e.kind) for e in g.edges}
+    assert (f"turn:{turn.event_id}", f"episode:{ep.episode_id}", "captured_as") in kinds
+    assert (f"episode:{ep.episode_id}", f"claim:{lisbon.fact_id}", "source_of") in kinds
+    assert (f"session:claude-code:s-9", f"tool:{tool.event_id}", "invoked") in kinds
+    returned = [e for e in g.edges if e.kind == "returned"]
+    assert returned and all(e.label.startswith("retrieval evidence") for e in returned)
+    assert any(e.kind == "judged" for e in g.edges)
+    # No edge exists between two chunks, and no similarity is ever an edge kind.
+    assert not any(e.source.startswith("chunk:") and e.target.startswith("chunk:") for e in g.edges)
+    assert "similar" not in {e.kind for e in g.edges}
+
+    whole = await engine.graph("default")
+    assert (f"claim:{austin.fact_id}", f"claim:{lisbon.fact_id}", "superseded_by") in {(e.source, e.target, e.kind) for e in whole.edges}
+    assert whole.as_dict()["counts"]["claim"] == 3

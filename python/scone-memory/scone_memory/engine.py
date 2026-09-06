@@ -56,11 +56,26 @@ LANE_DEPTH = 4
 EMBED_BATCH = 64
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
-EXTERNAL_EVENT_KINDS = ("job",)
+EXTERNAL_EVENT_KINDS = ("job", "agent")
 ORIGINS = ("stated", "extracted", "inferred")
 STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
 MAX_EXTERNAL_PAYLOAD = 4096
+AGENTS = ("claude-code", "codex", "other")
+AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result", "stop", "session_end")
+MAX_AGENT_TEXT = 65_536
+#: Defence in depth for the agent feed: the hook redacts before posting,
+#: and the engine scrubs again. Patterns cover the common key shapes;
+#: this is a net, not a guarantee, and the docs say so.
+SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    re.compile(r"\b(?:sk|rk|pk)[-_](?:live|test|proj|ant|or)?[-_]?[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bnpg_[A-Za-z0-9]{12,}\b"),
+    re.compile(r"(?i)\b(bearer|token|api[_-]?key|secret|password)\b(\s*[:=]\s*|\s+)[\"']?([A-Za-z0-9._\-/+]{12,})"),
+    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@"),
+)
 
 
 @dataclass
@@ -105,6 +120,7 @@ class _Placement:
     restates: Optional[Fact]
     bound: Optional[str]
     bound_reason: Optional[str]
+    bound_by: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -472,6 +488,7 @@ class MemoryEngine:
             "items_coverage": "returned",
             "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
             "facts": len(facts),
+            "fact_ids": [f.fact_id for f in facts],
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
         })
@@ -488,6 +505,8 @@ class MemoryEngine:
             raise InvalidInput("no event log is attached, so nothing can be recorded")
         if kind not in EXTERNAL_EVENT_KINDS:
             raise InvalidInput(f"kind must be one of {EXTERNAL_EVENT_KINDS}, got {kind!r}")
+        if kind == "agent":
+            return await self._record_agent(space, payload)
         import json
 
         if len(json.dumps(dict(payload))) > MAX_EXTERNAL_PAYLOAD:
@@ -509,6 +528,125 @@ class MemoryEngine:
             if value is not None and (not isinstance(value, str) or len(value) > 500):
                 raise InvalidInput(f"{field_name} must be a string of at most 500 chars")
         return await self._emit(space, kind, dict(payload))  # type: ignore[return-value]
+
+    async def _record_agent(self, space: str, payload: Mapping[str, object]) -> Event:
+        p = dict(payload)
+        if p.get("agent") not in AGENTS:
+            raise InvalidInput(f"agent must be one of {AGENTS}")
+        sid = p.get("session_id")
+        if not isinstance(sid, str) or not 1 <= len(sid) <= 128:
+            raise InvalidInput("session_id must be a string of 1..=128 chars")
+        if p.get("event") not in AGENT_EVENTS:
+            raise InvalidInput(f"event must be one of {AGENT_EVENTS}")
+        for key, limit in (("project", 120), ("tool_name", 120), ("tool_use_id", 128), ("model", 120)):
+            value = p.get(key)
+            if value is not None and (not isinstance(value, str) or len(value) > limit):
+                raise InvalidInput(f"{key} must be a string of at most {limit} chars")
+        text = p.get("text")
+        if text is not None:
+            if not isinstance(text, str):
+                raise InvalidInput("text must be a string")
+            if len(text.encode()) > MAX_AGENT_TEXT:
+                raise InvalidInput(f"text exceeds {MAX_AGENT_TEXT} bytes")
+            p["text"] = redact_secrets(text)
+        if p.get("episode_id") is not None and not isinstance(p["episode_id"], int):
+            raise InvalidInput("episode_id must be an integer")
+        if p.get("ok") is not None and not isinstance(p["ok"], bool):
+            raise InvalidInput("ok must be a boolean")
+        if p.get("duration_ms") is not None and not isinstance(p["duration_ms"], (int, float)):
+            raise InvalidInput("duration_ms must be a number")
+        source_event_id = p.get("source_event_id")
+        if source_event_id is not None and (not isinstance(source_event_id, str) or not 1 <= len(source_event_id) <= 128):
+            raise InvalidInput("source_event_id must be a string of 1..=128 chars")
+        allowed = {"agent", "session_id", "project", "event", "text", "tool_name", "tool_use_id", "ok", "duration_ms",
+                   "episode_id", "model", "source_event_id"}
+        unknown = set(p) - allowed
+        if unknown:
+            raise InvalidInput(f"unknown agent fields: {sorted(unknown)}")
+        if p.get("episode_id") is not None and await self.documents.get_episode(space, int(p["episode_id"])) is None:
+            # A link is connector-reported provenance; it must at least point inside this space.
+            raise InvalidInput(f"episode {p['episode_id']} is not in {space!r}")
+        if source_event_id is not None:
+            # Idempotent receipt: a retried post of the same connector event
+            # returns the event already kept instead of a duplicate.
+            for existing in await self.events.query(space, kind="agent", limit=1000):
+                if existing.payload.get("session_id") == sid and existing.payload.get("source_event_id") == source_event_id:
+                    return existing
+        return await self._emit(space, "agent", p)  # type: ignore[return-value]
+
+    async def graph(
+        self,
+        space: str,
+        session_id: Optional[str] = None,
+        episode_id: Optional[int] = None,
+        since: Optional[str] = None,
+        limit: int = 400,
+    ):
+        """The recorded relations around a session or an episode (or the
+        latest activity when neither is given). See ``graph.py``."""
+        from . import graph as G
+
+        check_space(space)
+        limit = max(1, min(limit, 2000))
+        g = G.Graph()
+        if self.events is None:
+            return g
+        events = await self.events.query(space, since=since, limit=limit)
+        g.truncated = len(events) >= limit
+        if session_id is not None:
+            events = [e for e in events if e.kind != "agent" or e.payload.get("session_id") == session_id]
+        agent_events = [e for e in events if e.kind == "agent"]
+        recall_events = [e for e in events if e.kind == "recall" and "error" not in e.payload]
+        feedback_events = [e for e in events if e.kind == "feedback"]
+
+        episode_ids: set[int] = set()
+        if episode_id is not None:
+            episode_ids.add(episode_id)
+        for e in agent_events:
+            if e.payload.get("episode_id") is not None:
+                episode_ids.add(int(e.payload["episode_id"]))
+        chunk_ids: set[int] = set()
+        for e in recall_events:
+            for item in e.payload.get("items") or []:
+                chunk_ids.add(int(item["chunk_id"]))
+        chunks = await self.documents.get_chunks(space, sorted(chunk_ids)) if chunk_ids else []
+        focused = session_id is not None or episode_id is not None
+        if focused:
+            keep = {c.chunk_id for c in chunks if c.episode_id in episode_ids}
+            recall_events = [e for e in recall_events if any(int(i["chunk_id"]) in keep for i in e.payload.get("items") or [])]
+            chunks = [c for c in chunks if c.chunk_id in keep]
+        for c in chunks:
+            episode_ids.add(c.episode_id)
+
+        for eid in sorted(episode_ids):
+            ep = await self.documents.get_episode(space, eid)
+            if ep is None:
+                continue
+            g.add(G.Node(f"episode:{eid}", "episode", ep.content[:80], ep.created_at,
+                         {"kind": ep.kind, "source": ep.source, "tags": list(ep.tags), "metadata": dict(ep.metadata), "content": ep.content}))
+        for c in chunks:
+            if f"episode:{c.episode_id}" in g.nodes:
+                g.add(G.Node(f"chunk:{c.chunk_id}", "chunk", c.text[:80], c.created_at, {"ordinal": c.ordinal, "start": c.start, "end": c.end, "text": c.text}))
+                g.link(f"episode:{c.episode_id}", f"chunk:{c.chunk_id}", "chunked_into")
+        facts = await self.documents.list_facts(space, include_closed=True)
+        wanted = [f for f in facts if (f.source_episode_id in episode_ids) or not focused]
+        for f in wanted:
+            g.add(G.Node(f"claim:{f.fact_id}", "claim", f"{f.subject} {f.predicate.replace('_', ' ')} {f.object}", f.valid_from, {
+                "status": f.status, "origin": f.origin, "confidence": f.confidence, "valid_from": f.valid_from,
+                "valid_until": f.valid_until, "closed_reason": f.closed_reason, "excluded_reason": f.excluded_reason,
+                "source_episode_id": f.source_episode_id, "superseded_by": f.superseded_by,
+            }))
+        for e in agent_events:
+            G.add_agent_event(g, e)
+        for e in recall_events:
+            G.add_recall_event(g, e)
+            for fid in e.payload.get("fact_ids") or []:
+                g.link(f"recall:{e.event_id}", f"claim:{int(fid)}", "held")
+        for e in feedback_events:
+            if f"recall:{e.payload.get('recall_event_id')}" in g.nodes:
+                G.add_feedback_event(g, e)
+        G.add_claim_edges(g)
+        return g
 
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
@@ -621,7 +759,8 @@ class MemoryEngine:
                 space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
                 valid_until=placement.bound, confidence=confidence,
                 status="closed" if placement.bound else "active",
-                closed_reason=placement.bound_reason, source_episode_id=source_episode_id, origin=origin,
+                closed_reason=placement.bound_reason, superseded_by=placement.bound_by,
+                source_episode_id=source_episode_id, origin=origin,
             )
         )
         await self._truncate(placement.covering, start, fact.fact_id)
@@ -652,6 +791,7 @@ class MemoryEngine:
             restates=restates,
             bound=successor.valid_from if successor else None,
             bound_reason=f"superseded by fact {successor.fact_id}" if successor else None,
+            bound_by=successor.fact_id if successor else None,
         )
 
     async def _truncate(self, covering: list[Fact], start: str, by_fact_id: int) -> None:
@@ -660,7 +800,7 @@ class MemoryEngine:
             if reason is None or reason.startswith("superseded by fact "):
                 reason = f"superseded by fact {by_fact_id}"
             await self.documents.update_fact(
-                rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason})
+                rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason, "superseded_by": by_fact_id})
             )
 
     async def approve(self, space: str, fact_id: int) -> Fact:
@@ -683,6 +823,7 @@ class MemoryEngine:
             "status": "closed" if placement.bound else "active",
             "valid_until": placement.bound,
             "closed_reason": placement.bound_reason,
+            "superseded_by": placement.bound_by,
         })
         await self.documents.update_fact(accepted)
         await self._truncate(placement.covering, fact.valid_from, fact.fact_id)
@@ -902,6 +1043,7 @@ class MemoryEngine:
                 source_episode_id=id_map.get(int(source)) if source is not None else None,
                 origin=str(f.get("origin", "stated")),
                 excluded_reason=f.get("excluded_reason"),
+                superseded_by=None,  # ids are store-local; the reason text keeps the history
             )
             if new.status not in STATUSES or new.origin not in ORIGINS:
                 raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
@@ -921,6 +1063,16 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def redact_secrets(text: str) -> str:
+    """Replace key-shaped substrings with [redacted]. A net, not a proof."""
+    for pattern in SECRET_PATTERNS:
+        if pattern.groups >= 3:
+            text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
+        else:
+            text = pattern.sub("[redacted]", text)
+    return text
 
 
 def _reason(reason: str) -> str:

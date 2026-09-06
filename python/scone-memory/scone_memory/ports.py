@@ -53,6 +53,7 @@ class NewFact:
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
     origin: str = "stated"
+    superseded_by: Optional[int] = None
     excluded_reason: Optional[str] = None
 
 
@@ -189,8 +190,13 @@ class EventLog(Protocol):
         kind: Optional[str] = None,
         since: Optional[str] = None,
         limit: int = 100,
+        after_id: Optional[int] = None,
     ) -> list[Event]:
-        """Newest first. ``since`` is inclusive on the event timestamp."""
+        """Newest first. ``since`` is inclusive on the event timestamp.
+
+        With ``after_id``, oldest first and only events with a larger id:
+        a stable cursor for a reader that must not miss a burst, since
+        ids are assigned at receipt and never reused."""
         ...
 
 

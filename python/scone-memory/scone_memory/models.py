@@ -81,6 +81,9 @@ class Fact(BaseModel):
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
     origin: FactOrigin = "stated"
+    #: The fact that truncated or bounded this one, as an id, so the
+    #: relation is data and not a sentence to be parsed.
+    superseded_by: Optional[int] = None
     #: Set when a person suppressed this fact from recall. The interval
     #: and status are untouched: exclusion is a policy, not a rewrite of
     #: history. Cleared by ``include``.

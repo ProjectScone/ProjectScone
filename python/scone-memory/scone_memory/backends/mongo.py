@@ -18,7 +18,7 @@ from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
-SCHEMA_VERSION = 4  # 4: facts carry origin and excluded_reason
+SCHEMA_VERSION = 5  # 5: facts carry superseded_by
 
 
 class SchemaMismatch(SconeError):
@@ -68,6 +68,7 @@ def _fact(doc: Mapping) -> Fact:
         source_episode_id=doc.get("source_episode_id"),
         origin=doc.get("origin", "stated"),
         excluded_reason=doc.get("excluded_reason"),
+        superseded_by=doc.get("superseded_by"),
     )
 
 
@@ -241,6 +242,7 @@ class MongoDocumentStore:
                     "closed_reason": fact.closed_reason,
                     "origin": fact.origin,
                     "excluded_reason": fact.excluded_reason,
+                    "superseded_by": fact.superseded_by,
                 }
             },
         )

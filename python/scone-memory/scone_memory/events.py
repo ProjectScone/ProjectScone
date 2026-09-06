@@ -42,12 +42,16 @@ class InMemoryEventLog:
         return None
 
     async def query(
-        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100
+        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100,
+        after_id: Optional[int] = None,
     ) -> list[Event]:
         out: list[Event] = []
         floor = parse_rfc3339(since) if since else None
-        for event in reversed(self._events):
+        ordered = self._events if after_id is not None else reversed(self._events)
+        for event in ordered:
             if event.space != space or (kind and event.kind != kind):
+                continue
+            if after_id is not None and event.event_id <= after_id:
                 continue
             if floor is not None and parse_rfc3339(event.ts) < floor:
                 continue
@@ -117,7 +121,8 @@ class SqliteEventLog:
         return _event(row) if row else None
 
     async def query(
-        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100
+        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100,
+        after_id: Optional[int] = None,
     ) -> list[Event]:
         sql = "SELECT * FROM events WHERE space = ?"
         params: list[object] = [space]
@@ -127,8 +132,12 @@ class SqliteEventLog:
         if since:
             sql += " AND ts >= ?"
             params.append(format_rfc3339(parse_rfc3339(since)))
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+        if after_id is not None:
+            sql += " AND id > ? ORDER BY id ASC LIMIT ?"
+            params.extend([after_id, limit])
+        else:
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
         return [_event(r) for r in self.conn.execute(sql, params)]
 
 
@@ -189,14 +198,17 @@ class MongoEventLog:
         return _mongo_event(doc) if doc else None
 
     async def query(
-        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100
+        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100,
+        after_id: Optional[int] = None,
     ) -> list[Event]:
         query: dict = {"space": space}
         if kind:
             query["kind"] = kind
         if since:
             query["ts"] = {"$gte": format_rfc3339(parse_rfc3339(since))}
-        cursor = self.events.find(query).sort("_id", -1).limit(limit)
+        if after_id is not None:
+            query["_id"] = {"$gt": after_id}
+        cursor = self.events.find(query).sort("_id", 1 if after_id is not None else -1).limit(limit)
         return [_mongo_event(doc) async for doc in cursor]
 
 
