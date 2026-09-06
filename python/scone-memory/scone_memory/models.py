@@ -186,3 +186,22 @@ class Status(BaseModel):
     embedder: str = ""
     document_store: str = ""
     vector_index: str = ""
+
+
+class DecisionOutcome(BaseModel):
+    """What one decision in a batch did, keyed by the id the caller sent.
+    Never by the id that came back: approving a duplicate returns the fact
+    already held, which is a different row."""
+
+    fact_id: int
+    outcome: str
+    #: Set when a proposal was folded into a fact already in the ledger.
+    held_fact_id: Optional[int] = None
+    error: Optional[str] = None
+
+
+class BatchDecision(BaseModel):
+    results: list[DecisionOutcome]
+    #: How many rows the ledger actually changed.
+    applied: int
+    revision: int

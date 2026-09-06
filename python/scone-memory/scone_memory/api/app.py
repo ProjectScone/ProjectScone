@@ -21,8 +21,21 @@ from contextlib import asynccontextmanager
 
 from .. import metrics
 from ..engine import MemoryEngine
-from ..errors import InvalidInput, NotFound
+from ..errors import Conflict, InvalidInput, NotFound
 from ..models import Fact, RecallItem
+
+
+class DecideBody(BaseModel):
+    """One decision applied to a list of facts a person has reviewed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str
+    ids: list[int]
+    #: Required by decline and exclude, which keep the reason on the fact.
+    reason: Optional[str] = None
+    #: The revision the reviewed list was read at, when the caller froze one.
+    expect_revision: Optional[int] = None
 
 
 class EpisodeBody(BaseModel):
@@ -149,6 +162,10 @@ def create_app(
     @app.exception_handler(InvalidInput)
     async def _invalid(_: Request, e: InvalidInput) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=422)
+
+    @app.exception_handler(Conflict)
+    async def _moved(_: Request, e: Conflict) -> JSONResponse:
+        return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
 
     @app.exception_handler(NotFound)
     async def _missing(_: Request, e: NotFound) -> JSONResponse:
@@ -308,6 +325,16 @@ def create_app(
             quote=body.quote,
         )
         return fact_json(fact)
+
+    @app.post("/v1/facts/decide")
+    async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        """One reviewed batch, settled together: applied oldest first, and
+        refused whole if the space moved since the batch was built."""
+        decided = await engine.decide(
+            space, body.decision, body.ids,
+            reason=body.reason, actor=actor, expect_revision=body.expect_revision,
+        )
+        return decided.model_dump()
 
     @app.post("/v1/facts/{fact_id}/approve")
     async def post_fact_approve(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:

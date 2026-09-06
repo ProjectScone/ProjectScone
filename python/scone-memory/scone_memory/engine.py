@@ -19,11 +19,13 @@ from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequenc
 
 from . import fusion
 from .chunker import DEFAULT_TARGET, byte_spans, chunk_spans
-from .errors import InvalidInput, NotFound
+from .errors import Conflict, InvalidInput, NotFound
 from .lexical import tokenize
 from .models import (
     MAX_CONTENT_BYTES,
     Added,
+    BatchDecision,
+    DecisionOutcome,
     Episode,
     EpisodeKind,
     Fact,
@@ -85,6 +87,10 @@ EXTERNAL_EVENT_KINDS = ("job", "agent")
 ORIGINS = ("stated", "extracted", "inferred")
 STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
+#: What one reviewed batch may do to the facts it names.
+DECISIONS = ("approve", "decline", "exclude")
+#: Ids one batch may carry. A review queue, not a migration.
+MAX_DECISIONS = 500
 MAX_EXTERNAL_PAYLOAD = 4096
 AGENTS = ("claude-code", "codex", "other")
 AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result", "stop", "session_end")
@@ -1081,6 +1087,81 @@ class MemoryEngine:
             "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering], "actor": actor,
         })
         return accepted
+
+    async def decide(
+        self,
+        space: str,
+        decision: str,
+        fact_ids: Sequence[int],
+        reason: Optional[str] = None,
+        actor: Optional[str] = None,
+        expect_revision: Optional[int] = None,
+    ) -> BatchDecision:
+        """One reviewed batch, settled together.
+
+        Three things a loop of single decisions cannot do. The batch is
+        applied by (valid_from, fact_id), not in the order the caller
+        listed, because inside one subject and predicate each approval
+        truncates what it covers and is bounded by what starts later, so
+        the caller's draw order would otherwise decide the ledger. With
+        ``expect_revision`` the space is checked once, before anything is
+        applied, so a batch built from a stale reading is refused whole
+        rather than half applied. And every id comes back with its own
+        outcome, keyed by the id that was sent, so one refusal does not
+        hide what the rest did.
+        """
+        check_space(space)
+        if decision not in DECISIONS:
+            raise InvalidInput(f"decision must be one of {DECISIONS}, got {decision!r}")
+        if not fact_ids:
+            raise InvalidInput("decide needs at least one fact id")
+        if len(fact_ids) > MAX_DECISIONS:
+            raise InvalidInput(f"decide takes at most {MAX_DECISIONS} ids, got {len(fact_ids)}")
+        if decision in ("decline", "exclude"):
+            reason = _reason(reason or "")
+        current = await self.documents.revision(space)
+        if expect_revision is not None and expect_revision != current:
+            raise Conflict(
+                f"space {space!r} is at revision {current}, the batch was built from {expect_revision}",
+                revision=current,
+            )
+        known = {}
+        outcomes: dict[int, DecisionOutcome] = {}
+        for fact_id in fact_ids:
+            if fact_id in outcomes or fact_id in known:
+                continue
+            found = await self.documents.get_fact(space, fact_id)
+            if found is None:
+                outcomes[fact_id] = DecisionOutcome(fact_id=fact_id, outcome="not_found")
+            else:
+                known[fact_id] = found
+        for fact in sorted(known.values(), key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)):
+            outcomes[fact.fact_id] = await self._decide_one(space, decision, fact.fact_id, reason, actor)
+        applied = sum(1 for o in outcomes.values() if o.outcome not in ("not_found", "refused"))
+        return BatchDecision(
+            results=[outcomes[fact_id] for fact_id in dict.fromkeys(fact_ids)],
+            applied=applied,
+            revision=await self.documents.revision(space),
+        )
+
+    async def _decide_one(
+        self, space: str, decision: str, fact_id: int, reason: Optional[str], actor: Optional[str]
+    ) -> DecisionOutcome:
+        try:
+            if decision == "approve":
+                landed = await self.approve(space, fact_id, actor=actor)
+                if landed.fact_id != fact_id:
+                    return DecisionOutcome(fact_id=fact_id, outcome="duplicate_of", held_fact_id=landed.fact_id)
+                return DecisionOutcome(fact_id=fact_id, outcome="approved")
+            if decision == "decline":
+                await self.decline(space, fact_id, reason or "", actor=actor)
+                return DecisionOutcome(fact_id=fact_id, outcome="declined")
+            await self.exclude(space, fact_id, reason or "", actor=actor)
+            return DecisionOutcome(fact_id=fact_id, outcome="excluded")
+        except NotFound as e:
+            return DecisionOutcome(fact_id=fact_id, outcome="not_found", error=str(e))
+        except InvalidInput as e:
+            return DecisionOutcome(fact_id=fact_id, outcome="refused", error=str(e))
 
     async def decline(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         """A person rejects a proposed fact. It never held; the reason is kept."""
