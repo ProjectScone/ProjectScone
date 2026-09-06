@@ -44,6 +44,7 @@ class SyncMemoryEngine:
 
     def _run(self, coro):
         if not self._thread.is_alive():
+            coro.close()  # otherwise "coroutine was never awaited" at collection
             raise RuntimeError("SyncMemoryEngine is closed")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 

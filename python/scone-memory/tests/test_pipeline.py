@@ -52,8 +52,15 @@ def test_sync_facade_works_from_plain_python_and_inside_a_running_loop():
             return sync.status("default").episodes
 
         assert asyncio.run(from_inside_a_loop()) == 1
-    with pytest.raises(RuntimeError):
-        sync.status("default")
+    import gc
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError):
+            sync.status("default")
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], "closed facade leaked a coroutine"
 
 
 async def test_export_then_import_moves_memory_between_stores(tmp_path):
@@ -139,3 +146,32 @@ async def test_scopes_count_episodes_per_metadata_value():
         "session_id": {"s1": 1},
         "user_id": {"alice": 2, "bob": 1},
     }
+
+
+class ExplodingIndex(InMemoryVectorIndex):
+    async def upsert(self, points):
+        raise ConnectionError("vector store went away")
+
+
+class ExplodingEmbedder(HashEmbedder):
+    async def embed(self, texts):
+        raise TimeoutError("embedding server timed out")
+
+
+async def test_a_batch_that_fails_leaves_nothing_behind():
+    for engine in (
+        MemoryEngine(InMemoryDocumentStore(), ExplodingIndex(), HashEmbedder()),
+        MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), ExplodingEmbedder()),
+    ):
+        await engine.open()
+        with pytest.raises((ConnectionError, TimeoutError)):
+            await engine.remember_many("default", [Record("first"), Record("second")])
+        status = await engine.status("default")
+        assert (status.episodes, status.chunks, status.revision) == (0, 0, 0)
+        # A retry with a working batch is not confused by the failed one.
+        engine.vectors = InMemoryVectorIndex()
+        engine.embedder = HashEmbedder()
+        await engine.open()
+        added = await engine.remember_many("default", [Record("first"), Record("second"), Record("first")])
+        assert [a.deduplicated for a in added] == [False, False, True]
+        assert added[2].episode_id == added[0].episode_id

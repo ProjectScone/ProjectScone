@@ -84,6 +84,21 @@ class ImportSummary:
     facts: int = 0
 
 
+@dataclass(frozen=True)
+class _Pending:
+    slot: int
+    new: NewEpisode
+    spans: list[tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class _DupOf:
+    """A record identical to an earlier one in the same batch; its id is
+    known only after that one is written."""
+
+    slot: int
+
+
 class MemoryEngine:
     def __init__(
         self,
@@ -125,12 +140,18 @@ class MemoryEngine:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
         instead of one per record, and one revision bump. Outcomes come
         back in input order; a record identical to an earlier one in the
-        same batch is deduplicated against it."""
+        same batch is deduplicated against it.
+
+        Nothing is written until every vector exists, so an embedder that
+        fails leaves no orphan episodes. If a store fails after the first
+        write, the episodes written so far are deleted again and the
+        error is raised; a batch either lands whole or not at all.
+        """
         check_space(space)
         when = self.clock()
         results: list[Optional[Added]] = []
-        pending: list[tuple[int, Episode, tuple[str, ...], dict[str, str]]] = []
-        seen_hashes: dict[str, int] = {}
+        fresh: list[_Pending] = []
+        seen: dict[str, int] = {}  # content hash -> index into results
         for record in records:
             content = record.content
             if not isinstance(content, str) or not content.strip():
@@ -143,78 +164,99 @@ class MemoryEngine:
             clean_meta = normalise_metadata(record.metadata or {})
             happened = normalise_time(record.created_at) if record.created_at else when
             digest = content_hash(space, content)
-            if digest in seen_hashes:
-                results.append(Added(episode_id=seen_hashes[digest], deduplicated=True, chunks=0))
+            if digest in seen:
+                results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
+                fresh_or_dup = seen[digest]
+                results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
                 continue
             existing = await self.documents.episode_by_hash(space, digest)
             if existing is not None:
-                seen_hashes[digest] = existing.episode_id
+                seen[digest] = len(results)
                 results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0))
                 continue
-            episode = await self.documents.insert_episode(
-                NewEpisode(
-                    space=space,
-                    kind=record.kind,
-                    content=content,
-                    content_hash=digest,
-                    created_at=happened,
-                    ingested_at=when,
-                    source=record.source,
-                    tags=clean_tags,
-                    metadata=clean_meta,
+            seen[digest] = len(results)
+            results.append(None)
+            spans = chunk_spans(content, self.chunk_target)
+            fresh.append(
+                _Pending(
+                    slot=len(results) - 1,
+                    new=NewEpisode(
+                        space=space,
+                        kind=record.kind,
+                        content=content,
+                        content_hash=digest,
+                        created_at=happened,
+                        ingested_at=when,
+                        source=record.source,
+                        tags=clean_tags,
+                        metadata=clean_meta,
+                    ),
+                    spans=[(sp.start, sp.end) for sp in spans],
                 )
             )
-            seen_hashes[digest] = episode.episode_id
-            results.append(None)
-            pending.append((len(results) - 1, episode, clean_tags, clean_meta))
 
-        if not pending:
-            return [r for r in results if r is not None]
+        if fresh:
+            texts = [p.new.content[a:b] for p in fresh for a, b in p.spans]
+            vectors: list[list[float]] = []
+            for i in range(0, len(texts), EMBED_BATCH):
+                vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
+            await self._write_batch(space, fresh, vectors, results)
+            await self.documents.bump_revision(space)
 
-        new_chunks: list[NewChunk] = []
-        owners: list[tuple[int, Episode, tuple[str, ...], dict[str, str]]] = []
-        for slot, episode, clean_tags, clean_meta in pending:
-            spans = chunk_spans(episode.content, self.chunk_target)
-            for i, span in enumerate(spans):
-                new_chunks.append(
-                    NewChunk(
-                        episode_id=episode.episode_id,
-                        space=space,
-                        ordinal=i,
-                        start=span.start,
-                        end=span.end,
-                        text=episode.content[span.start : span.end],
-                        created_at=episode.created_at,
-                    )
+        resolved: list[Added] = []
+        for r in results:
+            if isinstance(r, _DupOf):
+                target = results[r.slot]
+                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0))  # type: ignore[union-attr]
+            else:
+                resolved.append(r)  # type: ignore[arg-type]
+        return resolved
+
+    async def _write_batch(
+        self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list
+    ) -> None:
+        written: list[int] = []
+        try:
+            offset = 0
+            for pending in fresh:
+                episode = await self.documents.insert_episode(pending.new)
+                written.append(episode.episode_id)
+                chunks = await self.documents.insert_chunks(
+                    [
+                        NewChunk(
+                            episode_id=episode.episode_id,
+                            space=space,
+                            ordinal=i,
+                            start=a,
+                            end=b,
+                            text=episode.content[a:b],
+                            created_at=episode.created_at,
+                        )
+                        for i, (a, b) in enumerate(pending.spans)
+                    ]
                 )
-                owners.append((slot, episode, clean_tags, clean_meta))
-        chunks = await self.documents.insert_chunks(new_chunks)
-
-        vectors: list[list[float]] = []
-        texts = [c.text for c in chunks]
-        for i in range(0, len(texts), EMBED_BATCH):
-            vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
-        await self.vectors.upsert(
-            [
-                VectorPoint(
-                    chunk_id=c.chunk_id,
-                    space=space,
-                    episode_id=episode.episode_id,
-                    created_at=episode.created_at,
-                    vector=v,
-                    tags=clean_tags,
-                    metadata=clean_meta,
+                await self.vectors.upsert(
+                    [
+                        VectorPoint(
+                            chunk_id=c.chunk_id,
+                            space=space,
+                            episode_id=episode.episode_id,
+                            created_at=episode.created_at,
+                            vector=v,
+                            tags=pending.new.tags,
+                            metadata=pending.new.metadata,
+                        )
+                        for c, v in zip(chunks, vectors[offset : offset + len(chunks)])
+                    ]
                 )
-                for c, v, (_, episode, clean_tags, clean_meta) in zip(chunks, vectors, owners)
-            ]
-        )
-        per_episode: dict[int, int] = {}
-        for c in chunks:
-            per_episode[c.episode_id] = per_episode.get(c.episode_id, 0) + 1
-        for slot, episode, _, _ in pending:
-            results[slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=per_episode[episode.episode_id])
-        await self.documents.bump_revision(space)
-        return [r for r in results if r is not None]
+                offset += len(chunks)
+                results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
+        except Exception:
+            # Undo the partial batch so a retry starts clean.
+            for episode_id in written:
+                removed = await self.documents.delete_episode(space, episode_id)
+                await self.vectors.delete(removed)
+            raise
 
     async def forget(self, space: str, episode_id: int) -> None:
         check_space(space)
