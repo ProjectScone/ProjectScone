@@ -117,6 +117,14 @@ class SqliteEventLog:
                 (new.ts, new.space, new.kind, new.schema_version, payload, new.dedup_key),
             )
         except sqlite3.IntegrityError:
+            # The failed INSERT opened a write transaction that nothing
+            # would close: with it open, this connection holds the file's
+            # write lock and every other connection on the file (the
+            # document and vector stores of the same engine) fails with
+            # "database is locked" until this one commits something. Seen
+            # on the live server: one duplicate hook receipt blocked every
+            # approve and capture that followed.
+            self.conn.rollback()
             # The unique index is the atomic check; decide same-or-conflict after it fires.
             row = self.conn.execute("SELECT * FROM events WHERE space = ? AND dedup_key = ?", (new.space, new.dedup_key)).fetchone()
             existing = _event(row)

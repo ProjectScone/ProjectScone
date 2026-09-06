@@ -365,3 +365,24 @@ async def test_episode_focus_reaches_its_own_turn_past_the_window_and_excludes_n
     assert (f"turn:{turn.event_id}", f"episode:{ep.episode_id}", "captured_as") in {(e.source, e.target, e.kind) for e in g.edges}
     by_session = await engine.graph("default", session_id="other", limit=20)
     assert by_session.as_dict()["counts"].get("tool_call") == 60, "a session focus reaches all of that session's events, not only the window"
+
+
+def test_a_duplicate_receipt_does_not_leave_the_file_locked_for_other_connections(tmp_path):
+    """Seen on the live server: after one duplicate hook receipt, every
+    write from the document and vector stores on the same file failed
+    with "database is locked". The failed INSERT had opened a write
+    transaction on the event log's connection and nothing closed it."""
+    import asyncio
+    import sqlite3
+
+    path = tmp_path / "shared.db"
+    log = SqliteEventLog(path)
+    first = asyncio.run(log.append(NewEvent("2025-01-01T00:00:00.000Z", "alpha", "agent", {"k": 1}, dedup_key="hook-1")))
+    again = asyncio.run(log.append(NewEvent("2025-01-01T00:00:00.000Z", "alpha", "agent", {"k": 1}, dedup_key="hook-1")))
+    assert again.event_id == first.event_id, "the idempotent receipt still works"
+    assert not log.conn.in_transaction, "and the connection is not left holding the write lock"
+    other = sqlite3.connect(path, timeout=0.5)  # the document store's connection, in effect
+    other.execute("CREATE TABLE IF NOT EXISTS probe (n INTEGER)")
+    other.execute("INSERT INTO probe VALUES (1)")
+    other.commit()  # would raise "database is locked" if the log still held the lock
+    other.close()
