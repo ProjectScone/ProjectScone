@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { EvidenceEdge, EvidenceNode } from '../types';
-import { projectGraph, layoutGraph, layoutNetwork, CARD_WIDTH, CARD_HEIGHT } from './graph-layout';
+import { projectGraph, projectGrowth, layoutGrowth, layoutGraph, layoutNetwork, CARD_WIDTH, CARD_HEIGHT } from './graph-layout';
 import { LayoutPicker, type GraphLayout } from './LayoutPicker';
 
 type Point = { x: number; y: number };
@@ -27,8 +27,9 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
   const [size, setSize] = useState({ width: 700, height: 450 });
   const [camera, setCamera] = useState({ x: 20, y: 100, zoom: 1 });
   const fitted = useRef(false);
-  const view = useMemo(() => projectGraph(nodes, edges, {group,page,focus}), [nodes,edges,group,page,focus]);
+  const view = useMemo(() => layout==='growth'?projectGrowth(nodes,edges,page):projectGraph(nodes, edges, {group,page,focus}), [nodes,edges,group,page,focus,layout]);
   const points = useMemo(() => {
+    if(layout==='growth')return layoutGrowth(view.nodes);
     if(layout==='flow')return layoutGraph(view.nodes,depth);
     const result=layoutNetwork(view.nodes,view.edges,layout);
     if(depth)for(const n of view.nodes){const p=result.get(n.id)!;p.x+=n.category*20;p.y=p.y*.75-n.category*24;}
@@ -65,10 +66,10 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
   function zoomBy(factor: number) { setCamera(c => { const zoom = Math.max(.12, Math.min(2.5, c.zoom * factor)); return { zoom, x: size.width / 2 - (size.width / 2 - c.x) * zoom / c.zoom, y: size.height / 2 - (size.height / 2 - c.y) * zoom / c.zoom }; }); }
   return <>
     <div className="graph-navigation" aria-label="Graph scope">
-      <LayoutPicker value={layout} onChange={value=>{setLayout(value);setHovered(null);}}/>
-      {view.mode !== 'overview' ? <><button onClick={() => {setGroup(undefined);setFocus(undefined);setPage(0);}}>← Overview</button><span>{view.mode==='focus' ? `${view.total} direct neighbors · paged` : `${view.total} records · newest first`}</span></> : <span>{view.grouped ? 'Grouped by session · select a group to explore' : 'Recorded connections · select a record to inspect'}</span>}
+      <LayoutPicker value={layout} onChange={value=>{setLayout(value);setHovered(null);setGroup(undefined);setFocus(undefined);setPage(0);}}/>
+      {layout==='growth'?<span>{view.total} dated agent events · {'undated' in view?String(view.undated):0} undated not plotted · 120 per page</span>:view.mode !== 'overview' ? <><button onClick={() => {setGroup(undefined);setFocus(undefined);setPage(0);}}>← Overview</button><span>{view.mode==='focus' ? `${view.total} direct neighbors · paged` : `${view.total} records · newest first`}</span></> : <span>{view.grouped ? 'Grouped by session · select a group to explore' : 'Recorded connections · select a record to inspect'}</span>}
       {view.pages > 1 && <div className="graph-pagination"><button aria-label={view.mode==='group' ? 'Previous group page' : 'Previous graph page'} disabled={view.page === 0} onClick={() => setPage(view.page - 1)}>←</button><span>{view.page + 1} / {view.pages}</span><button aria-label={view.mode==='group' ? 'Next group page' : 'Next graph page'} disabled={view.page + 1 >= view.pages} onClick={() => setPage(view.page + 1)}>→</button></div>}
-      {selected && nodes.some(n => n.id === selected && n.kind !== 'session') && focus !== selected && <button onClick={() => {setFocus(selected);setPage(0);}}>Focus selected</button>}
+      {layout!=='growth'&&selected && nodes.some(n => n.id === selected && n.kind !== 'session') && focus !== selected && <button onClick={() => {setFocus(selected);setPage(0);}}>Focus selected</button>}
     </div>
     <svg ref={svg} id="graph" className={network ? 'network-map' : 'flow-map'} data-layout={layout} aria-label="Memory evidence graph" onWheel={e => zoomBy(e.deltaY < 0 ? 1.08 : 1 / 1.08)}
       onPointerDown={e => { if ((e.target as Element).closest('[data-node], [data-group]')) return; drag.current = { x: e.clientX - camera.x, y: e.clientY - camera.y }; e.currentTarget.setPointerCapture(e.pointerId); }}
@@ -85,7 +86,7 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
         <g id="edges">{view.edges.map((edge, i) => {
           const a=points.get(edge.source),b=points.get(edge.target);if(!a||!b)return null;
           const forward=b.x>a.x,dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy));
-          const radius=(id:string)=>{const n=view.nodes.find(n=>n.id===id);return n?.members ? 36 : n?.kind==='session' ? 29 : 20;};
+          const radius=(id:string)=>{const n=view.nodes.find(n=>n.id===id);return n?.members ? 36 : n?.kind==='session' ? 29 : layout==='growth'?6:20;};
           const x1=network?a.x+112+dx/d*radius(edge.source):a.x+(forward?CARD_WIDTH:0),x2=network?b.x+112-dx/d*radius(edge.target):b.x+(forward?0:CARD_WIDTH);
           const y1=a.y+54+(network?dy/d*radius(edge.source):0),y2=b.y+54-(network?dy/d*radius(edge.target):0),mid=(x1+x2)/2;
           const bend=network?Math.min(46,d*.12):0,cx=mid-dy/d*bend,cy=(y1+y2)/2+dx/d*bend;
@@ -94,7 +95,10 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
         })}</g>
         <g id="nodes">{view.nodes.map(node => { const p = points.get(node.id)!; const session = node.kind === 'session'; const agent = node.data?.agent === 'claude-code' ? 'Claude Code' : node.data?.agent === 'codex' ? 'Codex' : node.label; const activate = () => {setHovered(null);if(node.members){setGroup(node.id);setPage(0);setFocus(undefined);}else{select(node.id);}}; return <g key={node.id} className={`atlas-card category-${node.category} ${session ? 'session-anchor' : ''}`} data-node={node.members ? undefined : node.id} data-group={node.members ? node.id : undefined} transform={`translate(${p.x} ${p.y})`} role="button" tabIndex={0} aria-label={`${node.members ? 'Expand' : 'Inspect'} ${node.label}`} aria-pressed={selected === node.id} onMouseEnter={()=>setHovered(node.id)} onMouseLeave={()=>setHovered(null)} onFocus={()=>setHovered(node.id)} onBlur={()=>setHovered(null)} onClick={activate} onKeyDown={e => { if (['Enter', ' '].includes(e.key)) { e.preventDefault(); activate(); } if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) { e.preventDefault(); const list = [...(svg.current?.querySelectorAll<SVGGElement>('[data-node], [data-group]') || [])], index = list.indexOf(e.currentTarget), delta = ['ArrowRight', 'ArrowDown'].includes(e.key) ? 1 : -1; list[(index + delta + list.length) % list.length]?.focus(); } }}>
           <title>{node.label}{node.members ? ' — presentation group, not an evidence record' : ''}</title>
-          {network ? <>
+          {layout==='growth'&&!session?<>
+            <circle className={`growth-event ${['session_start','session_end'].includes(String(node.data?.event))?'lifecycle-boundary':''}`} cx={112} cy={54} r={active===node.id?10:['session_start','session_end'].includes(String(node.data?.event))?9:6}/>
+            {active===node.id&&<><text className="growth-label" x={128} y={51}>{clip(node.label,38)}</text><text className="growth-time" x={128} y={69}>{node.ts}</text></>}
+          </>:network ? <>
             <circle className="node-halo" cx={112} cy={54} r={node.members?44:session?37:28} />
             <circle className="orb-surface" cx={112} cy={54} r={node.members?36:session?29:20} />
             {node.members?<><text className="orb-count" x={112} y={60} textAnchor="middle">{node.members.length}</text><circle className="expand-disc" cx={139} cy={28} r={9}/><path className="expand-plus" d="M135 28h8m-4-4v8"/></>:<g className="orb-glyph" transform="translate(100 42)"><RecordGlyph category={node.category}/></g>}
@@ -107,7 +111,8 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
         </g>; })}</g>
       </g>
     </svg>
-    {!nodes.length && <div id="empty"><div className="empty-mark" aria-hidden>◇</div><h2>No recorded interactions yet</h2><p>Connect an explicitly selected Claude Code or Codex session. Its captured activity will appear here.</p></div>}
+    {(!nodes.length||layout==='growth'&&!view.nodes.length) && <div id="empty"><div className="empty-mark" aria-hidden>◇</div><h2>{layout==='growth'?'No dated agent events in this snapshot':'No recorded interactions yet'}</h2><p>{layout==='growth'?'This view needs timestamped agent activity. Missing dates and session boundaries are not inferred.':'Connect an explicitly selected Claude Code or Codex session. Its captured activity will appear here.'}</p></div>}
+    {layout==='growth'&&<div className="growth-explanation">Golden-angle sequence within this snapshot · outward means later, not elapsed time.<br/>A larger event mark identifies a captured session start or end. Silence is not an end event.</div>}
     <div className="graph-bottom"><div className="atlas-legend"><span className="legend-session">Sessions</span><span className="legend-interaction">Interactions</span><span className="legend-memory">Memory</span><small>{view.grouped ? 'Dashed links bundle stored references' : 'Only recorded relationships'}</small></div><div className="zoom"><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>−</button><output>{Math.round(camera.zoom * 100)}%</output><button aria-label="Zoom in" onClick={() => zoomBy(1.2)}>+</button><button aria-label="Fit graph" onClick={fit}>Fit</button></div></div>
   </>;
 }

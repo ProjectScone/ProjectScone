@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { projectGraph, layoutGraph, layoutNetwork, CARD_WIDTH, CARD_HEIGHT } from '../src/playground/graph-layout.ts';
+import { projectGraph, projectGrowth, layoutGrowth, layoutGraph, layoutNetwork, CARD_WIDTH, CARD_HEIGHT } from '../src/playground/graph-layout.ts';
 import type { EvidenceNode, EvidenceEdge } from '../src/types.ts';
 
 function crowded() {
@@ -51,6 +51,39 @@ test('two-node constellation and radial views differ after camera fitting',()=>{
   const view=projectGraph([{id:'s',kind:'session',label:'Session'},{id:'t',kind:'turn',label:'Turn'}],[{source:'s',target:'t',kind:'has'}]);
   const angles=['constellation','radial'].map(mode=>{const p=layoutNetwork(view.nodes,view.edges,mode as 'constellation'|'radial'),a=p.get('s')!,b=p.get('t')!;return Math.atan2(b.y-a.y,b.x-a.x);});
   assert.ok(Math.abs(angles[0]-angles[1])>.3,'fitting must not make both layouts look identical');
+});
+
+test('growth view exposes real chronological events without inventing lifecycle boundaries',()=>{
+  const raw=crowded();raw.nodes.push({id:'untimed',kind:'turn',label:'No date'});
+  const first=projectGrowth(raw.nodes,raw.edges,0),second=projectGrowth(raw.nodes,raw.edges,1);
+  assert.equal(first.undated,1);assert.equal(first.total,240);assert.equal(first.pages,2);
+  assert.equal(first.nodes.filter(n=>n.kind!=='session').length,120);
+  const all=new Set([...first.nodes,...second.nodes].filter(n=>n.kind!=='session').map(n=>n.id));
+  assert.equal(all.size,240);
+  assert.ok(first.edges.every(e=>raw.edges.some(r=>r.source===e.source&&r.target===e.target&&r.kind===e.kind)));
+  const points=layoutGrowth(first.nodes);
+  assert.equal(points.size,first.nodes.length);
+  assert.ok([...points.values()].every(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)));
+  assert.ok(first.nodes.every(n=>!n.members));
+  for(const owner of ['session:0','session:1','session:2','session:3']){
+    const early=first.nodes.filter(n=>n.owner===owner&&n.sequence!==undefined).map(n=>n.sequence!);
+    const later=second.nodes.filter(n=>n.owner===owner&&n.sequence!==undefined).map(n=>n.sequence!);
+    assert.ok(Math.min(...later)>Math.max(...early),'sequence must not restart on the next page');
+  }
+  assert.deepEqual(first.nodes.filter(n=>n.kind!=='session').map(n=>n.ts),first.nodes.filter(n=>n.kind!=='session').map(n=>n.ts).sort());
+  assert.equal(projectGrowth([],[],0).pages,1);
+});
+
+test('growth pages bound session count as well as event count',()=>{
+  const nodes:EvidenceNode[]=[],edges:EvidenceEdge[]=[];
+  for(let i=0;i<120;i++){nodes.push({id:`s${i}`,kind:'session',label:'Session'},{id:`t${i}`,kind:'turn',label:'Turn',ts:'2026-09-06T00:00:00Z'});edges.push({source:`s${i}`,target:`t${i}`,kind:'has'});}
+  const first=projectGrowth(nodes,edges,0),reached=new Set<string>();
+  assert.equal(first.pages,30);
+  for(let page=0;page<first.pages;page++){
+    const view=projectGrowth(nodes,edges,page);assert.ok(new Set(view.nodes.map(n=>n.owner)).size<=4);
+    view.nodes.filter(n=>n.kind!=='session').forEach(n=>reached.add(n.id));
+  }
+  assert.equal(reached.size,120);
 });
 
 // Removing grouping brings back the unreadable 240-card column.

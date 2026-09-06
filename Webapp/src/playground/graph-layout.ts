@@ -4,6 +4,7 @@ export interface ViewNode extends EvidenceNode {
   owner: string;
   members?: string[];
   category: number;
+  sequence?: number;
 }
 export interface ViewEdge extends EvidenceEdge { count: number; grouped: boolean }
 export interface GraphView { nodes: ViewNode[]; edges: ViewEdge[]; total: number; pages: number; page: number; grouped: boolean; mode:'overview'|'focus'|'group' }
@@ -61,6 +62,41 @@ export function layoutNetwork(nodes: ViewNode[], edges: ViewEdge[], mode: Networ
 }
 const category: Record<NodeKind, number> = {session:0,turn:1,tool_call:1,episode:2,chunk:2,claim:3,recall:3,feedback:3};
 const labels = ['', 'Interactions', 'Memories', 'Claims & recall'];
+
+export function projectGrowth(nodes:EvidenceNode[],edges:EvidenceEdge[],requestedPage=0):GraphView & {undated:number} {
+  const ownership=owners(nodes,edges);
+  const activity=nodes.filter(n=>['turn','tool_call'].includes(n.kind));
+  const dated=activity.filter(n=>n.ts&&Number.isFinite(Date.parse(n.ts))).sort((a,b)=>Date.parse(a.ts!)-Date.parse(b.ts!)||a.id.localeCompare(b.id));
+  const counts=new Map<string,number>(),sequence=new Map<string,number>();
+  for(const n of dated){const owner=ownership.get(n.id)||'unattributed',index=counts.get(owner)||0;sequence.set(n.id,index);counts.set(owner,index+1);}
+  const ownersInOrder=[...counts.keys()].sort(),slices:EvidenceNode[][]=[];
+  for(let i=0;i<ownersInOrder.length;i+=4){
+    const batch=new Set(ownersInOrder.slice(i,i+4)),events=dated.filter(n=>batch.has(ownership.get(n.id)||'unattributed'));
+    for(let start=0;start<events.length;start+=120)slices.push(events.slice(start,start+120));
+  }
+  const pages=Math.max(1,slices.length),page=Math.max(0,Math.min(requestedPage,pages-1));
+  const slice=slices[page]||[],sessionIds=new Set(slice.map(n=>ownership.get(n.id)));
+  const shown=[...nodes.filter(n=>n.kind==='session'&&sessionIds.has(n.id)),...slice];
+  const ids=new Set(shown.map(n=>n.id));
+  return {nodes:shown.map(n=>({...n,owner:ownership.get(n.id)||'unattributed',category:category[n.kind],sequence:sequence.get(n.id)})),
+    edges:edges.filter(e=>ids.has(e.source)&&ids.has(e.target)).map(e=>({...e,count:1,grouped:false})),
+    total:dated.length,undated:activity.length-dated.length,pages,page,grouped:false,mode:'overview'};
+}
+
+export function layoutGrowth(nodes:ViewNode[]) {
+  const points=new Map<string,{x:number;y:number}>(),lanes=[...new Set(nodes.map(n=>n.owner))].sort();
+  const goldenAngle=Math.PI*(3-Math.sqrt(5));
+  const largest=Math.max(1,...nodes.map(n=>(n.sequence??0)+1));
+  const span=2*(80+28*Math.sqrt(largest))+160;
+  for(const [lane,owner] of lanes.entries()) {
+    const cx=lane%2*span,cy=Math.floor(lane/2)*span;
+    const records=nodes.filter(n=>n.owner===owner&&n.kind!=='session').sort((a,b)=>Date.parse(a.ts!)-Date.parse(b.ts!)||a.id.localeCompare(b.id));
+    const anchor=nodes.find(n=>n.id===owner);if(anchor)points.set(anchor.id,{x:cx,y:cy});
+    records.forEach((n,index)=>{const ordinal=n.sequence??index,radius=80+28*Math.sqrt(ordinal+1),angle=ordinal*goldenAngle-Math.PI/2;
+      points.set(n.id,{x:cx+radius*Math.cos(angle),y:cy+radius*Math.sin(angle)});});
+  }
+  return points;
+}
 
 // Ownership is a presentation grouping, not a new evidence relationship.
 // Multi-source records get one deterministic home; their real links remain.

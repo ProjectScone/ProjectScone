@@ -68,6 +68,14 @@
 .radial-theme .network-map .session-anchor .orb-surface { fill: #303a2c; }
 .radial-theme .network-map .session-anchor .orb-glyph { color: #fcfaf5; }
 .radial-theme .network-map .orb-label,.radial-theme .network-map .orb-subtitle,.radial-theme .network-map .edge-caption { stroke: #fcfaf5; }
+.workspace .evidence-atlas .growth-theme { background-color: #f9f4e9; background-image: none; }
+.growth-theme .growth-event { fill: var(--card-ink); stroke: #f9f4e9; stroke-width: 1; }
+.growth-theme .growth-event.lifecycle-boundary { fill: #374e36; stroke: #b49c63; stroke-width: 3; }
+.growth-theme .growth-label { fill: #3b3b2b; font: 12px ui-monospace,monospace; paint-order: stroke; stroke: #f9f4e9; stroke-width: 5; }
+.growth-theme .growth-time { fill: #77725d; font: 9px ui-monospace,monospace; paint-order: stroke; stroke: #f9f4e9; stroke-width: 4; }
+.evidence-atlas .growth-theme [data-edge] { opacity: .2; stroke: #9c916e; }
+.evidence-atlas .growth-theme [data-edge].highlight { opacity: 1; stroke: #995b33; }
+.growth-explanation { position: absolute; left: 22px; bottom: 66px; font-size: 9px; color: #817760; pointer-events: none; line-height: 1.6; }
 .evidence-atlas .view-switch,.evidence-atlas .zoom { background: #fff; border-color: #d6d9cd; border-radius: 8px; }
 .evidence-atlas .graph-lanes rect { fill: #f1f3eb; fill-opacity: .72; stroke: #e0e4d7; stroke-width: 1; }
 .evidence-atlas .graph-lanes text { fill: #777f6c; font: 10px ui-monospace,SFMono-Regular,monospace; letter-spacing: .3px; }
