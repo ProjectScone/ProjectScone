@@ -26,6 +26,13 @@ INSTRUCTIONS = (
     "State consequential uncertainty; respect existing permission boundaries.",
 )
 _OUTER = " \t\r\n"
+#: Above this the request passes through untouched and the host is told
+#: so; a structured copy of a huge prompt would double its size. Same
+#: limit as the Rust compiler.
+MAX_TASK_BYTES = 60_000
+SKIPPED_NOTICE = (
+    "Scone prompt processing skipped: request exceeds the 60000-byte limit; the original prompt is unchanged."
+)
 
 
 def clean_request(request: str) -> str:
@@ -39,11 +46,21 @@ def compile_payload(request: str) -> dict:
 
 def additional_context(request: str) -> str:
     """What the hook hands the host: prefix plus the payload as compact JSON."""
-    return CONTEXT_PREFIX + json.dumps(compile_payload(request), ensure_ascii=False, separators=(",", ":"))
+    # Keys sorted, so the bytes match the Rust compiler (serde_json sorts);
+    # consumers must still compare as JSON, not as text.
+    return CONTEXT_PREFIX + json.dumps(compile_payload(request), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def hook_output(request: str) -> Mapping[str, object]:
-    """The stdout JSON for a Claude Code UserPromptSubmit hook."""
+    """The stdout JSON for a UserPromptSubmit hook. Three outcomes, the
+    same as the Rust compiler: an empty request (after outer trim) gets
+    {}, an oversized one gets a systemMessage notice and no context, and
+    everything else gets the compiled context."""
+    task = clean_request(request)
+    if not task:
+        return {}
+    if len(task.encode()) > MAX_TASK_BYTES:
+        return {"systemMessage": SKIPPED_NOTICE}
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

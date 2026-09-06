@@ -201,7 +201,7 @@ def run_hook(
         payload = json.loads(stdin_text or "{}")
         if env.get("SCONE_HOOK_COMPILE", "1") == "1" and payload.get("hook_event_name") == "UserPromptSubmit":
             request = payload.get("user_input", payload.get("prompt"))
-            if isinstance(request, str) and request.strip():
+            if isinstance(request, str):
                 from .prompting import hook_output
 
                 print(json.dumps(hook_output(request), ensure_ascii=False), file=out)

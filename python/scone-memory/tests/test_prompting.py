@@ -93,3 +93,46 @@ def test_session_gate_limits_which_sessions_are_logged():
         payload = json.dumps({"hook_event_name": "Stop", "session_id": sid, "cwd": "/Users/me/ProjectScone", "last_assistant_message": "x"})
         agent_hook.run_hook([], payload, env, transport=transport, stdout=io.StringIO())
     assert [c["payload"]["session_id"] for c in calls] == ["keep-me"]
+
+
+def test_empty_and_oversized_requests_match_the_rust_compiler():
+    assert hook_output("   \r\n\t") == {}, "nothing to structure: the host gets an empty object"
+    big = "x" * 60_000
+    assert "hookSpecificOutput" in hook_output(big), "exactly at the limit still compiles"
+    over = hook_output("🥐" * 15_001)  # 60,004 bytes, 15,001 characters: the limit is bytes
+    assert over == {"systemMessage": "Scone prompt processing skipped: request exceeds the 60000-byte limit; the original prompt is unchanged."}
+    assert hook_output("  " + big + "  ") != {"systemMessage": over["systemMessage"]}, "outer whitespace does not count"
+
+
+def test_hook_stdout_for_empty_prompt_is_empty_object():
+    env = {"SCONE_API_KEY": "k", "SCONE_HOOK_PROJECTS": "scone=/Users/me/ProjectScone"}
+    out = io.StringIO()
+    payload = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s", "cwd": "/Users/me/ProjectScone", "user_input": "  \n"})
+    assert agent_hook.run_hook([], payload, env, transport=lambda *a: {"recorded": 1}, stdout=out) == 0
+    assert json.loads(out.getvalue()) == {}
+
+
+RUST_PREVIEW = pathlib.Path.home() / ".local" / "share" / "scone-preview" / "bin" / "scone"
+
+
+def test_rust_and_python_compilers_agree_as_json_on_fixture_and_edge_cases():
+    """Runs only where the installed Rust preview binary exists; CI skips."""
+    import subprocess
+
+    import pytest
+
+    if not RUST_PREVIEW.exists():
+        pytest.skip("installed Rust scone preview not present")
+    cases = [c["input"] for c in load()["cases"]] + ["   \n", "x" * 60_000, "🥐" * 15_001, "  hello  "]
+    for inp in cases:
+        stdin = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s", "user_input": inp})
+        r = subprocess.run([str(RUST_PREVIEW), "prompt-hook"], input=stdin, capture_output=True, text=True, timeout=10)
+        rust = json.loads(r.stdout or "{}")
+        py = json.loads(json.dumps(hook_output(inp)))
+        # additionalContext is prefix + JSON: compare the JSON as JSON.
+        for side in (rust, py):
+            if "hookSpecificOutput" in side:
+                ctx = side["hookSpecificOutput"]["additionalContext"]
+                assert ctx.startswith(CONTEXT_PREFIX)
+                side["hookSpecificOutput"]["additionalContext"] = json.loads(ctx[len(CONTEXT_PREFIX):])
+        assert rust == py, repr(inp[:40])
