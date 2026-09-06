@@ -29,8 +29,10 @@ class Clock:
 def backends():
     yield pytest.param("memory", id="memory")
     yield pytest.param("sqlite", id="sqlite")
+    yield pytest.param("qdrant-local", id="qdrant-local")
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
+        yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
     if QDRANT_URL:
         yield pytest.param("qdrant", id="qdrant", marks=pytest.mark.qdrant)
 
@@ -45,12 +47,17 @@ async def engine(request, tmp_path):
 
         path = tmp_path / "memory.db"
         documents, vectors = SqliteDocumentStore(path), SqliteVectorIndex(path)
-    elif request.param == "mongo":
-        from scone_memory.backends import MongoDocumentStore
+    elif request.param.startswith("mongo"):
+        from scone_memory.backends import MongoDocumentStore, QdrantVectorIndex
 
         documents = MongoDocumentStore(MONGO_URL, f"scone_test_{uuid.uuid4().hex[:8]}")
         await documents.open()
-        vectors = InMemoryVectorIndex()
+        vectors = QdrantVectorIndex(":memory:", "scone_test") if "qdrant" in request.param else InMemoryVectorIndex()
+    elif request.param == "qdrant-local":
+        from scone_memory.backends import QdrantVectorIndex
+
+        documents = InMemoryDocumentStore()
+        vectors = QdrantVectorIndex(":memory:", "scone_test")
     else:
         from scone_memory.backends import QdrantVectorIndex
 
@@ -59,11 +66,8 @@ async def engine(request, tmp_path):
     e = await MemoryEngine(documents, vectors, HashEmbedder(), chunk_target=200, clock=clock).open()
     e.test_clock = clock  # type: ignore[attr-defined]
     yield e
-    if hasattr(documents, "close"):
-        await documents.close()
-    if hasattr(vectors, "close"):
-        await vectors.close()
-    if hasattr(documents, "drop"):
-        await documents.drop()
-    if hasattr(vectors, "drop"):
-        await vectors.drop()
+    for store in (documents, vectors):
+        if hasattr(store, "drop"):
+            await store.drop()
+        if hasattr(store, "close"):
+            await store.close()

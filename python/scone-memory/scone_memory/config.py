@@ -1,9 +1,10 @@
 """Assemble an engine from environment variables.
 
-    SCONE_DOCUMENTS   memory | mongo            (default memory)
-    SCONE_VECTORS     memory | qdrant           (default memory)
+    SCONE_DOCUMENTS   memory | sqlite | mongo   (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
+    SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
     SCONE_MONGO_URL, SCONE_MONGO_DB (default scone)
     SCONE_QDRANT_URL, SCONE_QDRANT_API_KEY, SCONE_QDRANT_COLLECTION (default scone_chunks)
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
@@ -31,6 +32,7 @@ class Settings:
     documents: str = "memory"
     vectors: str = "memory"
     embedder: str = "hash"
+    sqlite_path: str = "~/.scone-memory/memory.db"
     mongo_url: Optional[str] = None
     mongo_db: str = "scone"
     qdrant_url: Optional[str] = None
@@ -50,6 +52,7 @@ class Settings:
             documents=env.get("SCONE_DOCUMENTS", "memory"),
             vectors=env.get("SCONE_VECTORS", "memory"),
             embedder=env.get("SCONE_EMBEDDER", "hash"),
+            sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
             mongo_url=env.get("SCONE_MONGO_URL"),
             mongo_db=env.get("SCONE_MONGO_DB", "scone"),
             qdrant_url=env.get("SCONE_QDRANT_URL"),
@@ -108,6 +111,10 @@ def build_documents(settings: Settings):
         from .backends import InMemoryDocumentStore
 
         return InMemoryDocumentStore()
+    if settings.documents == "sqlite":
+        from .backends import SqliteDocumentStore
+
+        return SqliteDocumentStore(settings.sqlite_path)
     if settings.documents == "mongo":
         from .backends import MongoDocumentStore
 
@@ -122,6 +129,10 @@ def build_vectors(settings: Settings):
         from .backends import InMemoryVectorIndex
 
         return InMemoryVectorIndex()
+    if settings.vectors == "sqlite":
+        from .backends import SqliteVectorIndex
+
+        return SqliteVectorIndex(settings.sqlite_path)
     if settings.vectors == "qdrant":
         from .backends import QdrantVectorIndex
 
