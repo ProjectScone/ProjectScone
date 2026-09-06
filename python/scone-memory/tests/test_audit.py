@@ -67,6 +67,22 @@ async def test_a_claim_carrying_a_quote_that_still_holds_is_reported_grounded(en
     assert [(f.verdict, f.flagged) for f in found] == [("grounded", False)]
 
 
+async def test_an_imported_quote_that_is_not_in_its_source_is_flagged(engine):
+    """A claim that stored evidence is judged on that evidence. assert_fact
+    refuses a quote its episode does not contain, but an import carries
+    whatever the other store wrote, so the audit checks it again here."""
+    await engine.import_records(SPACE, [
+        {"type": "episode", "episode_id": 1, "content": "Ana moved to Lisbon in March."},
+        {"type": "fact", "subject": "ana", "predicate": "moved_to", "object": "Porto",
+         "valid_from": "2024-03-02", "status": "active", "origin": "extracted",
+         "source_episode_id": 1, "quote": "Ana moved to Porto in March."},
+    ])
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("quote_not_in_source", True)]
+
+
 async def test_a_claim_the_audit_cannot_settle_is_not_flagged(engine):
     """The checks are necessary, not sufficient: an object sitting in an
     ordinary asserted clause proves nothing either way, and saying so is
