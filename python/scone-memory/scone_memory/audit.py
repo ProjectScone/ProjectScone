@@ -20,35 +20,33 @@ from typing import Iterator, Optional, Sequence
 
 from .errors import NotFound
 
-# The checks below mirror the ones the distiller applies to a new
-# extraction. They are stated here rather than imported because an audit
-# that cannot run without the extractor's current patch is an audit that
-# cannot run; when the distiller's source grounding lands, the two should
-# share one definition of a non-asserted clause.
-_NON_ASSERTED = re.compile(
-    r"\b(?:if|unless|assuming|suppose|supposing|whether|might|may|could|would|"
-    r"should|perhaps|maybe|possibly|potentially|unclear|unknown|not|never|no|"
-    r"nothing|neither|unlikely|likely|doubt|doubts|doubted|plans?|planned|planning|"
-    r"intends?|intended|intending|intents?|intentions?)\b|"
+# What the distiller refuses and what an audit may condemn are not the
+# same list. The distiller refuses doubt as well as denial, because a
+# false positive there costs one missed extraction. Applied to a ledger
+# that already exists, that same list calls "every extraction would land
+# as a proposal for Review" unsupported, when the source asserts it. So
+# the audit knows only denial, and even then it condemns just the case
+# with no other reading: the object IS the denial.
+_DENIAL = re.compile(
+    r"\b(?:no|not|never|nothing|none|neither|nor|cannot|without|unclear|unknown)\b|"
     r"\b(?:aren|can|couldn|didn|doesn|don|hadn|hasn|haven|isn|mightn|mustn|"
-    r"needn|shan|shouldn|wasn|weren|won|wouldn)['\u2019]t\b|\bcannot\b|"
-    r"\bevidence\s+to\s+verify\b|\bto\s+verify\b|"
-    r"\bfollowed\s+by\s+confirmation\b",
+    r"needn|shan|shouldn|wasn|weren|won|wouldn)['\u2019]t\b",
     re.IGNORECASE,
 )
-_IMPERATIVE = re.compile(
-    r"^\s*(?:[-*]\s*)?(?:please\s+)?(?:verify|confirm|check|ensure|use|run|"
-    r"install|create|open|record|remember|follow|test)\b",
-    re.IGNORECASE,
-)
+#: An object made only of these is an extraction that swallowed the
+#: negation it was reading, which is what put "is_installed / nothing" in
+#: the live ledger.
+_DENIAL_WORDS = frozenset({
+    "no", "not", "never", "nothing", "none", "neither", "nor", "cannot",
+    "unclear", "unknown", "false",
+})
 
 #: Verdicts that mean the source cannot support the claim.
 FLAGGED = frozenset({
+    "object_is_a_denial",
     "object_not_in_source",
-    "object_only_in_non_asserted_context",
     "quote_not_in_source",
     "object_not_in_quote",
-    "quote_context_not_asserted",
 })
 
 
@@ -102,12 +100,16 @@ async def _judge(engine, space: str, fact, sources: dict) -> Finding:
         return _judge_quote(fact, source)
     spans = list(_spans(source, fact.object))
     if not spans:
-        return _finding(fact, "object_not_in_source")
+        return _finding(fact, _absent_verdict(source, fact.object))
     clauses = [_clause_around(source, start, end) for start, end in spans]
-    denials = [clause for clause in clauses if _is_non_asserted(clause)]
-    if len(denials) == len(clauses):
-        return _finding(fact, "object_only_in_non_asserted_context", evidence=denials[0])
-    return _finding(fact, "unverifiable_without_a_quote")
+    denials = [clause for clause in clauses if _DENIAL.search(clause)]
+    if len(denials) < len(clauses):
+        return _finding(fact, "unverifiable_without_a_quote")
+    if _is_a_denial(fact.object):
+        return _finding(fact, "object_is_a_denial", evidence=denials[0])
+    # A real object inside a denied clause may or may not survive
+    # reading. Reported with the clause, not condemned by it.
+    return _finding(fact, "denial_in_the_same_clause", evidence=denials[0])
 
 
 def _judge_quote(fact, source: str) -> Finding:
@@ -120,9 +122,58 @@ def _judge_quote(fact, source: str) -> Finding:
     if next(_spans(fact.quote, fact.object), None) is None:
         return _finding(fact, "object_not_in_quote")
     clause = _clause_around(source, *quote_at)
-    if _is_non_asserted(clause):
-        return _finding(fact, "quote_context_not_asserted", evidence=clause)
+    if _DENIAL.search(clause) and _is_a_denial(fact.object):
+        return _finding(fact, "object_is_a_denial", evidence=clause)
     return _finding(fact, "grounded")
+
+
+#: Words that carry no evidence either way, so a claim made only of them
+#: cannot be checked against a text by looking for them in it.
+_EMPTY_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "by", "did", "do", "does", "false",
+    "for", "from", "had", "has", "have", "in", "is", "it", "its", "no", "none", "not", "of",
+    "on", "or", "that", "the", "then", "there", "this", "to", "true", "was", "were", "with",
+    "yes",
+})
+#: How much of an object's own vocabulary has to be missing from the
+#: source before the claim is one a person should look at. Above this it
+#: is a rewording, which the audit cannot settle and does not flag.
+MIN_WORD_SHARE = 0.5
+
+
+def _absent_verdict(source: str, object: str) -> str:
+    """The object is not in the source as a phrase. That alone does not
+    make it fabricated: the live store is full of claims that say their
+    source in another word order, and calling those fabricated sends a
+    person to reject good claims. So ask how much of the object's own
+    vocabulary the source contains at all."""
+    wanted = _content_words(object)
+    if not wanted:
+        return "unverifiable_without_a_quote"
+    # One side is expanded, not both: expanding the object's words too
+    # would count "fixtures" and "fixture" as two things to find.
+    have = {form for word in _content_words(source) for form in _forms(word)}
+    found = sum(1 for word in wanted if _forms(word) & have)
+    return "object_not_in_source" if found / len(wanted) < MIN_WORD_SHARE else "unverifiable_without_a_quote"
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[^\W_]+", text.casefold())
+        if word not in _EMPTY_WORDS and len(word) > 1
+    }
+
+
+def _forms(word: str) -> set[str]:
+    """A word and the stems a rewording is likely to reach for."""
+    forms = {word}
+    if len(word) > 3 and word.endswith("s"):
+        forms.add(word[:-1])
+    if len(word) > 4 and word.endswith("ed"):
+        forms.update((word[:-2], word[:-1]))
+    if len(word) > 5 and word.endswith("ing"):
+        forms.update((word[:-3], word[:-3] + "e"))
+    return forms
 
 
 def _clause_around(source: str, start: int, end: int) -> str:
@@ -132,10 +183,9 @@ def _clause_around(source: str, start: int, end: int) -> str:
     return source[left:right]
 
 
-def _is_non_asserted(clause: str) -> bool:
-    return bool(
-        _NON_ASSERTED.search(clause) or _IMPERATIVE.search(clause) or clause.rstrip().endswith("?")
-    )
+def _is_a_denial(object: str) -> bool:
+    words = set(re.findall(r"[^\W_]+", object.casefold()))
+    return bool(words) and words <= _DENIAL_WORDS
 
 
 def _finding(fact, verdict: str, evidence: Optional[str] = None) -> Finding:

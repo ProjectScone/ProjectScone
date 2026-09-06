@@ -38,7 +38,11 @@ def client(engine):
         yield c
 
 
-async def test_a_claim_taken_from_a_denial_is_flagged_with_the_clause_that_denies_it(engine):
+async def test_a_claim_whose_object_is_the_denial_itself_is_flagged(engine):
+    """The live store's "claude code / is_installed / nothing" took the
+    denial's own word as the object. An object made only of denial words
+    is an extraction that swallowed the negation, and there is no reading
+    of the source under which the claim holds."""
     added = await engine.remember(SPACE, DENIAL)
     await engine.assert_fact(
         SPACE, "claude code", "is_installed", "nothing",
@@ -47,9 +51,45 @@ async def test_a_claim_taken_from_a_denial_is_flagged_with_the_clause_that_denie
 
     found = await audit_grounding(engine, SPACE)
 
-    assert [f.verdict for f in found] == ["object_only_in_non_asserted_context"]
+    assert [f.verdict for f in found] == ["object_is_a_denial"]
     assert found[0].flagged
     assert "says nothing about whether" in found[0].evidence
+
+
+async def test_a_real_object_inside_a_denied_clause_is_reported_not_condemned(engine):
+    """"the hook / posts_to_endpoint / successfully" comes from the same
+    denial, and may well be wrong, but the object is real text and only a
+    person reading the sentence can say. It is reported with its clause
+    and left unflagged: a queue, not a verdict."""
+    added = await engine.remember(SPACE, DENIAL)
+    await engine.assert_fact(
+        SPACE, "the hook", "posts_to_endpoint", "successfully",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("denial_in_the_same_clause", False)]
+    assert "says nothing about whether" in found[0].evidence
+
+
+async def test_a_clause_that_only_says_would_is_not_a_finding(engine):
+    """The distiller refuses "would" at extraction time, where a false
+    positive costs one missed claim. Used against a stored ledger the same
+    rule condemns "every extraction would land as a proposal for Review",
+    which the source plainly asserts. Precision at write time is not
+    precision at audit time."""
+    added = await engine.remember(
+        SPACE, "With consolidation on, every extraction would land as a proposal for Review."
+    )
+    await engine.assert_fact(
+        SPACE, "extraction", "would_land_as", "a proposal for Review",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("unverifiable_without_a_quote", False)]
 
 
 async def test_a_claim_whose_object_is_absent_from_its_source_is_flagged(engine):
@@ -161,12 +201,12 @@ def test_the_cli_reports_a_flagged_claim_with_its_evidence(tmp_path):
     assert code == 0
     reported = json.loads(text)
     assert reported["fact_id"] == 1
-    assert reported["verdict"] == "object_only_in_non_asserted_context"
+    assert reported["verdict"] == "object_is_a_denial"
     assert "says nothing about whether" in reported["evidence"]
 
     code, human = run("audit-grounding")
     assert code == 0
-    assert "fact 1" in human and "object_only_in_non_asserted_context" in human
+    assert "fact 1" in human and "object_is_a_denial" in human
     assert "says nothing about whether" in human  # the evidence, not only the verdict
     assert "1 of 1 claim needs a person" in human
 
@@ -199,7 +239,7 @@ def test_the_audit_is_readable_over_http(client):
                                    "source_episode_id": plain, "origin": "extracted"}, headers=head)
 
     body = client.get("/v1/facts/audit", headers=head).json()
-    assert body["counts"] == {"object_only_in_non_asserted_context": 1, "object_not_in_source": 1,
+    assert body["counts"] == {"object_is_a_denial": 1, "object_not_in_source": 1,
                               "unverifiable_without_a_quote": 1}
     assert body["revision"] == client.get("/v1/facts", headers=head).json()["revision"]
     assert len(body["findings"]) == 3
@@ -207,8 +247,55 @@ def test_the_audit_is_readable_over_http(client):
     assert "says nothing about whether" in denied["evidence"]
 
     only = client.get("/v1/facts/audit", params={"flagged": "true"}, headers=head).json()
-    assert [f["verdict"] for f in only["findings"]] == [
-        "object_only_in_non_asserted_context", "object_not_in_source",
-    ]
+    assert [f["verdict"] for f in only["findings"]] == ["object_is_a_denial", "object_not_in_source"]
     assert only["counts"] == body["counts"]  # what is shown is filtered, what is counted is not
     assert client.get("/v1/facts/audit", params={"status": "proposed"}, headers=head).json()["findings"] == []
+
+
+async def test_a_claim_that_says_its_source_in_other_words_is_not_flagged(engine):
+    """The live store's "would_be_corrupted / if synthetic fixtures were
+    mixed in" comes from "mixing in synthetic fixtures would let seeded
+    data masquerade as captured evidence, corrupting retrieval". Every
+    word is there, in another order. An exact-phrase check calls that
+    fabricated and sends a person to reject a good claim, so a claim whose
+    words are mostly present is unproven, not wrong."""
+    added = await engine.remember(SPACE, (
+        "Demo records must stay separate: mixing in synthetic fixtures would let seeded "
+        "data masquerade as captured evidence, corrupting retrieval."
+    ))
+    await engine.assert_fact(
+        SPACE, "benchmarks", "would_be_corrupted", "if synthetic fixtures were mixed in",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("unverifiable_without_a_quote", False)]
+
+
+async def test_a_value_with_no_words_to_match_is_not_flagged(engine):
+    """"true" cannot be grounded by looking for it in a sentence. The
+    audit says so instead of calling a boolean a fabrication."""
+    added = await engine.remember(SPACE, "The doc comment joins the embedding; it is off by default.")
+    await engine.assert_fact(
+        SPACE, "contextual code", "is_off_by_default", "true",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("unverifiable_without_a_quote", False)]
+
+
+async def test_a_claim_whose_words_are_absent_is_still_flagged(engine):
+    """The class has to keep its meaning: an object that shares almost
+    nothing with its source is the one worth a person's time."""
+    added = await engine.remember(SPACE, "Ana moved to Lisbon in March.")
+    await engine.assert_fact(
+        SPACE, "ana", "works_at", "Farfetch and Kinsta",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert [(f.verdict, f.flagged) for f in found] == [("object_not_in_source", True)]
