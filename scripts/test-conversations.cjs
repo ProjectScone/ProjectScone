@@ -8,9 +8,9 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
-  const sessions=[{session_id:'previous',space:'alpha',state:'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null}];
+  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   let turn=null,posts=0,checks=0;const requested=[];
   const server=http.createServer(async(req,res)=>{
@@ -18,7 +18,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime'}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime'}));
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
@@ -59,9 +59,20 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
-test('unconfigured service explains setup and never probes sessions',async t=>{
-  const {page,requested}=await fixture(t,{unavailable:true});
+test('unconfigured text keeps saved conversations readable without permitting new work',async t=>{
+  const {page,posts}=await fixture(t,{unavailable:true});
   await page.getByText('Text runtime not configured',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Message',{exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+  await page.reload();await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(posts(),0);
+});
+test('an unknown conversation contract does not trigger session reads',async t=>{
+  const {page,requested}=await fixture(t,{unknown:true});
+  await page.getByRole('button',{name:'Retry service connection',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
   assert.equal(requested.some(p=>p.startsWith('/v1/conversations?')),false);
 });

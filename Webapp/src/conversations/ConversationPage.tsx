@@ -18,7 +18,7 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
       const options={signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])};
       const next=capabilities(await api.request('/v1/conversations/capabilities',options));
       if(controller.signal.aborted)return;setCap(next);
-      if(next.text_configured){const page=sessionPage(await api.request('/v1/conversations?limit=100',options));if(!controller.signal.aborted){setItems(page.items);setAfter(page.next_after);}}
+      const page=sessionPage(await api.request('/v1/conversations?limit=100',options));if(!controller.signal.aborted){setItems(page.items);setAfter(page.next_after);}
     }catch{if(!controller.signal.aborted)setError('The conversation service could not be verified. Your memory connection alone does not enable conversations.');}})();}
     return()=>controller.abort();
   },[api,enabled,attempt]);
@@ -46,10 +46,10 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
       {after&&<button onClick={more}>Load more sessions</button>}
       <p className="conversation-list-note">Sessions belong to this memory space. Switching views does not stop an active conversation.</p>
     </aside>
-    {enabled&&cap?.text_configured&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed}/>:<section className="conversation-landing">
+    {enabled&&cap&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed} textConfigured={cap.text_configured}/>:<section className="conversation-landing">
       <span className="conversation-orbit" aria-hidden="true">✳</span><span className="eyebrow">Context that carries forward</span>
       <h2>{!enabled?'Connect your memory first':cap&&!cap.text_configured?'Text runtime not configured':sid&&!idPattern.test(sid)?'Invalid session address':'Good conversations build on what you know.'}</h2>
-      <p>{!enabled?'Use Connect memory to authorize this workspace.':cap&&!cap.text_configured?'This server needs a configured text model and the optional conversation service. No provider key belongs in this page.':'Start a text session or open a saved conversation. Inspect the original sources alongside each exchange.'}</p>
+      <p>{!enabled?'Use Connect memory to authorize this workspace.':cap&&!cap.text_configured?'Saved conversations remain available. Configure a text model on this server to start or send messages. No provider key belongs in this page.':'Start a text session or open a saved conversation. Inspect the original sources alongside each exchange.'}</p>
       <div className="conversation-landing-facts"><div><b>01</b><strong>Bring context</strong><span>Recall from your authorized memory.</span></div><div><b>02</b><strong>Keep the original</strong><span>Public messages become source records.</span></div><div><b>03</b><strong>See the evidence</strong><span>Inspect what was prepared and saved.</span></div></div>
       <p className="conversation-caption">This workspace supports completed text replies. Voice and video controls will arrive with verified transport support.</p>
     </section>}

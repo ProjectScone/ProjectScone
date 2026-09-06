@@ -3,7 +3,7 @@ import {ApiError,type ApiClient} from '../api';
 import {ConversationEvidence} from './ConversationEvidence';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
-export function ConversationSession({api,sid,onSession}:{api:ApiClient;sid:string;onSession:(value:Session)=>void}){
+export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean}){
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
@@ -46,7 +46,7 @@ export function ConversationSession({api,sid,onSession}:{api:ApiClient;sid:strin
     void refresh();return()=>{controller.abort();clearTimeout(timer);};
   },[api,url,attempt,onSession]);
   async function send(){
-    if(!current||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
+    if(!textConfigured||!current||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
     if(new TextEncoder().encode(draft).length>32000){setError('Keep messages within 32,000 UTF-8 bytes.');return;}
     const controller=lifetime.current,id=crypto.randomUUID();request.current=id;mutation.current=true;setBusy(true);setDelivery('Sending message…');setError('');
     try{
@@ -74,6 +74,7 @@ export function ConversationSession({api,sid,onSession}:{api:ApiClient;sid:strin
     <header className="conversation-thread-header"><div><span className="eyebrow">Text session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
       <button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button></header>
     {error&&<div className="conversation-notice" role="alert">{error}<button onClick={()=>setAttempt(n=>n+1)}>Check connection</button></div>}
+    {!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
     <div className="conversation-messages" aria-label="Saved messages">
       {saved===null?<p role="status">Loading saved messages…</p>:saved.episodes.length?saved.episodes.map(item=><article className={`conversation-message ${item.metadata.role==='user'?'from-user':'from-agent'}`} key={item.episode_id}>
         <div className="conversation-message-label">{item.metadata.role==='user'?'You':item.metadata.role==='assistant'?'Assistant':'Recorded message'}<button onClick={()=>setSelected(item.episode_id)} aria-label={`Inspect message episode ${item.episode_id}`}>↗ Source {item.episode_id}</button></div><p>{item.content}</p>
@@ -81,8 +82,8 @@ export function ConversationSession({api,sid,onSession}:{api:ApiClient;sid:strin
       {saved?.has_more&&<p className="conversation-notice">Showing the first 200 saved messages. This is a partial transcript.</p>}
     </div>
     <form className="conversation-composer" onSubmit={e=>{e.preventDefault();void send();}}>
-      <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} placeholder={terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!verified||Boolean(terminal)} rows={3}/>
-      <div className="conversation-composer-footer"><span role="status">{delivery|| (terminal?'Saved messages remain in your memory.':'Completed replies · not a token stream')}</span><button className="primary" type="submit" aria-label="Send message" disabled={!verified||current?.state!=='running'||busy||!draft.trim()}>Send ↑</button></div>
+      <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>
+      <div className="conversation-composer-footer"><span role="status">{delivery|| (terminal?'Saved messages remain in your memory.':'Completed replies · not a token stream')}</span><button className="primary" type="submit" aria-label="Send message" disabled={!textConfigured||!verified||current?.state!=='running'||busy||!draft.trim()}>Send ↑</button></div>
     </form>
   </section><ConversationEvidence api={api} result={result} selected={selected} onSelect={setSelected}/></>;
 }
