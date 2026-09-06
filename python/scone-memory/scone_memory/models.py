@@ -17,7 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field
 #: The same vocabulary as the Rust product's schema CHECK, so an episode
 #: means the same thing on both sides (shared spec, section 1).
 EpisodeKind = Literal["note", "file", "conversation", "observation", "connector"]
-FactStatus = Literal["active", "closed", "proposed"]
+#: active: holds now. closed: held until valid_until. proposed: a model's
+#: extraction awaiting a person; outside the ledger until approved.
+#: declined: a proposal a person rejected; never held.
+FactStatus = Literal["active", "closed", "proposed", "declined"]
+#: stated: a person or a trusted program asserted it. extracted: a model
+#: read it out of an episode. inferred: derived from other facts.
+#: A surface must never show an extracted or inferred fact without saying so.
+FactOrigin = Literal["stated", "extracted", "inferred"]
 
 MAX_CONTENT_BYTES = 2_000_000
 
@@ -73,10 +80,27 @@ class Fact(BaseModel):
     status: FactStatus = "active"
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
+    origin: FactOrigin = "stated"
+    #: Set when a person suppressed this fact from recall. The interval
+    #: and status are untouched: exclusion is a policy, not a rewrite of
+    #: history. Cleared by ``include``.
+    excluded_reason: Optional[str] = None
+
+    @property
+    def excluded(self) -> bool:
+        return self.excluded_reason is not None
+
+    @property
+    def in_ledger(self) -> bool:
+        """Proposed and declined facts never held; they are not part of
+        the partition of time and never answer a question."""
+        return self.status in ("active", "closed")
 
     def holds_at(self, when: str) -> bool:
         from .timeutil import parse_rfc3339
 
+        if not self.in_ledger:
+            return False
         t = parse_rfc3339(when)
         if parse_rfc3339(self.valid_from) > t:
             return False
@@ -130,6 +154,8 @@ class Status(BaseModel):
     episodes: int = 0
     chunks: int = 0
     bytes: int = 0
+    #: Proposed facts awaiting a person.
+    pending_review: int = 0
     revision: int = 0
     embedder: str = ""
     document_store: str = ""

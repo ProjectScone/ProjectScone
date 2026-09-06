@@ -57,6 +57,8 @@ EMBED_BATCH = 64
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job",)
+ORIGINS = ("stated", "extracted", "inferred")
+STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
 MAX_EXTERNAL_PAYLOAD = 4096
 
@@ -95,6 +97,14 @@ class ImportSummary:
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
+
+
+@dataclass(frozen=True)
+class _Placement:
+    covering: list
+    restates: Optional[Fact]
+    bound: Optional[str]
+    bound_reason: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -530,7 +540,7 @@ class MemoryEngine:
         # Closed facts are included on purpose: asked about 2023, the
         # fact that held in 2023 is the answer even if it closed since.
         for fact in await self.documents.list_facts(space, include_closed=True):
-            if not fact.holds_at(when):
+            if fact.excluded or not fact.holds_at(when):
                 continue
             overlap = len(terms & set(tokenize(f"{fact.subject} {fact.predicate} {fact.object}")))
             if overlap:
@@ -549,11 +559,18 @@ class MemoryEngine:
         valid_from: Optional[str] = None,
         confidence: float = 1.0,
         source_episode_id: Optional[int] = None,
+        origin: str = "stated",
+        proposed: bool = False,
     ) -> Fact:
         """Record that ``subject predicate object`` holds from ``valid_from``.
 
-        Every fact with the same subject and predicate takes part, whatever
-        its status, so the ledger stays a partition of time:
+        ``origin`` says who is speaking: a person or trusted program
+        (stated), a model reading an episode (extracted), or a derivation
+        (inferred). ``proposed`` parks the fact for a person to approve;
+        until then it is outside the ledger and answers nothing.
+
+        Every ledger fact with the same subject and predicate takes part,
+        whatever its status, so the ledger stays a partition of time:
 
         - a fact with the same object whose interval covers the start is a
           restatement and is returned unchanged;
@@ -572,63 +589,169 @@ class MemoryEngine:
             raise InvalidInput("object must not be empty")
         if not 0.0 <= confidence <= 1.0:
             raise InvalidInput("confidence must be within 0..=1")
+        if origin not in ORIGINS:
+            raise InvalidInput(f"origin must be one of {ORIGINS}, got {origin!r}")
         start = normalise_time(valid_from) if valid_from else self.clock()
-        start_dt = parse_rfc3339(start)
-
         started = time.perf_counter()
-        rivals = await self.documents.facts_for(space, subject, predicate)
-        covering = [r for r in rivals if _covers(r, start_dt)]
-        for rival in covering:
-            if rival.object == object:
-                await self._emit(space, "fact_assert", {
-                    "fact_id": rival.fact_id, "subject": subject, "predicate": predicate,
-                    "outcome": "restated", "superseded": [], "latency_ms": _ms(started),
-                })
-                return rival
-        later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
-        successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
 
+        if proposed:
+            fact = await self.documents.insert_fact(
+                NewFact(
+                    space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
+                    confidence=confidence, status="proposed", source_episode_id=source_episode_id, origin=origin,
+                )
+            )
+            await self.documents.bump_revision(space)
+            await self._emit(space, "fact_assert", {
+                "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
+                "outcome": "proposed", "superseded": [], "source_episode_id": source_episode_id,
+                "latency_ms": _ms(started),
+            })
+            return fact
+
+        placement = await self._place(space, subject, predicate, object, start)
+        if placement.restates is not None:
+            await self._emit(space, "fact_assert", {
+                "fact_id": placement.restates.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
+                "outcome": "restated", "superseded": [], "latency_ms": _ms(started),
+            })
+            return placement.restates
         fact = await self.documents.insert_fact(
             NewFact(
-                space=space,
-                subject=subject,
-                predicate=predicate,
-                object=object,
-                valid_from=start,
-                valid_until=successor.valid_from if successor else None,
-                confidence=confidence,
-                status="closed" if successor else "active",
-                closed_reason=f"superseded by fact {successor.fact_id}" if successor else None,
-                source_episode_id=source_episode_id,
+                space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
+                valid_until=placement.bound, confidence=confidence,
+                status="closed" if placement.bound else "active",
+                closed_reason=placement.bound_reason, source_episode_id=source_episode_id, origin=origin,
             )
         )
-        for rival in covering:
-            reason = rival.closed_reason
-            if reason is None or reason.startswith("superseded by fact "):
-                reason = f"superseded by fact {fact.fact_id}"
-            await self.documents.update_fact(
-                rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason})
-            )
+        await self._truncate(placement.covering, start, fact.fact_id)
         await self.documents.bump_revision(space)
         await self._emit(space, "fact_assert", {
-            "fact_id": fact.fact_id, "subject": subject, "predicate": predicate,
-            "outcome": "new_closed" if successor else "new_active",
-            "superseded": [r.fact_id for r in covering],
+            "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
+            "outcome": "new_closed" if placement.bound else "new_active",
+            "superseded": [r.fact_id for r in placement.covering],
             "source_episode_id": source_episode_id,
             "latency_ms": _ms(started),
         })
         return fact
 
+    async def _place(self, space: str, subject: str, predicate: str, object: str, start: str, exclude_id: Optional[int] = None) -> "_Placement":
+        """Where a fact starting at ``start`` sits among the ledger facts
+        (active or closed) with the same subject and predicate."""
+        start_dt = parse_rfc3339(start)
+        rivals = [
+            r for r in await self.documents.facts_for(space, subject, predicate)
+            if r.in_ledger and r.fact_id != exclude_id
+        ]
+        covering = [r for r in rivals if _covers(r, start_dt)]
+        restates = next((r for r in covering if r.object == object), None)
+        later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
+        successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
+        return _Placement(
+            covering=[] if restates else covering,
+            restates=restates,
+            bound=successor.valid_from if successor else None,
+            bound_reason=f"superseded by fact {successor.fact_id}" if successor else None,
+        )
+
+    async def _truncate(self, covering: list[Fact], start: str, by_fact_id: int) -> None:
+        for rival in covering:
+            reason = rival.closed_reason
+            if reason is None or reason.startswith("superseded by fact "):
+                reason = f"superseded by fact {by_fact_id}"
+            await self.documents.update_fact(
+                rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason})
+            )
+
+    async def approve(self, space: str, fact_id: int) -> Fact:
+        """A person accepts a proposed fact: it enters the ledger exactly as
+        an assertion at its own valid_from would, truncating what it
+        covers and bounded by what starts later. A proposal that restates
+        a fact already held is marked declined as a duplicate and the held
+        fact is returned."""
+        check_space(space)
+        fact = await self._proposed(space, fact_id)
+        placement = await self._place(space, fact.subject, fact.predicate, fact.object, fact.valid_from, exclude_id=fact.fact_id)
+        if placement.restates is not None:
+            await self.documents.update_fact(
+                fact.model_copy(update={"status": "declined", "closed_reason": f"duplicate of fact {placement.restates.fact_id}"})
+            )
+            await self.documents.bump_revision(space)
+            await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id})
+            return placement.restates
+        accepted = fact.model_copy(update={
+            "status": "closed" if placement.bound else "active",
+            "valid_until": placement.bound,
+            "closed_reason": placement.bound_reason,
+        })
+        await self.documents.update_fact(accepted)
+        await self._truncate(placement.covering, fact.valid_from, fact.fact_id)
+        await self.documents.bump_revision(space)
+        await self._emit(space, "fact_review", {
+            "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering],
+        })
+        return accepted
+
+    async def decline(self, space: str, fact_id: int, reason: str) -> Fact:
+        """A person rejects a proposed fact. It never held; the reason is kept."""
+        check_space(space)
+        reason = _reason(reason)
+        fact = await self._proposed(space, fact_id)
+        declined = fact.model_copy(update={"status": "declined", "closed_reason": reason})
+        await self.documents.update_fact(declined)
+        await self.documents.bump_revision(space)
+        await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "declined"})
+        return declined
+
+    async def _proposed(self, space: str, fact_id: int) -> Fact:
+        fact = await self.documents.get_fact(space, fact_id)
+        if fact is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        if fact.status != "proposed":
+            raise InvalidInput(f"fact {fact_id} is {fact.status}, not proposed")
+        return fact
+
+    async def exclude(self, space: str, fact_id: int, reason: str) -> Fact:
+        """Suppress a ledger fact from recall without touching its interval
+        or its history. The third operation beside close (it stopped
+        holding) and forget (the data is gone)."""
+        check_space(space)
+        reason = _reason(reason)
+        fact = await self.documents.get_fact(space, fact_id)
+        if fact is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        if not fact.in_ledger:
+            raise InvalidInput(f"fact {fact_id} is {fact.status}; only ledger facts can be excluded")
+        excluded = fact.model_copy(update={"excluded_reason": reason})
+        await self.documents.update_fact(excluded)
+        await self.documents.bump_revision(space)
+        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "exclude"})
+        return excluded
+
+    async def include(self, space: str, fact_id: int) -> Fact:
+        """Undo exclude."""
+        check_space(space)
+        fact = await self.documents.get_fact(space, fact_id)
+        if fact is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        if not fact.excluded:
+            return fact
+        included = fact.model_copy(update={"excluded_reason": None})
+        await self.documents.update_fact(included)
+        await self.documents.bump_revision(space)
+        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "include"})
+        return included
+
     async def close_fact(self, space: str, fact_id: int, reason: str) -> Fact:
         check_space(space)
-        reason = reason.strip()
-        if not reason or len(reason) > 500:
-            raise InvalidInput("reason must be 1..=500 chars")
+        reason = _reason(reason)
         fact = await self.documents.get_fact(space, fact_id)
         if fact is None:
             raise NotFound(f"fact {fact_id} not found in {space!r}")
         if fact.status == "closed":
             return fact
+        if not fact.in_ledger:
+            raise InvalidInput(f"fact {fact_id} is {fact.status}; decline a proposal instead of closing it")
         closed = fact.model_copy(
             update={"status": "closed", "valid_until": self.clock(), "closed_reason": reason}
         )
@@ -638,13 +761,31 @@ class MemoryEngine:
         return closed
 
     async def facts(
-        self, space: str, include_closed: bool = False, as_of: Optional[str] = None
+        self,
+        space: str,
+        include_closed: bool = False,
+        as_of: Optional[str] = None,
+        status: Optional[str] = None,
+        include_excluded: bool = False,
     ) -> list[Fact]:
+        """Ledger facts: active by default, closed too with include_closed,
+        those holding at ``as_of`` when given. ``status`` selects one
+        status instead (``proposed`` lists what awaits review). Excluded
+        facts are left out unless asked for."""
         check_space(space)
-        found = await self.documents.list_facts(space, include_closed=include_closed or as_of is not None)
-        if as_of is not None:
+        if status is not None and status not in STATUSES:
+            raise InvalidInput(f"status must be one of {STATUSES}, got {status!r}")
+        found = await self.documents.list_facts(space, include_closed=True)
+        if status is not None:
+            found = [f for f in found if f.status == status]
+        elif as_of is not None:
             boundary = normalise_time(as_of)
             found = [f for f in found if f.holds_at(boundary)]
+        else:
+            allowed = ("active", "closed") if include_closed else ("active",)
+            found = [f for f in found if f.status in allowed]
+        if not include_excluded:
+            found = [f for f in found if not f.excluded]
         return sorted(found, key=lambda f: f.fact_id)
 
     # -- overviews --------------------------------------------------------
@@ -652,7 +793,7 @@ class MemoryEngine:
     async def profile(self, space: str, limit: int = 10) -> Profile:
         check_space(space)
         limit = max(1, min(limit, 50))
-        active = await self.documents.list_facts(space, include_closed=False)
+        active = [f for f in await self.documents.list_facts(space, include_closed=False) if f.status == "active" and not f.excluded]
         active.sort(key=lambda f: (-f.confidence, f.fact_id))
         recent = await self.documents.recent_episodes(space, limit)
         return Profile(
@@ -680,11 +821,13 @@ class MemoryEngine:
     async def status(self, space: str) -> Status:
         check_space(space)
         counts = await self.documents.counts(space)
+        pending = sum(1 for f in await self.documents.list_facts(space, include_closed=True) if f.status == "proposed")
         return Status(
             space=space,
             episodes=counts.episodes,
             chunks=counts.chunks,
             bytes=counts.bytes,
+            pending_review=pending,
             revision=await self.documents.revision(space),
             embedder=self.embedder.id,
             document_store=self.documents.name,
@@ -757,7 +900,11 @@ class MemoryEngine:
                 status=str(f.get("status", "active")),
                 closed_reason=f.get("closed_reason"),
                 source_episode_id=id_map.get(int(source)) if source is not None else None,
+                origin=str(f.get("origin", "stated")),
+                excluded_reason=f.get("excluded_reason"),
             )
+            if new.status not in STATUSES or new.origin not in ORIGINS:
+                raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
             identity = (
                 new.subject, new.predicate, new.object, new.valid_from, new.valid_until,
                 new.status, new.closed_reason, new.confidence,
@@ -774,6 +921,13 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _reason(reason: str) -> str:
+    reason = reason.strip()
+    if not reason or len(reason) > 500:
+        raise InvalidInput("reason must be 1..=500 chars")
+    return reason
 
 
 def _ms(since: float) -> float:

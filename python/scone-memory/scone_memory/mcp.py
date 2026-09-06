@@ -328,6 +328,7 @@ def create_server(engine: MemoryEngine, space: str = "default") -> MCPServer:
                 valid_from=fact.valid_from or episode.created_at,
                 confidence=clamp_confidence(fact.confidence),
                 source_episode_id=episode_id,
+                origin="extracted",  # the host agent is a model reading an episode
             )
         after = await fact_ids_by_status(engine, target)
         added = len(after.keys() - before.keys())

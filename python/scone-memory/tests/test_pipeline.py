@@ -233,3 +233,29 @@ async def test_episode_kinds_are_the_rust_vocabulary():
     for kind in ("chat", "web", "memo"):  # pre-release names are gone, not aliased
         with pytest.raises(InvalidInput):
             await engine.remember("default", f"a {kind}", kind=kind)  # type: ignore[arg-type]
+
+
+def test_cli_review_flow(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    _, text = run("assert", "mark", "lives_in", "Lisbon", "--valid-from", "2024-03-02", "--origin", "extracted", "--propose", "--json")
+    proposed = json.loads(text)
+    assert (proposed["status"], proposed["origin"]) == ("proposed", "extracted")
+    _, text = run("review")
+    assert f"#{proposed['fact_id']} [proposed] [extracted]" in text and "confidence 1.00" in text
+    assert run("facts")[1].strip() == "no facts"
+    _, text = run("approve", str(proposed["fact_id"]), "--json")
+    assert json.loads(text)["status"] == "active"
+    _, text = run("exclude", str(proposed["fact_id"]), "--reason", "private", "--json")
+    assert json.loads(text)["excluded_reason"] == "private"
+    assert run("facts")[1].strip() == "no facts"
+    assert "excluded: private" in run("facts", "--excluded")[1]
+    _, text = run("include", str(proposed["fact_id"]), "--json")
+    assert json.loads(text)["excluded_reason"] is None
+    assert run("decline", str(proposed["fact_id"]), "--reason", "no")[0] == 2  # not proposed any more
+    assert run("review")[1].strip() == "nothing awaiting review"

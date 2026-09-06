@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY, space TEXT NOT NULL,
     subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
     confidence REAL NOT NULL, valid_from TEXT NOT NULL, valid_until TEXT,
-    status TEXT NOT NULL, closed_reason TEXT, source_episode_id INTEGER);
+    status TEXT NOT NULL, closed_reason TEXT, source_episode_id INTEGER,
+    origin TEXT NOT NULL DEFAULT 'stated', excluded_reason TEXT);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(space, subject, predicate);
 CREATE TABLE IF NOT EXISTS revisions (space TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vectors (
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 #: Shared spec 3.6. Bumped on any incompatible change; while the package
 #: is pre-release nothing is migrated: a file from an older build is
 #: refused with a message, not rewritten.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: facts carry origin and excluded_reason
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -142,6 +143,8 @@ def _fact(row: sqlite3.Row) -> Fact:
         status=row["status"],
         closed_reason=row["closed_reason"],
         source_episode_id=row["source_episode_id"],
+        origin=row["origin"],
+        excluded_reason=row["excluded_reason"],
     )
 
 
@@ -256,10 +259,11 @@ class SqliteDocumentStore:
     async def insert_fact(self, new: NewFact) -> Fact:
         cur = self.conn.execute(
             "INSERT INTO facts (space, subject, predicate, object, confidence, valid_from, valid_until, status,"
-            " closed_reason, source_episode_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " closed_reason, source_episode_id, origin, excluded_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 new.space, new.subject, new.predicate, new.object, new.confidence, new.valid_from,
-                new.valid_until, new.status, new.closed_reason, new.source_episode_id,
+                new.valid_until, new.status, new.closed_reason, new.source_episode_id, new.origin,
+                new.excluded_reason,
             ),
         )
         self.conn.commit()
@@ -268,10 +272,10 @@ class SqliteDocumentStore:
     async def update_fact(self, fact: Fact) -> None:
         cur = self.conn.execute(
             "UPDATE facts SET object = ?, confidence = ?, valid_from = ?, valid_until = ?, status = ?,"
-            " closed_reason = ? WHERE id = ? AND space = ?",
+            " closed_reason = ?, origin = ?, excluded_reason = ? WHERE id = ? AND space = ?",
             (
                 fact.object, fact.confidence, fact.valid_from, fact.valid_until, fact.status,
-                fact.closed_reason, fact.fact_id, fact.space,
+                fact.closed_reason, fact.origin, fact.excluded_reason, fact.fact_id, fact.space,
             ),
         )
         self.conn.commit()

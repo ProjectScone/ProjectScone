@@ -47,6 +47,8 @@ class FactBody(BaseModel):
     valid_from: Optional[str] = None
     confidence: float = 1.0
     source_episode_id: Optional[int] = None
+    origin: str = "stated"
+    proposed: bool = False
 
 
 class CloseBody(BaseModel):
@@ -167,8 +169,14 @@ def create_app(
         }
 
     @app.get("/v1/facts")
-    async def get_facts(all: bool = False, as_of: Optional[str] = None, space: str = Depends(space_for)) -> dict:
-        facts = await engine.facts(space, include_closed=all, as_of=as_of)
+    async def get_facts(
+        all: bool = False,
+        as_of: Optional[str] = None,
+        status: Optional[str] = None,
+        excluded: bool = False,
+        space: str = Depends(space_for),
+    ) -> dict:
+        facts = await engine.facts(space, include_closed=all, as_of=as_of, status=status, include_excluded=excluded)
         return {"facts": [fact_json(f) for f in facts]}
 
     @app.post("/v1/facts")
@@ -181,8 +189,26 @@ def create_app(
             valid_from=body.valid_from,
             confidence=body.confidence,
             source_episode_id=body.source_episode_id,
+            origin=body.origin,
+            proposed=body.proposed,
         )
         return fact_json(fact)
+
+    @app.post("/v1/facts/{fact_id}/approve")
+    async def post_fact_approve(fact_id: int, space: str = Depends(space_for)) -> dict:
+        return fact_json(await engine.approve(space, fact_id))
+
+    @app.post("/v1/facts/{fact_id}/decline")
+    async def post_fact_decline(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
+        return fact_json(await engine.decline(space, fact_id, body.reason))
+
+    @app.post("/v1/facts/{fact_id}/exclude")
+    async def post_fact_exclude(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
+        return fact_json(await engine.exclude(space, fact_id, body.reason))
+
+    @app.post("/v1/facts/{fact_id}/include")
+    async def post_fact_include(fact_id: int, space: str = Depends(space_for)) -> dict:
+        return fact_json(await engine.include(space, fact_id))
 
     @app.post("/v1/facts/{fact_id}/close")
     async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
@@ -307,4 +333,6 @@ def fact_json(fact: Fact) -> dict:
         "status": fact.status,
         "closed_reason": fact.closed_reason,
         "source_episode_id": fact.source_episode_id,
+        "origin": fact.origin,
+        "excluded_reason": fact.excluded_reason,
     }

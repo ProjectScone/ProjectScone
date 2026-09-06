@@ -132,3 +132,27 @@ def test_console_is_served_with_the_key_baked_in():
         assert 'data-token="' not in c.get("/").text  # more than one key: the page asks
     with TestClient(create_app(engine, {"a": "x"}, console=False)) as c:
         assert c.get("/").status_code == 404
+
+
+def test_review_and_exclusion_over_http(client):
+    h = auth()
+    held = client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Austin", "valid_from": "2022-01-01"}, headers=h).json()
+    proposed = client.post(
+        "/v1/facts",
+        json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon", "valid_from": "2024-03-02", "origin": "extracted", "proposed": True, "confidence": 0.7},
+        headers=h,
+    ).json()
+    assert (proposed["status"], proposed["origin"]) == ("proposed", "extracted")
+    assert [f["object"] for f in client.get("/v1/facts", headers=h).json()["facts"]] == ["Austin"]
+    assert [f["fact_id"] for f in client.get("/v1/facts", params={"status": "proposed"}, headers=h).json()["facts"]] == [proposed["fact_id"]]
+    assert client.get("/v1/status", headers=h).json()["pending_review"] == 1
+    approved = client.post(f"/v1/facts/{proposed['fact_id']}/approve", headers=h).json()
+    assert approved["status"] == "active"
+    assert client.get("/v1/facts", params={"all": "true"}, headers=h).json()["facts"][0]["closed_reason"] == f"superseded by fact {proposed['fact_id']}"
+    excluded = client.post(f"/v1/facts/{proposed['fact_id']}/exclude", json={"reason": "private"}, headers=h).json()
+    assert excluded["excluded_reason"] == "private"
+    assert client.get("/v1/facts", headers=h).json()["facts"] == []
+    assert [f["fact_id"] for f in client.get("/v1/facts", params={"excluded": "true"}, headers=h).json()["facts"]] == [proposed["fact_id"]]
+    assert client.post(f"/v1/facts/{proposed['fact_id']}/include", headers=h).json()["excluded_reason"] is None
+    assert client.post(f"/v1/facts/{held['fact_id']}/decline", json={"reason": "x"}, headers=h).status_code == 422
+    assert client.post("/v1/facts/999/approve", headers=h).status_code == 404

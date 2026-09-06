@@ -52,6 +52,8 @@ class NewFact:
     status: str = "active"
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
+    origin: str = "stated"
+    excluded_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

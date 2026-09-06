@@ -40,7 +40,7 @@ async def test_facts_inherit_the_episode_date_and_name_their_source(engine):
         ]
     )
 
-    outcome = await Distiller(engine, chat).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(engine, chat, accept_at=0.0).distill_episode(SPACE, added.episode_id)
 
     assert (len(outcome.added), outcome.closed, outcome.skipped, outcome.failed) == (2, 0, 0, False)
     facts = await engine.facts(SPACE)
@@ -59,7 +59,7 @@ async def test_a_restated_fact_is_skipped_not_duplicated(engine):
     added = await engine.remember(SPACE, "Ana still lives in Lisbon.", created_at="2024-06-01")
     await engine.assert_fact(SPACE, "ana", "lives_in", "Lisbon", valid_from="2024-03-02")
 
-    outcome = await Distiller(engine, FakeChat([LISBON])).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
 
     assert (outcome.added, outcome.closed, outcome.skipped) == ([], 0, 1)
     assert len(await engine.facts(SPACE, include_closed=True)) == 1
@@ -69,7 +69,7 @@ async def test_a_missing_episode_is_a_not_found_error(engine):
     from scone_memory import NotFound
 
     with pytest.raises(NotFound):
-        await Distiller(engine, FakeChat(["[]"])).distill_episode(SPACE, 999)
+        await Distiller(engine, FakeChat(["[]"]), accept_at=0.0).distill_episode(SPACE, 999)
 
 
 # -- supersession through distill_pending -------------------------------------
@@ -83,7 +83,7 @@ async def test_pending_runs_oldest_first_so_the_newer_fact_supersedes(engine, re
         await engine.remember(SPACE, content, created_at=when)
     chat = FakeChat([AUSTIN, LISBON])
 
-    outcomes = await Distiller(engine, chat).distill_pending(SPACE)
+    outcomes = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
 
     assert [user for _, user in chat.calls] == ["Ana lives in Austin now.", "Ana moved to Lisbon."]
     assert [(len(o.added), o.closed) for o in outcomes] == [(1, 0), (1, 1)]
@@ -97,10 +97,10 @@ async def test_pending_runs_oldest_first_so_the_newer_fact_supersedes(engine, re
 
 async def test_a_stale_episode_distilled_late_does_not_overwrite_the_fresher_fact(engine):
     fresh = await engine.remember(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
-    await Distiller(engine, FakeChat([LISBON])).distill_episode(SPACE, fresh.episode_id)
+    await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_episode(SPACE, fresh.episode_id)
     stale = await engine.remember(SPACE, "Ana lives in Austin now.", created_at="2023-01-01")
 
-    outcome = await Distiller(engine, FakeChat([AUSTIN])).distill_episode(SPACE, stale.episode_id)
+    outcome = await Distiller(engine, FakeChat([AUSTIN]), accept_at=0.0).distill_episode(SPACE, stale.episode_id)
 
     assert [f.object for f in await engine.facts(SPACE)] == ["Lisbon"]
     [austin] = outcome.added
@@ -115,7 +115,7 @@ async def test_a_reply_that_is_not_json_is_a_loud_typed_error(engine):
     added = await engine.remember(SPACE, "nothing structured here", created_at="2024-01-01")
 
     with pytest.raises(DistillError) as raised:
-        await Distiller(engine, FakeChat(["I could not find any facts, sorry."])).distill_episode(SPACE, added.episode_id)
+        await Distiller(engine, FakeChat(["I could not find any facts, sorry."]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
 
     assert "JSON array" in str(raised.value)
     assert await engine.facts(SPACE, include_closed=True) == []
@@ -124,7 +124,7 @@ async def test_a_reply_that_is_not_json_is_a_loud_typed_error(engine):
 async def test_pending_parks_an_episode_after_max_attempts_and_stops_calling_the_model(engine):
     added = await engine.remember(SPACE, "garbage in", created_at="2024-01-01")
     chat = FakeChat(["not json", "still not json", "nope", "[]"])
-    distiller = Distiller(engine, chat, max_attempts=3)
+    distiller = Distiller(engine, chat, max_attempts=3, accept_at=0.0)
 
     for attempt in range(3):
         with pytest.raises(DistillError) as raised:
@@ -141,7 +141,7 @@ async def test_pending_parks_an_episode_after_max_attempts_and_stops_calling_the
     assert list(distiller.parked(SPACE)) == [added.episode_id]
 
     # A fresh instance has no memory of the failures and asks again.
-    retried = await Distiller(engine, chat).distill_pending(SPACE)
+    retried = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
     assert [(o.episode_id, o.failed) for o in retried] == [(added.episode_id, False)]
     assert len(chat.calls) == 4
 
@@ -152,7 +152,7 @@ async def test_a_transport_failure_counts_as_an_attempt_and_the_others_still_run
     chat = FakeChat([ChatError("connection refused"), LISBON])
 
     with pytest.raises(DistillError) as raised:
-        await Distiller(engine, chat).distill_pending(SPACE)
+        await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
 
     assert raised.value.failed == 1
     assert [o.failed for o in raised.value.outcomes] == [True, False]
@@ -221,7 +221,7 @@ def test_parse_triples_without_an_array_is_an_error(text):
 async def test_an_empty_array_adds_nothing_and_is_not_an_error(engine):
     added = await engine.remember(SPACE, "just chatter", created_at="2024-01-01")
 
-    outcome = await Distiller(engine, FakeChat(["[]"])).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(engine, FakeChat(["[]"]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
 
     assert (outcome.added, outcome.closed, outcome.skipped, outcome.failed) == ([], 0, 0, False)
     assert await engine.facts(SPACE, include_closed=True) == []
@@ -230,7 +230,7 @@ async def test_an_empty_array_adds_nothing_and_is_not_an_error(engine):
 async def test_pending_remembers_an_episode_that_stated_no_facts(engine):
     await engine.remember(SPACE, "just chatter", created_at="2024-01-01")
     chat = FakeChat(["[]", "[]"])
-    distiller = Distiller(engine, chat)
+    distiller = Distiller(engine, chat, accept_at=0.0)
 
     first = await distiller.distill_pending(SPACE)
     second = await distiller.distill_pending(SPACE)
@@ -246,7 +246,7 @@ async def test_pending_skips_episodes_that_already_have_facts(engine):
     todo = await engine.remember(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
     chat = FakeChat([LISBON])
 
-    outcomes = await Distiller(engine, chat).distill_pending(SPACE)
+    outcomes = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
 
     assert [o.episode_id for o in outcomes] == [todo.episode_id]
     assert [user for _, user in chat.calls] == ["Ana moved to Lisbon."]
@@ -258,7 +258,7 @@ async def test_pending_honours_the_limit_oldest_first(engine):
         await engine.remember(SPACE, f"note from day {day}", created_at=f"2024-01-{day}")
     chat = FakeChat(["[]", "[]"])
 
-    outcomes = await Distiller(engine, chat).distill_pending(SPACE, limit=2)
+    outcomes = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE, limit=2)
 
     assert len(outcomes) == 2
     assert [user for _, user in chat.calls] == ["note from day 01", "note from day 02"]
@@ -268,7 +268,7 @@ async def test_pending_honours_the_limit_oldest_first(engine):
 
 
 async def test_distill_text_dates_facts_without_an_episode(engine):
-    facts = await Distiller(engine, FakeChat([LISBON])).distill_text(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
+    facts = await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_text(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
 
     [fact] = facts
     assert (fact.subject, fact.object, fact.valid_from, fact.source_episode_id) == (
@@ -341,3 +341,26 @@ async def test_openai_compatible_chat_turns_transport_failures_into_chat_errors(
     chat = OpenAICompatibleChat("http://llm.local/v1", "gpt", transport=httpx.MockTransport(handle))
     with pytest.raises(ChatError, match="unreachable"):
         await chat.complete("sys", "hello")
+
+
+
+async def new_engine():
+    return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock("2025-01-01T00:00:00.000Z")).open()
+
+
+async def test_extractions_are_proposed_for_review_by_default():
+    """A model's reading is never presented as an established fact unless
+    the deployer sets accept_at; even then it stays marked extracted."""
+    engine = await new_engine()
+    added = await engine.remember(SPACE, "Ana moved to Lisbon in March 2024.", created_at="2024-03-02")
+    outcome = await Distiller(engine, FakeChat([LISBON])).distill_episode(SPACE, added.episode_id)
+    [fact] = outcome.added
+    assert (fact.status, fact.origin) == ("proposed", "extracted")
+    assert await engine.facts(SPACE) == []
+    assert [f.fact_id for f in await engine.facts(SPACE, status="proposed")] == [fact.fact_id]
+
+    accepted_engine = await new_engine()
+    added = await accepted_engine.remember(SPACE, "Ana moved to Lisbon in March 2024.", created_at="2024-03-02")
+    outcome = await Distiller(accepted_engine, FakeChat([LISBON]), accept_at=0.8).distill_episode(SPACE, added.episode_id)
+    [fact] = outcome.added
+    assert (fact.status, fact.origin) == ("active", "extracted")

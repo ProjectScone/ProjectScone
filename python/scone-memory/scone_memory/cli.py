@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
     p.add_argument("--as-of", help="facts that held at this time")
+    p.add_argument("--status", choices=["active", "closed", "proposed", "declined"], help="one status only")
+    p.add_argument("--excluded", action="store_true", help="include facts excluded from recall")
 
     p = sub.add_parser("assert", help="record that subject predicate object holds")
     p.add_argument("subject")
@@ -84,10 +86,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("object")
     p.add_argument("--valid-from")
     p.add_argument("--confidence", type=float, default=1.0)
+    p.add_argument("--origin", choices=["stated", "extracted", "inferred"], default="stated")
+    p.add_argument("--propose", action="store_true", help="park it for review instead of entering the ledger")
 
-    p = sub.add_parser("close", help="close a fact with a reason")
+    p = sub.add_parser("close", help="close a fact with a reason: it stopped holding")
     p.add_argument("fact_id", type=int)
     p.add_argument("--reason", required=True)
+
+    sub.add_parser("review", help="list proposed facts awaiting a decision")
+    p = sub.add_parser("approve", help="accept a proposed fact into the ledger")
+    p.add_argument("fact_id", type=int)
+    p = sub.add_parser("decline", help="reject a proposed fact with a reason")
+    p.add_argument("fact_id", type=int)
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("exclude", help="hide a fact from recall, keeping its history")
+    p.add_argument("fact_id", type=int)
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("include", help="undo exclude")
+    p.add_argument("fact_id", type=int)
 
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
@@ -109,7 +125,9 @@ def read_source(path: str, stdin) -> str:
 def fact_line(f) -> str:
     until = f" until {f.valid_until[:10]}" if f.valid_until else ""
     reason = f"  ({f.closed_reason})" if f.closed_reason else ""
-    return f"#{f.fact_id} [{f.status}] {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}"
+    origin = "" if f.origin == "stated" else f" [{f.origin}]"
+    excluded = f"  excluded: {f.excluded_reason}" if f.excluded_reason else ""
+    return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
 
 
 async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int:
@@ -161,7 +179,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
         return 0
 
     if args.command == "facts":
-        facts = await engine.facts(space, include_closed=args.all, as_of=args.as_of)
+        facts = await engine.facts(space, include_closed=args.all, as_of=args.as_of, status=args.status, include_excluded=args.excluded)
         if args.json:
             for f in facts:
                 emit(f.model_dump())
@@ -174,8 +192,33 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
 
     if args.command == "assert":
         fact = await engine.assert_fact(
-            space, args.subject, args.predicate, args.object, valid_from=args.valid_from, confidence=args.confidence
+            space, args.subject, args.predicate, args.object, valid_from=args.valid_from, confidence=args.confidence,
+            origin=args.origin, proposed=args.propose,
         )
+        emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
+        return 0
+
+    if args.command == "review":
+        facts = await engine.facts(space, status="proposed")
+        if args.json:
+            for f in facts:
+                emit(f.model_dump())
+        else:
+            for f in facts:
+                print(fact_line(f) + f"  confidence {f.confidence:.2f}", file=out)
+            if not facts:
+                print("nothing awaiting review", file=out)
+        return 0
+
+    if args.command in ("approve", "decline", "exclude", "include"):
+        if args.command == "approve":
+            fact = await engine.approve(space, args.fact_id)
+        elif args.command == "decline":
+            fact = await engine.decline(space, args.fact_id, args.reason)
+        elif args.command == "exclude":
+            fact = await engine.exclude(space, args.fact_id, args.reason)
+        else:
+            fact = await engine.include(space, args.fact_id)
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 

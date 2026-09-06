@@ -180,11 +180,17 @@ class Distiller:
         chat: ChatModel,
         max_attempts: int = 3,
         prompt: str = EXTRACTION_PROMPT,
+        accept_at: Optional[float] = None,
     ) -> None:
         self.engine = engine
         self.chat = chat
         self.max_attempts = max_attempts
         self.prompt = prompt
+        #: Extractions enter the ledger as proposals for a person to review
+        #: unless their confidence reaches ``accept_at``. None means every
+        #: extraction is proposed: a model's reading is never presented as
+        #: an established fact by default.
+        self.accept_at = accept_at
         # Both keyed by (space, episode_id); in memory only, so a new
         # Distiller starts with no history and retries parked episodes.
         self._failures: dict[tuple[str, int], _Attempts] = {}
@@ -299,6 +305,8 @@ class Distiller:
                 valid_from=valid_from,
                 confidence=triple.confidence,
                 source_episode_id=episode_id,
+                origin="extracted",
+                proposed=self.accept_at is None or triple.confidence < self.accept_at,
             )
             after = await self._active_ids(space, triple.subject, triple.predicate)
             outcome.closed += len(before - after)
