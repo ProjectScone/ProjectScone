@@ -104,6 +104,49 @@ def test_the_step_is_atomic(tmp_path, monkeypatch):
     assert snapshot(path) == before
 
 
+def test_two_openers_racing_on_a_v5_file_apply_the_step_once(tmp_path):
+    """Two processes starting against the same v5 file must not both ALTER.
+    The second waits on the write lock, re-reads the version under it, finds
+    the step done, and carries on."""
+    import threading
+
+    path = tmp_path / "live.db"
+    write_v5_file(path)
+    results: dict[str, object] = {}
+
+    def opener(name):
+        try:
+            store = SqliteDocumentStore(path)
+            results[name] = schema_version(store.conn)
+        except Exception as e:  # noqa: BLE001
+            results[name] = f"{type(e).__name__}: {e}"
+
+    threads = [threading.Thread(target=opener, args=(f"t{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert all(v == 6 for v in results.values()), results
+    probe = sqlite3.connect(path)
+    assert [r[1] for r in probe.execute("PRAGMA table_info(facts)")].count("quote") == 1, "the column was added exactly once"
+    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
+
+
+def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
+    """The re-read inside the transaction is what makes the race safe; this
+    pins it without threads by pre-applying the step and stale-calling."""
+    import scone_memory.backends.sqlite as mod
+
+    path = tmp_path / "live.db"
+    write_v5_file(path)
+    first = SqliteDocumentStore(path)  # applies the step
+    assert schema_version(first.conn) == 6
+    stale = sqlite3.connect(path)
+    stale.row_factory = sqlite3.Row
+    mod.apply_step(stale, 5, path)  # a caller that still believed the file was v5
+    assert schema_version(stale) == 6 and [r[1] for r in stale.execute("PRAGMA table_info(facts)")].count("quote") == 1
+
+
 def test_other_versions_are_still_refused_not_rewritten(tmp_path):
     for version in ("2", "4", "7"):
         path = tmp_path / f"v{version}.db"

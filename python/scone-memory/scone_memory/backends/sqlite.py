@@ -127,14 +127,25 @@ def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None"
             finally:
                 dest.close()
     conn.isolation_level = None  # explicit transaction control below
-    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("BEGIN IMMEDIATE")  # takes the write lock; a second opener waits here
     try:
+        # Re-read under the lock: if another opener applied the step while we
+        # waited, there is nothing left to do and applying it twice would
+        # fail on the duplicate column.
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        current = int(row[0]) if row else version
+        if current != version:
+            conn.execute("COMMIT")
+            if current != version + 1:
+                raise SchemaMismatch(f"schema changed to v{current} while opening; expected v{version} or v{version + 1}")
+            return
         for statement in STEPS[version]:
             conn.execute(statement)
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(version + 1),))
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.isolation_level = ""  # back to the module's default (implicit transactions)
