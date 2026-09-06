@@ -59,10 +59,20 @@ CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
-#: Shared spec 3.6. Bumped on any incompatible change; while the package
-#: is pre-release nothing is migrated: a file from an older build is
-#: refused with a message, not rewritten.
+#: Shared spec 3.6. Bumped on any incompatible change. A file from an
+#: older build is refused with a message, not rewritten, unless this build
+#: knows the one additive step from that exact version (STEPS below).
 SCHEMA_VERSION = 6  # 6: facts carry quote
+
+#: Additive steps this build can apply, keyed by the version they start
+#: from. A version gets a step only once a live store has held it (the
+#: first was v5, the live ProjectScone store on 2026-09-06); any other
+#: version is refused, because a guess about an unknown layout is worse
+#: than a clear stop. A step runs with its version bump in one transaction,
+#: after a backup copy of the file is written beside it.
+STEPS: dict[int, tuple[str, ...]] = {
+    5: ("ALTER TABLE facts ADD COLUMN quote TEXT",),
+}
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -73,7 +83,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
-    check_schema(conn)
+    check_schema(conn, path)
     return conn
 
 
@@ -85,17 +95,49 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return 1 if has_rows else SCHEMA_VERSION
 
 
-def check_schema(conn: sqlite3.Connection) -> None:
-    """Stamp a fresh file; refuse a file another build wrote."""
+def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> None:
+    """Stamp a fresh file; apply the known step to a file exactly one
+    version behind; refuse anything else."""
     version = schema_version(conn)
-    if version != SCHEMA_VERSION:
-        raise SchemaMismatch(
-            f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION}. "
-            "scone-memory is pre-release and does not migrate: export with the build that "
-            "wrote the file, delete it, and import again."
-        )
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
-    conn.commit()
+    if version == SCHEMA_VERSION:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.commit()
+        return
+    if version in STEPS and version + 1 == SCHEMA_VERSION:
+        apply_step(conn, version, path)
+        return
+    raise SchemaMismatch(
+        f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION} and knows no step from v{version}. "
+        "Export with the build that wrote the file, delete it, and import again."
+    )
+
+
+def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None") -> None:
+    """Run the additive statements for ``version`` and bump to version + 1 in
+    one transaction. For a file store a backup ``<name>.v<version>.bak`` is
+    taken first through SQLite's online backup, so it is consistent even
+    while another connection holds the file; an existing backup is kept."""
+    if path is not None and str(path) != ":memory:":
+        target = Path(path).expanduser()
+        backup = target.with_name(target.name + f".v{version}.bak")
+        if not backup.exists():
+            dest = sqlite3.connect(backup)
+            try:
+                conn.backup(dest)
+            finally:
+                dest.close()
+    conn.isolation_level = None  # explicit transaction control below
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in STEPS[version]:
+            conn.execute(statement)
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(version + 1),))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = ""  # back to the module's default (implicit transactions)
 
 
 class SchemaMismatch(SconeError):
