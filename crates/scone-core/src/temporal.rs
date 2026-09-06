@@ -167,8 +167,10 @@ pub fn plan(question: &str) -> Option<Plan> {
             return Some(Plan::Order { events });
         }
     }
+    // "Who graduated first, second and third among A, B and C" orders
+    // people by an event, and reads as ordering just as "which" does.
     if ORDER_ENABLED
-        && (q.contains("which") || q.contains("what"))
+        && (q.contains("which") || q.contains("what") || q.starts_with("who "))
         && (q.contains(" first") || q.contains(" last"))
     {
         let events = split_events(q);
@@ -792,6 +794,58 @@ pub fn relative_window(question: &str, as_of: &str) -> Option<Window> {
         }
     }
 
+    // "last Friday" / "on Saturday": the most recent such day before
+    // the question, as a single-day window. 1970-01-01 was a Thursday,
+    // so weekday(day) = (day + 3) mod 7 with Monday as 0.
+    const WEEKDAYS: [&str; 7] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    for (i, name) in WEEKDAYS.iter().enumerate() {
+        if q.contains(name) {
+            let today_wd = (today + 3).rem_euclid(7) as usize;
+            // Strictly before today: "last Friday" asked on a Friday means
+            // a week ago, not this morning.
+            let back = ((today_wd + 7 - i) % 7) as i64;
+            let back = if back == 0 { 7 } else { back };
+            let day = today - back;
+            return Some(window(day, day));
+        }
+    }
+
+    // "in February" with no year: the most recent February at or
+    // before the question. The whole month is the window.
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    for (i, name) in MONTHS.iter().enumerate() {
+        if q.contains(&format!(" in {name}")) || q.contains(&format!(" during {name}")) {
+            let month = i as i64 + 1;
+            let (year, this_month) = year_month(today);
+            let year = if month > this_month { year - 1 } else { year };
+            let start = day_number(&format!("{year:04}-{month:02}-01T00:00:00Z"))?;
+            let end_day = crate::timeparse::days_in_month(year as i32, month as u32);
+            let end = day_number(&format!("{year:04}-{month:02}-{end_day:02}T00:00:00Z"))?;
+            return Some(window(start, end));
+        }
+    }
+
     // "N units ago" points at a moment, so allow slack either side.
     if let Some(idx) = q.find(" ago") {
         let before = &q[..idx];
@@ -843,6 +897,15 @@ fn window(start: i64, end: i64) -> Window {
         start: format!("{}T00:00:00Z", civil_date(start)),
         end: format!("{}T23:59:59Z", civil_date(end)),
     }
+}
+
+/// Year and month of a day number.
+fn year_month(days: i64) -> (i64, i64) {
+    let date = civil_date(days);
+    let mut parts = date.split('-');
+    let y = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1970);
+    let m = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+    (y, m)
 }
 
 /// Calendar date for a day number, the inverse of [`day_number`].
@@ -910,5 +973,39 @@ mod relative_tests {
         assert!(relative_window("what is my dog's name", "2023-05-20T00:00:00Z").is_none());
         assert!(relative_window("how many days ago", "bad date").is_none());
         assert!(relative_window("", "2023-05-20T00:00:00Z").is_none());
+    }
+}
+
+#[cfg(test)]
+mod named_day_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// 2024-03-15 was a Friday. "Last Friday" asked on a Friday means a
+    /// week ago, not this morning.
+    #[test]
+    fn a_named_weekday_is_the_most_recent_one_strictly_before_today() {
+        let w = relative_window("who did I meet last Friday", "2024-03-15T00:00:00Z").unwrap();
+        assert_eq!(w.start, "2024-03-08T00:00:00Z", "{w:?}");
+        assert_eq!(w.end, "2024-03-08T23:59:59Z", "{w:?}");
+        // Asked on a Monday, last Saturday is two days back.
+        let w = relative_window("what did I do on Saturday", "2024-03-18T00:00:00Z").unwrap();
+        assert_eq!(w.start, "2024-03-16T00:00:00Z", "{w:?}");
+    }
+
+    /// "In February" asked in March means the February just gone; asked
+    /// in January it means last year's, since this year's has not
+    /// happened yet.
+    #[test]
+    fn a_bare_month_is_the_most_recent_one_at_or_before_today() {
+        let w = relative_window(
+            "which vehicle did I service in February",
+            "2024-03-10T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(w.start, "2024-02-01T00:00:00Z", "{w:?}");
+        assert_eq!(w.end, "2024-02-29T23:59:59Z", "leap year: {w:?}");
+        let w = relative_window("what happened in march", "2024-01-10T00:00:00Z").unwrap();
+        assert_eq!(w.start, "2023-03-01T00:00:00Z", "{w:?}");
     }
 }

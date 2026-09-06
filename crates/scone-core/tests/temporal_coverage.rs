@@ -29,7 +29,7 @@ fn coverage_over_the_real_questions() {
             Some(Plan::Span { .. }) => span += 1,
             None => {
                 declined += 1;
-                if misses.len() < 12 {
+                if misses.len() < 60 {
                     misses.push(q.to_owned());
                 }
             }
