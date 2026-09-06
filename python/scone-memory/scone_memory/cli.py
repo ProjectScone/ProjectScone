@@ -112,6 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
+    p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
+                       add_help=False)
+    p.add_argument("hook_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -272,6 +275,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None, stdin=None, out=None) -> int:
     args = build_parser().parse_args(argv)
     env = os.environ if env is None else env
+    if args.command == "agent-hook":
+        from .agent_hook import run_hook
+
+        return run_hook(args.hook_args, (stdin or sys.stdin).read(), env)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve
