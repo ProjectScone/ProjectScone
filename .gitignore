@@ -18,3 +18,5 @@ python/scone-memory/**/__pycache__/
 python/scone-memory/*.egg-info/
 python/scone-memory/dist/
 python/scone-memory/.pytest_cache/
+# Codex keeps the capability ledger; it is not part of the published tree.
+CAPABILITIES.md
