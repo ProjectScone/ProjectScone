@@ -43,14 +43,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      redis:
+        image: redis/redis-stack-server:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install
-        run: python -m pip install -q -e '.[test,qdrant,mongo,postgres,chroma,lancedb,langchain,llamaindex,openai-agents]'
+        run: python -m pip install -q -e '.[test,qdrant,mongo,postgres,redis,chroma,lancedb,langchain,llamaindex,openai-agents]'
       - name: Tests
         env:
           SCONE_TEST_POSTGRES_URL: postgresql://scone:scone@localhost:5432/scone
+          SCONE_TEST_REDIS_URL: redis://localhost:6379
         run: python -m pytest -q -p no:warnings

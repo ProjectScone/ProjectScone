@@ -1,7 +1,7 @@
 """Assemble an engine from environment variables.
 
     SCONE_DOCUMENTS   memory | sqlite | mongo | postgres   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres  (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres | redis  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
@@ -10,6 +10,7 @@
     SCONE_QDRANT_URL, SCONE_QDRANT_API_KEY, SCONE_QDRANT_COLLECTION (default scone_chunks)
     SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
     SCONE_LANCEDB_PATH (database directory, required for lancedb)
+    SCONE_REDIS_URL (required for redis; needs the RediSearch module), SCONE_REDIS_PREFIX (default scone_chunks)
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
     SCONE_EMBED_API_KEY        remote: bearer, optional
@@ -63,6 +64,8 @@ class Settings:
     chroma_path: Optional[str] = None
     chroma_url: Optional[str] = None
     lancedb_path: Optional[str] = None
+    redis_url: Optional[str] = None
+    redis_prefix: str = "scone_chunks"
     embed_model: Optional[str] = None
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
@@ -102,6 +105,8 @@ class Settings:
             chroma_path=env.get("SCONE_CHROMA_PATH"),
             chroma_url=env.get("SCONE_CHROMA_URL"),
             lancedb_path=env.get("SCONE_LANCEDB_PATH"),
+            redis_url=env.get("SCONE_REDIS_URL"),
+            redis_prefix=env.get("SCONE_REDIS_PREFIX", "scone_chunks"),
             embed_model=env.get("SCONE_EMBED_MODEL"),
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
@@ -223,6 +228,12 @@ def build_vectors(settings: Settings, documents=None):
         if not settings.lancedb_path:
             raise InvalidInput("SCONE_VECTORS=lancedb needs SCONE_LANCEDB_PATH")
         return LanceDBVectorIndex(settings.lancedb_path)
+    if settings.vectors == "redis":
+        from .backends import RedisVectorIndex
+
+        if not settings.redis_url:
+            raise InvalidInput("SCONE_VECTORS=redis needs SCONE_REDIS_URL")
+        return RedisVectorIndex(settings.redis_url, settings.redis_prefix)
     raise InvalidInput(f"unknown SCONE_VECTORS {settings.vectors!r}")
 
 

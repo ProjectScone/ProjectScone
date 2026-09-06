@@ -17,6 +17,7 @@ __all__ = [
     "PostgresDocumentStore",
     "PostgresVectorIndex",
     "PostgresEventLog",
+    "RedisVectorIndex",
 ]
 
 
@@ -37,6 +38,10 @@ def __getattr__(name: str):
         from .lancedb import LanceDBVectorIndex
 
         return LanceDBVectorIndex
+    if name == "RedisVectorIndex":
+        from .redis import RedisVectorIndex
+
+        return RedisVectorIndex
     if name in ("PostgresDocumentStore", "PostgresVectorIndex", "PostgresEventLog"):
         from . import postgres
 
