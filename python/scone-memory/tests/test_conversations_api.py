@@ -80,6 +80,35 @@ async def test_auth_scope_strict_bodies_and_existing_memory_surface(engine, tmp_
         assert len(runtimes) == 1
 
 
+async def test_workspace_is_opt_in_and_deep_links_never_disclose_keys(engine, tmp_path):
+    """Catch absent SPA deep links, an over-broad fallback, or key injection."""
+    disabled, _ = configured(engine, tmp_path / "disabled.db")
+    async with client_for(disabled) as client:
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one"):
+            assert (await client.get(path)).status_code == 404
+
+    enabled, _ = configured(engine, tmp_path / "enabled.db", console=True)
+    async with client_for(enabled) as client:
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one"):
+            response = await client.get(path, headers={"Authorization": ""})
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/html")
+            assert 'id="root"' in response.text
+            assert "alpha-key" not in response.text and "beta-key" not in response.text
+            assert response.headers["cache-control"] == "no-store"
+            assert response.headers["x-content-type-options"] == "nosniff"
+            head = await client.head(path)
+            assert head.status_code == 200 and head.content == b""
+            assert head.headers["content-length"] == response.headers["content-length"]
+        assert (await client.get("/v1/unknown")).status_code == 404
+        assert (await client.get("/conversations/session-one/not-a-route")).status_code == 404
+        # The mounted memory router can turn a method mismatch into 404; neither
+        # may serve the SPA for a write or turn it into a session command.
+        assert (await client.post("/conversations")).status_code in {404, 405}
+        assert (await client.get("/v1/conversations", headers={"Authorization": ""})).status_code == 401
+        assert (await client.get("/v1/status", headers={"Authorization": ""})).status_code == 401
+
+
 async def test_turn_reply_capture_and_request_retry_execute_once(engine, tmp_path):
     app, runtimes = configured(engine, tmp_path / "sessions.db")
     async with client_for(app) as client:

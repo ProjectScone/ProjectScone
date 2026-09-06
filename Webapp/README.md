@@ -122,15 +122,18 @@ CLIs retain their own independently tested workflows.
 - `src/assets/`: runtime images; `assets/`: original mark and generation record.
 - `/memory`, `/playground` and `/conversations/:sid?` are React routes in one application; `/` redirects
   to `/memory`. Development proxies only API traffic and local auth bootstrap.
-- The Python server serves both routes directly (the local preview uses port
+- The Python memory server serves Memory and Playground directly (the local preview uses port
   7437). Rust packages the same Playground app; its existing native root console
   remains until Memory-page capability parity is independently verified.
 
-Conversation deep links require the web host to serve the React application for
-`/conversations` and its session paths, with `/v1/conversations` routed to the
-optional conversation service. Vite provides that SPA routing in development.
-The existing native servers have not yet gained conversation-page deep-link
-serving; adding the React route does not itself configure or launch a provider.
+The optional Python conversation service accepts `console=True` to serve the
+packaged webapp at `/memory`, `/playground`, `/conversations` and session deep
+links, alongside its memory/conversation APIs. Page hosting defaults to off and
+never embeds a space or provider key. A full reload asks for the space key again.
+The ordinary native memory servers do not provide conversation hosting or a
+configured provider. For separate hosting, route these page paths to the React
+application and `/v1/conversations` to the optional service. Vite handles SPA
+paths in development. Adding a route does not configure or launch a provider.
 
 For isolated conversation UI checks, build with Vite, package with `--output`
 as above, and pass that path as `SCONE_CONVERSATIONS_HTML` to
@@ -138,6 +141,15 @@ as above, and pass that path as `SCONE_CONVERSATIONS_HTML` to
 Playwright or set `SCONE_PLAYWRIGHT_MODULE` to an installed module; optionally set
 `SCONE_BROWSER_PATH` and `SCONE_SCREENSHOT_DIR`. Fixtures use temporary localhost
 services, never the live memory store. No screenshots are written by default.
+
+`scripts/test-conversations-native.cjs` additionally exercises the actual Python
+conversation API, native memory and Pipecat scheduler through the browser. Set
+`SCONE_TEST_PYTHON` to an environment with Scone's `api` and Pipecat dependencies,
+plus `SCONE_CONVERSATIONS_HTML` and the browser settings above. The Python
+fixture uses temporary state and scripted model frames, not provider inference.
+For an existing split local test installation, `SCONE_TEST_EXTRA_SITEPACKAGES`
+can explicitly append an API dependency directory; such a run does not verify a
+fresh, self-contained dependency installation.
 
 The graph renders stored relationships only. Depth is a spatial layout, not a
 3D simulation or confidence value. API connectivity, observed agent events and

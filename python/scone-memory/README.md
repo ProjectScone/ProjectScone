@@ -448,8 +448,18 @@ from scone_memory.integrations.pipecat_text import PipecatTextConversation
 app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
     lambda space, sid: PipecatTextConversation(memory, space, sid, model_factory),
+    console=True,  # optional same-origin packaged React workspace; no keys embedded
 )
 ```
+
+With `console=True`, the service serves `/memory`, `/playground`,
+`/conversations` and `/conversations/{session_id}` directly, including browser
+refreshes. `/` opens the same application. Pages contain no configured keys:
+enter a Scone space key in the connection dialog; it stays in tab memory and
+must be supplied again after a full reload. Provider credentials stay in server
+configuration. Hosting defaults to off; enabling pages does not configure a
+model, launch a server or enable voice/video. Use a freshly packaged Webapp
+build and HTTPS when deploying beyond loopback.
 
 Bearer keys determine the space. Provider credentials never belong in request
 bodies or query strings. Send `POST /v1/conversations` with a stable `request_id`
@@ -485,8 +495,9 @@ against a hostile filesystem owner, or support for uncooperative runtimes.
 Capabilities explicitly report configured text, polling, no voice/video, and no
 token stream. `runtime_factory=None` reports text unavailable and refuses starts.
 Tests connect HTTP controls to real Pipecat scheduling and native memory using a
-scripted model; they do not certify a live provider. Provider configuration,
-React conversation controls, durable reply replay, Rust HTTP memory adapters and
+scripted model; they do not certify a live provider. The React page supports
+start, send, saved transcripts, source inspection and stop. Provider certification,
+durable reply replay, Rust HTTP memory adapters and
 voice/video remain required product work. Existing live servers are unchanged.
 
 ### Conversation lifecycle journal (service foundation)
