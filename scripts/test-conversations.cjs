@@ -8,17 +8,18 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
+  if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
   let turn=null,posts=0,checks=0;const requested=[];
   const server=http.createServer(async(req,res)=>{
     requested.push(req.url);res.setHeader('content-type','application/json');
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination}));
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
@@ -31,7 +32,11 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
       const value=sessions.find(s=>s.session_id===match[1]);if(!value){res.statusCode=404;return res.end('{}');}
       if(!match[2]&&req.method==='DELETE'){sessions.splice(sessions.indexOf(value),1);delete saved[value.session_id];res.statusCode=204;return res.end();}
       if(!match[2])return res.end(JSON.stringify(value));
-      if(match[2]==='/transcript')return res.end(JSON.stringify({episodes:saved[value.session_id]||[],has_more:false}));
+      if(match[2].split('?')[0]==='/transcript'){
+        const query=new URL(req.url,'http://fixture').searchParams,limit=Number(query.get('limit')||200),before=query.get('before');
+        const records=(saved[value.session_id]||[]).filter(e=>!before||e.episode_id<Number(before.replace('cursor-',''))),episodes=records.slice(-limit),has_more=records.length>limit;
+        return res.end(JSON.stringify({episodes,has_more,...(pagination?{next_before:has_more?'cursor-'+episodes[0].episode_id:null}:{})}));
+      }
       if(match[2]==='/stop'){value.state='ended';value.revision=4;return res.end(JSON.stringify(value));}
       if(match[2]==='/turns'&&req.method==='POST'){
         posts++;if(reject){res.statusCode=429;return res.end('{"error":"capacity reached"}');}turn={request_id:data.request_id,status:'pending'};value.active_request_id=data.request_id;
@@ -63,6 +68,56 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
+
+for(const mobile of [false,true])test(`transcript navigation reaches older messages and keeps the page during polling, mobile=${mobile}`,async t=>{
+  const {page,requested}=await fixture(t,{pagination:true,mobile});
+  await page.getByRole('link',{name:/previous/}).click();
+  const messages=page.locator('.conversation-messages');
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  assert.equal(await messages.locator('article').count(),50);
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();
+  await page.getByText('Saved message 24',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Saved message 123',{exact:true}).count(),0);
+  const reads=()=>requested.filter(url=>url.includes('/transcript?')&&url.includes('before=cursor-74')).length;
+  const prior=reads();await page.waitForResponse(response=>response.url().includes('before=cursor-74'));
+  assert.ok(reads()>prior);assert.equal(await page.getByText('Saved message 24',{exact:true}).count(),1);
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();
+  await page.getByText('Saved message 1',{exact:true}).waitFor();
+  assert.equal(await messages.locator('article').count(),23);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`scone-transcript-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  assert.equal(await page.getByRole('button',{name:'Older messages',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Newer messages',exact:true}).click();
+  await page.getByText('Saved message 24',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Latest messages',exact:true}).click();
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('a failed older page can be retried without resending or losing the selected boundary',async t=>{
+  const {page,posts}=await fixture(t,{pagination:true});let fail=true;
+  await page.route('**/previous/transcript?*before=*',route=>fail?route.fulfill({status:503,json:{error:'read unavailable'}}):route.continue());
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();
+  await page.getByText(/Connection interrupted. Controls are paused/).waitFor();
+  assert.equal(await page.getByText('Saved message 123',{exact:true}).count(),0);
+  fail=false;await page.getByRole('button',{name:'Check connection',exact:true}).click();
+  await page.getByText('Saved message 24',{exact:true}).waitFor();
+  assert.equal(posts(),0);
+});
+
+test('late older-page responses cannot replace another selected session',async t=>{
+  const {page}=await fixture(t,{pagination:true});let release;
+  const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  await page.route('**/previous/transcript?*before=*',async route=>{await gate;await route.fulfill({json:{episodes:[{episode_id:1,content:'Late older text',metadata:{}}],has_more:false,next_before:null}}).catch(()=>{});});
+  const requested=page.waitForRequest(request=>request.url().includes('before=cursor-74'));
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();await requested;
+  await start(page);release();
+  await page.getByRole('heading',{name:'Start with a question.',exact:true}).waitFor();
+  assert.match(page.url(),/\/current$/);assert.equal(await page.getByText('Late older text',{exact:true}).count(),0);
+});
 
 test('closed session deletion requires confirmation and removes the saved session',async t=>{
   const {page}=await fixture(t,{deletion:true,mobile:true});

@@ -14,6 +14,20 @@ test('reply cancellation is enabled only by an explicit capability',()=>{
   assert.equal(capabilities({...wire,turn_cancellation:true}).turn_cancellation,true);
 });
 
+test('transcript pagination requires explicit support and valid advancing cursors',()=>{
+  const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
+  for(const value of [undefined,false,'true',1])assert.equal(capabilities({...wire,transcript_pagination:value}).transcript_pagination,false);
+  assert.equal(capabilities({...wire,transcript_pagination:true}).transcript_pagination,true);
+  const page={episodes:[{episode_id:2,content:'Message',metadata:{}}],has_more:true,next_before:'valid_cursor-123'};
+  assert.equal(transcript(page).next_before,'valid_cursor-123');
+  assert.equal(transcript({episodes:[],has_more:false,next_before:null}).next_before,null);
+  // Legacy partial transcripts stay readable, but cannot invent a paging cursor.
+  assert.equal(transcript({episodes:[],has_more:true}).next_before,null);
+  for(const invalid of ['',123,'../secret','a'.repeat(1025)])assert.throws(()=>transcript({...page,next_before:invalid}));
+  assert.throws(()=>transcript({...page,has_more:false}));
+  assert.throws(()=>transcript({...page,episodes:[]}));
+});
+
 test('a cancelled turn is a settled receipt, not missing work to resend',()=>{
   const receipt=turnReceipt({request_id:'cancelled-turn',status:'cancelled',result_state:'unavailable',result:null});
   assert.equal(receipt.status,'cancelled');assert.equal(receipt.result,undefined);

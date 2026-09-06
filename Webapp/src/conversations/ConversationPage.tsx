@@ -53,7 +53,7 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
       {after&&<button onClick={more}>Load more sessions</button>}
       <p className="conversation-list-note">Sessions belong to this memory space. Switching views does not stop an active conversation.</p>
     </aside>
-    {enabled&&cap&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed} textConfigured={cap.text_configured} deletionSupported={cap.session_deletion} cancellationSupported={cap.turn_cancellation} onRemoved={deleted}/>:<section className="conversation-landing">
+    {enabled&&cap&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed} textConfigured={cap.text_configured} deletionSupported={cap.session_deletion} cancellationSupported={cap.turn_cancellation} paginationSupported={cap.transcript_pagination} onRemoved={deleted}/>:<section className="conversation-landing">
       <span className="conversation-orbit" aria-hidden="true">✳</span><span className="eyebrow">Context that carries forward</span>
       <h2>{!enabled?'Connect your memory first':cap&&!cap.text_configured?'Text runtime not configured':sid&&!idPattern.test(sid)?'Invalid session address':'Good conversations build on what you know.'}</h2>
       <p>{!enabled?'Use Connect memory to authorize this workspace.':cap&&!cap.text_configured?'Saved conversations remain available. Configure a text model on this server to start or send messages. No provider key belongs in this page.':'Start a text session or open a saved conversation. Inspect the original sources alongside each exchange.'}</p>

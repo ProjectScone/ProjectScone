@@ -4,16 +4,19 @@ import {ConversationEvidence} from './ConversationEvidence';
 import {DeleteConversation} from './DeleteConversation';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
-export function ConversationSession({api,sid,onSession,textConfigured,deletionSupported,cancellationSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;deletionSupported:boolean;cancellationSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
+export function ConversationSession({api,sid,onSession,textConfigured,deletionSupported,cancellationSupported,paginationSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
   const [attempt,setAttempt]=useState(0);
   const [cancelTarget,setCancelTarget]=useState<string|null>(null),[cancelling,setCancelling]=useState(false);
+  const [pages,setPages]=useState<(string|null)[]>([null]);
   const lifetime=useRef(new AbortController()),mutation=useRef(false),request=useRef<string|null>(null),settled=useRef<string|null>(null),stopId=useRef<string|null>(null);
   const commandGeneration=useRef(0),invalidatedReceipt=useRef<string|null>(null);
   const pendingRequest=useRef<string|null>(null);
   const url=`/v1/conversations/${encodeURIComponent(sid)}`;
+  const before=pages[pages.length-1];
+  const transcriptUrl=url+'/transcript'+(paginationSupported?'?limit=50'+(before?'&before='+encodeURIComponent(before):''):'');
   useEffect(()=>{
     const controller=new AbortController();lifetime.current=controller;
     let timer:ReturnType<typeof setTimeout>;
@@ -30,7 +33,12 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
       try{
         const options={signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])};
         const next=session(await api.request(url,options));
-        const records=transcript(await api.request(url+'/transcript',options));
+        async function readTranscript(){
+          const records=transcript(await api.request(transcriptUrl,options));
+          if(paginationSupported&&(records.episodes.length>50||(records.has_more&&(!records.next_before||pages.includes(records.next_before)))))throw Error('Transcript pagination did not advance');
+          return records;
+        }
+        const records=await readTranscript();
         if(!isCurrent())return;
         setCurrent(previous=>previous&&previous.revision>next.revision?previous:next);onSession(next);setSaved(records);setVerified(true);setError('');
         const active=pendingRequest.current||next.active_request_id||next.latest_request_id||request.current;
@@ -51,7 +59,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
               if(receipt.result_state==='available'){invalidatedReceipt.current=null;setResult(receipt.result);}
               else clearUnavailableEvidence(active);
               // Capture may finish after the transcript request above.
-              if(newlySettled){const latest=transcript(await api.request(url+'/transcript',options));
+              if(newlySettled){const latest=await readTranscript();
                 if(isCurrent())setSaved(latest);}
             }else setBusy(true);
           }catch{
@@ -63,7 +71,11 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
       }finally{if(!controller.signal.aborted)timer=setTimeout(refresh,1500);}
     }
     void refresh();return()=>{controller.abort();clearTimeout(timer);};
-  },[api,url,attempt,onSession]);
+  },[api,url,attempt,onSession,transcriptUrl,paginationSupported,pages]);
+  function changePage(next:(string|null)[]){
+    if(!verified||mutation.current)return;
+    setSaved(null);setVerified(false);setPages(next);
+  }
   async function send(){
     if(!textConfigured||!current||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
     if(new TextEncoder().encode(draft).length>32000){setError('Keep messages within 32,000 UTF-8 bytes.');return;}
@@ -110,11 +122,19 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
       {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
     {error&&<div className="conversation-notice" role="alert">{error}<button onClick={()=>setAttempt(n=>n+1)}>Check connection</button></div>}
     {!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
-    <div className="conversation-messages" aria-label="Saved messages">
+    {paginationSupported&&<nav className="conversation-transcript-nav" aria-label="Transcript pages">
+      <div><strong>{before?'Earlier messages':'Latest messages'}</strong><span>{saved?`${saved.episodes.length} messages on this page`:'Loading page…'}{before?' · New replies stay in Latest':''}</span></div>
+      <div className="conversation-page-actions">
+        {before&&<button onClick={()=>changePage([null])} disabled={!verified||mutation.current}>Latest messages</button>}
+        <button onClick={()=>changePage(pages.slice(0,-1))} disabled={!verified||mutation.current||pages.length===1}>Newer messages</button>
+        <button onClick={()=>saved?.next_before&&changePage([...pages,saved.next_before])} disabled={!verified||mutation.current||!saved?.next_before}>Older messages</button>
+      </div>
+    </nav>}
+    <div className="conversation-messages" role="region" aria-label="Saved messages">
       {saved===null?<p role="status">Loading saved messages…</p>:saved.episodes.length?saved.episodes.map(item=><article className={`conversation-message ${item.metadata.role==='user'?'from-user':'from-agent'}`} key={item.episode_id}>
         <div className="conversation-message-label">{item.metadata.role==='user'?'You':item.metadata.role==='assistant'?'Assistant':'Recorded message'}<button onClick={()=>setSelected(item.episode_id)} aria-label={`Inspect message episode ${item.episode_id}`}>↗ Source {item.episode_id}</button></div><p>{item.content}</p>
-      </article>):<div className="conversation-welcome"><div className="conversation-orbit" aria-hidden="true">✳</div><h3>Start with a question.</h3><p>Bring your knowledge into the conversation.<br/>Public messages and replies will be saved to this space.</p></div>}
-      {saved?.has_more&&<p className="conversation-notice">Showing the first 200 saved messages. This is a partial transcript.</p>}
+      </article>):before?<p>No retained messages on this page. Return to a newer page.</p>:<div className="conversation-welcome"><div className="conversation-orbit" aria-hidden="true">✳</div><h3>Start with a question.</h3><p>Bring your knowledge into the conversation.<br/>Public messages and replies will be saved to this space.</p></div>}
+      {saved?.has_more&&!paginationSupported&&<p className="conversation-notice">This is a partial transcript. This server does not support browsing older messages.</p>}
     </div>
     <form className="conversation-composer" onSubmit={e=>{e.preventDefault();void send();}}>
       <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>

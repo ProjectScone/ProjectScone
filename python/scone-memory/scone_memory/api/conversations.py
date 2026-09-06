@@ -8,6 +8,9 @@ not reconstructed or retried after restart; lifecycle receipts are durable.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import hmac
@@ -16,12 +19,12 @@ from pathlib import Path
 import stat
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..engine import check_space
+from ..engine import check_space, normalise_time
 from ..errors import Conflict, InvalidInput, NotFound
 from ..session_journal import SessionJournal
 from .app import PLAYGROUND, create_app, episode_json
@@ -217,6 +220,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
                 "session_deletion": True,
                 "turn_cancellation": True,
+                "transcript_pagination": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
     @app.get("/v1/conversations")
@@ -258,11 +262,34 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return journal.events(space, sid, after, limit)
 
     @app.get("/v1/conversations/{sid}/transcript")
-    async def transcript(sid: str, space=Depends(space_for)):
+    async def transcript(sid: str, before: str | None = Query(default=None, max_length=1024),
+                         limit: int = Query(default=200, ge=1, le=200), space=Depends(space_for)):
         journal.get(space, sid)
-        episodes = await engine.episodes(space, {"session_id": sid}, limit=201)
-        return {"episodes": [episode_json(episode) for episode in episodes[:200]],
-                "has_more": len(episodes) > 200}
+        boundary = None
+        if before is not None:
+            try:
+                raw = base64.b64decode(before + "=" * (-len(before) % 4), altchars=b"-_", validate=True)
+                cursor = json.loads(raw)
+                if (not isinstance(cursor, list) or len(cursor) != 5 or type(cursor[0]) is not int or cursor[:3] != [1, space, sid]
+                        or not isinstance(cursor[3], str) or normalise_time(cursor[3]) != cursor[3]
+                        or type(cursor[4]) is not int or not 1 <= cursor[4] <= 2**63 - 1):
+                    raise ValueError("invalid boundary")
+                boundary = (cursor[3], cursor[4])
+            except (ValueError, TypeError, UnicodeError, binascii.Error, InvalidInput):
+                raise HTTPException(422, "invalid transcript cursor") from None
+        # The engine already walks matching episodes; bound the response, not
+        # the history being searched. Cursors survive deletion of their boundary.
+        episodes = await engine.episodes(space, {"session_id": sid})
+        if boundary is not None:
+            episodes = [e for e in episodes if (e.created_at, e.episode_id) < boundary]
+        page = episodes[-limit:]
+        has_more = len(episodes) > limit
+        next_before = None
+        if has_more:
+            raw = json.dumps([1, space, sid, page[0].created_at, page[0].episode_id], separators=(",", ":"))
+            next_before = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+        return {"episodes": [episode_json(episode) for episode in page],
+                "has_more": has_more, "next_before": next_before}
 
     async def resolved(space, kept, entry):
         """One receipt shape, live or rehydrated, with the reply's text

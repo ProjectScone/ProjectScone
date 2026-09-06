@@ -489,9 +489,20 @@ Cleanup continues if the requesting browser disconnects. A matching stop retry
 returns current state (possibly `stopping`), not a fabricated original event.
 `GET /v1/conversations/{sid}/events` exposes durable lifecycle event receipts;
 `GET /v1/conversations` lists bounded pages using `after`/`limit`.
-`GET /v1/conversations/{sid}/transcript` reads the first 200 native episodes
-attributed to that session, with `has_more` for a partial transcript. It checks
-session ownership before reading memory and does not reconstruct reply receipts.
+`GET /v1/conversations/{sid}/transcript` reads the latest native message page
+attributed to that session, in chronological order. `limit` defaults to 200 and
+accepts 1–200. When `has_more` is true, pass the opaque `next_before` value as
+`before` to read an older page. The cursor binds the authorized space and session
+to a timestamp/episode-ID boundary, so deleting that boundary message does not
+break navigation. It checks session ownership before reading memory and does not
+reconstruct reply receipts. Pages reflect current retained data, not a frozen
+snapshot; backdated imports can change older pages. Response size is bounded,
+but the current engine still scans the space's history to find matching episodes.
+
+With explicit `transcript_pagination: true`, the React workspace shows 50 messages
+per page and provides Older, Newer and Latest controls. Polling re-reads the selected
+page without changing your position or resubmitting work. A server without this
+capability remains readable but does not expose unsupported navigation.
 
 Turn receipts survive service recreation in the journal. A receipt's `status`
 is separate from `result_state`: `available` includes the authorized saved reply;

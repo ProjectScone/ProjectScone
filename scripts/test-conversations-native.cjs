@@ -47,6 +47,35 @@ async function fixture(t,{reopened=false}={}){
   return {page,base,errors,modelWaiting};
 }
 
+test('the browser pages a native transcript and opens an older original source',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
+  const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
+  const response=await fetch(base+'/v1/conversations',{method:'POST',headers,body:JSON.stringify({request_id:'history-fixture',capture:true})});
+  assert.equal(response.status,200);const session=await response.json();
+  const ids=[];
+  // Explicit synthetic history belongs only to this disposable fixture server.
+  // This tests navigation through real storage, not agent capture provenance.
+  for(let index=1;index<=123;index++){
+    const added=await fetch(base+'/v1/episodes',{method:'POST',headers,body:JSON.stringify({content:`Archived fixture message ${index}`,kind:'conversation',metadata:{session_id:session.session_id,role:index%2?'user':'assistant'}})});
+    assert.equal(added.status,200);ids.push((await added.json()).episode_id);
+  }
+  let writes=0;page.on('request',request=>{if(request.method()==='POST')writes++;});
+  await page.goto(base+'/conversations/'+session.session_id);
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByText('Archived fixture message 123',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Saved messages'}).locator('article').count(),50);
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();
+  await page.getByText('Archived fixture message 24',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Older messages',exact:true}).click();
+  await page.getByText('Archived fixture message 1',{exact:true}).waitFor();
+  await page.getByRole('button',{name:`Inspect message episode ${ids[0]}`,exact:true}).click();
+  await page.getByRole('complementary',{name:'Conversation evidence'}).getByText('Archived fixture message 1',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Latest messages',exact:true}).click();
+  await page.getByText('Archived fixture message 123',{exact:true}).waitFor();
+  assert.equal(writes,0,'reading history must not create or submit work');
+  assert.deepEqual(errors,[]);
+});
+
 test('the browser cancels a real Pipecat reply and completes the next question',{timeout:60000},async t=>{
   const {page,base,errors,modelWaiting}=await fixture(t);page.setDefaultTimeout(8000);
   const writes=[];page.on('request',request=>{if(request.method()==='POST')writes.push(new URL(request.url()).pathname);});
