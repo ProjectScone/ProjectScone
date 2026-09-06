@@ -19,13 +19,17 @@ embedder), so the same code runs in-process with no server, or against
 MongoDB and Qdrant behind FastAPI. The in-process stores are the reference
 implementation; the database adapters pass the same contract tests.
 Vector indexes: in-memory, SQLite, Qdrant, Chroma (embedded or server),
-LanceDB (embedded). Document stores: in-memory, SQLite, MongoDB.
+LanceDB (embedded), PostgreSQL with pgvector. Document stores: in-memory,
+SQLite, MongoDB, PostgreSQL. Evidence: in-memory, SQLite, MongoDB,
+PostgreSQL. With `SCONE_DOCUMENTS=postgres` the vectors and the evidence
+log default to the same database through one connection pool.
 
 ## Install
 
 ```sh
 pip install scone-memory                 # core, in-process stores
 pip install 'scone-memory[mongo,qdrant]' # database adapters
+pip install 'scone-memory[postgres]'     # PostgreSQL + pgvector for documents, vectors and evidence (SCONE_POSTGRES_URL)
 pip install 'scone-memory[chroma]'       # Chroma vectors (SCONE_VECTORS=chroma; SCONE_CHROMA_PATH or SCONE_CHROMA_URL)
 pip install 'scone-memory[lancedb]'      # LanceDB vectors (SCONE_VECTORS=lancedb, SCONE_LANCEDB_PATH)
 pip install 'scone-memory[api]'          # FastAPI server

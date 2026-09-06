@@ -17,6 +17,7 @@ from scone_memory.testing import Clock
 
 MONGO_URL = os.environ.get("SCONE_TEST_MONGO_URL")
 QDRANT_URL = os.environ.get("SCONE_TEST_QDRANT_URL")
+POSTGRES_URL = os.environ.get("SCONE_TEST_POSTGRES_URL")
 
 
 def backends():
@@ -30,6 +31,8 @@ def backends():
         yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
     if QDRANT_URL:
         yield pytest.param("qdrant", id="qdrant", marks=pytest.mark.qdrant)
+    if POSTGRES_URL:
+        yield pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
 
 
 @pytest.fixture(params=list(backends()))
@@ -55,6 +58,13 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = QdrantVectorIndex(":memory:", "scone_test")
+    elif request.param == "postgres":
+        from scone_memory.backends import PostgresDocumentStore
+
+        documents = PostgresDocumentStore(POSTGRES_URL, schema=f"scone_test_{uuid.uuid4().hex[:8]}")
+        await documents.open()
+        vectors = documents.vectors()
+        events = await documents.events(clock=clock).open()
     elif request.param == "chroma":
         from scone_memory.backends import ChromaVectorIndex
 

@@ -29,12 +29,28 @@ jobs:
     defaults:
       run:
         working-directory: python/scone-memory
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: scone
+          POSTGRES_PASSWORD: scone
+          POSTGRES_DB: scone
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scone"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install
-        run: python -m pip install -q -e '.[test,qdrant,mongo,chroma,lancedb,langchain,llamaindex,openai-agents]'
+        run: python -m pip install -q -e '.[test,qdrant,mongo,postgres,chroma,lancedb,langchain,llamaindex,openai-agents]'
       - name: Tests
+        env:
+          SCONE_TEST_POSTGRES_URL: postgresql://scone:scone@localhost:5432/scone
         run: python -m pytest -q -p no:warnings

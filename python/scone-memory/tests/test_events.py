@@ -33,6 +33,8 @@ def sink_params():
     yield pytest.param("sqlite", id="sqlite")
     if os.environ.get("SCONE_TEST_MONGO_URL"):
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
+    if os.environ.get("SCONE_TEST_POSTGRES_URL"):
+        yield pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
 
 
 @pytest.fixture(params=list(sink_params()))
@@ -42,12 +44,19 @@ async def sink(request, tmp_path):
         log = InMemoryEventLog(max_events=5)
     elif request.param == "sqlite":
         log = SqliteEventLog(tmp_path / "events.db", max_age_days=30, clock=clock)
+    elif request.param == "postgres":
+        from scone_memory.backends import PostgresEventLog
+
+        log = await PostgresEventLog(os.environ["SCONE_TEST_POSTGRES_URL"], f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=30, clock=clock).open()
     else:
         from scone_memory.events import MongoEventLog
 
         log = await MongoEventLog(os.environ["SCONE_TEST_MONGO_URL"], f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=7).open()
     log.test_clock = clock
     yield log
+    if request.param == "postgres":  # the log drops its table; the throwaway schema goes too
+        async with log.pool.connection() as conn:
+            await conn.execute(f"DROP SCHEMA IF EXISTS {log.schema} CASCADE")
     if hasattr(log, "drop"):
         await log.drop()
     if hasattr(log, "close"):
@@ -68,6 +77,12 @@ async def test_retention_is_a_stated_policy(sink):
         e = await sink.append(ev("alpha", "recall", query="dated"))
         doc = await sink.events.find_one({"_id": e.event_id})
         assert doc["ts_date"].year == 2025
+    elif sink.name == "postgres":
+        await sink.append(ev("alpha", "recall", "2024-11-01T00:00:00.000Z", query="old"))
+        await sink.append(ev("alpha", "recall", "2024-12-20T00:00:00.000Z", query="recent"))
+        sink.test_clock.now = "2025-01-01T00:00:00.000Z"
+        assert await sink.sweep() == 1
+        assert [e.payload["query"] for e in await sink.query("alpha")] == ["recent"]
     else:
         await sink.append(ev("alpha", "recall", "2024-11-01T00:00:00.000Z", query="old"))
         await sink.append(ev("alpha", "recall", "2024-12-20T00:00:00.000Z", query="recent"))

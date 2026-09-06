@@ -20,6 +20,7 @@ api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 mcp = ["mcp>=2,<3"]
 remote-embed = ["httpx>=0.27"]
 local-embed = ["fastembed>=0.4"]
+postgres = ["psycopg[binary,pool]>=3.2", "pgvector>=0.3"]
 chroma = ["chromadb>=1.0"]
 lancedb = ["lancedb>=0.20"]
 langchain = ["langchain-core>=0.3"]
@@ -49,4 +50,5 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "mongo: needs a live MongoDB at SCONE_TEST_MONGO_URL",
     "qdrant: needs a live Qdrant at SCONE_TEST_QDRANT_URL",
+    "postgres: needs a live PostgreSQL with pgvector at SCONE_TEST_POSTGRES_URL",
 ]

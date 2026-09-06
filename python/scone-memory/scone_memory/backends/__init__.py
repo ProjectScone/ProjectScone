@@ -14,6 +14,9 @@ __all__ = [
     "QdrantVectorIndex",
     "ChromaVectorIndex",
     "LanceDBVectorIndex",
+    "PostgresDocumentStore",
+    "PostgresVectorIndex",
+    "PostgresEventLog",
 ]
 
 
@@ -34,4 +37,8 @@ def __getattr__(name: str):
         from .lancedb import LanceDBVectorIndex
 
         return LanceDBVectorIndex
+    if name in ("PostgresDocumentStore", "PostgresVectorIndex", "PostgresEventLog"):
+        from . import postgres
+
+        return getattr(postgres, name)
     raise AttributeError(name)

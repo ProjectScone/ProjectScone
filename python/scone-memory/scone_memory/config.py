@@ -1,11 +1,12 @@
 """Assemble an engine from environment variables.
 
-    SCONE_DOCUMENTS   memory | sqlite | mongo   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb  (default memory)
+    SCONE_DOCUMENTS   memory | sqlite | mongo | postgres   (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
     SCONE_MONGO_URL, SCONE_MONGO_DB (default scone)
+    SCONE_POSTGRES_URL, SCONE_POSTGRES_SCHEMA (default scone); documents, vectors and events share one pool
     SCONE_QDRANT_URL, SCONE_QDRANT_API_KEY, SCONE_QDRANT_COLLECTION (default scone_chunks)
     SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
     SCONE_LANCEDB_PATH (database directory, required for lancedb)
@@ -15,10 +16,10 @@
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
-    SCONE_EVENTS      memory | sqlite | mongo | none
+    SCONE_EVENTS      memory | sqlite | mongo | postgres | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
-    SCONE_EVENTS_MAX_AGE_DAYS                    sqlite sink retention, optional
+    SCONE_EVENTS_MAX_AGE_DAYS                    sqlite, mongo and postgres sink retention, optional
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
@@ -54,6 +55,8 @@ class Settings:
     sqlite_path: str = "~/.scone-memory/memory.db"
     mongo_url: Optional[str] = None
     mongo_db: str = "scone"
+    postgres_url: Optional[str] = None
+    postgres_schema: str = "scone"
     qdrant_url: Optional[str] = None
     qdrant_api_key: Optional[str] = None
     qdrant_collection: str = "scone_chunks"
@@ -91,6 +94,8 @@ class Settings:
             sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
             mongo_url=env.get("SCONE_MONGO_URL"),
             mongo_db=env.get("SCONE_MONGO_DB", "scone"),
+            postgres_url=env.get("SCONE_POSTGRES_URL"),
+            postgres_schema=env.get("SCONE_POSTGRES_SCHEMA", "scone"),
             qdrant_url=env.get("SCONE_QDRANT_URL"),
             qdrant_api_key=env.get("SCONE_QDRANT_API_KEY"),
             qdrant_collection=env.get("SCONE_QDRANT_COLLECTION", "scone_chunks"),
@@ -174,10 +179,26 @@ def build_documents(settings: Settings):
         if not settings.mongo_url:
             raise InvalidInput("SCONE_DOCUMENTS=mongo needs SCONE_MONGO_URL")
         return MongoDocumentStore(settings.mongo_url, settings.mongo_db)
+    if settings.documents == "postgres":
+        from .backends import PostgresDocumentStore
+
+        if not settings.postgres_url:
+            raise InvalidInput("SCONE_DOCUMENTS=postgres needs SCONE_POSTGRES_URL")
+        return PostgresDocumentStore(settings.postgres_url, settings.postgres_schema)
     raise InvalidInput(f"unknown SCONE_DOCUMENTS {settings.documents!r}")
 
 
-def build_vectors(settings: Settings):
+def build_vectors(settings: Settings, documents=None):
+    """``documents`` lets a Postgres vector index share the document
+    store's pool when both live in the same database."""
+    if settings.vectors == "postgres":
+        from .backends import PostgresDocumentStore, PostgresVectorIndex
+
+        if isinstance(documents, PostgresDocumentStore):
+            return documents.vectors()
+        if not settings.postgres_url:
+            raise InvalidInput("SCONE_VECTORS=postgres needs SCONE_POSTGRES_URL")
+        return PostgresVectorIndex(settings.postgres_url, settings.postgres_schema)
     if settings.vectors == "memory":
         from .backends import InMemoryVectorIndex
 
@@ -230,10 +251,18 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
     return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s, batch=settings.distill_batch)
 
 
-def build_events(settings: Settings):
-    choice = settings.events or {"sqlite": "sqlite", "mongo": "mongo"}.get(settings.documents, "memory")
+def build_events(settings: Settings, documents=None):
+    choice = settings.events or {"sqlite": "sqlite", "mongo": "mongo", "postgres": "postgres"}.get(settings.documents, "memory")
     if choice == "none":
         return None
+    if choice == "postgres":
+        from .backends import PostgresDocumentStore, PostgresEventLog
+
+        if isinstance(documents, PostgresDocumentStore):
+            return documents.events(settings.events_max_age_days)
+        if not settings.postgres_url:
+            raise InvalidInput("SCONE_EVENTS=postgres needs SCONE_POSTGRES_URL")
+        return PostgresEventLog(settings.postgres_url, settings.postgres_schema, settings.events_max_age_days)
     if choice == "mongo":
         from .events import MongoEventLog
 
@@ -257,12 +286,12 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         await documents.open()
     if settings.events_queries not in ("text", "hash"):
         raise InvalidInput("SCONE_EVENTS_QUERIES must be text or hash")
-    events = build_events(settings)
+    events = build_events(settings, documents)
     if hasattr(events, "open"):
         await events.open()
     engine = MemoryEngine(
         documents,
-        build_vectors(settings),
+        build_vectors(settings, documents),
         build_embedder(settings),
         events=events,
         record_queries=settings.events_queries == "text",
