@@ -12,6 +12,8 @@ __all__ = [
     "SqliteVectorIndex",
     "MongoDocumentStore",
     "QdrantVectorIndex",
+    "ChromaVectorIndex",
+    "LanceDBVectorIndex",
 ]
 
 
@@ -24,4 +26,12 @@ def __getattr__(name: str):
         from .qdrant import QdrantVectorIndex
 
         return QdrantVectorIndex
+    if name == "ChromaVectorIndex":
+        from .chroma import ChromaVectorIndex
+
+        return ChromaVectorIndex
+    if name == "LanceDBVectorIndex":
+        from .lancedb import LanceDBVectorIndex
+
+        return LanceDBVectorIndex
     raise AttributeError(name)

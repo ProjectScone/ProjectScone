@@ -1,12 +1,14 @@
 """Assemble an engine from environment variables.
 
     SCONE_DOCUMENTS   memory | sqlite | mongo   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant  (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
     SCONE_MONGO_URL, SCONE_MONGO_DB (default scone)
     SCONE_QDRANT_URL, SCONE_QDRANT_API_KEY, SCONE_QDRANT_COLLECTION (default scone_chunks)
+    SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
+    SCONE_LANCEDB_PATH (database directory, required for lancedb)
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
     SCONE_EMBED_API_KEY        remote: bearer, optional
@@ -55,6 +57,9 @@ class Settings:
     qdrant_url: Optional[str] = None
     qdrant_api_key: Optional[str] = None
     qdrant_collection: str = "scone_chunks"
+    chroma_path: Optional[str] = None
+    chroma_url: Optional[str] = None
+    lancedb_path: Optional[str] = None
     embed_model: Optional[str] = None
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
@@ -89,6 +94,9 @@ class Settings:
             qdrant_url=env.get("SCONE_QDRANT_URL"),
             qdrant_api_key=env.get("SCONE_QDRANT_API_KEY"),
             qdrant_collection=env.get("SCONE_QDRANT_COLLECTION", "scone_chunks"),
+            chroma_path=env.get("SCONE_CHROMA_PATH"),
+            chroma_url=env.get("SCONE_CHROMA_URL"),
+            lancedb_path=env.get("SCONE_LANCEDB_PATH"),
             embed_model=env.get("SCONE_EMBED_MODEL"),
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
@@ -184,6 +192,16 @@ def build_vectors(settings: Settings):
         if not settings.qdrant_url:
             raise InvalidInput("SCONE_VECTORS=qdrant needs SCONE_QDRANT_URL")
         return QdrantVectorIndex(settings.qdrant_url, settings.qdrant_collection, settings.qdrant_api_key)
+    if settings.vectors == "chroma":
+        from .backends import ChromaVectorIndex
+
+        return ChromaVectorIndex(path=settings.chroma_path, url=settings.chroma_url)
+    if settings.vectors == "lancedb":
+        from .backends import LanceDBVectorIndex
+
+        if not settings.lancedb_path:
+            raise InvalidInput("SCONE_VECTORS=lancedb needs SCONE_LANCEDB_PATH")
+        return LanceDBVectorIndex(settings.lancedb_path)
     raise InvalidInput(f"unknown SCONE_VECTORS {settings.vectors!r}")
 
 

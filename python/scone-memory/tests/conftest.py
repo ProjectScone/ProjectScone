@@ -5,6 +5,7 @@ against MongoDB and Qdrant whenever ``SCONE_TEST_MONGO_URL`` and
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import uuid
 
@@ -22,6 +23,8 @@ def backends():
     yield pytest.param("memory", id="memory")
     yield pytest.param("sqlite", id="sqlite")
     yield pytest.param("qdrant-local", id="qdrant-local")
+    yield pytest.param("chroma", id="chroma", marks=pytest.mark.skipif(importlib.util.find_spec("chromadb") is None, reason="chromadb not installed"))
+    yield pytest.param("lancedb", id="lancedb", marks=pytest.mark.skipif(importlib.util.find_spec("lancedb") is None, reason="lancedb not installed"))
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
         yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
@@ -52,6 +55,16 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = QdrantVectorIndex(":memory:", "scone_test")
+    elif request.param == "chroma":
+        from scone_memory.backends import ChromaVectorIndex
+
+        documents = InMemoryDocumentStore()
+        vectors = ChromaVectorIndex(collection=f"scone_test_{uuid.uuid4().hex[:8]}")
+    elif request.param == "lancedb":
+        from scone_memory.backends import LanceDBVectorIndex
+
+        documents = InMemoryDocumentStore()
+        vectors = LanceDBVectorIndex(str(tmp_path / "lance"))
     else:
         from scone_memory.backends import QdrantVectorIndex
 

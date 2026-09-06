@@ -18,12 +18,16 @@ The engine is written against three small protocols (documents, vectors,
 embedder), so the same code runs in-process with no server, or against
 MongoDB and Qdrant behind FastAPI. The in-process stores are the reference
 implementation; the database adapters pass the same contract tests.
+Vector indexes: in-memory, SQLite, Qdrant, Chroma (embedded or server),
+LanceDB (embedded). Document stores: in-memory, SQLite, MongoDB.
 
 ## Install
 
 ```sh
 pip install scone-memory                 # core, in-process stores
 pip install 'scone-memory[mongo,qdrant]' # database adapters
+pip install 'scone-memory[chroma]'       # Chroma vectors (SCONE_VECTORS=chroma; SCONE_CHROMA_PATH or SCONE_CHROMA_URL)
+pip install 'scone-memory[lancedb]'      # LanceDB vectors (SCONE_VECTORS=lancedb, SCONE_LANCEDB_PATH)
 pip install 'scone-memory[api]'          # FastAPI server
 pip install 'scone-memory[local-embed]'  # bge-small ONNX, same model as the Rust core
 ```
