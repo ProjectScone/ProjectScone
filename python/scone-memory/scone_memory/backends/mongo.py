@@ -15,8 +15,13 @@ from ..lexical import tokenize
 from ..models import Chunk, Episode, Fact
 from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
 
-#: Shared spec 3.6. 1: code-point spans. 2: UTF-8 byte-offset spans.
-SCHEMA_VERSION = 2
+#: Shared spec 3.6. Pre-release: a database another build wrote is
+#: refused, not migrated.
+SCHEMA_VERSION = 3
+
+
+class SchemaMismatch(Exception):
+    pass
 
 
 def _episode(doc: Mapping) -> Episode:
@@ -87,40 +92,25 @@ class MongoDocumentStore:
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
-        await self.migrate()
+        await self.check_schema()
         return self
 
     async def schema_version(self) -> int:
         doc = await self.meta.find_one({"_id": "schema"})
         if doc:
             return int(doc["version"])
-        has_rows = await self.chunks.find_one({}, {"_id": 1}) is not None
+        has_rows = await self.episodes.find_one({}, {"_id": 1}) is not None
         return 1 if has_rows else SCHEMA_VERSION
 
-    async def migrate(self) -> int:
+    async def check_schema(self) -> None:
         version = await self.schema_version()
-        changed = 0
-        if version < 2:
-            changed += await self._spans_to_bytes()
+        if version != SCHEMA_VERSION:
+            raise SchemaMismatch(
+                f"database {self.db.name!r} holds schema v{version}; this build writes v{SCHEMA_VERSION}. "
+                "scone-memory is pre-release and does not migrate: export with the build that wrote it, "
+                "drop the database, and import again."
+            )
         await self.meta.replace_one({"_id": "schema"}, {"_id": "schema", "version": SCHEMA_VERSION}, upsert=True)
-        return changed
-
-    async def _spans_to_bytes(self) -> int:
-        changed = 0
-        async for chunk in self.chunks.find({}, {"_id": 1, "episode_id": 1, "start": 1, "text": 1}):
-            episode = await self.episodes.find_one({"_id": chunk["episode_id"]}, {"content": 1})
-            if episode is None:
-                continue
-            content, text = episode["content"], chunk["text"]
-            raw = content.encode()
-            start = len(content[: chunk["start"]].encode())
-            if raw[start : start + len(text.encode())].decode(errors="replace") != text:
-                start = raw.find(text.encode())
-                if start < 0:
-                    continue
-            await self.chunks.update_one({"_id": chunk["_id"]}, {"$set": {"start": start, "end": start + len(text.encode())}})
-            changed += 1
-        return changed
 
     async def drop(self) -> None:
         await self.client.drop_database(self.db.name)

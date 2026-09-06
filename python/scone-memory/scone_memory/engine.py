@@ -211,7 +211,8 @@ class MemoryEngine:
                 raise InvalidInput("content must not be empty")
             if len(content.encode()) > MAX_CONTENT_BYTES:
                 raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-            if record.kind not in KINDS:
+            kind = record.kind
+            if kind not in KINDS:
                 raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
             clean_tags = normalise_tags(record.tags)
             clean_meta = normalise_metadata(record.metadata or {})
@@ -236,7 +237,7 @@ class MemoryEngine:
                     texts=[content[sp.start : sp.end] for sp in spans],
                     new=NewEpisode(
                         space=space,
-                        kind=record.kind,
+                        kind=kind,
                         content=content,
                         content_hash=digest,
                         created_at=happened,

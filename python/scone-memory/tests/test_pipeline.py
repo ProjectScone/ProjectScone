@@ -230,6 +230,6 @@ async def test_episode_kinds_are_the_rust_vocabulary():
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     for kind in ("note", "file", "conversation", "observation", "connector"):
         await engine.remember("default", f"a {kind}", kind=kind)  # type: ignore[arg-type]
-    for kind in ("chat", "web", "memo"):
+    for kind in ("chat", "web", "memo"):  # pre-release names are gone, not aliased
         with pytest.raises(InvalidInput):
             await engine.remember("default", f"a {kind}", kind=kind)  # type: ignore[arg-type]

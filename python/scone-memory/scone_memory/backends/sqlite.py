@@ -57,9 +57,10 @@ CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
-#: Schema versions (shared spec 3.6). 1: chunk spans were code-point
-#: indexes. 2: chunk spans are UTF-8 byte offsets.
-SCHEMA_VERSION = 2
+#: Shared spec 3.6. Bumped on any incompatible change; while the package
+#: is pre-release nothing is migrated: a file from an older build is
+#: refused with a message, not rewritten.
+SCHEMA_VERSION = 3
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -70,7 +71,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
-    migrate(conn)
+    check_schema(conn)
     return conn
 
 
@@ -78,44 +79,25 @@ def schema_version(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if row:
         return int(row["value"])
-    # No version recorded: a file written before versioning existed holds
-    # version-1 rows if it holds any chunks at all; an empty file is new.
-    has_rows = conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
+    has_rows = conn.execute("SELECT 1 FROM episodes LIMIT 1").fetchone() is not None
     return 1 if has_rows else SCHEMA_VERSION
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Bring the file to SCHEMA_VERSION; returns the number of rows changed."""
+def check_schema(conn: sqlite3.Connection) -> None:
+    """Stamp a fresh file; refuse a file another build wrote."""
     version = schema_version(conn)
-    changed = 0
-    if version < 2:
-        changed += _spans_to_bytes(conn)
+    if version != SCHEMA_VERSION:
+        raise SchemaMismatch(
+            f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION}. "
+            "scone-memory is pre-release and does not migrate: export with the build that "
+            "wrote the file, delete it, and import again."
+        )
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     conn.commit()
-    return changed
 
 
-def _spans_to_bytes(conn: sqlite3.Connection) -> int:
-    """v1 -> v2: recompute every span as UTF-8 byte offsets from the
-    stored chunk text, which was always exact."""
-    changed = 0
-    rows = conn.execute(
-        'SELECT c.id AS id, c.start AS start, c.text AS text, e.content AS content'
-        " FROM chunks c JOIN episodes e ON e.id = c.episode_id"
-    ).fetchall()
-    for row in rows:
-        content, text = row["content"], row["text"]
-        raw = content.encode()
-        start = len(content[: row["start"]].encode())
-        if raw[start : start + len(text.encode())].decode(errors="replace") != text:
-            start = raw.find(text.encode())
-            if start < 0:
-                continue  # text no longer addressable; left as it was
-        end = start + len(text.encode())
-        if (start, end) != (row["start"], None):
-            conn.execute('UPDATE chunks SET start = ?, "end" = ? WHERE id = ?', (start, end, row["id"]))
-            changed += 1
-    return changed
+class SchemaMismatch(Exception):
+    pass
 
 
 def _episode(row: sqlite3.Row) -> Episode:

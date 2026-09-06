@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .. import metrics
 from ..engine import MemoryEngine
 from ..errors import InvalidInput, NotFound
 from ..models import Fact, RecallItem
@@ -207,6 +208,19 @@ def create_app(
     async def post_feedback(body: FeedbackBody, space: str = Depends(space_for)) -> dict:
         event = await engine.feedback(space, body.recall_event_id, body.chunk_id, body.useful, body.note)
         return {"recorded": event.event_id}
+
+    @app.get("/v1/metrics")
+    async def get_metrics(
+        since: Optional[str] = None, until: Optional[str] = None, limit: int = 5000, space: str = Depends(space_for)
+    ) -> dict:
+        """Computed from the retained events in [since, until). The reply
+        says how many events it saw and whether the read was truncated."""
+        if engine.events is None:
+            return {"evidence": "none: no event log attached", "metrics": [], "coverage": None}
+        limit = max(1, min(limit, 20000))
+        events = await engine.events.query(space, since=since, limit=limit)
+        report = metrics.compute(events, since=since, until=until, truncated=len(events) >= limit)
+        return {"evidence": engine.events.name, **report.as_dict()}
 
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
