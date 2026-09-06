@@ -201,3 +201,30 @@ async def test_mongo_refuses_another_builds_database():
     finally:
         await client.drop_database(name)
         await client.close()
+
+
+def test_an_opener_retries_the_wal_switch_while_another_connection_is_writing(tmp_path):
+    """Switching a rollback-journal file to WAL opens a read transaction and
+    then upgrades it to a write. If another connection holds the reserved
+    lock at that moment, SQLite refuses the upgrade at once instead of
+    calling the busy handler (its deadlock rule), so several openers
+    starting on such a file together failed in CI with "database is
+    locked". The opener retries until the writer is gone. A connection
+    holding an exclusive lock is the other case: there SQLite does wait,
+    which is why this test holds a reserved lock (BEGIN IMMEDIATE)."""
+    import threading
+    import time
+
+    path = tmp_path / "rollback.db"
+    write_v5_file(path)  # a plain rollback-journal file, as a foreign tool would leave it
+    holder = sqlite3.connect(path, check_same_thread=False)  # released from another thread below
+    holder.execute("BEGIN IMMEDIATE")
+
+    def release():
+        time.sleep(0.3)
+        holder.execute("COMMIT")
+
+    threading.Thread(target=release).start()
+    store = SqliteDocumentStore(path)
+    assert store.conn.execute("PRAGMA journal_mode").fetchall()[0][0] == "wal"
+    assert schema_version(store.conn) == 6

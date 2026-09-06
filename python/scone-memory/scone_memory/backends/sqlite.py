@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
 from array import array
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -81,17 +82,40 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(Path(path).expanduser()) if str(path) != ":memory:" else path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    enable_wal(conn)
     conn.executescript(SCHEMA)
     check_schema(conn, path)
     return conn
 
 
+def enable_wal(conn: sqlite3.Connection, attempts: int = 100, pause_s: float = 0.02) -> None:
+    """Switch a file to write-ahead logging. The switch opens a read
+    transaction and upgrades it to a write; if another connection holds
+    the reserved lock at that moment SQLite refuses at once instead of
+    calling the busy handler (its deadlock rule). Several openers starting
+    on a rollback-journal file together therefore failed in CI with
+    "database is locked". The mode is persistent, so whoever wins settles
+    it and the others retry until their own switch goes through."""
+    for attempt in range(attempts):
+        try:
+            # An in-memory database answers "memory" and stays that way;
+            # that is not a failure. Only a lock error is retried.
+            conn.execute("PRAGMA journal_mode = WAL").fetchall()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or attempt == attempts - 1:
+                raise
+        time.sleep(pause_s)
+
+
 def schema_version(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    if row:
-        return int(row["value"])
-    has_rows = conn.execute("SELECT 1 FROM episodes LIMIT 1").fetchone() is not None
+    # fetchall, not fetchone: an exhausted statement releases its read lock,
+    # and a read lock still held when BEGIN IMMEDIATE is attempted makes
+    # SQLite refuse at once (deadlock avoidance) instead of waiting.
+    rows = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
+    if rows:
+        return int(rows[0]["value"])
+    has_rows = bool(conn.execute("SELECT 1 FROM episodes LIMIT 1").fetchall())
     return 1 if has_rows else SCHEMA_VERSION
 
 
@@ -112,33 +136,46 @@ def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> 
     )
 
 
+def backup_before_step(path: "str | Path", version: int) -> None:
+    """``<name>.v<version>.bak`` through SQLite's online backup, read by its
+    own connection so it copies the committed file, which under the
+    caller's write lock is exactly the pre-step state. An existing backup
+    is kept."""
+    target = Path(path).expanduser()
+    backup = target.with_name(target.name + f".v{version}.bak")
+    if backup.exists():
+        return
+    source, dest = sqlite3.connect(target), sqlite3.connect(backup)
+    try:
+        source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+
+
 def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None") -> None:
     """Run the additive statements for ``version`` and bump to version + 1 in
-    one transaction. For a file store a backup ``<name>.v<version>.bak`` is
-    taken first through SQLite's online backup, so it is consistent even
-    while another connection holds the file; an existing backup is kept."""
-    if path is not None and str(path) != ":memory:":
-        target = Path(path).expanduser()
-        backup = target.with_name(target.name + f".v{version}.bak")
-        if not backup.exists():
-            dest = sqlite3.connect(backup)
-            try:
-                conn.backup(dest)
-            finally:
-                dest.close()
+    one transaction. For a file store a backup is taken first, inside the
+    write lock: two openers racing on the same file used to both find no
+    backup and both write one, and the second failed with "database is
+    locked" on the backup file itself (seen in CI). Under the lock only the
+    opener that applies the step takes the backup; the others find the
+    version already bumped and do nothing."""
     conn.isolation_level = None  # explicit transaction control below
     conn.execute("BEGIN IMMEDIATE")  # takes the write lock; a second opener waits here
     try:
         # Re-read under the lock: if another opener applied the step while we
         # waited, there is nothing left to do and applying it twice would
         # fail on the duplicate column.
-        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-        current = int(row[0]) if row else version
+        rows = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
+        current = int(rows[0][0]) if rows else version
         if current != version:
             conn.execute("COMMIT")
             if current != version + 1:
                 raise SchemaMismatch(f"schema changed to v{current} while opening; expected v{version} or v{version + 1}")
             return
+        if path is not None and str(path) != ":memory:":
+            backup_before_step(path, version)
         for statement in STEPS[version]:
             conn.execute(statement)
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(version + 1),))
