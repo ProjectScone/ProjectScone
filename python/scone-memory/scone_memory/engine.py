@@ -186,6 +186,7 @@ class MemoryEngine:
         record_queries: bool = False,
         contextual_embeddings: bool = False,
         similarity_floor: Optional[float] = None,
+        demote_restated: bool = False,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
@@ -206,6 +207,10 @@ class MemoryEngine:
         #: engine's setting is recorded on every recall event so a number is
         #: never quoted without it.
         self.contextual_embeddings = contextual_embeddings
+        #: Order a restated claim ahead of what it replaces (fusion.
+        #: demote_restated). Off until the effect on ordinary retrieval is
+        #: measured on E21's slice; see memory/EXPERIMENTS.md E34.
+        self.demote_restated = demote_restated
         #: Experiment 9: with a floor, a recall whose best vector hit sits
         #: below it is flagged low_confidence so a reader can abstain
         #: instead of answering from weak evidence. None (the default) means
@@ -617,7 +622,14 @@ class MemoryEngine:
                 if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
                 and _fits(episode, kind, source_prefix, since_at, until_at)
             ]
-        items = fusion.normalise(items[:limit])
+        items = items[:limit]
+        if self.demote_restated:
+            items = fusion.demote_restated(
+                items,
+                {cid: c.text for cid, c in chunks.items()},
+                {cid: c.created_at for cid, c in chunks.items()},
+            )
+        items = fusion.normalise(items)
 
         for item in items:
             eid = chunks[item.chunk_id].episode_id

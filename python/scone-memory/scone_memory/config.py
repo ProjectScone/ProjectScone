@@ -19,6 +19,7 @@
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
+    SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -86,6 +87,7 @@ class Settings:
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
     contextual_embeddings: bool = False
+    demote_restated: bool = False
     similarity_floor: Optional[float] = None
     events: Optional[str] = None
     events_queries: str = "hash"
@@ -133,6 +135,7 @@ class Settings:
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
+            demote_restated=env.get("SCONE_DEMOTE_RESTATED") == "1",
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             events=env.get("SCONE_EVENTS"),
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
@@ -271,6 +274,28 @@ def build_vectors(settings: Settings, documents=None):
     raise InvalidInput(f"unknown SCONE_VECTORS {settings.vectors!r}")
 
 
+#: Settings that change what an engine does, so every one of them must
+#: reach a bench's per-item engines (see build_in_process_engine).
+ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated")
+
+
+async def build_in_process_engine(settings: Settings, embedder):
+    """A fresh engine on in-process stores, carrying every engine setting
+    the environment holds. The benches build one per item, and every one
+    of them must run under the configuration being measured: twice now a
+    new setting has been added and a bench has gone on measuring the
+    default under the new name (contextual embeddings, then restatement
+    demotion), so both benches build their engines here."""
+    from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+
+    return await MemoryEngine(
+        InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
+        contextual_embeddings=settings.contextual_embeddings,
+        similarity_floor=settings.similarity_floor,
+        demote_restated=settings.demote_restated,
+    ).open()
+
+
 def build_chat(settings: Settings):
     """The consolidation model, or None when none is configured."""
     if not settings.chat_url and not settings.chat_model:
@@ -350,6 +375,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         events=events,
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
+        demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

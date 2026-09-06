@@ -174,7 +174,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
     from collections import defaultdict
 
     from .bench import load_items, run as run_bench, stratified_sample
-    from .config import build_embedder
+    from .config import build_embedder, build_in_process_engine
 
     items = load_items(args.dataset)
     if args.stratified:
@@ -194,11 +194,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         # Fresh stores per item so nothing leaks between questions; the
         # bench always uses in-process stores, so the number measures the
         # engine, not a database.
-        from .backends import InMemoryDocumentStore, InMemoryVectorIndex
-
-        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
-                                  contextual_embeddings=settings.contextual_embeddings,
-                                  similarity_floor=settings.similarity_floor).open()
+        return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
         if not args.json:
@@ -243,7 +239,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -> int:
     """Like bench: in-process stores per item, the configured store untouched."""
     from .bench.memoryagentbench import load_conflict_resolution, run_conflict_resolution
-    from .config import build_chat, build_embedder
+    from .config import build_chat, build_embedder, build_in_process_engine
 
     items = load_conflict_resolution(args.dataset)
     if args.sources:
@@ -257,11 +253,7 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
     reader_name = f"{settings.chat_model} at {settings.chat_url}" if reader is not None else None
 
     async def make():
-        from .backends import InMemoryDocumentStore, InMemoryVectorIndex
-
-        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
-                                  contextual_embeddings=settings.contextual_embeddings,
-                                  similarity_floor=settings.similarity_floor).open()
+        return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
         if not args.json:

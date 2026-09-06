@@ -57,6 +57,68 @@ def normalise(items: list[Fused]) -> list[Fused]:
     return [Fused(f.chunk_id, f.score / top, f.similarity) for f in items]
 
 
+MIN_SHARED_WORDS = 4
+MIN_SHARED_SHARE = 0.6
+
+
+def words_of(text: str) -> list[str]:
+    return [w for w in text.strip().lower().split() if w]
+
+
+def restates(a: Sequence[str], b: Sequence[str]) -> bool:
+    """Whether two texts are the same statement with a different ending:
+    "the author of The Marriage of Figaro is Pierre Beaumarchais." and the
+    same sentence ending in Thomas Kyd. They must share a prefix of at
+    least four words covering at least 60% of the shorter text, so a
+    shared opening ("the meeting is ...") does not make two statements one,
+    and a value of several words is still caught."""
+    if not a or not b or a == b:
+        return False
+    shared = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        shared += 1
+    return shared >= MIN_SHARED_WORDS and shared >= MIN_SHARED_SHARE * min(len(a), len(b))
+
+
+def demote_restated(
+    items: list[Fused], text_of: dict[int, str], time_of: dict[int, str]
+) -> list[Fused]:
+    """Within one result, when chunks restate each other (see restates),
+    keep the newest at the group's best rank and put the others after it,
+    newest first.
+
+    Retrieval otherwise ranks a superseded statement and its replacement
+    by embedding similarity, which is nearly equal because they differ
+    only at the end, so insertion order decides. Measured on
+    MemoryAgentBench Conflict Resolution (E34): the older statement
+    outranked the newer in 72 of the 74 single-hop questions that had one.
+    Nothing is dropped, since a caller may be asking about the past; only
+    the order changes."""
+    words = {item.chunk_id: words_of(text_of.get(item.chunk_id, "")) for item in items}
+    group_of: dict[int, int] = {}
+    groups: list[list[int]] = []
+    for position, item in enumerate(items):
+        for index, group in enumerate(groups):
+            if restates(words[item.chunk_id], words[items[group[0]].chunk_id]):
+                group.append(position)
+                group_of[position] = index
+                break
+        else:
+            group_of[position] = len(groups)
+            groups.append([position])
+    ordered = list(items)
+    for group in groups:
+        if len(group) < 2:
+            continue
+        members = [items[p] for p in group]
+        members.sort(key=lambda f: (time_of.get(f.chunk_id, ""), f.chunk_id), reverse=True)
+        for position, member in zip(group, members):
+            ordered[position] = member
+    return ordered
+
+
 def cap_per_episode(items: list[Fused], episode_of: dict[int, int], cap: int = PER_EPISODE_CAP) -> list[Fused]:
     seen: dict[int, int] = {}
     kept: list[Fused] = []
