@@ -19,13 +19,26 @@ from .engine import check_space
 from .errors import Conflict, InvalidInput, NotFound
 
 _APPLICATION_ID = 0x53434A31
-_VERSION = 1
+_VERSION = 2
 _KEY = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _TRANSITIONS = {
     "created": {"start": "running", "stop": "ended", "fail": "failed", "interrupt": "interrupted"},
     "running": {"stop": "stopping", "end": "ended", "fail": "failed", "interrupt": "interrupted"},
     "stopping": {"end": "ended", "fail": "failed", "interrupt": "interrupted"},
 }
+
+
+#: A turn's durable half. The reply's text is not here: it lives in the
+#: episode this row names, so forgetting that episode removes the text
+#: rather than leaving a second copy behind in a receipt.
+_TURNS_TABLE = """CREATE TABLE session_turns (
+    space TEXT NOT NULL, session_id TEXT NOT NULL, request_id TEXT NOT NULL,
+    signature TEXT NOT NULL, status TEXT NOT NULL, episode_id INTEGER,
+    error TEXT, accepted_at TEXT NOT NULL, settled_at TEXT,
+    PRIMARY KEY(space, session_id, request_id))"""
+#: What a turn can be. "accepted" is the only one a process is still
+#: working on, which is what makes recovery decidable after a restart.
+_TURN_STATUSES = ("accepted", "completed", "interrupted", "failed")
 
 
 def _key(value: str) -> None:
@@ -36,6 +49,12 @@ def _key(value: str) -> None:
 def _integer(value: int, minimum: int, maximum: int = 2**63 - 2) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise InvalidInput(f"expected an integer in {minimum}..{maximum}")
+
+
+def _turn_receipt(row: sqlite3.Row) -> dict:
+    return {"request_id": row["request_id"], "session_id": row["session_id"],
+            "status": row["status"], "episode_id": row["episode_id"], "error": row["error"],
+            "accepted_at": row["accepted_at"], "settled_at": row["settled_at"]}
 
 
 def _now() -> str:
@@ -62,9 +81,17 @@ class SessionJournal:
                 ).fetchall()
                 tables = {row["name"] for row in objects if row["type"] == "table"}
                 if app_id == _APPLICATION_ID:
-                    if version != _VERSION:
+                    if version > _VERSION:
                         raise InvalidInput("unsupported session journal schema version")
-                    if tables != {"sessions", "session_events"}:
+                    if version == 1:
+                        # A journal written before turn receipts existed. Its
+                        # sessions are real and stay exactly as they are; only
+                        # the new table is added.
+                        if tables != {"sessions", "session_events"}:
+                            raise InvalidInput("invalid session journal tables")
+                        self._db.execute(_TURNS_TABLE)
+                        self._db.execute(f"PRAGMA user_version={_VERSION}")
+                    elif tables != {"sessions", "session_events", "session_turns"}:
                         raise InvalidInput("invalid session journal tables")
                 elif app_id or version or objects:
                     raise InvalidInput("path is not a session journal; refusing to modify another database")
@@ -81,6 +108,7 @@ class SessionJournal:
                         signature TEXT NOT NULL, receipt TEXT NOT NULL,
                         PRIMARY KEY(space, session_id, revision),
                         UNIQUE(space, session_id, request_id))""")
+                    self._db.execute(_TURNS_TABLE)
                     self._db.execute(f"PRAGMA application_id={_APPLICATION_ID}")
                     self._db.execute(f"PRAGMA user_version={_VERSION}")
             self._db.execute("PRAGMA journal_mode=WAL")
@@ -188,6 +216,111 @@ class SessionJournal:
             self._db.execute("UPDATE sessions SET state=?, revision=?, updated_at=? WHERE space=? AND session_id=?",
                              (state, revision, now, space, session_id))
             return self._append(space, session_id, revision, request_id, signature, action, session["state"], state, now)
+
+    # -- turns ------------------------------------------------------------
+
+    def _turn_row(self, space, session_id, request_id):
+        return self._db.execute(
+            "SELECT * FROM session_turns WHERE space=? AND session_id=? AND request_id=?",
+            (space, session_id, request_id),
+        ).fetchone()
+
+    def start_turn(self, space: str, session_id: str, request_id: str, signature: dict) -> dict:
+        """Record that a turn was accepted, before anything is asked of a
+        provider. A repeat of the same request returns what that turn has
+        become; a repeat that changed its mind is a conflict, because the
+        first one may already have been delivered."""
+        check_space(space)
+        _key(session_id)
+        _key(request_id)
+        signed = json.dumps(signature, sort_keys=True)
+        with self._transaction():
+            session = self._session(space, session_id)
+            found = self._turn_row(space, session_id, request_id)
+            if found is not None:
+                if found["signature"] != signed:
+                    raise Conflict("request ID was already used for a different turn", session["revision"])
+                return _turn_receipt(found)
+            now = _now()
+            self._db.execute(
+                "INSERT INTO session_turns VALUES (?, ?, ?, ?, 'accepted', NULL, NULL, ?, NULL)",
+                (space, session_id, request_id, signed, now),
+            )
+            return _turn_receipt(self._turn_row(space, session_id, request_id))
+
+    def finish_turn(self, space: str, session_id: str, request_id: str, status: str,
+                    episode_id: int | None = None, error: str | None = None) -> dict:
+        """What became of an accepted turn. ``episode_id`` names where the
+        reply's text is; the text itself is never stored here."""
+        check_space(space)
+        _key(session_id)
+        _key(request_id)
+        if status not in _TURN_STATUSES or status == "accepted":
+            raise InvalidInput(f"a turn settles as one of {_TURN_STATUSES[1:]}")
+        if episode_id is not None:
+            _integer(episode_id, 1)
+        with self._transaction():
+            session = self._session(space, session_id)
+            found = self._turn_row(space, session_id, request_id)
+            if found is None:
+                raise NotFound("turn not found in this session")
+            if found["status"] != "accepted":
+                # Settling twice is the retry case: the first answer stands.
+                if found["status"] != status:
+                    raise Conflict("turn already settled differently", session["revision"])
+                return _turn_receipt(found)
+            self._db.execute(
+                "UPDATE session_turns SET status=?, episode_id=?, error=?, settled_at=? "
+                "WHERE space=? AND session_id=? AND request_id=?",
+                (status, episode_id, error, _now(), space, session_id, request_id),
+            )
+            return _turn_receipt(self._turn_row(space, session_id, request_id))
+
+    def turn(self, space: str, session_id: str, request_id: str) -> dict:
+        check_space(space)
+        _key(session_id)
+        _key(request_id)
+        self._session(space, session_id)
+        found = self._turn_row(space, session_id, request_id)
+        if found is None:
+            raise NotFound("turn not found in this session")
+        return _turn_receipt(found)
+
+    def turns(self, space: str, session_id: str, after: str = "", limit: int = 100) -> dict:
+        check_space(space)
+        _key(session_id)
+        if after != "":
+            _key(after)
+        _integer(limit, 1, 200)
+        self._session(space, session_id)
+        rows = self._db.execute(
+            "SELECT * FROM session_turns WHERE space=? AND session_id=? AND request_id>? "
+            "ORDER BY request_id LIMIT ?",
+            (space, session_id, after, limit + 1),
+        ).fetchall()
+        items = [_turn_receipt(row) for row in rows[:limit]]
+        return {"turns": items, "next_after": items[-1]["request_id"] if items else after,
+                "has_more": len(rows) > limit}
+
+    def recover(self, space: str) -> int:
+        """Settle turns whose process is gone.
+
+        A turn still marked accepted after a restart was owned by a
+        process that no longer exists, so whether the provider answered
+        cannot be known from here. It is recorded as interrupted saying
+        exactly that, rather than left reading as in flight forever. The
+        caller decides when no process owns these sessions any more; the
+        journal will not guess that for a server sharing this file.
+        """
+        check_space(space)
+        with self._transaction():
+            settled = self._db.execute(
+                "UPDATE session_turns SET status='interrupted', error=?, settled_at=? "
+                "WHERE space=? AND status='accepted'",
+                ("the process handling this turn did not finish it; whether the provider "
+                 "answered is unknown, so it is not retried automatically", _now(), space),
+            ).rowcount
+        return settled
 
     def events(self, space: str, session_id: str, after: int = 0, limit: int = 100) -> dict:
         check_space(space)
