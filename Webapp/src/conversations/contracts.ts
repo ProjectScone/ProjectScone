@@ -1,10 +1,10 @@
 export type SessionState = 'created'|'running'|'stopping'|'ended'|'failed'|'interrupted';
 export interface ConversationSession {session_id:string;space:string;state:SessionState;revision:number;created_at:string;active_request_id?:string|null;latest_request_id?:string|null}
-export interface Capabilities {text_configured:boolean}
+export interface Capabilities {text_configured:boolean;session_deletion:boolean}
 export interface Episode {episode_id:number;content:string;metadata:Record<string,unknown>;created_at?:string}
 export interface Transcript {episodes:Episode[];has_more:boolean}
 export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[]}}
-export interface TurnReceipt {request_id:string;status:'pending'|'completed'|'failed'|'interrupted';result_state:'available'|'forgotten'|'unavailable'|'unreadable';result?:TurnResult}
+export interface TurnReceipt {request_id:string;status:'pending'|'completed'|'failed'|'interrupted'|'cancelled';result_state:'available'|'forgotten'|'unavailable'|'unreadable';result?:TurnResult}
 export const idPattern=/^[A-Za-z0-9._:-]{1,128}$/;
 const states=['created','running','stopping','ended','failed','interrupted'];
 function record(value:unknown):Record<string,unknown>{if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid conversation response');return value as Record<string,unknown>;}
@@ -14,7 +14,7 @@ function text(value:unknown):string{if(typeof value!=='string')throw Error('Inva
 export function capabilities(value:unknown):Capabilities{
   const v=record(value);
   if(v.schema_version!==1||typeof v.text_configured!=='boolean'||v.reply_transport!=='poll'||(v.reply_replay!=='process_lifetime'&&v.reply_replay!=='durable_receipts'))throw Error('This conversation service has an unsupported capability contract.');
-  return {text_configured:v.text_configured};
+  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true};
 }
 export function session(value:unknown):ConversationSession{
   const v=record(value);
@@ -33,7 +33,7 @@ export function transcript(value:unknown):Transcript{
   return {episodes:v.episodes.map(episode),has_more:v.has_more};
 }
 export function turnReceipt(value:unknown):TurnReceipt{
-  const v=record(value);if(!['pending','completed','failed','interrupted'].includes(String(v.status)))throw Error('Invalid reply status');
+  const v=record(value);if(!['pending','completed','failed','interrupted','cancelled'].includes(String(v.status)))throw Error('Invalid reply status');
   const availability=v.result_state===undefined||(v.status==='pending'&&v.result_state===null)?(v.status==='completed'?'available':'unavailable'):v.result_state;
   if(typeof availability!=='string'||!['available','forgotten','unavailable','unreadable'].includes(availability))throw Error('Invalid reply availability');
   if(availability!=='unavailable'&&v.status!=='completed')throw Error('Reply availability contradicts its status');

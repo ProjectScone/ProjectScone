@@ -1,9 +1,10 @@
 import {useEffect,useRef,useState} from 'react';
 import {ApiError,type ApiClient} from '../api';
 import {ConversationEvidence} from './ConversationEvidence';
+import {DeleteConversation} from './DeleteConversation';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
-export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean}){
+export function ConversationSession({api,sid,onSession,textConfigured,deletionSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;deletionSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
@@ -90,7 +91,7 @@ export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiC
   const terminal=current&&['ended','failed','interrupted'].includes(current.state);
   return <><section className="conversation-thread" aria-label="Text conversation">
     <header className="conversation-thread-header"><div><span className="eyebrow">Text session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
-      <button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button></header>
+      {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
     {error&&<div className="conversation-notice" role="alert">{error}<button onClick={()=>setAttempt(n=>n+1)}>Check connection</button></div>}
     {!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
     <div className="conversation-messages" aria-label="Saved messages">

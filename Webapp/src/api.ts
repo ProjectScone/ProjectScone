@@ -73,6 +73,7 @@ export function createApiClient(key: string, unauthorized: () => void, base = ''
       headers.set('Authorization', 'Bearer ' + key);
       if (options.body) headers.set('Content-Type', 'application/json');
       const response = await fetch(base + path, { ...options, headers });
+      if (response.status === 204 && options.method?.toUpperCase() === 'DELETE') return undefined as T;
       const body = await response.json().catch(() => null);
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) unauthorized();

@@ -2,6 +2,17 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {capabilities, session, transcript, turnReceipt} from '../src/conversations/contracts.ts';
 
+test('conversation deletion requires an explicit true capability',()=>{
+  const wire={schema_version:1,text_configured:false,reply_transport:'poll',reply_replay:'durable_receipts'};
+  for(const value of [undefined,false,'true',1,null])assert.equal(capabilities({...wire,session_deletion:value}).session_deletion,false);
+  assert.equal(capabilities({...wire,session_deletion:true}).session_deletion,true);
+});
+
+test('a cancelled turn is a settled receipt, not missing work to resend',()=>{
+  const receipt=turnReceipt({request_id:'cancelled-turn',status:'cancelled',result_state:'unavailable',result:null});
+  assert.equal(receipt.status,'cancelled');assert.equal(receipt.result,undefined);
+});
+
 test('conversation capability checks do not enable a string boolean or unknown protocol',()=>{
   const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'process_lifetime'};
   assert.equal(capabilities(wire).text_configured,true);

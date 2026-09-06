@@ -82,6 +82,17 @@ test('conversation deep links, public capture and sources work through native Pi
   await page.getByRole('heading',{name:'Conversation ended',exact:true}).waitFor();
   assert.equal(await page.getByLabel('Message',{exact:true}).isDisabled(),true);
   assert.equal((await(await fetch(base+api+'/transcript',{headers})).json()).episodes.length,4,'refresh and stop do not replay a turn');
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  const deletion=page.getByRole('dialog',{name:'Delete this conversation?'});
+  await deletion.getByLabel('I understand this cannot be undone').check();
+  await deletion.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await page.waitForURL(base+'/conversations');
+  await page.getByText('Conversation deleted.',{exact:true}).waitFor();
+  assert.equal((await fetch(base+api,{headers})).status,404);
+  for(const episode of transcript.episodes)assert.equal((await fetch(base+'/v1/episodes/'+episode.episode_id,{headers})).status,404);
+  const original=await(await fetch(base+'/v1/episodes/1',{headers})).json();
+  assert.equal(original.content,'Juniper is calibrated with Polaris.','deleting a conversation must not delete its imported context');
+  assert.equal(await page.getByRole('navigation',{name:'Saved conversations'}).getByRole('link').count(),0);
   assert.deepEqual(await page.evaluate(()=>({local:localStorage.length,session:sessionStorage.length})),{local:0,session:0});
   assert.deepEqual(errors,[]);
 });

@@ -496,6 +496,22 @@ after reopening; do not infer chronology from UUIDs or the paginated turn list.
 order, with limits from 1 to 200. Latest means most recently accepted, not delivered
 or successfully completed. Receipt availability still depends on memory retention.
 
+When conversation capabilities explicitly report `session_deletion: true`, the
+React workspace offers **Delete conversation** for verified closed sessions. It
+requires confirmation and sends `DELETE /v1/conversations/{sid}`. A successful
+204 removes the session, lifecycle events, turn receipts and message episodes
+not held by another conversation's receipts. Imported context is not deleted.
+Running sessions return 409: end the conversation first. This is not an erasure
+request to external providers or backups, and it does not reclaim process-local
+creation capacity. If the response is uncertain, the UI offers a read-only status
+check, never an automatic delete retry. A remaining session may be partially
+deleted after a storage failure; inspect it before confirming another attempt.
+
+The Pipecat text adapter gives each session, turn and speaker a distinct capture
+identity, so repeated identical messages remain separate transcript occurrences.
+Custom runtime factories must also preserve session attribution; content-only
+deduplication can make their metadata-based transcripts incomplete.
+
 Restart never resubmits a model request: abandoned sessions become interrupted,
 while captured episodes follow the configured engine's persistence. Transcript
 history is not automatically restored into a new model session. Defaults admit 100 create IDs per process

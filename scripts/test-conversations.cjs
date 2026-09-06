@@ -8,7 +8,7 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
@@ -18,7 +18,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime'}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion}));
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
@@ -29,6 +29,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     const match=req.url.match(/^\/v1\/conversations\/([^/]+)(.*)$/);
     if(match){
       const value=sessions.find(s=>s.session_id===match[1]);if(!value){res.statusCode=404;return res.end('{}');}
+      if(!match[2]&&req.method==='DELETE'){sessions.splice(sessions.indexOf(value),1);delete saved[value.session_id];res.statusCode=204;return res.end();}
       if(!match[2])return res.end(JSON.stringify(value));
       if(match[2]==='/transcript')return res.end(JSON.stringify({episodes:saved[value.session_id]||[],has_more:false}));
       if(match[2]==='/stop'){value.state='ended';value.revision=4;return res.end(JSON.stringify(value));}
@@ -60,6 +61,100 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
+
+test('closed session deletion requires confirmation and removes the saved session',async t=>{
+  const {page}=await fixture(t,{deletion:true,mobile:true});
+  const commands=[];page.on('request',r=>{if(r.method()==='DELETE')commands.push(r.url());});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete this conversation?'});
+  assert.equal(await dialog.getByRole('button',{name:'Permanently delete',exact:true}).isDisabled(),true);
+  await dialog.getByLabel('I understand this cannot be undone').check();
+  await dialog.getByRole('button',{name:'Keep conversation',exact:true}).click();
+  assert.deepEqual(commands,[]);
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  assert.equal(await dialog.getByRole('button',{name:'Permanently delete',exact:true}).isDisabled(),true,'reopening needs fresh confirmation');
+  await dialog.getByLabel('I understand this cannot be undone').check();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'scone-delete-mobile.png'),fullPage:true});
+  await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await page.waitForURL(/\/conversations$/);
+  await page.getByText('Conversation deleted.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('link',{name:/previous/}).count(),0);
+  assert.equal(await page.getByText('Earlier conversation.',{exact:true}).count(),0);
+  assert.equal(commands.length,1);
+});
+
+test('unsupported and active sessions expose no delete command',async t=>{
+  const {page}=await fixture(t);
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Delete conversation',exact:true}).count(),0);
+  await start(page);await page.getByLabel('Message',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Delete conversation',exact:true}).count(),0);
+});
+
+test('a supported server still cannot delete an active session',async t=>{
+  const {page}=await fixture(t,{deletion:true});await start(page);
+  await page.waitForFunction(()=>!document.querySelector('textarea')?.disabled);
+  assert.equal(await page.getByRole('button',{name:'Delete conversation',exact:true}).count(),0);
+});
+
+test('a refused delete preserves the session and requires fresh confirmation',async t=>{
+  const {page}=await fixture(t,{deletion:true});let deletes=0;
+  await page.getByRole('link',{name:/previous/}).click();await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.route('**/v1/conversations/previous',route=>{
+    if(route.request().method()!=='DELETE')return route.continue();
+    deletes++;return route.fulfill({status:409,json:{error:'stop first'}});
+  });
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete this conversation?'});
+  await dialog.getByLabel('I understand this cannot be undone').check();
+  await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await dialog.getByText(/Deletion was refused/).waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Permanently delete',exact:true}).isDisabled(),true);
+  await dialog.getByRole('button',{name:'Keep conversation',exact:true}).click();
+  assert.equal(await page.getByText('Earlier conversation.',{exact:true}).count(),1);
+  assert.equal(deletes,1);
+});
+
+test('Escape cannot dismiss an in-flight deletion or permit a second command',async t=>{
+  const {page}=await fixture(t,{deletion:true});let release;
+  const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());let deletes=0;
+  await page.getByRole('link',{name:/previous/}).click();await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.route('**/v1/conversations/previous',async route=>{
+    if(route.request().method()!=='DELETE')return route.continue();
+    deletes++;await gate;await route.fulfill({status:204}).catch(()=>{});
+  });
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete this conversation?'});
+  await dialog.getByLabel('I understand this cannot be undone').check();
+  await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await dialog.getByRole('button',{name:'Deleting…',exact:true}).waitFor();
+  await page.keyboard.press('Escape');
+  assert.equal(await dialog.isVisible(),true);
+  assert.equal(await dialog.getByRole('button',{name:'Deleting…',exact:true}).isDisabled(),true);
+  release();await page.waitForURL(/\/conversations$/);assert.equal(deletes,1);
+});
+
+for(const missing of [false,true])test(`uncertain deletion uses a read-only check; session missing=${missing}`,async t=>{
+  const {page}=await fixture(t,{deletion:true});let deletes=0;
+  await page.getByRole('link',{name:/previous/}).click();await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.route('**/v1/conversations/previous',route=>{
+    if(route.request().method()==='DELETE'){deletes++;return route.fulfill({status:503,json:{error:'unknown outcome'}});}
+    if(deletes&&missing)return route.fulfill({status:404,json:{error:'not found'}});
+    return route.continue();
+  });
+  await page.getByRole('button',{name:'Delete conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete this conversation?'});
+  await dialog.getByLabel('I understand this cannot be undone').check();
+  await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await dialog.getByRole('button',{name:'Check deletion status',exact:true}).click();
+  if(missing){await page.waitForURL(/\/conversations$/);await page.getByText('Conversation is no longer available.',{exact:true}).waitFor();}
+  else{await dialog.getByText(/still exists/).waitFor();assert.equal(await dialog.getByRole('button',{name:'Permanently delete',exact:true}).isDisabled(),true);}
+  assert.equal(deletes,1,'uncertain outcome must not automatically issue another DELETE');
+});
 test('unconfigured text keeps saved conversations readable without permitting new work',async t=>{
   const {page,posts}=await fixture(t,{unavailable:true});
   await page.getByText('Text runtime not configured',{exact:true}).waitFor();
@@ -131,6 +226,14 @@ test('late polling cannot reopen a conversation after an acknowledged end',async
   await page.waitForTimeout(150);
   assert.equal(await page.getByRole('button',{name:'End conversation',exact:true}).isDisabled(),true);
   assert.match(await page.locator('nav[aria-label="Saved conversations"] a.active').textContent(),/ended/);
+});
+
+test('a cancelled receipt settles without replaying the message',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.route('**/current/turns/*',route=>route.fulfill({json:{request_id:new URL(route.request().url()).pathname.split('/').at(-1),status:'cancelled',result_state:'unavailable',result:null}}));
+  await page.getByLabel('Message',{exact:true}).fill('Cancelled request');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Reply cancelled',{exact:true}).waitFor();
+  assert.equal(posts(),1);
 });
 
 for(const result_state of ['forgotten','unavailable'])test(`completed reply with ${result_state} content settles without resending`,async t=>{

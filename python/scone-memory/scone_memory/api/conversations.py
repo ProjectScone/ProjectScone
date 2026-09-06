@@ -208,6 +208,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return {"schema_version": 1, "text_configured": runtime_factory is not None,
                 "voice": False, "video": False, "streaming": False,
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
+                "session_deletion": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
     @app.get("/v1/conversations")

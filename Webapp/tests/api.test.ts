@@ -4,6 +4,17 @@ import { createServer } from 'node:http';
 import { createApiClient, ApiError } from '../src/api.ts';
 import { createHash } from 'node:crypto';
 
+test('an acknowledged no-content delete succeeds but an empty read still fails', async()=>{
+  const server=createServer((req,res)=>{assert.equal(req.headers.authorization,'Bearer allowed');res.writeHead(204);res.end();});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();if(!address||typeof address==='string')throw Error('missing address');
+  const client=createApiClient('allowed',()=>{},`http://127.0.0.1:${address.port}`);
+  try{
+    assert.equal(await client.request('/v1/conversations/ended',{method:'DELETE'}),undefined);
+    await assert.rejects(client.request('/v1/status'),/invalid JSON/);
+  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test('typed client sends the selected key and reports permission failure', async () => {
   let denied = false;
   const server = createServer((req, res) => {
