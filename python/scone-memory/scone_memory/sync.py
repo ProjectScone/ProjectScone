@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import math
 import threading
 from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -27,15 +28,29 @@ class SyncMemoryEngine:
 
     def __init__(self, engine: MemoryEngine | Callable[[], Awaitable[MemoryEngine]]) -> None:
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, name="scone-memory", daemon=True)
-        self._pending: set[concurrent.futures.Future] = set()
+        self._thread = threading.Thread(target=self._run_loop, name="scone-memory", daemon=True)
         self._lock = threading.Lock()
+        self._pending: set[concurrent.futures.Future] = set()
+        self._closing = False
+        self._shutdown_error: Optional[BaseException] = None
         self._thread.start()
-        if callable(engine):
-            self._engine = self._run(engine())
-        else:
-            self._engine = engine
-        self._run(self._engine.open())
+        try:
+            if callable(engine):
+                self._engine = self._run(engine())
+            else:
+                self._engine = engine
+            self._run(self._engine.open())
+        except BaseException:
+            self.close()
+            raise
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+            asyncio.set_event_loop(None)
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "SyncMemoryEngine":
@@ -51,11 +66,16 @@ class SyncMemoryEngine:
         return self._engine
 
     def _run(self, coro):
-        if not self._thread.is_alive():
-            coro.close()  # otherwise "coroutine was never awaited" at collection
-            raise RuntimeError("SyncMemoryEngine is closed")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        if threading.current_thread() is self._thread:
+            coro.close()
+            raise RuntimeError("Blocking SyncMemoryEngine calls cannot run on its own event loop")
+        # Admission and shutdown use the same lock, so every accepted coroutine
+        # is enqueued before the drain task. Rejected coroutines are never leaked.
         with self._lock:
+            if self._closing or not self._thread.is_alive():
+                coro.close()
+                raise RuntimeError("SyncMemoryEngine is closed or closing")
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
             self._pending.add(future)
         try:
             return future.result()
@@ -65,17 +85,60 @@ class SyncMemoryEngine:
             with self._lock:
                 self._pending.discard(future)
 
-    def close(self) -> None:
-        # A call still running when the loop stops would never resolve and
-        # its caller would wait forever; cancel it so it raises instead.
+    async def _settle_calls(self) -> None:
+        # Completed asyncio Tasks disappear from all_tasks before their result
+        # is delivered to a thread-safe Future. Await that bridge explicitly.
         with self._lock:
             pending = list(self._pending)
-        for future in pending:
-            future.cancel()
+        if pending:
+            await asyncio.gather(*(asyncio.wrap_future(future) for future in pending), return_exceptions=True)
+
+    async def _drain_tasks(self) -> None:
+        current = asyncio.current_task()
+        while pending := {task for task in asyncio.all_tasks() if task is not current}:
+            for task in pending:
+                task.cancel()
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            for task, result in zip(pending, results):
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    self._loop.call_exception_handler({"message": "Task failed during SyncMemoryEngine shutdown",
+                                                       "exception": result, "task": task})
+
+    async def _shutdown(self) -> None:
+        try:
+            await self._drain_tasks()
+            await self._settle_calls()
+            await self._loop.shutdown_asyncgens()
+            await self._drain_tasks()
+            await self._loop.shutdown_default_executor()
+            # A finishing executor worker can enqueue loop work while we join
+            # it. Finalize that tail before destroying the loop as well.
+            await self._drain_tasks()
+            await self._loop.shutdown_asyncgens()
+            await self._drain_tasks()
+        except BaseException as error:
+            self._shutdown_error = error
+        finally:
+            self._loop.stop()
+
+    def close(self, *, timeout: float = 5.0) -> None:
+        """Cancel and drain the owned loop. A timeout leaves it draining, not
+        destroyed; subsequent calls wait for the same shutdown. Underlying
+        backend clients remain caller-managed, as for the async engine.
+        """
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("close timeout must be a finite positive number")
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("SyncMemoryEngine.close cannot block its own event loop")
+        with self._lock:
+            if not self._closing:
+                self._closing = True
+                self._loop.call_soon_threadsafe(self._loop.create_task, self._shutdown())
+        self._thread.join(timeout=timeout)
         if self._thread.is_alive():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5)
-        self._loop.close()
+            raise TimeoutError("SyncMemoryEngine shutdown is still draining; call close again to wait")
+        if self._shutdown_error is not None:
+            raise RuntimeError("SyncMemoryEngine shutdown failed") from self._shutdown_error
 
     def __enter__(self) -> "SyncMemoryEngine":
         return self

@@ -254,7 +254,28 @@ retriever = SconeRetriever(memory=memory, space="default", limit=5, where={"user
 docs = retriever.invoke("where is the deploy runbook")   # Documents with episode_id, score, similarity, lanes in metadata
 history = SconeChatMessageHistory(memory, "default", session_id="chat-1", extra={"user_id": "mark"})
 history.add_messages([...])                              # one episode per message, in order, recallable like any memory
+memory.close()                                          # finish owned loop work before exiting
 ```
+
+Use `SyncMemoryEngine` as a context manager, or call `close()` when finished.
+Closing first rejects new calls, then cancels and drains tasks on its dedicated
+loop, finalizes async generators and waits for that loop's default executor.
+Pending calls report cancellation after their async cleanup completes. A call
+that already completed is not retroactively cancelled, and cancellation is not
+a rollback of writes that reached storage.
+
+`close(timeout=5.0)` bounds how long the calling thread waits. If cleanup or an
+executor worker has not finished, it raises `TimeoutError` and leaves the loop
+draining; new work remains rejected. Release any externally blocked work and call
+`close()` again to wait for the same shutdown. Repeated/concurrent closes do not
+cancel cleanup again. Blocking facade calls, including close, cannot be made
+from its own event-loop thread; use the async engine there instead. Failed
+construction also shuts down its worker loop.
+
+This lifecycle owns the wrapper's loop, not arbitrary document/vector/backend
+clients. Backend-resource ownership and explicit client closing remain the
+caller's responsibility; successful facade shutdown alone does not certify that
+every remote pool or external thread has been released.
 
 `scone_memory.integrations.llamaindex.SconeRetriever(memory, space, ...)`
 returns `NodeWithScore` nodes (`retrieve` needs a `SyncMemoryEngine`,
