@@ -111,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("include", help="undo exclude")
     p.add_argument("fact_id", type=int)
 
+    p = sub.add_parser("audit-grounding",
+                       help="re-check extracted facts against the text they came from")
+    p.add_argument("--status", action="append", default=None,
+                   help="which statuses to audit (repeatable, default active)")
+    p.add_argument("--flagged-only", action="store_true", help="only claims their source cannot support")
+
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
     sub.add_parser("profile", help="identity facts plus recent activity")
@@ -352,6 +358,29 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             origin=args.origin, proposed=args.propose,
         )
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
+        return 0
+
+    if args.command == "audit-grounding":
+        from dataclasses import asdict
+
+        from .audit import audit_grounding
+
+        found = await audit_grounding(engine, space, statuses=tuple(args.status or ("active",)))
+        shown = [f for f in found if f.flagged] if args.flagged_only else found
+        if args.json:
+            for finding in shown:
+                emit(asdict(finding))
+            return 0
+        for finding in shown:
+            mark = "!" if finding.flagged else " "
+            print(f"{mark} fact {finding.fact_id}  {finding.subject} {finding.predicate} {finding.object}"
+                  f"  {finding.verdict}", file=out)
+            if finding.evidence:
+                print(f"    source says: {finding.evidence.strip()}", file=out)
+        flagged = sum(1 for f in found if f.flagged)
+        counted = "claim needs" if flagged == 1 else "claims need"
+        print(f"{flagged} of {len(found)} {counted} a person" if flagged
+              else f"nothing flagged in {len(found)} extracted claims", file=out)
         return 0
 
     if args.command == "review":
