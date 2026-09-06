@@ -131,7 +131,7 @@ class LangChainVectorIndex:
         metadatas = [self.metadata(p) for p in points]
         # An existing id is replaced, not duplicated: delete first, since
         # not every store treats add with a known id as an update.
-        await self._delete(ids)
+        await self._delete_existing(ids)
         if hasattr(self.store, "add_embeddings"):
             pairs = [(f"chunk:{p.chunk_id}", list(map(float, p.vector))) for p in points]
             await asyncio.to_thread(self.store.add_embeddings, text_embeddings=pairs, metadatas=metadatas, ids=ids)
@@ -201,6 +201,22 @@ class LangChainVectorIndex:
     async def _delete(self, ids: Sequence[str]) -> None:
         if ids:
             await self.store.adelete(ids=list(ids))
+
+    async def _delete_existing(self, ids: Sequence[str]) -> None:
+        """Delete only the ids the store holds. Stores disagree about
+        deleting an unknown id (InMemoryVectorStore ignores it, FAISS
+        raises), so where get_by_ids exists it decides; where it does not,
+        a ValueError from the delete is read as "nothing to delete"."""
+        try:
+            present = await asyncio.to_thread(self.store.get_by_ids, list(ids))
+        except NotImplementedError:
+            try:
+                await self._delete(ids)
+            except ValueError:
+                pass
+            return
+        held = {doc.id for doc in present if doc.id is not None} | {str(doc.metadata.get("chunk_id")) for doc in present}
+        await self._delete([i for i in ids if i in held])
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         await self._delete([str(int(c)) for c in chunk_ids])

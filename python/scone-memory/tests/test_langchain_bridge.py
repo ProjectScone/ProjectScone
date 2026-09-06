@@ -122,3 +122,31 @@ async def test_a_store_without_vector_search_is_refused_up_front():
         await LangChainVectorIndex(NoSearch()).ensure(2)
     with pytest.raises(ValueError, match="bind"):
         await LangChainVectorIndex().ensure(2)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("faiss") is None or importlib.util.find_spec("langchain_community") is None,
+                    reason="faiss-cpu and langchain-community not installed")
+async def test_faiss_replaces_a_point_without_deleting_what_is_not_there():
+    """FAISS raises on deleting an unknown id where InMemoryVectorStore
+    ignores it. A first write must not try to delete, and a rewrite of
+    the same chunk must replace it."""
+    import warnings
+
+    from scone_memory.backends import LangChainVectorIndex
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import faiss
+        from langchain_community.docstore.in_memory import InMemoryDocstore
+        from langchain_community.vectorstores import FAISS
+        from langchain_community.vectorstores.utils import DistanceStrategy
+
+    index = LangChainVectorIndex(score="cosine_similarity")
+    index.bind(FAISS(embedding_function=index.embeddings, index=faiss.IndexFlatIP(2), docstore=InMemoryDocstore(),
+                     index_to_docstore_id={}, distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT, normalize_L2=True))
+    await index.ensure(2)
+    await index.upsert([point(1, [1.0, 0.0], owner="old")])
+    await index.upsert([point(1, [0.0, 1.0], owner="new")])
+    assert await index.search("default", [0.0, 1.0], 5, where={"owner": "new"}) == [(1, pytest.approx(1.0))]
+    assert await index.search("default", [0.0, 1.0], 5, where={"owner": "old"}) == [], "replaced, not duplicated"
+    assert index.store.index.ntotal == 1

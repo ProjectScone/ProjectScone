@@ -32,6 +32,9 @@ def backends():
     needs_langchain = pytest.mark.skipif(importlib.util.find_spec("langchain_core") is None, reason="langchain-core not installed")
     yield pytest.param("langchain-filtered", id="langchain-filtered", marks=needs_langchain)
     yield pytest.param("langchain-postfilter", id="langchain-postfilter", marks=needs_langchain)
+    yield pytest.param("langchain-faiss", id="langchain-faiss", marks=pytest.mark.skipif(
+        importlib.util.find_spec("faiss") is None or importlib.util.find_spec("langchain_community") is None,
+        reason="faiss-cpu and langchain-community not installed"))
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
         yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
@@ -102,6 +105,28 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = MilvusVectorIndex(str(tmp_path / "milvus.db"))
+    elif request.param == "langchain-faiss":
+        # The bridge over a real third-party store: FAISS with inner product
+        # over unit vectors (cosine), and a callable filter over metadata.
+        import warnings
+
+        from scone_memory.backends import LangChainVectorIndex
+        from scone_memory.backends.langchain import LangChainVectorIndex as Bridge
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import faiss
+            from langchain_community.docstore.in_memory import InMemoryDocstore
+            from langchain_community.vectorstores import FAISS
+            from langchain_community.vectorstores.utils import DistanceStrategy
+
+        def faiss_builder(space, as_of_ts, tags, where):
+            return lambda meta: Bridge._matches(meta, space, as_of_ts, tags, where)  # FAISS hands the metadata dict
+
+        documents = InMemoryDocumentStore()
+        vectors = LangChainVectorIndex(score="cosine_similarity", filter_builder=faiss_builder)
+        vectors.bind(FAISS(embedding_function=vectors.embeddings, index=faiss.IndexFlatIP(256), docstore=InMemoryDocstore(),
+                           index_to_docstore_id={}, distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT, normalize_L2=True))
     elif request.param.startswith("langchain"):
         # The bridge over langchain_core's InMemoryVectorStore, once with a
         # filter_builder (the store filters) and once without (the bridge

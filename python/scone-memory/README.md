@@ -118,8 +118,14 @@ first, each with its interval and closing reason, bounded by `as_of`.
 from langchain_community.vectorstores import FAISS   # or Pinecone, Weaviate, PGVector, Azure Search, ...
 from scone_memory.backends import LangChainVectorIndex
 
-index = LangChainVectorIndex(score="unit_l2_squared", filter_builder=None)
-index.bind(FAISS.from_texts([], embedding=index.embeddings))   # the store must embed through the bridge
+from scone_memory.backends.langchain import LangChainVectorIndex as Bridge
+
+def faiss_filter(space, as_of_ts, tags, where):          # FAISS hands a callable the metadata dict
+    return lambda meta: Bridge._matches(meta, space, as_of_ts, tags, where)
+
+index = LangChainVectorIndex(score="cosine_similarity", filter_builder=faiss_filter)
+index.bind(FAISS(embedding_function=index.embeddings, index=faiss.IndexFlatIP(dim), docstore=InMemoryDocstore(),
+                 index_to_docstore_id={}, distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT, normalize_L2=True))
 engine = MemoryEngine(documents, index, embedder)
 ```
 
@@ -135,7 +141,9 @@ means (`cosine_similarity`, `cosine_distance`, `unit_l2_squared`, or the
 default `unknown`, under which the order still drives fusion but no
 similarity is shown and no confidence verdict is derived). The contract
 runs through the bridge over `langchain_core`'s `InMemoryVectorStore`,
-filtered and post-filtered.
+filtered and post-filtered, and over FAISS (inner product on unit
+vectors, a callable filter over the metadata dict), which is the recipe
+above.
 
 ## Using it from a framework
 
