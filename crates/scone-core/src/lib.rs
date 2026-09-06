@@ -84,6 +84,10 @@ pub struct Engine {
     /// out of recall until a person approves them. None: every
     /// extracted fact is active on arrival, as before.
     propose_below: Option<f32>,
+    /// Embed code chunks with their file name and enclosing declaration
+    /// in front (the stored span stays raw). Off until the code probe
+    /// shows a gain; see memory/EXPERIMENTS.md.
+    contextual_code: bool,
 }
 
 impl Drop for Engine {
@@ -164,6 +168,7 @@ impl Engine {
             indexes_dirty: false,
             chunk_target: ingest::CHUNK_TARGET_BYTES,
             propose_below: None,
+            contextual_code: false,
         };
         if engine.fts.writable() {
             engine.catch_up_indexes()?;
@@ -194,6 +199,13 @@ impl Engine {
     /// The confidence gate, if any (see `set_propose_below`).
     pub fn propose_below(&self) -> Option<f32> {
         self.propose_below
+    }
+
+    /// Embed code chunks with their file name and enclosing declaration
+    /// in front. Changes what future ingests embed, not what they
+    /// store; an existing store keeps its vectors until rebuilt.
+    pub fn set_contextual_code(&mut self, on: bool) {
+        self.contextual_code = on;
     }
 
     /// True when another scone process holds the index write lock: search

@@ -135,6 +135,45 @@ pub fn syntax_for(source: Option<&str>) -> Syntax {
     }
 }
 
+/// The declaration a byte offset sits under: the nearest line at or
+/// before `at` that opens one, trimmed and without its opening brace.
+/// None when nothing above it declares anything (a file header, a
+/// script with no functions). This is what a chunk cut from the
+/// middle of a function has lost, and what a contextual embedding
+/// gives back to it.
+pub fn enclosing_declaration(text: &str, at: usize) -> Option<&str> {
+    let at = at.min(text.len());
+    let mut found = None;
+    let mut pos = 0usize;
+    for line in text.split_inclusive('\n') {
+        if pos > at {
+            break;
+        }
+        if starts_declaration(line) {
+            found = Some(line);
+        }
+        pos += line.len();
+    }
+    found.map(|line| line.trim().trim_end_matches('{').trim_end())
+}
+
+/// What a code chunk is embedded as when contextual embedding is on:
+/// the file's name, the declaration the chunk sits under, then the
+/// chunk itself. The stored chunk is still the raw span; only the
+/// vector sees the context.
+pub fn contextual_code_text(source: Option<&str>, text: &str, span: ChunkSpan) -> String {
+    let file = source
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .unwrap_or("");
+    let chunk = &text[span.start..span.end];
+    match enclosing_declaration(text, span.start) {
+        Some(decl) if !file.is_empty() => format!("{file} | {decl}\n{chunk}"),
+        Some(decl) => format!("{decl}\n{chunk}"),
+        None if !file.is_empty() => format!("{file}\n{chunk}"),
+        None => chunk.to_owned(),
+    }
+}
+
 pub fn chunk_text(text: &str, target_bytes: usize) -> Vec<ChunkSpan> {
     chunk_syntax(text, target_bytes, Syntax::Prose)
 }
