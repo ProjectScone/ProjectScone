@@ -186,6 +186,7 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
+        await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
         await self.check_schema()
         return self
 
@@ -208,7 +209,7 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "meta", "counters", "vectors", "events")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "meta", "counters", "vectors", "events", "inflight")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -303,6 +304,41 @@ class ElasticsearchDocumentStore:
             return []
         hits = await self._search("chunks", query={"bool": {"filter": [{"term": {"space": space}}, {"terms": {"chunk_id": list(chunk_ids)}}]}}, size=len(chunk_ids))
         return [_chunk(h) for h in hits]
+
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        out: list[Chunk] = []
+        after: Optional[list] = None
+        while True:
+            kwargs: dict = {
+                "query": {"bool": {"filter": [{"term": {"space": space}}, {"term": {"episode_id": episode_id}}]}},
+                "size": self.PAGE, "sort": [{"ordinal": "asc"}],
+            }
+            if after is not None:
+                kwargs["search_after"] = after
+            response = await self.client.search(index=self._idx("chunks"), **kwargs)
+            hits = response["hits"]["hits"]
+            out.extend(_chunk(h["_source"]) for h in hits)
+            if len(hits) < self.PAGE:
+                return out
+            after = hits[-1]["sort"]
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        await self.client.index(
+            index=self._idx("inflight"), id=f"{space}:{content_hash}", document={"space": space, "content_hash": content_hash},
+            refresh=self.shared.refresh,
+        )
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        from elasticsearch import NotFoundError
+
+        try:
+            await self.client.delete(index=self._idx("inflight"), id=f"{space}:{content_hash}", refresh=self.shared.refresh)
+        except NotFoundError:
+            pass
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        hits = await self._search("inflight", query={"match_all": {}}, size=10_000, sort=[{"space": "asc"}, {"content_hash": "asc"}])
+        return [(h["space"], h["content_hash"]) for h in hits]
 
     async def search_text(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
         terms = tokenize(query)

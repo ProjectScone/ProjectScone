@@ -105,6 +105,22 @@ class DocumentStore(Protocol):
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]: ...
     async def get_chunks(self, space: str, chunk_ids: Sequence[int]) -> list[Chunk]: ...
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        """Every chunk of one episode, in ordinal order."""
+        ...
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        """Record that a write for this episode identity has started and
+        its vectors may not have landed. Cleared by ``clear_inflight``
+        once the whole episode (rows and vectors) is durable; anything
+        still marked when the engine next opens is repaired first. Marks
+        are idempotent per (space, hash)."""
+        ...
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None: ...
+    async def inflight(self) -> list[tuple[str, str]]:
+        """Every (space, content_hash) still marked, any space."""
+        ...
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:

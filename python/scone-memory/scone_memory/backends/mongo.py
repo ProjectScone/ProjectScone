@@ -89,6 +89,7 @@ class MongoDocumentStore:
         self.counters = self.db["counters"]
         self.revisions = self.db["revisions"]
         self.meta = self.db["meta"]
+        self.inflight_marks = self.db["inflight"]
 
     async def open(self) -> "MongoDocumentStore":
         await self.episodes.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -97,6 +98,7 @@ class MongoDocumentStore:
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
+        await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
         await self.check_schema()
         return self
 
@@ -179,6 +181,22 @@ class MongoDocumentStore:
             return []
         cursor = self.chunks.find({"space": space, "_id": {"$in": list(chunk_ids)}})
         return [_chunk(doc) async for doc in cursor]
+
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        cursor = self.chunks.find({"space": space, "episode_id": episode_id}).sort("ordinal", 1)
+        return [_chunk(doc) async for doc in cursor]
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        await self.inflight_marks.update_one(
+            {"space": space, "content_hash": content_hash}, {"$setOnInsert": {"space": space, "content_hash": content_hash}}, upsert=True
+        )
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        await self.inflight_marks.delete_one({"space": space, "content_hash": content_hash})
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        cursor = self.inflight_marks.find({}).sort([("space", 1), ("content_hash", 1)])
+        return [(doc["space"], doc["content_hash"]) async for doc in cursor]
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter

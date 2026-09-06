@@ -58,12 +58,13 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS vectors_space ON vectors(space, created_at);
 CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
 """
 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 6  # 6: facts carry quote
+SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -73,6 +74,7 @@ SCHEMA_VERSION = 6  # 6: facts carry quote
 #: after a backup copy of the file is written beside it.
 STEPS: dict[int, tuple[str, ...]] = {
     5: ("ALTER TABLE facts ADD COLUMN quote TEXT",),
+    6: ("CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash))",),
 }
 
 
@@ -120,20 +122,26 @@ def schema_version(conn: sqlite3.Connection) -> int:
 
 
 def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> None:
-    """Stamp a fresh file; apply the known step to a file exactly one
-    version behind; refuse anything else."""
+    """Stamp a fresh file; walk a file forward through every known step
+    from its version to this build's, one transaction and one backup per
+    step; refuse a version with no step from it."""
     version = schema_version(conn)
     if version == SCHEMA_VERSION:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
         conn.commit()
         return
-    if version in STEPS and version + 1 == SCHEMA_VERSION:
+    if version > SCHEMA_VERSION or version not in STEPS:
+        raise SchemaMismatch(
+            f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION} and knows no step from v{version}. "
+            "Export with the build that wrote the file, delete it, and import again."
+        )
+    while version < SCHEMA_VERSION:
+        if version not in STEPS:
+            raise SchemaMismatch(
+                f"this file reached schema v{version} but this build knows no step from there to v{SCHEMA_VERSION}."
+            )
         apply_step(conn, version, path)
-        return
-    raise SchemaMismatch(
-        f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION} and knows no step from v{version}. "
-        "Export with the build that wrote the file, delete it, and import again."
-    )
+        version = schema_version(conn)
 
 
 def backup_before_step(path: "str | Path", version: int) -> None:
@@ -171,8 +179,12 @@ def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None"
         current = int(rows[0][0]) if rows else version
         if current != version:
             conn.execute("COMMIT")
-            if current != version + 1:
-                raise SchemaMismatch(f"schema changed to v{current} while opening; expected v{version} or v{version + 1}")
+            # Another opener applied this step, and perhaps the ones after
+            # it, while we waited; the caller's walk re-reads and carries on.
+            if current < version or current > SCHEMA_VERSION:
+                raise SchemaMismatch(
+                    f"schema changed to v{current} while opening; expected v{version} to v{SCHEMA_VERSION}"
+                )
             return
         if path is not None and str(path) != ":memory:":
             backup_before_step(path, version)
@@ -299,6 +311,24 @@ class SqliteDocumentStore:
             f"SELECT * FROM chunks WHERE space = ? AND id IN ({marks})", (space, *chunk_ids)
         ).fetchall()
         return [_chunk(r) for r in rows]
+
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        rows = self.conn.execute(
+            "SELECT * FROM chunks WHERE space = ? AND episode_id = ? ORDER BY ordinal", (space, episode_id)
+        ).fetchall()
+        return [_chunk(r) for r in rows]
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO inflight (space, content_hash) VALUES (?, ?)", (space, content_hash))
+        self.conn.commit()
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        self.conn.execute("DELETE FROM inflight WHERE space = ? AND content_hash = ?", (space, content_hash))
+        self.conn.commit()
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        rows = self.conn.execute("SELECT space, content_hash FROM inflight ORDER BY space, content_hash").fetchall()
+        return [(r["space"], r["content_hash"]) for r in rows]
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter

@@ -112,6 +112,20 @@ would wrongly withhold, and that sweep is where a floor comes from.
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
 
+## What survives a crash
+
+A `remember` marks the episode's identity in the document store before
+it writes, and clears the mark only after the rows and the vectors are
+all durable. On the next open the engine finishes or forgets whatever
+was cut off in between: chunks are rebuilt from the stored content when
+they are missing, vectors are re-embedded when they are missing, and a
+mark with no episode behind it is dropped. Each open that had anything
+to repair records one `recover` event with the counts. The guarantee:
+an episode you can see is complete, or it is absent; it is never
+searchable by one lane and not the other. This holds on every document
+store below (the recovery contract in `tests/test_contract.py` plays the
+crash at each step of the write).
+
 ## Stores and what each one promises
 
 Every store below runs the same 37 contract tests (`tests/test_contract.py`)
@@ -122,7 +136,7 @@ means against a real server in Docker locally and as a CI service.
 | Store | Documents | Vectors | Evidence | Verified | Notes |
 |---|---|---|---|---|---|
 | in-memory | yes | yes | yes | embedded | reference implementation |
-| SQLite | yes | yes | yes | embedded | FTS5 lexical lane; WAL; schema stamped, one additive step from v5 |
+| SQLite | yes | yes | yes | embedded | FTS5 lexical lane; WAL; schema stamped, additive steps from v5 (quote column, inflight table) |
 | MongoDB | yes | | yes | container (local; CI when `SCONE_TEST_MONGO_URL` is set) | `$text` lexical lane; TTL retention |
 | PostgreSQL + pgvector | yes | yes | yes | container | tsvector lexical lane, HNSW cosine, one pool for all three |
 | Elasticsearch 8 | yes | yes | yes | container | BM25 lexical lane, float32 HNSW (int8 would round cosine), refresh per write |

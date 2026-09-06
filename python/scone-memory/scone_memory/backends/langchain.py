@@ -225,7 +225,9 @@ class LangChainVectorIndex:
         await self._delete([i for i in ids if i in held])
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
-        await self._delete([str(int(c)) for c in chunk_ids])
+        # A rollback may delete vectors that never landed; only what the
+        # store holds is deleted, as in upsert.
+        await self._delete_existing([str(int(c)) for c in chunk_ids])
 
     async def close(self) -> None:
         return None

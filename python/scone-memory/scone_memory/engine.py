@@ -124,6 +124,17 @@ class Record:
 
 
 @dataclass
+class RecoveryReport:
+    """What recover() found: episodes brought to a complete state, of
+    which how many needed their chunks rebuilt, and marks with no
+    episode behind them (the write never landed)."""
+
+    completed: int = 0
+    rechunked: int = 0
+    forgotten: int = 0
+
+
+@dataclass
 class ImportSummary:
     episodes: int = 0
     #: Episodes already present in the target.
@@ -212,7 +223,71 @@ class MemoryEngine:
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
+        await self.recover()
         return self
+
+    async def recover(self) -> RecoveryReport:
+        """Finish or forget what a crash interrupted. A remember marks its
+        episode identity in the document store before writing and clears
+        the mark once the rows and the vectors are all durable. Anything
+        still marked here was cut off somewhere in between: an episode row
+        without chunks, or chunks without vectors, or no row at all. Each
+        is brought to the complete state (chunks and vectors rebuilt from
+        the stored content, which never changed) or, if nothing landed,
+        the mark is dropped. Recorded as one "recover" event per open when
+        there was anything to do, so the evidence shows it happened."""
+        report = RecoveryReport()
+        marks = await self.documents.inflight()
+        for space, digest in marks:
+            episode = await self.documents.episode_by_hash(space, digest)
+            if episode is None:
+                report.forgotten += 1
+            else:
+                chunks = await self.documents.chunks_of(space, episode.episode_id)
+                if not chunks:
+                    spans = chunk_spans(episode.content, self.chunk_target)
+                    chunks = await self.documents.insert_chunks(
+                        [
+                            NewChunk(
+                                episode_id=episode.episode_id,
+                                space=space,
+                                ordinal=i,
+                                start=bs.start,
+                                end=bs.end,
+                                text=episode.content[sp.start : sp.end],
+                                created_at=episode.created_at,
+                            )
+                            for i, (sp, bs) in enumerate(zip(spans, byte_spans(episode.content, spans)))
+                        ]
+                    )
+                    report.rechunked += 1
+                as_new = NewEpisode(
+                    space=space, kind=episode.kind, content=episode.content, content_hash=episode.content_hash,
+                    created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
+                    tags=episode.tags, metadata=episode.metadata,
+                )
+                texts = [self._embed_text(as_new, c.text) for c in chunks]
+                vectors: list[list[float]] = []
+                for i in range(0, len(texts), EMBED_BATCH):
+                    vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
+                await self.vectors.upsert(
+                    [
+                        VectorPoint(
+                            chunk_id=c.chunk_id, space=space, episode_id=episode.episode_id, created_at=episode.created_at,
+                            vector=v, tags=episode.tags, metadata=episode.metadata,
+                        )
+                        for c, v in zip(chunks, vectors)
+                    ]
+                )
+                report.completed += 1
+            await self.documents.clear_inflight(space, digest)
+        if marks:
+            for space in sorted({s for s, _ in marks}):
+                await self._emit(space, "recover", {
+                    "marks": sum(1 for s, _ in marks if s == space),
+                    "completed": report.completed, "rechunked": report.rechunked, "forgotten": report.forgotten,
+                })
+        return report
 
     # -- episodes ---------------------------------------------------------
 
@@ -349,6 +424,9 @@ class MemoryEngine:
         try:
             offset = 0
             for pending in fresh:
+                # The mark outlives a crash; clear_inflight below is the
+                # last thing this episode's write does (see recover()).
+                await self.documents.mark_inflight(space, pending.new.content_hash)
                 episode = await self.documents.insert_episode(pending.new)
                 written.append(episode.episode_id)
                 chunks = await self.documents.insert_chunks(
@@ -380,12 +458,15 @@ class MemoryEngine:
                     ]
                 )
                 offset += len(chunks)
+                await self.documents.clear_inflight(space, pending.new.content_hash)
                 results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
         except Exception:
             # Undo the partial batch so a retry starts clean.
             for episode_id in written:
                 removed = await self.documents.delete_episode(space, episode_id)
                 await self.vectors.delete(removed)
+            for pending in fresh:
+                await self.documents.clear_inflight(space, pending.new.content_hash)
             raise
 
     async def forget(self, space: str, episode_id: int) -> None:

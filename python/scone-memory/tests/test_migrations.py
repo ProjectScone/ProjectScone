@@ -1,7 +1,8 @@
 """Shared spec 3.6. A store stamps the schema version it writes. A file
-exactly one known step behind is brought forward additively, in one
-transaction, after a backup; anything else is refused, never rewritten.
-The first step exists because a live store held v5 with real data."""
+behind by known steps is walked forward additively, one transaction and
+one backup per step; anything else is refused, never rewritten. The
+first step exists because a live store held v5 with real data; the
+second adds the inflight table for crash recovery."""
 
 from __future__ import annotations
 
@@ -19,11 +20,12 @@ ROW = ("INSERT INTO episodes (id, space, kind, content, content_hash, tags, meta
 
 def write_v5_file(path):
     """A file as the 2026-09-06 live store looked: schema 5, facts without a
-    quote column, plus events and an index, so the step must leave all of
-    them exactly as they were."""
+    quote column and no inflight table, plus events and an index, so the
+    steps must leave all of them exactly as they were."""
     conn = sqlite3.connect(path)
     v5_schema = SCHEMA.replace(", superseded_by INTEGER, quote TEXT);", ", superseded_by INTEGER);")
-    assert "quote" not in v5_schema, "the v5 shape must not carry the new column"
+    v5_schema = "\n".join(line for line in v5_schema.splitlines() if "inflight" not in line)
+    assert "quote" not in v5_schema and "inflight" not in v5_schema, "the v5 shape must not carry the new parts"
     conn.executescript(v5_schema)
     conn.executescript(SqliteEventLog.SCHEMA)  # the live file holds its event log in the same database
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')")
@@ -64,10 +66,11 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     write_v5_file(path)
     before = snapshot(path)
 
-    store = SqliteDocumentStore(path)  # opening applies the step
-    assert schema_version(store.conn) == SCHEMA_VERSION == 6
+    store = SqliteDocumentStore(path)  # opening applies both steps, 5 -> 6 -> 7
+    assert schema_version(store.conn) == SCHEMA_VERSION == 7
     cols = [r[1] for r in store.conn.execute("PRAGMA table_info(facts)")]
     assert "quote" in cols
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'inflight'").fetchone()[0] == 1
     after = snapshot(path)
     assert after["episodes"] == before["episodes"], "episode rows and ids untouched"
     assert after["facts"] == before["facts"], "fact rows, ids, statuses, reasons untouched"
@@ -76,9 +79,13 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     assert store.conn.execute("SELECT quote FROM facts WHERE id = 3").fetchone()[0] is None, "new column is null for old rows"
 
     backup = tmp_path / "live.db.v5.bak"
-    assert backup.exists(), "a backup is written before the step"
+    assert backup.exists(), "a backup is written before the first step"
     assert snapshot(backup) == before
     assert sqlite3.connect(backup).execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+    second = tmp_path / "live.db.v6.bak"
+    assert second.exists(), "and another before the second step"
+    assert sqlite3.connect(second).execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
+    assert snapshot(second) == before, "the v6 copy holds the same rows, one step further along"
 
     # The upgraded store works: it reads the old rows and writes the new column.
     import asyncio
@@ -86,7 +93,7 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     facts = asyncio.run(store.list_facts("default", include_closed=True))
     assert sorted(f.fact_id for f in facts) == [2, 3] and all(f.quote is None for f in facts)
     again = SqliteDocumentStore(path)  # reopening does nothing further
-    assert schema_version(again.conn) == 6 and not (tmp_path / "live.db.v6.bak").exists()
+    assert schema_version(again.conn) == 7 and not (tmp_path / "live.db.v7.bak").exists()
 
 
 def test_the_step_is_atomic(tmp_path, monkeypatch):
@@ -126,10 +133,10 @@ def test_two_openers_racing_on_a_v5_file_apply_the_step_once(tmp_path):
         t.start()
     for t in threads:
         t.join(timeout=30)
-    assert all(v == 6 for v in results.values()), results
+    assert all(v == 7 for v in results.values()), results
     probe = sqlite3.connect(path)
     assert [r[1] for r in probe.execute("PRAGMA table_info(facts)")].count("quote") == 1, "the column was added exactly once"
-    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
+    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
 
 
 def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
@@ -139,16 +146,16 @@ def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
 
     path = tmp_path / "live.db"
     write_v5_file(path)
-    first = SqliteDocumentStore(path)  # applies the step
-    assert schema_version(first.conn) == 6
+    first = SqliteDocumentStore(path)  # applies both steps
+    assert schema_version(first.conn) == 7
     stale = sqlite3.connect(path)
     stale.row_factory = sqlite3.Row
     mod.apply_step(stale, 5, path)  # a caller that still believed the file was v5
-    assert schema_version(stale) == 6 and [r[1] for r in stale.execute("PRAGMA table_info(facts)")].count("quote") == 1
+    assert schema_version(stale) == 7 and [r[1] for r in stale.execute("PRAGMA table_info(facts)")].count("quote") == 1
 
 
 def test_other_versions_are_still_refused_not_rewritten(tmp_path):
-    for version in ("2", "4", "7"):
+    for version in ("2", "4", "8"):
         path = tmp_path / f"v{version}.db"
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)
@@ -227,4 +234,4 @@ def test_an_opener_retries_the_wal_switch_while_another_connection_is_writing(tm
     threading.Thread(target=release).start()
     store = SqliteDocumentStore(path)
     assert store.conn.execute("PRAGMA journal_mode").fetchall()[0][0] == "wal"
-    assert schema_version(store.conn) == 6
+    assert schema_version(store.conn) == 7

@@ -147,6 +147,7 @@ class PostgresDocumentStore:
         excluded_reason TEXT, quote TEXT);
     CREATE INDEX IF NOT EXISTS facts_key ON {s}.facts (space, subject, predicate);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
+    CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
     """
 
     def __init__(self, url: str, schema: str = "scone", pool: Optional[Pool] = None) -> None:
@@ -249,6 +250,27 @@ class PostgresDocumentStore:
             return []
         rows = await self._rows(f"SELECT * FROM {self.schema}.chunks WHERE space = %s AND id = ANY(%s)", (space, list(chunk_ids)))
         return [_chunk(r) for r in rows]
+
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        rows = await self._rows(
+            f"SELECT * FROM {self.schema}.chunks WHERE space = %s AND episode_id = %s ORDER BY ordinal", (space, episode_id)
+        )
+        return [_chunk(r) for r in rows]
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        await self._rows(
+            f"INSERT INTO {self.schema}.inflight (space, content_hash) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING space",
+            (space, content_hash),
+        )
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        await self._rows(
+            f"DELETE FROM {self.schema}.inflight WHERE space = %s AND content_hash = %s RETURNING space", (space, content_hash)
+        )
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        rows = await self._rows(f"SELECT space, content_hash FROM {self.schema}.inflight ORDER BY space, content_hash")
+        return [(r["space"], r["content_hash"]) for r in rows]
 
     async def search_text(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
         terms = tokenize(query)
