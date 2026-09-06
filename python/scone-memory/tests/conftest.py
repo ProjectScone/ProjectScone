@@ -28,6 +28,7 @@ def backends():
     yield pytest.param("qdrant-local", id="qdrant-local")
     yield pytest.param("chroma", id="chroma", marks=pytest.mark.skipif(importlib.util.find_spec("chromadb") is None, reason="chromadb not installed"))
     yield pytest.param("lancedb", id="lancedb", marks=pytest.mark.skipif(importlib.util.find_spec("lancedb") is None, reason="lancedb not installed"))
+    yield pytest.param("milvus-lite", id="milvus-lite", marks=pytest.mark.skipif(importlib.util.find_spec("milvus_lite") is None, reason="milvus-lite not installed"))
     if MONGO_URL:
         yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
         yield pytest.param("mongo+qdrant-local", id="mongo+qdrant-local", marks=pytest.mark.mongo)
@@ -93,6 +94,11 @@ async def engine(request, tmp_path):
 
         documents = InMemoryDocumentStore()
         vectors = LanceDBVectorIndex(str(tmp_path / "lance"))
+    elif request.param == "milvus-lite":
+        from scone_memory.backends import MilvusVectorIndex
+
+        documents = InMemoryDocumentStore()
+        vectors = MilvusVectorIndex(str(tmp_path / "milvus.db"))
     else:
         from scone_memory.backends import QdrantVectorIndex
 

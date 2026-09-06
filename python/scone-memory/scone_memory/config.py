@@ -1,7 +1,7 @@
 """Assemble an engine from environment variables.
 
     SCONE_DOCUMENTS   memory | sqlite | mongo | postgres | elasticsearch   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | postgres | redis | elasticsearch  (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | milvus | postgres | redis | elasticsearch  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
@@ -11,6 +11,7 @@
     SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
     SCONE_LANCEDB_PATH (database directory, required for lancedb)
     SCONE_REDIS_URL (required for redis; needs the RediSearch module), SCONE_REDIS_PREFIX (default scone_chunks)
+    SCONE_MILVUS_URI (a local .db path runs Milvus Lite; http://host:19530 a server), SCONE_MILVUS_TOKEN, SCONE_MILVUS_COLLECTION
     SCONE_ELASTICSEARCH_URL, SCONE_ELASTICSEARCH_API_KEY, SCONE_ELASTICSEARCH_PREFIX (default scone); one client for all three
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
@@ -67,6 +68,9 @@ class Settings:
     lancedb_path: Optional[str] = None
     redis_url: Optional[str] = None
     redis_prefix: str = "scone_chunks"
+    milvus_uri: Optional[str] = None
+    milvus_token: Optional[str] = None
+    milvus_collection: str = "scone_chunks"
     elasticsearch_url: Optional[str] = None
     elasticsearch_api_key: Optional[str] = None
     elasticsearch_prefix: str = "scone"
@@ -111,6 +115,9 @@ class Settings:
             lancedb_path=env.get("SCONE_LANCEDB_PATH"),
             redis_url=env.get("SCONE_REDIS_URL"),
             redis_prefix=env.get("SCONE_REDIS_PREFIX", "scone_chunks"),
+            milvus_uri=env.get("SCONE_MILVUS_URI"),
+            milvus_token=env.get("SCONE_MILVUS_TOKEN"),
+            milvus_collection=env.get("SCONE_MILVUS_COLLECTION", "scone_chunks"),
             elasticsearch_url=env.get("SCONE_ELASTICSEARCH_URL"),
             elasticsearch_api_key=env.get("SCONE_ELASTICSEARCH_API_KEY"),
             elasticsearch_prefix=env.get("SCONE_ELASTICSEARCH_PREFIX", "scone"),
@@ -249,6 +256,12 @@ def build_vectors(settings: Settings, documents=None):
         if not settings.lancedb_path:
             raise InvalidInput("SCONE_VECTORS=lancedb needs SCONE_LANCEDB_PATH")
         return LanceDBVectorIndex(settings.lancedb_path)
+    if settings.vectors == "milvus":
+        from .backends import MilvusVectorIndex
+
+        if not settings.milvus_uri:
+            raise InvalidInput("SCONE_VECTORS=milvus needs SCONE_MILVUS_URI")
+        return MilvusVectorIndex(settings.milvus_uri, settings.milvus_collection, settings.milvus_token)
     if settings.vectors == "redis":
         from .backends import RedisVectorIndex
 

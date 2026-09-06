@@ -19,8 +19,8 @@ embedder), so the same code runs in-process with no server, or against
 MongoDB and Qdrant behind FastAPI. The in-process stores are the reference
 implementation; the database adapters pass the same contract tests.
 Vector indexes: in-memory, SQLite, Qdrant, Chroma (embedded or server),
-LanceDB (embedded), PostgreSQL with pgvector, Redis with RediSearch,
-Elasticsearch. Document stores: in-memory, SQLite, MongoDB, PostgreSQL,
+LanceDB (embedded), Milvus (Milvus Lite embedded or server), PostgreSQL
+with pgvector, Redis with RediSearch, Elasticsearch. Document stores: in-memory, SQLite, MongoDB, PostgreSQL,
 Elasticsearch. Evidence: in-memory, SQLite, MongoDB, PostgreSQL,
 Elasticsearch. With `SCONE_DOCUMENTS=postgres` or `=elasticsearch` the
 vectors and the evidence log default to the same database through one
@@ -35,6 +35,7 @@ pip install 'scone-memory[postgres]'     # PostgreSQL + pgvector for documents, 
 pip install 'scone-memory[chroma]'       # Chroma vectors (SCONE_VECTORS=chroma; SCONE_CHROMA_PATH or SCONE_CHROMA_URL)
 pip install 'scone-memory[lancedb]'      # LanceDB vectors (SCONE_VECTORS=lancedb, SCONE_LANCEDB_PATH)
 pip install 'scone-memory[redis]'        # Redis Stack vectors (SCONE_VECTORS=redis, SCONE_REDIS_URL)
+pip install 'scone-memory[milvus-lite]'  # Milvus vectors, embedded (SCONE_VECTORS=milvus, SCONE_MILVUS_URI=./milvus.db); [milvus] for a server
 pip install 'scone-memory[elasticsearch]' # Elasticsearch 8 for documents, vectors and evidence (SCONE_ELASTICSEARCH_URL)
 pip install 'scone-memory[api]'          # FastAPI server
 pip install 'scone-memory[local-embed]'  # bge-small ONNX, same model as the Rust core

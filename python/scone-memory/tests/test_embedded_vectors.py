@@ -1,7 +1,7 @@
-"""Chroma and LanceDB as vector indexes. The published contract runs over
-both (tests/test_contract.py); this file holds what is specific to them:
-filters built from user-supplied strings, persistence across reopen, and
-the environment wiring. Both run embedded, no server."""
+"""Chroma, LanceDB and Milvus Lite as vector indexes. The published contract
+runs over all three (tests/test_contract.py); this file holds what is
+specific to them: filters built from user-supplied strings, persistence
+across reopen, and the environment wiring. All run embedded, no server."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from scone_memory.ports import VectorPoint
 
 needs_chroma = pytest.mark.skipif(importlib.util.find_spec("chromadb") is None, reason="chromadb not installed")
 needs_lancedb = pytest.mark.skipif(importlib.util.find_spec("lancedb") is None, reason="lancedb not installed")
+needs_milvus = pytest.mark.skipif(importlib.util.find_spec("milvus_lite") is None, reason="milvus-lite not installed")
 
 
 def make(kind: str, tmp_path):
@@ -22,26 +23,31 @@ def make(kind: str, tmp_path):
         from scone_memory.backends import ChromaVectorIndex
 
         return ChromaVectorIndex(path=str(tmp_path / "chroma"))
+    if kind == "milvus":
+        from scone_memory.backends import MilvusVectorIndex
+
+        return MilvusVectorIndex(str(tmp_path / "milvus.db"))
     from scone_memory.backends import LanceDBVectorIndex
 
     return LanceDBVectorIndex(str(tmp_path / "lance"))
 
 
-@pytest.fixture(params=[pytest.param("chroma", marks=needs_chroma), pytest.param("lancedb", marks=needs_lancedb)])
+@pytest.fixture(params=[pytest.param("chroma", marks=needs_chroma), pytest.param("lancedb", marks=needs_lancedb), pytest.param("milvus", marks=needs_milvus)])
 def kind(request):
     return request.param
 
 
 async def test_quotes_in_tags_and_values_are_data_not_syntax(kind, tmp_path):
     engine = await MemoryEngine(InMemoryDocumentStore(), make(kind, tmp_path), HashEmbedder()).open()
-    await engine.remember("default", "the o'reilly book on sql", tags=["o'reilly"], metadata={"owner": "mark's"})
+    await engine.remember("default", "the o'reilly book on sql", tags=["o'reilly", 'say "hi"'], metadata={"owner": "mark's", "b": "back\\slash"})
     await engine.remember("default", "another book on sql", tags=["plain"], metadata={"owner": "ana"})
-    hit = await engine.recall("default", "book on sql", tags=["o'reilly"])
-    assert [i.episode_id for i in hit.items] == [1]
-    hit = await engine.recall("default", "book on sql", where={"owner": "mark's"})
-    assert [i.episode_id for i in hit.items] == [1]
-    hostile = await engine.recall("default", "book on sql", where={"owner": "x' OR 1=1 --"})
-    assert hostile.items == [] and not hostile.degraded, "a would-be predicate matches nothing and breaks nothing"
+    for tags in (["o'reilly"], ['say "hi"']):
+        assert [i.episode_id for i in (await engine.recall("default", "book on sql", tags=tags)).items] == [1], tags
+    for where in ({"owner": "mark's"}, {"b": "back\\slash"}):
+        assert [i.episode_id for i in (await engine.recall("default", "book on sql", where=where)).items] == [1], where
+    for hostile_value in ("x' OR 1=1 --", 'x" or space == "default', 'x" or 1 == 1'):
+        hostile = await engine.recall("default", "book on sql", where={"owner": hostile_value})
+        assert hostile.items == [] and not hostile.degraded, "a would-be predicate matches nothing and breaks nothing"
 
 
 async def test_a_limit_beyond_the_index_size_and_an_empty_index_are_fine(kind, tmp_path):
@@ -89,3 +95,11 @@ async def test_lancedb_from_the_environment(tmp_path):
     assert engine.vectors.name == "lancedb"
     with pytest.raises(InvalidInput, match="SCONE_LANCEDB_PATH"):
         build_vectors(Settings.from_env({"SCONE_VECTORS": "lancedb"}))
+
+
+@needs_milvus
+async def test_milvus_from_the_environment(tmp_path):
+    engine = await build_engine(Settings.from_env({"SCONE_VECTORS": "milvus", "SCONE_MILVUS_URI": str(tmp_path / "m.db")}))
+    assert engine.vectors.name == "milvus"
+    with pytest.raises(InvalidInput, match="SCONE_MILVUS_URI"):
+        build_vectors(Settings.from_env({"SCONE_VECTORS": "milvus"}))
