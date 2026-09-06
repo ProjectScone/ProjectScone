@@ -301,3 +301,48 @@ def test_the_bench_engine_takes_the_contextual_and_floor_settings(tmp_path):
     assert prefixed["contextual_embeddings"] is True and prefixed["similarity_floor"] == 0.9
     sims = lambda r: [x["top_similarity"] for x in r["results"]]  # noqa: E731
     assert sims(plain) != sims(prefixed), "the prefix never reached the embedded text"
+
+
+def raw_item(qid, qtype, question, sessions, answer_ids):
+    """Like item(), with the session ids given so haystacks can be disjoint."""
+    return {
+        "question_id": qid, "question_type": qtype, "question": question, "question_date": "2023/06/01 (Thu) 10:00",
+        "haystack_sessions": [[{"role": "user", "content": text}] for _, text in sessions],
+        "haystack_session_ids": [sid for sid, _ in sessions],
+        "haystack_dates": ["2023/05/10 (Wed) 09:00"] * len(sessions),
+        "answer_session_ids": answer_ids, "answer": "x",
+    }
+
+
+CROSS_DATASET = [
+    raw_item("q1", "single-session-user", "which city did I move to", [("a1", "I moved to Lisbon last March"), ("a2", "dentist on the 14th")], ["a1"]),
+    raw_item("q2", "multi-session", "what broke at the launch", [("b1", "launch went live at noon"), ("b2", "the launch broke billing")], ["b1", "b2"]),
+    raw_item("q3", "single-session-user", "what did I name the cat", [("c1", "the cat is called Mint"), ("a1", "I moved to Lisbon last March")], ["c1"]),
+]
+
+
+async def test_cross_queries_give_the_sweep_a_no_evidence_population(tmp_path):
+    """LongMemEval has no item without evidence (every _abs item's answer
+    sessions sit in its haystack), so the sweep was never measurable on
+    the real file. With cross_queries each item's store is also asked the
+    next item's question whose evidence is absent here: q1 gets q2's
+    question (b1, b2 absent), q2 gets q3's, and q3 skips q1 (a1 is in q3's
+    haystack) and takes q2's. Those rows feed the sweep and nothing else:
+    the recall numbers are the same as a run without them."""
+    path = tmp_path / "cross.json"
+    path.write_text(json.dumps(CROSS_DATASET))
+    items = load_items(path)
+
+    def make():
+        return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), similarity_floor=0.5).open()
+
+    plain = await run(make, items, ks=(5,))
+    crossed = await run(make, items, ks=(5,), cross_queries=True)
+    assert plain.abstention is None
+    assert crossed.abstention is not None
+    assert crossed.abstention["no_evidence_n"] == 3 and crossed.abstention["cross_item_n"] == 3 and crossed.abstention["evidence_n"] == 3
+    assert [r.question_id for r in crossed.cross_results] == ["q2@q1", "q3@q2", "q2@q3"]
+    assert all(r.question_type == "cross-item" and not r.has_evidence and r.top_similarity is not None for r in crossed.cross_results)
+    assert (crossed.scored, crossed.items, crossed.recall_any, crossed.recall_all) == (plain.scored, plain.items, plain.recall_any, plain.recall_all)
+    assert [r.question_id for r in crossed.results] == ["q1", "q2", "q3"]
+    assert "cross_results" not in crossed.as_dict(with_items=False) and len(crossed.as_dict()["cross_results"]) == 3

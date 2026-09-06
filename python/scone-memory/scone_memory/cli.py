@@ -130,6 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42, help="seed for --sample (default 42, the harness's default)")
     p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
     p.add_argument("--history", action="store_true", help="ask every recall for the closed chain behind matched facts (experiment 3)")
+    p.add_argument("--cross-queries", action="store_true",
+                   help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -194,7 +196,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
             print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
-                             dataset=str(args.dataset), progress=progress, history=args.history)
+                             dataset=str(args.dataset), progress=progress, history=args.history,
+                             cross_queries=args.cross_queries)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -220,8 +223,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         if sweep is None:
             print("  abstention sweep: not measurable (no item without evidence ran)", file=out)
         else:
-            print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence and {sweep['evidence_n']} evidence item(s): "
-                  "floor -> abstained / wrongly withheld", file=out)
+            print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence ({sweep['cross_item_n']} cross-item) "
+                  f"and {sweep['evidence_n']} evidence item(s): floor -> abstained / wrongly withheld", file=out)
             for f in sweep["floors"]:
                 withheld = sweep["false_abstain_rate"][f]
                 print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)

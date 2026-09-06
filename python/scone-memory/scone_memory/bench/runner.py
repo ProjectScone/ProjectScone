@@ -135,8 +135,26 @@ class ItemResult:
         return bool(self.answer_sessions) and all(a in seen for a in self.answer_sessions)
 
 
+def cross_partner(items: Sequence[BenchItem], idx: int) -> Optional[BenchItem]:
+    """Another item whose question has no evidence in this item's haystack:
+    the next item in run order (wrapping) none of whose answer sessions
+    appear among this item's session ids. Its question, asked of this
+    item's store, is a no-evidence query for the abstention sweep
+    (experiment 9). LongMemEval's own abstention items cannot serve: their
+    answer sessions are in the haystack (the topic is there, the detail is
+    not), so has_evidence is true for every one of the 500."""
+    here = set(items[idx].session_ids)
+    for step in range(1, len(items)):
+        other = items[(idx + step) % len(items)]
+        if other.answer_session_ids and here.isdisjoint(other.answer_session_ids) and other.question != items[idx].question:
+            return other
+    return None
+
+
 #: Candidate floors for the abstention sweep, 0.30 to 0.90 by 0.05.
 FLOOR_GRID: tuple[float, ...] = tuple(round(0.30 + 0.05 * i, 2) for i in range(13))
+#: question_type of a cross-item query result (never scored for recall).
+CROSS_ITEM = "cross-item"
 
 
 def flagged(top_similarity: Optional[float], floor: float) -> bool:
@@ -160,6 +178,7 @@ def abstention_sweep(results: Sequence["ItemResult"], floors: Sequence[float] = 
     return {
         "floors": list(floors),
         "no_evidence_n": len(without),
+        "cross_item_n": sum(r.question_type == CROSS_ITEM for r in without),
         "evidence_n": len(with_ev),
         "abstain_rate": {f: round(sum(flagged(r.top_similarity, f) for r in without) / len(without), 4) for f in floors},
         "false_abstain_rate": {f: (round(sum(flagged(r.top_similarity, f) for r in with_ev) / len(with_ev), 4) if with_ev else None) for f in floors},
@@ -196,6 +215,9 @@ class RunReport:
     #: from the engine itself so the report says what ran, not what was asked.
     contextual_embeddings: bool = False
     low_confidence_counts: dict[str, int] = field(default_factory=dict)
+    #: Experiment 9: one no-evidence query per item (another item's question
+    #: whose evidence is absent here), kept apart from the scored results.
+    cross_results: list[ItemResult] = field(default_factory=list)
     #: Experiment 3: whether history was asked for, and how many items got any facts / any history back.
     history: bool = False
     items_with_facts: int = 0
@@ -205,6 +227,7 @@ class RunReport:
         d = asdict(self)
         if not with_items:
             d.pop("results")
+            d.pop("cross_results")
         return d
 
 
@@ -225,18 +248,23 @@ async def run(
     dataset: str = "",
     progress: Optional[Callable[[int, int], None]] = None,
     history: bool = False,
+    cross_queries: bool = False,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
     recall limit and defaults to max(ks). ``history`` passes
     ``history=True`` to every recall (experiment 3) and counts what came
-    back; it changes nothing unless facts exist in the item's space."""
+    back; it changes nothing unless facts exist in the item's space.
+    ``cross_queries`` asks each item's store one other item's question
+    whose evidence is absent (see cross_partner) after the real recall;
+    those results feed the abstention sweep only."""
     import asyncio
     from datetime import datetime, timezone
 
     items = list(items)
     k_max = limit or max(ks)
     results: list[ItemResult] = []
+    cross: list[ItemResult] = []
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     engine_meta = {"embedder": "", "document_store": "", "vector_index": ""}
     floor: Optional[float] = None
@@ -273,6 +301,16 @@ async def run(
             result.low_confidence = pack.low_confidence
             result.facts = len(pack.facts)
             result.history_facts = len(pack.history)
+            partner = cross_partner(items, n - 1) if cross_queries else None
+            if partner is not None:
+                t0 = time.perf_counter()
+                stray = await engine.recall(space, partner.question, limit=k_max)
+                cross.append(ItemResult(
+                    f"{partner.question_id}@{item.question_id}", CROSS_ITEM, False,
+                    [i.source or "" for i in stray.items], result.stored_bytes, stray.returned_bytes,
+                    round((time.perf_counter() - t0) * 1000, 3), degraded=list(stray.degraded),
+                    top_similarity=stray.top_similarity, low_confidence=stray.low_confidence,
+                ))
         except Exception as e:  # noqa: BLE001 - one bad item must not lose the run; it is counted
             result.error = f"{type(e).__name__}: {e}"
         results.append(result)
@@ -296,7 +334,7 @@ async def run(
                        **{f"all@{k}": round(sum(r.all_at(k) for r in rows) / len(rows), 4) for k in ks}}
     reductions = [1 - r.returned_bytes / r.stored_bytes for r in results if r.error is None and r.stored_bytes]
     verdicts: dict[str, int] = {}
-    for r in results:
+    for r in results + cross:
         if r.error is None and r.low_confidence is not None:
             key = ("no_evidence" if not r.has_evidence else "evidence") + ("_flagged" if r.low_confidence else "_cleared")
             verdicts[key] = verdicts.get(key, 0) + 1
@@ -307,8 +345,8 @@ async def run(
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        results=results, abstention=abstention_sweep(results), similarity_floor=floor, low_confidence_counts=verdicts,
-        contextual_embeddings=contextual,
+        results=results, abstention=abstention_sweep(results + cross), similarity_floor=floor, low_confidence_counts=verdicts,
+        contextual_embeddings=contextual, cross_results=cross,
         history=history, items_with_facts=sum(1 for r in results if r.facts), items_with_history=sum(1 for r in results if r.history_facts),
         **engine_meta,
     )
