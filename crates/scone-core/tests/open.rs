@@ -150,7 +150,7 @@ fn widening_fact_statuses_keeps_every_row_and_reference() {
         "INSERT INTO facts (space_id, subject_entity, predicate, object, status) VALUES (1, 1, 'drinks', 'tea', 'proposed')",
         [],
     )
-    .expect("the widened CHECK admits proposed");
+    .unwrap(); // the widened CHECK admits proposed
     let n: i64 = raw
         .query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='facts_subject_predicate'", [], |r| r.get(0))
         .unwrap();

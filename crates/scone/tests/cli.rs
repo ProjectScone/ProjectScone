@@ -789,3 +789,112 @@ fn hook_session_state_cannot_escape_the_data_directory() {
         "a traversing session id must not write outside the data dir"
     );
 }
+
+const FAKE_UNSURE: &str =
+    r#"[{"subject":"mark","predicate":"lives_in","object":"lisbon","confidence":0.55}]"#;
+
+/// With --propose-below, an unsure extraction waits for a person: listed
+/// under `facts pending`, absent from `facts list`, and active only after
+/// `facts approve`. Without the flag the same extraction is active at once.
+#[test]
+fn unsure_facts_wait_for_approval_when_a_gate_is_set() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark moved to lisbon in march"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "--propose-below", "0.7", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no facts"));
+    scone(dir.path())
+        .args(["facts", "pending"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "[1] mark lives_in lisbon  (conf 0.55, proposed",
+        ));
+    scone(dir.path())
+        .args(["facts", "approve", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "approved fact 1 (0 older fact(s) closed)",
+        ));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark lives_in lisbon"))
+        .stdout(predicates::str::contains("active (approved)"));
+    scone(dir.path())
+        .args(["facts", "pending"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("nothing pending"));
+    scone(dir.path())
+        .args(["facts", "decline", "1", "--reason", "no"])
+        .assert()
+        .failure();
+    scone(dir.path())
+        .args(["--propose-below", "1.5", "facts", "pending"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "propose_below must be within 0..=1",
+        ));
+}
+
+#[test]
+fn declining_a_proposal_keeps_it_out_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark might like green"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "--propose-below", "0.9", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "decline", "1", "--reason", "a guess"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declined fact 1: a guess"));
+    scone(dir.path())
+        .args(["facts", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declined (a guess)"));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no facts"));
+}
+
+#[test]
+fn without_a_gate_an_unsure_fact_is_active_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark moved to lisbon in march"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark lives_in lisbon"));
+}
