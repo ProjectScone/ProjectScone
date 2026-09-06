@@ -185,3 +185,27 @@ async def test_a_store_that_cannot_be_read_is_not_reported_as_a_deletion(engine,
         assert broken["status"] == "completed"
         assert broken["result"] is None and broken["result_state"] == "unreadable"
         assert (await client.get(url + "/turns/turn-1")).json()["result_state"] == "available"
+
+
+async def test_starting_the_service_settles_turns_a_dead_process_left_behind(engine, tmp_path):
+    """The lifespan already interrupts sessions that were running when
+    their process died. Their turns were left reading as in flight, which
+    is a receipt that can never become true: the process that would have
+    settled it is gone. The service takes an exclusive lock on the journal
+    at startup, so nothing else can own those turns while it does."""
+    path = tmp_path / "sessions.db"
+    with SessionJournal(path) as journal:
+        created = journal.create("alpha", "create-1")
+        sid = created["session_id"]
+        journal.transition("alpha", sid, "start-1", "start", created["revision"])
+        journal.start_turn("alpha", sid, "turn-1", {"text": "asked but never answered"})
+        assert journal.turn("alpha", sid, "turn-1")["status"] == "accepted"
+
+    app, _ = configured(engine, path)
+    async with client_for(app) as client:
+        answered = (await client.get(f"/v1/conversations/{sid}/turns/turn-1")).json()
+
+    assert answered["status"] == "interrupted"
+    assert answered["result"] is None
+    with SessionJournal(path) as journal:
+        assert "did not finish" in journal.turn("alpha", sid, "turn-1")["error"]

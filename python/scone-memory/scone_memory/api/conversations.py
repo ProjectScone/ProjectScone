@@ -106,6 +106,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
                 raise RuntimeError("conversation journal is already owned by another service") from exc
             journal = SessionJournal(path)
             for space in sorted(set(keys.values())):
+                # A turn still marked accepted belonged to the process this
+                # one replaced, so whether its provider answered is
+                # unknowable; it is settled as interrupted saying that,
+                # rather than left as a receipt that can never come true.
+                # Safe here because the lock above makes this service the
+                # journal's only owner.
+                journal.recover(space)
                 after = ""
                 while True:
                     page = journal.sessions(space, after=after)
@@ -208,7 +215,6 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return {"schema_version": 1, "text_configured": runtime_factory is not None,
                 "voice": False, "video": False, "streaming": False,
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
-                "session_deletion": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
     @app.get("/v1/conversations")
