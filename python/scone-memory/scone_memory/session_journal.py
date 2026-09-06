@@ -318,6 +318,42 @@ class SessionJournal:
         ).fetchone()
         return row["request_id"] if row else None
 
+    def episodes_held_elsewhere(self, space: str, session_id: str, episode_ids) -> set[int]:
+        """Which of these episodes another conversation's receipt names.
+
+        Identical replies deduplicate to one episode, so two conversations
+        can hold the same one between them. Deleting either must leave the
+        other's transcript readable, and this says which ids are not this
+        session's alone to remove.
+        """
+        check_space(space)
+        _key(session_id)
+        wanted = {int(found) for found in episode_ids if found is not None}
+        if not wanted:
+            return set()
+        marks = ",".join("?" * len(wanted))
+        rows = self._db.execute(
+            f"SELECT DISTINCT episode_id FROM session_turns "
+            f"WHERE space=? AND session_id!=? AND episode_id IN ({marks})",
+            (space, session_id, *sorted(wanted)),
+        ).fetchall()
+        return {row["episode_id"] for row in rows}
+
+    def delete_session(self, space: str, session_id: str) -> None:
+        """Remove a session, its lifecycle events and its turn receipts.
+
+        The transcript's episodes are the caller's to forget first: a
+        receipt naming an episode that is gone reads as forgotten, which
+        is true, while an episode with no session left to explain it is
+        an orphan nothing can account for.
+        """
+        check_space(space)
+        _key(session_id)
+        with self._transaction():
+            self._session(space, session_id)
+            for table in ("session_turns", "session_events", "sessions"):
+                self._db.execute(f"DELETE FROM {table} WHERE space=? AND session_id=?", (space, session_id))
+
     def recover(self, space: str) -> int:
         """Settle turns whose process is gone.
 

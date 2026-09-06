@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..engine import check_space
@@ -377,6 +377,36 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         # The journal answers when this process does not hold the turn, so
         # a 404 means only what it should: nobody sent that request.
         return await resolved(space, journal.turn(space, sid, request_id), entry)
+
+    @app.delete("/v1/conversations/{sid}", status_code=204)
+    async def delete(sid: str, space=Depends(space_for)):
+        """The session, its transcript and its receipts. A conversation a
+        process is still serving is refused rather than deleted out from
+        under it: stop it first, or that process keeps answering from a
+        transcript that no longer exists."""
+        current = journal.get(space, sid)
+        # State decides, not process ownership: an ended session may still
+        # have an entry in this process, and that entry cannot serve a
+        # deleted turn anyway, because every read goes through the journal.
+        if current["state"] in ("created", "running", "stopping"):
+            raise Conflict("stop the conversation before deleting it", current["revision"])
+        # Episodes first: a receipt naming an episode that is gone reads
+        # as forgotten, which is true, while the reverse leaves episodes
+        # no session can account for.
+        held = {episode.episode_id for episode in await engine.episodes(space, {"session_id": sid})}
+        after = ""
+        while True:
+            page = journal.turns(space, sid, after=after, limit=200)
+            held |= {turn["episode_id"] for turn in page["turns"] if turn["episode_id"] is not None}
+            if not page["has_more"]:
+                break
+            after = page["next_after"]
+        # A receipt names an episode the metadata may not: identical replies
+        # deduplicate, so one episode can be two conversations' transcript.
+        for episode_id in sorted(held - journal.episodes_held_elsewhere(space, sid, held)):
+            await engine.forget(space, episode_id)
+        journal.delete_session(space, sid)
+        return Response(status_code=204)
 
     @app.post("/v1/conversations/{sid}/stop")
     async def stop(sid: str, body: Stop, space=Depends(space_for)):
