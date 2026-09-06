@@ -59,6 +59,7 @@
 
   main { padding: 36px 40px 80px; max-width: 920px; width: 100%; min-width: 0; overflow-wrap: anywhere; }
   .page-head { margin-bottom: 28px; }
+  .page-head .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
   .page-head h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
   .page-head p { margin: 0; color: var(--muted); max-width: 60ch; }
 
@@ -253,7 +254,7 @@
     <div class="foot" id="foot"></div>
   </nav>
   <main>
-    <div class="page-head"><h1 id="title">Search</h1><p id="intro"></p></div>
+    <div class="page-head"><div class="eyebrow" id="eyebrow">Memory</div><h1 id="title">Search</h1><p id="intro"></p></div>
     <div id="out"></div>
   </main>
 </div>
@@ -281,7 +282,8 @@ const show = (html) => { out.innerHTML = html; };
 const safeHref = (url) => { try { const u = new URL(url, location.href); return u.protocol === "http:" || u.protocol === "https:" ? u.href : null; } catch (_) { return null; } };
 const sourceHtml = (src) => { if (!src) return ""; const href = safeHref(src); return href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer noopener">${esc(src)}</a>` : `<span title="source">${esc(src)}</span>`; };
 const fail = (e) => { if (e.message !== "key needed") show(`<p class="err">${esc(e.message)}</p>`); };
-const setHead = (title, intro) => { document.getElementById("title").textContent = title; document.getElementById("intro").textContent = intro; };
+const GROUP = { search: "Memory", beliefs: "Memory", review: "Memory", live: "Activity", analytics: "Activity", scopes: "System", status: "System" };
+const setHead = (title, intro) => { document.getElementById("eyebrow").textContent = GROUP[view] || ""; document.getElementById("title").textContent = title; document.getElementById("intro").textContent = intro; };
 
 function askKey() {
   setHead("Which space?", "");
@@ -314,7 +316,7 @@ const chipHtml = () => {
 
 function searchShell(resultsHtml) {
   setHead("Search", "Ask in plain words. Results are excerpts of what was stored, with the recorded claims that held at the time and where each came from.");
-  show(`<div class="search"><input type="search" id="q" placeholder="Where does Bob live?" autocomplete="off" value="${esc(state.q)}"><button class="btn" id="run">Recall</button></div>
+  show(`<div class="search"><input type="search" id="q" placeholder="Where does Bob live?" autocomplete="off" value="${esc(state.q)}"><button class="btn" id="run">Search</button></div>
     ${chipHtml()}<div id="results">${resultsHtml || ""}</div>`);
   const q = document.getElementById("q");
   document.getElementById("run").onclick = () => { state.q = q.value.trim(); runSearch(); };
