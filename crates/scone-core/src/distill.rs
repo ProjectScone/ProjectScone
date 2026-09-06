@@ -296,12 +296,12 @@ impl Engine {
                 rusqlite::params![fact_id, space.id()],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Err(SconeError::NotFound(format!(
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => SconeError::NotFound(format!(
                     "proposed fact {fact_id} in space {}",
                     space.name()
-                ))),
-                other => Err(SconeError::Db(other)),
+                )),
+                other => SconeError::Db(other),
             })?;
         tx.execute(
             "UPDATE facts SET status = 'active', status_reason = 'approved' WHERE id = ?1",
