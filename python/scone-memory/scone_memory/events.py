@@ -1,8 +1,10 @@
 """Event log sinks: where the evidence goes.
 
 ``InMemoryEventLog`` keeps the newest N events; ``SqliteEventLog`` keeps
-them in the same file as the SQLite stores, with an optional max age.
-Both return newest first and isolate spaces. Retention is a stated
+them in the same file as the SQLite stores, with an optional max age;
+``MongoEventLog`` keeps them in an ``events`` collection with an optional
+TTL index. All return newest first and isolate spaces, and all pass
+``scone_memory.testing.events_contract``. Retention is a stated
 policy, not an accident: what was dropped is not evidence any more and
 metrics computed afterwards say so through their n.
 """
@@ -138,4 +140,72 @@ def _event(row: sqlite3.Row) -> Event:
         kind=row["kind"],
         payload=json.loads(row["payload"]),
         schema_version=row["schema_version"],
+    )
+
+
+class MongoEventLog:
+    name = "mongo"
+
+    def __init__(self, url: str, database: str = "scone", max_age_days: Optional[float] = None, client=None) -> None:
+        try:
+            from pymongo import AsyncMongoClient
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("MongoEventLog needs pymongo>=4.13: pip install 'scone-memory[mongo]'") from e
+        self.client = client or AsyncMongoClient(url)
+        self.db = self.client[database]
+        self.events = self.db["events"]
+        self.counters = self.db["counters"]
+        self.max_age_days = max_age_days
+
+    async def open(self) -> "MongoEventLog":
+        await self.events.create_index([("space", 1), ("kind", 1), ("_id", -1)])
+        await self.events.create_index([("space", 1), ("ts", 1)])
+        if self.max_age_days is not None:
+            # Mongo expires on a BSON date, so the timestamp is stored twice:
+            # the canonical string for reads and a date for the TTL index.
+            await self.events.create_index([("ts_date", 1)], expireAfterSeconds=int(self.max_age_days * 86400))
+        return self
+
+    async def drop(self) -> None:
+        await self.events.drop()
+        await self.counters.delete_one({"_id": "events"})
+
+    async def close(self) -> None:
+        await self.client.close()
+
+    async def append(self, new: NewEvent) -> Event:
+        doc = await self.counters.find_one_and_update(
+            {"_id": "events"}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
+        )
+        event_id = int(doc["seq"])
+        await self.events.insert_one({
+            "_id": event_id, "ts": new.ts, "ts_date": parse_rfc3339(new.ts), "space": new.space,
+            "kind": new.kind, "schema_version": new.schema_version, "payload": dict(new.payload),
+        })
+        return Event(event_id=event_id, **new.__dict__)
+
+    async def get(self, space: str, event_id: int) -> Optional[Event]:
+        doc = await self.events.find_one({"_id": event_id, "space": space})
+        return _mongo_event(doc) if doc else None
+
+    async def query(
+        self, space: str, kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100
+    ) -> list[Event]:
+        query: dict = {"space": space}
+        if kind:
+            query["kind"] = kind
+        if since:
+            query["ts"] = {"$gte": format_rfc3339(parse_rfc3339(since))}
+        cursor = self.events.find(query).sort("_id", -1).limit(limit)
+        return [_mongo_event(doc) async for doc in cursor]
+
+
+def _mongo_event(doc) -> Event:
+    return Event(
+        event_id=int(doc["_id"]),
+        ts=doc["ts"],
+        space=doc["space"],
+        kind=doc["kind"],
+        payload=doc.get("payload", {}),
+        schema_version=int(doc.get("schema_version", 1)),
     )

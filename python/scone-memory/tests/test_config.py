@@ -68,3 +68,16 @@ async def test_production_shape_mongo_plus_qdrant_round_trips():
     finally:
         await engine.documents.drop()
         await engine.vectors.drop()
+
+
+def test_event_sink_follows_the_document_store_by_default(tmp_path):
+    from scone_memory.config import build_events
+    from scone_memory.events import InMemoryEventLog, MongoEventLog, SqliteEventLog
+
+    assert isinstance(build_events(Settings()), InMemoryEventLog)
+    assert isinstance(build_events(Settings(documents="sqlite", sqlite_path=str(tmp_path / "e.db"))), SqliteEventLog)
+    assert isinstance(build_events(Settings(documents="mongo", mongo_url="mongodb://localhost:1")), MongoEventLog)
+    assert isinstance(build_events(Settings(documents="mongo", mongo_url="mongodb://localhost:1", events="memory")), InMemoryEventLog)
+    assert build_events(Settings(events="none")) is None
+    with pytest.raises(InvalidInput):
+        build_events(Settings(events="mongo"))

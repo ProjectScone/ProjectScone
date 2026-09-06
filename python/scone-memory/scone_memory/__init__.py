@@ -12,7 +12,7 @@ and nothing else changes.
 
 from .backends import InMemoryDocumentStore, InMemoryVectorIndex
 from .distill import DistillError, Distiller, DistillOutcome
-from .events import InMemoryEventLog, SqliteEventLog
+from .events import InMemoryEventLog, MongoEventLog, SqliteEventLog
 from .embedders import HashEmbedder
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from .sync import SyncMemoryEngine
@@ -30,6 +30,7 @@ __all__ = [
     "InMemoryVectorIndex",
     "InMemoryEventLog",
     "SqliteEventLog",
+    "MongoEventLog",
     "HashEmbedder",
     "SconeError",
     "Distiller",

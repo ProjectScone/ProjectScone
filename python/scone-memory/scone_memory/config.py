@@ -12,7 +12,8 @@
     SCONE_EMBED_API_KEY        remote: bearer, optional
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
-    SCONE_EVENTS      memory | sqlite | none    (default: sqlite when SCONE_DOCUMENTS=sqlite, else memory)
+    SCONE_EVENTS      memory | sqlite | mongo | none
+                      (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
     SCONE_EVENTS_MAX_AGE_DAYS                    sqlite sink retention, optional
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
@@ -156,9 +157,15 @@ def build_vectors(settings: Settings):
 
 
 def build_events(settings: Settings):
-    choice = settings.events or ("sqlite" if settings.documents == "sqlite" else "memory")
+    choice = settings.events or {"sqlite": "sqlite", "mongo": "mongo"}.get(settings.documents, "memory")
     if choice == "none":
         return None
+    if choice == "mongo":
+        from .events import MongoEventLog
+
+        if not settings.mongo_url:
+            raise InvalidInput("SCONE_EVENTS=mongo needs SCONE_MONGO_URL")
+        return MongoEventLog(settings.mongo_url, settings.mongo_db, settings.events_max_age_days)
     if choice == "memory":
         from .events import InMemoryEventLog
 
@@ -176,11 +183,14 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         await documents.open()
     if settings.events_queries not in ("text", "hash"):
         raise InvalidInput("SCONE_EVENTS_QUERIES must be text or hash")
+    events = build_events(settings)
+    if hasattr(events, "open"):
+        await events.open()
     engine = MemoryEngine(
         documents,
         build_vectors(settings),
         build_embedder(settings),
-        events=build_events(settings),
+        events=events,
         record_queries=settings.events_queries == "text",
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

@@ -3,6 +3,9 @@ feedback refers to a real recall, and the sinks agree."""
 
 from __future__ import annotations
 
+import os
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,35 +22,34 @@ from scone_memory import (
 from scone_memory.api import create_app
 from scone_memory.ports import NewEvent
 from scone_memory.testing import Clock
+from scone_memory.testing.events_contract import *  # noqa: F401,F403
+from scone_memory.testing.events_contract import ev
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def sink(request, tmp_path):
+def sink_params():
+    yield pytest.param("memory", id="memory")
+    yield pytest.param("sqlite", id="sqlite")
+    if os.environ.get("SCONE_TEST_MONGO_URL"):
+        yield pytest.param("mongo", id="mongo", marks=pytest.mark.mongo)
+
+
+@pytest.fixture(params=list(sink_params()))
+async def sink(request, tmp_path):
     clock = Clock()
     if request.param == "memory":
         log = InMemoryEventLog(max_events=5)
-    else:
+    elif request.param == "sqlite":
         log = SqliteEventLog(tmp_path / "events.db", max_age_days=30, clock=clock)
+    else:
+        from scone_memory.events import MongoEventLog
+
+        log = await MongoEventLog(os.environ["SCONE_TEST_MONGO_URL"], f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=7).open()
     log.test_clock = clock
-    return log
-
-
-def ev(space, kind, ts="2025-01-01T00:00:00.000Z", **payload):
-    return NewEvent(ts=ts, space=space, kind=kind, payload=payload)
-
-
-async def test_sink_returns_newest_first_filters_and_isolates_spaces(sink):
-    a = await sink.append(ev("alpha", "recall", "2025-01-01T00:00:00.000Z", query="one", items=[{"chunk_id": 1}]))
-    b = await sink.append(ev("alpha", "remember", "2025-01-02T00:00:00.000Z", fresh=1))
-    c = await sink.append(ev("alpha", "recall", "2025-01-03T00:00:00.000Z", query="two", nested={"k": ["v", 1]}))
-    await sink.append(ev("beta", "recall", "2025-01-04T00:00:00.000Z", query="other space"))
-    assert [e.event_id for e in await sink.query("alpha")] == [c.event_id, b.event_id, a.event_id]
-    assert [e.event_id for e in await sink.query("alpha", kind="recall")] == [c.event_id, a.event_id]
-    assert [e.event_id for e in await sink.query("alpha", since="2025-01-02T00:00:00.000Z")] == [c.event_id, b.event_id]
-    assert [e.event_id for e in await sink.query("alpha", limit=1)] == [c.event_id]
-    assert (await sink.get("alpha", c.event_id)).payload == {"query": "two", "nested": {"k": ["v", 1]}}
-    assert await sink.get("beta", c.event_id) is None
-    assert (await sink.get("alpha", a.event_id)).schema_version == 1
+    yield log
+    if hasattr(log, "drop"):
+        await log.drop()
+    if hasattr(log, "close"):
+        await log.close()
 
 
 async def test_retention_is_a_stated_policy(sink):
@@ -55,6 +57,15 @@ async def test_retention_is_a_stated_policy(sink):
         for i in range(7):
             await sink.append(ev("alpha", "recall", query=str(i)))
         assert [e.payload["query"] for e in await sink.query("alpha", limit=10)] == ["6", "5", "4", "3", "2"]
+    elif sink.name == "mongo":
+        # Mongo expires through a TTL index; the sweep is the server's, so
+        # the check is that the index exists with the configured age.
+        indexes = await sink.events.index_information()
+        ttl = [i for i in indexes.values() if i.get("expireAfterSeconds") is not None]
+        assert ttl and ttl[0]["expireAfterSeconds"] == 7 * 86400
+        e = await sink.append(ev("alpha", "recall", query="dated"))
+        doc = await sink.events.find_one({"_id": e.event_id})
+        assert doc["ts_date"].year == 2025
     else:
         await sink.append(ev("alpha", "recall", "2024-11-01T00:00:00.000Z", query="old"))
         await sink.append(ev("alpha", "recall", "2024-12-20T00:00:00.000Z", query="recent"))
