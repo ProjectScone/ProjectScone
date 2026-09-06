@@ -479,10 +479,26 @@ returns current state (possibly `stopping`), not a fabricated original event.
 attributed to that session, with `has_more` for a partial transcript. It checks
 session ownership before reading memory and does not reconstruct reply receipts.
 
-Turn-result replay is **process-lifetime only**. Restart never resubmits a model
-request: abandoned sessions become interrupted, while captured episodes follow
-the configured engine's persistence. Transcript history is not automatically
-restored into a new model session. Defaults admit 100 create IDs per process
+Turn receipts survive service recreation in the journal. A receipt's `status`
+is separate from `result_state`: `available` includes the authorized saved reply;
+`forgotten` means its episode is gone; `unavailable` means no reply episode can
+be resolved; `unreadable` means a temporary storage read failure. Completed turns
+remain completed when their text is absent. Pending receipts may have a null
+`result_state`. Retry receipt reads, never automatically resubmit model work.
+Both live and recovered receipts resolve text from the native episode so forgetting
+it also removes the text from subsequent receipt reads.
+
+`GET /v1/conversations/{sid}` includes `latest_request_id`, calculated from
+journal acceptance order, and `active_request_id`, which names only current
+in-process work. Either can be null. Use the latest ID to discover an outcome
+after reopening; do not infer chronology from UUIDs or the paginated turn list.
+`GET /v1/conversations/{sid}/turns?after=&limit=` lists scoped receipts in request-ID
+order, with limits from 1 to 200. Latest means most recently accepted, not delivered
+or successfully completed. Receipt availability still depends on memory retention.
+
+Restart never resubmits a model request: abandoned sessions become interrupted,
+while captured episodes follow the configured engine's persistence. Transcript
+history is not automatically restored into a new model session. Defaults admit 100 create IDs per process
 (including failed starts and terminal sessions), and 100 turns per session.
 Matching retries remain available at capacity; new work returns 429.
 
@@ -496,8 +512,8 @@ Capabilities explicitly report configured text, polling, no voice/video, and no
 token stream. `runtime_factory=None` reports text unavailable and refuses starts.
 Tests connect HTTP controls to real Pipecat scheduling and native memory using a
 scripted model; they do not certify a live provider. The React page supports
-start, send, saved transcripts, source inspection and stop. Provider certification,
-durable reply replay, Rust HTTP memory adapters and
+start, send, saved transcripts, source inspection, recovered outcomes and stop.
+Provider certification, process-crash recovery evaluation, Rust HTTP memory adapters and
 voice/video remain required product work. Existing live servers are unchanged.
 
 ### Conversation lifecycle journal (service foundation)

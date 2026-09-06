@@ -200,13 +200,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         result = journal.get(space, sid)
         entry = owned.get((space, sid))
         result["active_request_id"] = entry.active_id if entry else None
+        result["latest_request_id"] = journal.latest_turn_id(space, sid)
         return result
 
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1, "text_configured": runtime_factory is not None,
                 "voice": False, "video": False, "streaming": False,
-                "reply_transport": "poll", "reply_replay": "process_lifetime",
+                "reply_transport": "poll", "reply_replay": "durable_receipts",
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
     @app.get("/v1/conversations")

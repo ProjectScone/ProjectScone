@@ -13,6 +13,7 @@ if os.environ.get("SCONE_TEST_EXTRA_SITEPACKAGES"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python/scone-memory"))
 
 import uvicorn
+import httpx
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
     LLMTextFrame, LLMThoughtTextFrame,
@@ -56,6 +57,33 @@ async def run():
                                                           where={"collection": "manuals"}),
                 console=True,
             )
+            if "--reopened" in sys.argv[2:]:
+                # Exercise real service teardown/recreation with a retained
+                # journal and memory engine. No provider or fixture-only API.
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture",
+                                                 headers={"Authorization": "Bearer conversation-fixture-alpha"}) as client:
+                        created = await client.post("/v1/conversations", json={"request_id": "create-recovery", "capture": True})
+                        created.raise_for_status()
+                        session = created.json()
+                        url = "/v1/conversations/" + session["session_id"]
+                        for request_id, text in [("z-earlier", "How is Juniper calibrated?"),
+                                                 ("a-newer", "What was my question?")]:
+                            accepted = await client.post(url + "/turns", json={"request_id": request_id, "text": text,
+                                                                              "expected_revision": session["revision"]})
+                            accepted.raise_for_status()
+                            async with asyncio.timeout(10):
+                                while True:
+                                    receipt = (await client.get(url + "/turns/" + request_id)).json()
+                                    if receipt["status"] != "pending":
+                                        break
+                                    await asyncio.sleep(0.01)
+                            assert receipt["status"] == "completed"
+                        await memory.forget("alpha", receipt["result"]["assistant_episode_id"])
+                app = conversations.create_conversation_app(
+                    memory, {"conversation-fixture-alpha": "alpha", "conversation-fixture-beta": "beta"},
+                    Path(temporary) / "sessions.db", None, console=True,
+                )
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 print("CONVERSATIONS_READY " + str(sock.getsockname()[1]), flush=True)

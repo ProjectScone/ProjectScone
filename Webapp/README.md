@@ -135,6 +135,15 @@ configured provider. For separate hosting, route these page paths to the React
 application and `/v1/conversations` to the optional service. Vite handles SPA
 paths in development. Adding a route does not configure or launch a provider.
 
+Saved sessions remain readable without a configured text model; starting and
+sending require one. On reopening, the optional conversation API's
+`latest_request_id` identifies the latest accepted turn without guessing from
+request-ID order. The UI distinguishes a completed reply whose text was forgotten
+from one that cannot currently be read, and never resends either automatically.
+It rechecks known receipts, clears revoked reply evidence and protects newer
+commands/session selections from stale polling responses. These are outcome
+receipts, not proof of provider delivery or a reconstructed token stream.
+
 For isolated conversation UI checks, build with Vite, package with `--output`
 as above, and pass that path as `SCONE_CONVERSATIONS_HTML` to
 `node --test scripts/test-conversations.cjs` from the repository root. Install
@@ -150,6 +159,11 @@ fixture uses temporary state and scripted model frames, not provider inference.
 For an existing split local test installation, `SCONE_TEST_EXTRA_SITEPACKAGES`
 can explicitly append an API dependency directory; such a run does not verify a
 fresh, self-contained dependency installation.
+
+The native browser suite also tears down and recreates the conversation service
+around its retained journal and memory engine, with the model then disabled.
+It verifies latest-outcome discovery, forgotten text, browser reload and scope
+isolation. This is service recreation, not a killed-process or live-provider test.
 
 The graph renders stored relationships only. Depth is a spatial layout, not a
 3D simulation or confidence value. API connectivity, observed agent events and

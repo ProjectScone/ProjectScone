@@ -9,38 +9,54 @@ export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiC
   const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
   const [attempt,setAttempt]=useState(0);
   const lifetime=useRef(new AbortController()),mutation=useRef(false),request=useRef<string|null>(null),settled=useRef<string|null>(null),stopId=useRef<string|null>(null);
+  const commandGeneration=useRef(0),invalidatedReceipt=useRef<string|null>(null);
+  const pendingRequest=useRef<string|null>(null);
   const url=`/v1/conversations/${encodeURIComponent(sid)}`;
   useEffect(()=>{
     const controller=new AbortController();lifetime.current=controller;
     let timer:ReturnType<typeof setTimeout>;
+    function clearUnavailableEvidence(id:string){
+      setResult(undefined);
+      // Revoke once, then let people inspect other retained sources normally.
+      if(invalidatedReceipt.current!==id){invalidatedReceipt.current=id;setSelected(null);}
+    }
     async function refresh(){
       if(controller.signal.aborted)return;
-      if(document.hidden){timer=setTimeout(refresh,1500);return;}
+      if(document.hidden||mutation.current){timer=setTimeout(refresh,1500);return;}
+      const generation=commandGeneration.current;
+      const isCurrent=()=>!controller.signal.aborted&&generation===commandGeneration.current;
       try{
         const options={signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])};
         const next=session(await api.request(url,options));
         const records=transcript(await api.request(url+'/transcript',options));
-        if(controller.signal.aborted)return;
+        if(!isCurrent())return;
         setCurrent(previous=>previous&&previous.revision>next.revision?previous:next);onSession(next);setSaved(records);setVerified(true);setError('');
-        const active=request.current||next.active_request_id;
-        if(active&&settled.current!==active){
+        const active=pendingRequest.current||next.active_request_id||next.latest_request_id||request.current;
+        if(active){
           try{
             const receipt=turnReceipt(await api.request(url+'/turns/'+encodeURIComponent(active),options));
-            if(controller.signal.aborted)return;
+            if(!isCurrent())return;
             if(receipt.request_id!==active)throw Error('Mismatched reply receipt');
-            setDelivery(receipt.status==='pending'?'Reply in progress':receipt.status==='completed'?'Reply saved':`Reply ${receipt.status}`);
+            setDelivery(receipt.status==='pending'?'Reply in progress':receipt.status==='completed'?
+              receipt.result_state==='forgotten'?'Reply completed; its saved text was forgotten.':
+              receipt.result_state==='unreadable'?'Reply completed; its saved text cannot be read right now. Checking again…':
+              receipt.result_state==='unavailable'?'Reply completed; its text is unavailable.':'Reply saved':`Reply ${receipt.status}`);
             if(receipt.status!=='pending'){
-              settled.current=active;setBusy(false);setResult(receipt.result);
+              const newlySettled=settled.current!==active;
+              if(pendingRequest.current===active)pendingRequest.current=null;
+              settled.current=active;setBusy(false);
+              if(receipt.result_state==='available'){invalidatedReceipt.current=null;setResult(receipt.result);}
+              else clearUnavailableEvidence(active);
               // Capture may finish after the transcript request above.
-              const latest=transcript(await api.request(url+'/transcript',options));
-              if(!controller.signal.aborted)setSaved(latest);
+              if(newlySettled){const latest=transcript(await api.request(url+'/transcript',options));
+                if(isCurrent())setSaved(latest);}
             }else setBusy(true);
           }catch{
-            if(!controller.signal.aborted){setDelivery('Reply receipt unavailable. No message was resent.');setBusy(true);}
+            if(isCurrent()){setDelivery('Reply receipt unavailable. No message was resent.');clearUnavailableEvidence(active);setBusy(settled.current!==active);}
           }
         }else if(!next.active_request_id&&!mutation.current)setBusy(false);
       }catch{
-        if(!controller.signal.aborted){setVerified(false);setError('Connection interrupted. Controls are paused until session state is verified.');}
+        if(isCurrent()){setVerified(false);setError('Connection interrupted. Controls are paused until session state is verified.');}
       }finally{if(!controller.signal.aborted)timer=setTimeout(refresh,1500);}
     }
     void refresh();return()=>{controller.abort();clearTimeout(timer);};
@@ -48,13 +64,14 @@ export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiC
   async function send(){
     if(!textConfigured||!current||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
     if(new TextEncoder().encode(draft).length>32000){setError('Keep messages within 32,000 UTF-8 bytes.');return;}
-    const controller=lifetime.current,id=crypto.randomUUID();request.current=id;mutation.current=true;setBusy(true);setDelivery('Sending message…');setError('');
+    commandGeneration.current++;
+    const controller=lifetime.current,id=crypto.randomUUID();request.current=id;pendingRequest.current=id;mutation.current=true;setBusy(true);setDelivery('Sending message…');setError('');
     try{
       await api.request(url+'/turns',{method:'POST',body:JSON.stringify({request_id:id,text:draft,expected_revision:current.revision}),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])});
       if(!controller.signal.aborted){setDraft('');setDelivery('Reply in progress');}
     }catch(error){if(!controller.signal.aborted){
       if(error instanceof ApiError&&[400,401,403,404,409,422,429].includes(error.status)){
-        request.current=null;setBusy(false);setDelivery('Message was not accepted. Your draft is kept.');
+        request.current=null;pendingRequest.current=null;setBusy(false);setDelivery('Message was not accepted. Your draft is kept.');
         if(error.status===409)setVerified(false);
       }else setDelivery('Delivery uncertain. Checking the same request; nothing will be resent automatically.');
     }}
@@ -62,6 +79,7 @@ export function ConversationSession({api,sid,onSession,textConfigured}:{api:ApiC
   }
   async function stop(){
     if(!current||!verified||mutation.current||current.state!=='running')return;
+    commandGeneration.current++;
     const controller=lifetime.current;stopId.current??=crypto.randomUUID();mutation.current=true;setBusy(true);
     try{
       const next=session(await api.request(url+'/stop',{method:'POST',body:JSON.stringify({request_id:stopId.current,expected_revision:current.revision}),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])}));

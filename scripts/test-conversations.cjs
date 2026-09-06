@@ -8,9 +8,9 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
-  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null}];
+  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   let turn=null,posts=0,checks=0;const requested=[];
   const server=http.createServer(async(req,res)=>{
@@ -38,6 +38,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
         res.statusCode=uncertain?503:202;return res.end(JSON.stringify(uncertain?{error:'Delivery uncertain'}:turn));
       }
       if(match[2].startsWith('/turns/')){
+        if(recovered&&value.session_id==='previous')return res.end(JSON.stringify({request_id:'a-newer',status:'completed',result_state:'forgotten',result:null}));
         if(!turn){res.statusCode=404;return res.end('{"error":"receipt unavailable"}');}
         checks++;if(checks>1){turn.status='completed';turn.result={text:'Use Polaris.',user_episode_id:10,assistant_episode_id:11,provider_completion:'unverified',memory_context:{status:'prepared',references:[{episode_id:7,chunk_id:8}]}};value.active_request_id=null;saved.current=[saved.current[0],{episode_id:11,content:'Use Polaris.',metadata:{role:'assistant'}}];}
         return res.end(JSON.stringify(turn));
@@ -130,4 +131,144 @@ test('late polling cannot reopen a conversation after an acknowledged end',async
   await page.waitForTimeout(150);
   assert.equal(await page.getByRole('button',{name:'End conversation',exact:true}).isDisabled(),true);
   assert.match(await page.locator('nav[aria-label="Saved conversations"] a.active').textContent(),/ended/);
+});
+
+for(const result_state of ['forgotten','unavailable'])test(`completed reply with ${result_state} content settles without resending`,async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.route('**/current/turns/*',route=>route.fulfill({json:{
+    request_id:new URL(route.request().url()).pathname.split('/').at(-1),
+    status:'completed',result_state,result:null,
+  }}));
+  await page.getByLabel('Message',{exact:true}).fill('An uncertain outcome');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText(result_state==='forgotten'?'Reply completed; its saved text was forgotten.':'Reply completed; its text is unavailable.',{exact:true}).waitFor();
+  await page.getByLabel('Message',{exact:true}).fill('A different question');
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),true);
+  assert.equal(posts(),1,'settling an outcome must not replay the original turn');
+});
+
+test('a forgotten settled reply clears its cached evidence on the next receipt check',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('How is Juniper calibrated?');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Use Polaris.',{exact:true}).waitFor();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.getByRole('button',{name:'Source episode 7',exact:true}).click();
+  await evidence.getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
+  await page.route('**/current/turns/*',route=>route.fulfill({json:{
+    request_id:new URL(route.request().url()).pathname.split('/').at(-1),
+    status:'completed',result_state:'forgotten',result:null,
+  }}));
+  await page.route('**/current/transcript',route=>route.fulfill({json:{episodes:[{episode_id:10,content:'How is Juniper calibrated?',metadata:{role:'user'}}],has_more:false}}));
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Use Polaris.',{exact:true}).count(),0);
+  assert.equal(await evidence.getByRole('button',{name:'Source episode 7',exact:true}).count(),0);
+  assert.equal(await evidence.locator('.conversation-source-text').count(),0);
+  assert.equal(posts(),1);
+});
+
+test('a late transcript from the previous session cannot replace the selected conversation',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.waitForFunction(()=>!document.querySelector('textarea')?.disabled);
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  let entered;const blocked=new Promise(resolve=>{entered=resolve;});
+  await page.route('**/current/transcript',async route=>{
+    entered();await gate;
+    await route.fulfill({json:{episodes:[{episode_id:19,content:'Late response from old session',metadata:{role:'assistant'}}],has_more:false}}).catch(()=>{});
+  },{times:1});
+  await blocked;
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  release();await page.waitForTimeout(200);
+  assert.equal(await page.getByText('Late response from old session',{exact:true}).count(),0);
+  assert.match(page.url(),/\/conversations\/previous$/);
+  assert.equal(posts(),0);
+});
+
+test('a delayed settled receipt cannot unlock sending while a newer turn is pending',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('First question');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Use Polaris.',{exact:true}).waitFor();
+  let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  let entered;const blocked=new Promise(resolve=>{entered=resolve;});let oldId;
+  await page.route('**/current/turns/*',async route=>{
+    const request_id=new URL(route.request().url()).pathname.split('/').at(-1);
+    if(!oldId){oldId=request_id;entered();await gate;
+      await route.fulfill({json:{request_id,status:'completed',result:{text:'Old answer',assistant_episode_id:11}}});
+    }else await route.fulfill({json:{request_id,status:'pending'}});
+  });
+  await blocked;
+  await page.getByLabel('Message',{exact:true}).fill('Second question');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Reply in progress',{exact:true}).waitFor();
+  await page.getByLabel('Message',{exact:true}).fill('Third question');
+  const returned=page.waitForResponse(r=>r.url().endsWith('/turns/'+oldId));
+  release();await returned;await page.waitForTimeout(200);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByText('Reply in progress',{exact:true}).count(),1);
+  assert.equal(posts(),2);
+});
+
+test('a forgotten reply does not repeatedly close a retained source the user inspects',async t=>{
+  const {page}=await fixture(t);await start(page);
+  await page.route('**/current/turns/*',route=>route.fulfill({json:{
+    request_id:new URL(route.request().url()).pathname.split('/').at(-1),status:'completed',result_state:'forgotten',result:null,
+  }}));
+  await page.route('**/v1/episodes/10',route=>route.fulfill({json:{episode_id:10,content:'Retained user question',metadata:{role:'user'}}}));
+  await page.getByLabel('Message',{exact:true}).fill('Retained user question');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Inspect message episode 10',exact:true}).click();
+  const source=page.getByRole('complementary',{name:'Conversation evidence'}).locator('.conversation-source-text');
+  await source.waitFor();
+  await page.waitForResponse(r=>r.url().includes('/current/turns/'));await page.waitForTimeout(150);
+  assert.equal(await source.textContent(),'Retained user question');
+});
+
+test('polling preserves a send that is still waiting for its HTTP acknowledgment',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('First question');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Use Polaris.',{exact:true}).waitFor();
+  let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  let entered;const blocked=new Promise(resolve=>{entered=resolve;});
+  await page.route('**/current/turns',async route=>{entered();await gate;await route.continue().catch(()=>{});},{times:1});
+  await page.getByLabel('Message',{exact:true}).fill('Second question');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();await blocked;
+  // Cross a polling interval while the server still knows only the old turn.
+  await page.waitForTimeout(2200);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByText('Sending message…',{exact:true}).count(),1);
+  assert.equal(posts(),1);
+  release();
+});
+
+test('temporarily unreadable completed reply retries the read without declaring deletion or resending',async t=>{
+  const {page,posts}=await fixture(t);await start(page);
+  let available=false;
+  await page.route('**/current/turns/*',route=>route.fulfill({json:{
+    request_id:new URL(route.request().url()).pathname.split('/').at(-1),status:'completed',
+    result_state:available?'available':'unreadable',result:available?{text:'Recovered saved answer',assistant_episode_id:11}:null,
+  }}));
+  await page.getByLabel('Message',{exact:true}).fill('A question worth preserving');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Reply completed; its saved text cannot be read right now. Checking again…',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).count(),0);
+  await page.getByLabel('Message',{exact:true}).fill('Keep my next question');
+  available=true;await page.getByText('Reply saved',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Message',{exact:true}).inputValue(),'Keep my next question');
+  assert.equal(posts(),1);
+});
+
+test('reopening and reloading discover the recorded latest outcome without submitting work',async t=>{
+  const {page,requested,posts}=await fixture(t,{unavailable:true,recovered:true});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  await page.reload();
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  assert.ok(requested.filter(p=>p==='/v1/conversations/previous/turns/a-newer').length>=2);
+  assert.equal(requested.some(p=>p.includes('/turns?')),false,'no UUID sorting or history scan to guess the newest turn');
+  assert.equal(posts(),0);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
 });

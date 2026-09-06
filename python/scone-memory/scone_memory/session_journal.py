@@ -302,6 +302,22 @@ class SessionJournal:
         return {"turns": items, "next_after": items[-1]["request_id"] if items else after,
                 "has_more": len(rows) > limit}
 
+    def latest_turn_id(self, space: str, session_id: str) -> str | None:
+        """Latest insertion in this journal, not UUID or wall-clock order.
+
+        New turns append a SQLite row; idempotent retries and outcome updates
+        keep that row. Read it afresh so no cached pointer can become stale.
+        This does not imply the turn is running, completed or delivered.
+        """
+        check_space(space)
+        _key(session_id)
+        self._session(space, session_id)
+        row = self._db.execute(
+            "SELECT request_id FROM session_turns WHERE space=? AND session_id=? "
+            "ORDER BY rowid DESC LIMIT 1", (space, session_id),
+        ).fetchone()
+        return row["request_id"] if row else None
+
     def recover(self, space: str) -> int:
         """Settle turns whose process is gone.
 

@@ -7,11 +7,11 @@ const path=require('node:path');
 const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
 
-test('conversation deep links, public capture and sources work through native Pipecat',{timeout:60000},async t=>{
+async function fixture(t,{reopened=false}={}){
   const html=process.env.SCONE_CONVERSATIONS_HTML;
   assert.ok(html,'SCONE_CONVERSATIONS_HTML must name the verified isolated webapp artifact');
   const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(root,'python/scone-memory/.venv/bin/python'),
-    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html],{cwd:root,stdio:['ignore','pipe','pipe']});
+    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[])],{cwd:root,stdio:['ignore','pipe','pipe']});
   let logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
   t.after(async()=>{
     if(server.exitCode!==null||server.signalCode!==null)return;
@@ -37,6 +37,11 @@ test('conversation deep links, public capture and sources work through native Pi
   t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1320,height:940}});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  return {page,base,errors};
+}
+
+test('conversation deep links, public capture and sources work through native Pipecat',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t);
   await page.goto(base+'/conversations');
   assert.equal(await page.getByRole('dialog',{name:'Memory connection'}).count(),1);
   assert.ok(!(await page.content()).includes('conversation-fixture-alpha'),'public page must not contain a space key');
@@ -77,6 +82,36 @@ test('conversation deep links, public capture and sources work through native Pi
   await page.getByRole('heading',{name:'Conversation ended',exact:true}).waitFor();
   assert.equal(await page.getByLabel('Message',{exact:true}).isDisabled(),true);
   assert.equal((await(await fetch(base+api+'/transcript',{headers})).json()).episodes.length,4,'refresh and stop do not replay a turn');
+  assert.deepEqual(await page.evaluate(()=>({local:localStorage.length,session:sessionStorage.length})),{local:0,session:0});
+  assert.deepEqual(errors,[]);
+});
+
+test('recreated native service recovers the actual latest outcome without a model or browser cache',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t,{reopened:true});
+  page.setDefaultTimeout(7000);
+  const writes=[];page.on('request',request=>{if(request.method()!=='GET')writes.push(request.method()+' '+new URL(request.url()).pathname);});
+  await page.goto(base+'/conversations');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');
+  await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('navigation',{name:'Saved conversations'}).getByRole('link').click();
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  const url=page.url(),sid=new URL(url).pathname.split('/').at(-1);
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+  const headers={authorization:'Bearer conversation-fixture-alpha'};
+  const endpoint=base+'/v1/conversations/'+sid;
+  const session=await(await fetch(endpoint,{headers})).json();
+  assert.equal(session.latest_request_id,'a-newer','latest must come from chronology, not UUID order');
+  assert.equal(session.active_request_id,null);
+  assert.equal((await(await fetch(endpoint+'/transcript',{headers})).json()).episodes.length,3);
+  assert.equal((await fetch(endpoint+'/turns/a-newer',{headers:{authorization:'Bearer conversation-fixture-beta'}})).status,404);
+  await page.reload();
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');
+  await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByText('Reply completed; its saved text was forgotten.',{exact:true}).waitFor();
+  assert.equal(page.url(),url);
+  assert.equal(await page.getByText('Scripted follow-up: you asked about Juniper calibration.',{exact:true}).count(),0);
+  assert.deepEqual(writes,[],'reopening only reads; no create/send/stop commands');
   assert.deepEqual(await page.evaluate(()=>({local:localStorage.length,session:sessionStorage.length})),{local:0,session:0});
   assert.deepEqual(errors,[]);
 });
