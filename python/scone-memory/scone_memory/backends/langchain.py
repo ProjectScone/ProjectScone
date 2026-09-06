@@ -132,18 +132,24 @@ class LangChainVectorIndex:
         # An existing id is replaced, not duplicated: delete first, since
         # not every store treats add with a known id as an update.
         await self._delete_existing(ids)
-        if hasattr(self.store, "add_embeddings"):
-            pairs = [(f"chunk:{p.chunk_id}", list(map(float, p.vector))) for p in points]
-            await asyncio.to_thread(self.store.add_embeddings, text_embeddings=pairs, metadatas=metadatas, ids=ids)
-            return
-        placeholders = [f"chunk:{p.chunk_id}" for p in points]
-        for placeholder, p in zip(placeholders, points):
-            self.embeddings.pending[placeholder] = list(map(float, p.vector))
+        # From here the old vectors, if any, are gone. A store that then
+        # refuses the replacement leaves those chunks without vectors, so
+        # the failure names them instead of letting the index quietly drift.
         try:
-            await self.store.aadd_texts(placeholders, metadatas=metadatas, ids=ids)
-        finally:
-            for placeholder in placeholders:
-                self.embeddings.pending.pop(placeholder, None)
+            if hasattr(self.store, "add_embeddings"):
+                pairs = [(f"chunk:{p.chunk_id}", list(map(float, p.vector))) for p in points]
+                await asyncio.to_thread(self.store.add_embeddings, text_embeddings=pairs, metadatas=metadatas, ids=ids)
+                return
+            placeholders = [f"chunk:{p.chunk_id}" for p in points]
+            for placeholder, p in zip(placeholders, points):
+                self.embeddings.pending[placeholder] = list(map(float, p.vector))
+            try:
+                await self.store.aadd_texts(placeholders, metadatas=metadatas, ids=ids)
+            finally:
+                for placeholder in placeholders:
+                    self.embeddings.pending.pop(placeholder, None)
+        except Exception as e:
+            raise RuntimeError(f"the store refused vectors for chunks {ids}; any earlier vectors for them were removed first: {e}") from e
 
     def _similarity(self, raw: float) -> float:
         if self.score == "cosine_similarity":

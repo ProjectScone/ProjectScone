@@ -232,19 +232,49 @@ class ElasticsearchDocumentStore:
         hits = await self._search("episodes", query={"bool": {"filter": [{"term": {"space": space}}, {"term": {"content_hash": content_hash}}]}}, size=1)
         return _episode(hits[0]) if hits else None
 
-    async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
-        if not await self.client.exists(index=self._idx("episodes"), id=str(episode_id)):
+    async def _doc(self, name: str, doc_id: str) -> Optional[dict]:
+        """One document by id, or None. A single get, not exists-then-get:
+        a concurrent delete between the two would turn None into a 404."""
+        from elasticsearch import NotFoundError
+
+        try:
+            return (await self.client.get(index=self._idx(name), id=doc_id))["_source"]
+        except NotFoundError:
             return None
-        doc = (await self.client.get(index=self._idx("episodes"), id=str(episode_id)))["_source"]
-        return _episode(doc) if doc["space"] == space else None
+
+    async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
+        doc = await self._doc("episodes", str(episode_id))
+        return _episode(doc) if doc is not None and doc["space"] == space else None
+
+    #: Rows per page when walking an episode's chunks; Elasticsearch caps a
+    #: single page at index.max_result_window (10,000 by default).
+    PAGE = 10_000
+
+    async def _chunk_ids(self, episode_id: int) -> list[int]:
+        ids: list[int] = []
+        after: Optional[list] = None
+        while True:
+            kwargs: dict = {"query": {"term": {"episode_id": episode_id}}, "size": self.PAGE, "sort": [{"chunk_id": "asc"}], "source": ["chunk_id"]}
+            if after is not None:
+                kwargs["search_after"] = after
+            response = await self.client.search(index=self._idx("chunks"), **kwargs)
+            hits = response["hits"]["hits"]
+            ids.extend(int(h["_source"]["chunk_id"]) for h in hits)
+            if len(hits) < self.PAGE:
+                return ids
+            after = hits[-1]["sort"]
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.get_episode(space, episode_id) is None:
             return []
-        hits = await self._search("chunks", query={"term": {"episode_id": episode_id}}, size=10_000, sort=[{"chunk_id": "asc"}], source=["chunk_id"])
-        removed = [int(h["chunk_id"]) for h in hits]
+        removed = await self._chunk_ids(episode_id)
         await self.client.delete_by_query(index=self._idx("chunks"), query={"term": {"episode_id": episode_id}}, refresh=True)
-        await self.client.delete(index=self._idx("episodes"), id=str(episode_id), refresh=self.shared.refresh)
+        from elasticsearch import NotFoundError
+
+        try:
+            await self.client.delete(index=self._idx("episodes"), id=str(episode_id), refresh=self.shared.refresh)
+        except NotFoundError:
+            pass  # a concurrent delete got there first; the chunks are gone either way
         return removed
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
@@ -322,10 +352,8 @@ class ElasticsearchDocumentStore:
         )
 
     async def get_fact(self, space: str, fact_id: int) -> Optional[Fact]:
-        if not await self.client.exists(index=self._idx("facts"), id=str(fact_id)):
-            return None
-        doc = (await self.client.get(index=self._idx("facts"), id=str(fact_id)))["_source"]
-        return _fact(doc) if doc["space"] == space else None
+        doc = await self._doc("facts", str(fact_id))
+        return _fact(doc) if doc is not None and doc["space"] == space else None
 
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         filters: list[dict] = [{"term": {"space": space}}]

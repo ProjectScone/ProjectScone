@@ -150,3 +150,16 @@ async def test_faiss_replaces_a_point_without_deleting_what_is_not_there():
     assert await index.search("default", [0.0, 1.0], 5, where={"owner": "new"}) == [(1, pytest.approx(1.0))]
     assert await index.search("default", [0.0, 1.0], 5, where={"owner": "old"}) == [], "replaced, not duplicated"
     assert index.store.index.ntotal == 1
+
+
+async def test_a_refused_replacement_names_the_chunks_left_without_vectors():
+    index = bridge(score="cosine_similarity")
+    await index.ensure(2)
+    await index.upsert([point(1, [1.0, 0.0])])
+
+    async def refuse(*a, **k):
+        raise ValueError("store full")
+
+    index.store.aadd_texts = refuse
+    with pytest.raises(RuntimeError, match=r"chunks \['1'\].*removed first.*store full"):
+        await index.upsert([point(1, [0.0, 1.0])])

@@ -47,3 +47,35 @@ def test_a_prebuilt_engine_still_works_and_a_closed_wrapper_refuses():
     memory.close()
     with pytest.raises(RuntimeError, match="closed"):
         memory.status("default")
+
+
+def test_close_while_a_call_is_pending_raises_instead_of_hanging():
+    """A caller blocked in a call must not wait forever when another thread
+    closes the wrapper mid-flight."""
+    import threading
+    import time
+
+    class Slow(InMemoryDocumentStore):
+        async def counts(self, space):
+            await asyncio.sleep(5)
+            return await super().counts(space)
+
+    memory = SyncMemoryEngine(MemoryEngine(Slow(), InMemoryVectorIndex(), HashEmbedder()))
+    outcome: dict[str, object] = {}
+
+    def caller():
+        try:
+            memory.status("default")
+            outcome["result"] = "returned"
+        except RuntimeError as e:
+            outcome["result"] = str(e)
+
+    thread = threading.Thread(target=caller, daemon=True)  # daemon: a hang must fail the test, not pin the process
+    thread.start()
+    time.sleep(0.2)  # let the call get onto the loop
+    started = time.monotonic()
+    memory.close()
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "the caller is still blocked after close"
+    assert "closed while this call was pending" in str(outcome["result"])
+    assert time.monotonic() - started < 3

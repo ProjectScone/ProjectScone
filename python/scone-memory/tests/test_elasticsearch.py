@@ -129,3 +129,32 @@ async def test_elasticsearch_from_the_environment(prefix):
         build_vectors(Settings.from_env({"SCONE_VECTORS": "elasticsearch"}))
     with pytest.raises(InvalidInput, match="SCONE_ELASTICSEARCH_URL"):
         build_events(Settings.from_env({"SCONE_EVENTS": "elasticsearch"}))
+
+
+async def test_a_read_racing_a_delete_returns_none_not_a_404(prefix):
+    """exists-then-get let a concurrent delete turn "not found" into an
+    exception; a single get answers None. Simulated by answering the
+    read for an id that was never written."""
+    from scone_memory.backends import ElasticsearchDocumentStore
+
+    documents = await ElasticsearchDocumentStore(URL, prefix=prefix).open()
+    assert await documents.get_episode("default", 404) is None
+    assert await documents.get_fact("default", 404) is None
+    assert await documents.delete_episode("default", 404) == []
+    await documents.close()
+
+
+async def test_forgetting_a_long_episode_returns_every_chunk_id(prefix):
+    """The chunk walk pages past Elasticsearch's result window, so the
+    vector index is told about every chunk, not the first page only."""
+    from scone_memory.backends import ElasticsearchDocumentStore
+
+    documents = await ElasticsearchDocumentStore(URL, prefix=prefix).open()
+    documents.PAGE = 2  # a tiny window stands in for the 10,000 default
+    engine = await MemoryEngine(documents, documents.vectors(), HashEmbedder(), events=None, chunk_target=120).open()
+    added = await engine.remember("default", " ".join(f"sentence number {i} of a long note." for i in range(60)))
+    assert added.chunks > 5
+    ids = await documents.delete_episode("default", added.episode_id)
+    assert len(ids) == added.chunks and ids == sorted(ids)
+    await documents.close()
+    await engine.vectors.close()
