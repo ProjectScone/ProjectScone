@@ -789,3 +789,164 @@ fn hook_session_state_cannot_escape_the_data_directory() {
         "a traversing session id must not write outside the data dir"
     );
 }
+
+const FAKE_UNSURE: &str =
+    r#"[{"subject":"mark","predicate":"lives_in","object":"lisbon","confidence":0.55}]"#;
+
+/// With --propose-below, an unsure extraction waits for a person: listed
+/// under `facts pending`, absent from `facts list`, and active only after
+/// `facts approve`. Without the flag the same extraction is active at once.
+#[test]
+fn unsure_facts_wait_for_approval_when_a_gate_is_set() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark moved to lisbon in march"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "--propose-below", "0.7", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no facts"));
+    scone(dir.path())
+        .args(["facts", "pending"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "[1] mark lives_in lisbon  (conf 0.55, proposed",
+        ));
+    scone(dir.path())
+        .args(["facts", "approve", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "approved fact 1 (0 older fact(s) closed)",
+        ));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark lives_in lisbon"))
+        .stdout(predicates::str::contains("active (approved)"));
+    scone(dir.path())
+        .args(["facts", "pending"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("nothing pending"));
+    scone(dir.path())
+        .args(["facts", "decline", "1", "--reason", "no"])
+        .assert()
+        .failure();
+    scone(dir.path())
+        .args(["--propose-below", "1.5", "facts", "pending"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "propose_below must be within 0..=1",
+        ));
+}
+
+#[test]
+fn declining_a_proposal_keeps_it_out_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark might like green"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "--propose-below", "0.9", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "decline", "1", "--reason", "a guess"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declined fact 1: a guess"));
+    scone(dir.path())
+        .args(["facts", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declined (a guess)"));
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no facts"));
+}
+
+#[test]
+fn without_a_gate_an_unsure_fact_is_active_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark moved to lisbon in march"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_UNSURE)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mark lives_in lisbon"));
+}
+
+/// --contextual-code changes what the vector sees, never what is stored.
+/// Two files with unrelated bodies and a query that is one file's name:
+/// the lexical lane finds that file through its path either way, so
+/// the observable is the vector lane's margin. With the prefix embedded
+/// the other file falls well behind; without it the two are a near tie.
+#[test]
+fn contextual_code_flag_widens_the_vector_margin_and_stores_raw_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = dir.path().join("other.rs");
+    std::fs::write(&other, "fn twice(y: u32) -> u32 {\n    y * 2\n}\n").unwrap();
+    let file = dir.path().join("widget.rs");
+    std::fs::write(
+        &file,
+        "/// Adds one.\nfn add_one(x: u32) -> u32 {\n    x + 1\n}\n",
+    )
+    .unwrap();
+    for path in [&other, &file] {
+        scone(dir.path())
+            .arg("--contextual-code")
+            .arg("add")
+            .arg(path)
+            .assert()
+            .success();
+    }
+    let out = scone(dir.path())
+        .args(["search", "widget.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    let score_of = |needle: &str| -> f64 {
+        out.lines()
+            .find(|l| l.contains(needle))
+            .and_then(|l| l.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no scored line for {needle}: {out}"))
+    };
+    let widget = score_of("x + 1");
+    let other_score = score_of("y * 2");
+    assert!(widget > other_score, "{out}");
+    assert!(
+        widget - other_score > 0.2,
+        "the embedded file name should separate the two well beyond a tie: {out}"
+    );
+    assert!(
+        !out.contains("widget.rs | "),
+        "the prefix is embedded, not stored: {out}"
+    );
+}

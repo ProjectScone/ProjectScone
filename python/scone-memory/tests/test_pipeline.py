@@ -259,3 +259,134 @@ def test_cli_review_flow(tmp_path):
     assert json.loads(text)["excluded_reason"] is None
     assert run("decline", str(proposed["fact_id"]), "--reason", "no")[0] == 2  # not proposed any more
     assert run("review")[1].strip() == "nothing awaiting review"
+
+
+def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeypatch):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "d.db")}
+    out = io.StringIO()
+    assert cli.main(["distill"], env=env, stdin=io.StringIO(), out=out) == 2
+
+    from scone_memory import FakeChat
+    import scone_memory.config as config
+
+    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat([json.dumps([{"subject": "ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])]))
+    env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "d.db"), "SCONE_CHAT_URL": "http://x", "SCONE_CHAT_MODEL": "m"}
+    cli.main(["remember"], env=env2, stdin=io.StringIO("Ana moved to Lisbon."), out=io.StringIO())
+    out = io.StringIO()
+    assert cli.main(["distill", "--json"], env=env2, stdin=io.StringIO(), out=out) == 0
+    report = json.loads(out.getvalue())
+    assert (report["episodes"], report["proposed"], report["error"]) == (1, 1, None)
+    out = io.StringIO()
+    cli.main(["review"], env=env2, stdin=io.StringIO(), out=out)
+    assert "[proposed] [extracted] ana lives_in Lisbon" in out.getvalue()
+
+    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat(["not json"]))
+    cli.main(["remember"], env=env2, stdin=io.StringIO("Bob moved to Berlin."), out=io.StringIO())
+    out = io.StringIO()
+    assert cli.main(["distill", "--json"], env=env2, stdin=io.StringIO(), out=out) == 1, "a failed pass exits 1"
+    assert json.loads(out.getvalue())["error"].startswith("DistillError")
+
+
+def test_cli_agent_hook_accepts_its_own_flags_first(tmp_path):
+    """The hook is invoked as `scone-memory agent-hook --agent claude-code ...`;
+    argparse REMAINDER refused a leading flag with exit 2, which would have
+    made an installed hook fail on every call."""
+    env = {"SCONE_API_KEY": "k", "SCONE_HOOK_PROJECTS": f"scone={tmp_path}"}
+    out = io.StringIO()
+    payload = json.dumps({"hook_event_name": "Stop", "session_id": "s", "cwd": str(tmp_path), "last_assistant_message": "x"})
+    code = cli.main(["agent-hook", "--agent", "claude-code", "--feed", "metadata", "--server", "http://127.0.0.1:1"], env=env, stdin=io.StringIO(payload), out=out)
+    assert code == 0, "the hook never blocks the agent, even when the server is down"
+    assert out.getvalue().strip() == "{}"
+    with pytest.raises(SystemExit) as exit_info:  # other commands still reject unknown flags
+        cli.main(["status", "--bogus"], env={"SCONE_SQLITE_PATH": str(tmp_path / "x.db")}, stdin=io.StringIO(), out=io.StringIO())
+    assert exit_info.value.code == 2
+
+
+class SeeingEmbedder(HashEmbedder):
+    """Records exactly what it was asked to embed."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen: list[str] = []
+
+    async def embed(self, texts):
+        self.seen.extend(texts)
+        return await super().embed(texts)
+
+
+async def test_contextual_embeddings_change_what_is_embedded_not_what_is_stored():
+    from scone_memory.engine import contextual_prefix
+    from scone_memory.ports import NewEpisode
+
+    plain, ctx = SeeingEmbedder(), SeeingEmbedder()
+    off = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), plain).open()
+    on = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), ctx, contextual_embeddings=True).open()
+    text = "the harbour crane was repainted"
+    for engine in (off, on):
+        await engine.remember("default", text, created_at="2024-05-01", source="notes://harbour", metadata={"user_id": "ana"})
+    assert plain.seen == [text]
+    assert ctx.seen == ["2024-05-01 | notes://harbour | user id ana\n" + text], "the prefix names date, source and scope"
+    for engine in (off, on):
+        [item] = (await engine.recall("default", "harbour crane", limit=1)).items
+        assert item.text == text, "stored and returned text is the raw span either way"
+        [chunk] = await engine.documents.get_chunks("default", [item.chunk_id])
+        assert chunk.text == text and chunk.end - chunk.start == len(text.encode())
+    # queries are embedded as written in both modes; only chunks get the prefix
+    assert ctx.seen[-1] == "harbour crane" and plain.seen[-1] == "harbour crane"
+    [ev] = await on.events.query("default", kind="recall") if on.events else [None]
+    bare = NewEpisode(space="s", kind="note", content="x", content_hash="h", created_at="", ingested_at="")
+    assert contextual_prefix(bare) == "", "nothing to say means no prefix"
+
+
+async def test_recall_events_record_the_embedding_mode():
+    from scone_memory import InMemoryEventLog
+
+    on = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog(), contextual_embeddings=True).open()
+    await on.remember("default", "one note")
+    await on.recall("default", "note")
+    [ev] = await on.events.query("default", kind="recall")
+    assert ev.payload["contextual_embeddings"] is True
+
+
+def test_cli_recall_history_flag(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(), out=out)
+        return code, out.getvalue()
+
+    assert run("assert", "mark", "lives_in", "Austin", "--valid-from", "2019-08-01")[0] == 0
+    assert run("assert", "mark", "lives_in", "Lisbon", "--valid-from", "2024-03-02")[0] == 0
+    code, text = run("recall", "mark lives", "--json")
+    assert code == 0 and json.loads(text)["history"] == []
+    code, text = run("recall", "mark lives", "--history", "--json")
+    assert code == 0 and [f["object"] for f in json.loads(text)["history"]] == ["Austin"]
+    code, text = run("recall", "mark lives", "--history")
+    lines = text.splitlines()
+    assert any(l.startswith("fact  mark lives_in Lisbon") for l in lines)
+    assert any(l.startswith("was   mark lives_in Austin  (2019-08-01 to 2024-03-02; superseded by fact 2)") for l in lines), lines
+
+
+def test_cli_recall_narrowing_flags(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    assert run("remember", "--kind", "note", "--created-at", "2024-01-10", stdin="deploy runbook: rotate the staging keys first")[0] == 0
+    assert run("remember", "--kind", "file", "--source", "/ops/runbooks/deploy.md", "--created-at", "2024-02-10", stdin="deploy runbook: rotate the staging keys, then restart")[0] == 0
+    assert run("remember", "--kind", "conversation", "--source", "session-42", "--created-at", "2024-04-10", stdin="user: where is the deploy runbook for staging keys?")[0] == 0
+
+    def got(*flags):
+        code, text = run("recall", "deploy runbook staging keys", "--json", *flags)
+        assert code == 0, text
+        return sorted({i["episode_id"] for i in json.loads(text)["items"]})
+
+    assert got() == [1, 2, 3]
+    assert got("--kind", "file") == [2]
+    assert got("--source-prefix", "session-") == [3]
+    assert got("--until", "2024-01-31") == [1]
+    assert got("--since", "2024-03-01") == [3]

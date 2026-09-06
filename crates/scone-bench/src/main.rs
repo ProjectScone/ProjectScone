@@ -111,8 +111,9 @@ enum Cmd {
         #[arg(long)]
         reranker: bool,
         /// Answer system prompt: v1 (default), v2 (extraction-style),
-        /// or v3 (evidence-chaining; benchmarked 10 points WORSE than v2
-        /// on an 8B reader)
+        /// or v3 (evidence-chaining). At temperature 0 on 30 items v3
+        /// ties v2 (33.3% each, E29, 2026-09-06); the earlier "10 points
+        /// worse" was sampler noise. v2 stays the shipped default.
         #[arg(long, default_value = "v1")]
         prompt: String,
         /// Retrieve for each clause of a multi-part question and fuse
@@ -134,8 +135,10 @@ enum Cmd {
         #[arg(long)]
         handoff: Option<String>,
         /// Two-pass reader: pass 1 extracts evidence, pass 2 answers
-        /// from only that evidence (benchmarked 13 points WORSE than
-        /// single-pass on an 8B reader; temporal questions collapse)
+        /// from only that evidence. Benchmarked 10 points worse than
+        /// single-pass on an 8B reader at temperature 0 (E29, 2026-09-06:
+        /// 23.3% against 33.3%), confirming the earlier sampled result;
+        /// the extraction pass drops what the answer pass cannot recover.
         #[arg(long)]
         two_pass: bool,
     },

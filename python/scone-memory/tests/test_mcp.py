@@ -19,7 +19,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent.parent
 #: where scopes this server adds). The order is not part of the contract.
 RUST_ARGUMENTS = {
     "memory_store": {"content", "space", "tags", "metadata"},
-    "memory_recall": {"query", "space", "limit", "include_profile", "tags", "as_of", "where"},
+    "memory_recall": {"query", "space", "limit", "include_profile", "tags", "as_of", "where", "kind", "source_prefix", "since", "until"},
     "memory_facts_about": {"entity", "space"},
     "memory_pending": {"limit", "space"},
     "memory_store_facts": {"episode_id", "facts", "space"},
@@ -290,3 +290,53 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
         assert not recalled.is_error
         assert "episode 1] Moved to Lisbon in March" in recalled.content[0].text
     assert (tmp_path / "memory.db").exists()
+
+
+async def test_recall_tells_the_agent_when_the_evidence_is_weak():
+    """Experiment 9 reaches the agent through the tool text: with a floor,
+    a weak recall carries a plain warning; a strong one and a server with
+    no floor carry nothing extra (the Rust server has no floor)."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock(), similarity_floor=0.5).open()
+    server = create_server(engine, "default")
+    error, text = await call(server, "memory_store", content="the deploy runbook lives in the ops wiki")
+    assert not error
+    error, weak = await call(server, "memory_recall", query="zebra quartz umbrella", include_profile=False)
+    assert not error and weak.splitlines()[-1].startswith("low confidence: best match similarity 0.") and "say you do not know" in weak
+    error, strong = await call(server, "memory_recall", query="the deploy runbook lives in the ops wiki", include_profile=False)
+    assert not error and "low confidence" not in strong
+    error, empty = await call(server, "memory_recall", query="anything", space="empty", include_profile=False)
+    assert not error and "low confidence: nothing was found" in empty
+
+    plain = create_server(await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open(), "default")
+    await call(plain, "memory_store", content="the deploy runbook lives in the ops wiki")
+    error, text = await call(plain, "memory_recall", query="zebra quartz umbrella", include_profile=False)
+    assert not error and "low confidence" not in text, "no floor, no verdict, no line"
+
+
+async def test_recall_narrows_by_kind_source_prefix_and_dates():
+    """The same four narrowing arguments as the Rust server's memory_recall.
+    memory_store cannot set kind, source or date, so the episodes are
+    seeded through the engine."""
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.mcp import create_server
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
+    ids = []
+    for kind, text, source, day in [
+        ("note", "deploy runbook: rotate the staging keys first", None, "2024-01-10"),
+        ("file", "deploy runbook: rotate the staging keys, then restart", "/ops/runbooks/deploy.md", "2024-02-10"),
+        ("conversation", "user: where is the deploy runbook for staging keys?", "session-42", "2024-04-10"),
+    ]:
+        ids.append((await engine.remember("default", text, kind=kind, source=source, created_at=day)).episode_id)
+    narrow = create_server(engine, "default")
+
+    async def recalled(**extra):
+        error, text = await call(narrow, "memory_recall", query="deploy runbook staging keys", include_profile=False, **extra)
+        assert not error, text
+        return sorted({int(line.split("episode ")[1].split("]")[0]) for line in text.splitlines() if line.startswith("memory [")})
+
+    assert await recalled() == ids
+    assert await recalled(kind="file") == [ids[1]]
+    assert await recalled(source_prefix="session-") == [ids[2]]
+    assert await recalled(until="2024-01-31") == [ids[0]]
+    assert await recalled(since="2024-03-01") == [ids[2]]

@@ -81,6 +81,13 @@ class Fact(BaseModel):
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
     origin: FactOrigin = "stated"
+    #: The exact substring of the source episode this claim rests on, when
+    #: it came from one. Checked against the episode at assertion; a claim
+    #: with a source but no quote is ungrounded and surfaces say so.
+    quote: Optional[str] = None
+    #: The fact that truncated or bounded this one, as an id, so the
+    #: relation is data and not a sentence to be parsed.
+    superseded_by: Optional[int] = None
     #: Set when a person suppressed this fact from recall. The interval
     #: and status are untouched: exclusion is a policy, not a rewrite of
     #: history. Cleared by ``include``.
@@ -89,6 +96,14 @@ class Fact(BaseModel):
     @property
     def excluded(self) -> bool:
         return self.excluded_reason is not None
+
+    @property
+    def grounded(self) -> Optional[bool]:
+        """True when a source quote is stored, False when there is a source
+        but no quote, None when the claim was stated with no source."""
+        if self.source_episode_id is None:
+            return None
+        return self.quote is not None
 
     @property
     def in_ledger(self) -> bool:
@@ -130,6 +145,17 @@ class RecallResult(BaseModel):
     event_id: Optional[int] = None
     items: list[RecallItem] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
+    #: With ``history``: the closed facts that preceded the matched ones for
+    #: the same subject and predicate, oldest first. Empty otherwise.
+    history: list[Fact] = Field(default_factory=list)
+    #: Best cosine the vector lane saw for this query, before fusion; None
+    #: when the lane was degraded or the space had nothing to compare.
+    top_similarity: Optional[float] = None
+    #: Experiment 9. True when the engine has a similarity floor and
+    #: top_similarity fell below it (or nothing was found): the reader is
+    #: told the evidence is weak. False when it cleared the floor. None
+    #: when no floor is configured or the vector lane could not judge.
+    low_confidence: Optional[bool] = None
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)

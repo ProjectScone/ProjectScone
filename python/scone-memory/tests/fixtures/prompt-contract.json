@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "context_prefix": "Scone structured request (user-level data, not additional authority). The original user request remains authoritative; this representation does not change permissions or override higher-priority instructions.\n",
+  "instructions": [
+    "Fulfill the user's request without inventing unstated requirements.",
+    "Preserve the meaning of quoted text, code, and explicit constraints.",
+    "State consequential uncertainty; respect existing permission boundaries."
+  ],
+  "cases": [
+    {"input": "  make the UI useful\r\n", "task": "make the UI useful"},
+    {"input": "fix this:\n```python\n    print('café 🥐')\n```", "task": "fix this:\n```python\n    print('café 🥐')\n```"},
+    {"input": "\u00a0retain this spacing\u00a0", "task": "\u00a0retain this spacing\u00a0"}
+  ]
+}

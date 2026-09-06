@@ -16,6 +16,7 @@ into a data pipeline step.
 from __future__ import annotations
 
 import argparse
+import pathlib
 import asyncio
 import json
 import os
@@ -70,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--as-of")
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--where", action="append", default=[], help="key=value scope filter, repeatable")
+    p.add_argument("--history", action="store_true", help="also show the closed facts that preceded the matched ones")
+    p.add_argument("--kind", help="only episodes of this kind (note, file, conversation, ...)")
+    p.add_argument("--source-prefix", help="only episodes whose source starts with this text (literal)")
+    p.add_argument("--since", help="only episodes that happened at or after this instant")
+    p.add_argument("--until", help="only episodes that happened at or before this instant")
 
     p = sub.add_parser("forget", help="delete an episode")
     p.add_argument("episode_id", type=int)
@@ -112,6 +118,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
+    p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
+    p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("bench", help="measure retrieval on a LongMemEval-style file with the Rust harness's definitions")
+    p.add_argument("dataset", help="path to longmemeval_s.json or a same-shaped file")
+    p.add_argument("--k", default="5,10,15", help="comma-separated k values (default 5,10,15)")
+    p.add_argument("--limit", type=int, help="recall limit (default max k)")
+    p.add_argument("--first", type=int, help="only the first N items")
+    p.add_argument("--stratified", type=int, help="N items per question type, in file order")
+    p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
+    p.add_argument("--history", action="store_true", help="ask every recall for the closed chain behind matched facts (experiment 3)")
+    p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
+    # The hook's own flags are parsed by agent_hook; this subparser accepts
+    # anything after its name and hands it over untouched. parse_known_args
+    # is used at the call site because REMAINDER does not capture a flag
+    # that appears first (argparse reports it as unknown and exits 2).
+    p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
+                       add_help=False)
     return parser
 
 
@@ -130,7 +153,7 @@ def fact_line(f) -> str:
     return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
 
 
-async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int:
+async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
 
@@ -157,18 +180,25 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
 
     if args.command == "recall":
         result = await engine.recall(
-            space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where")
+            space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
+            history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
         )
         if args.json:
             emit(result.model_dump() | {"context_reduction": result.context_reduction})
             return 0
         for f in result.facts:
             print(f"fact  {f.subject} {f.predicate} {f.object}  (since {f.valid_from[:10]})", file=out)
+        for f in result.history:
+            until = f.valid_until[:10] if f.valid_until else "?"
+            print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
         for item in result.items:
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.low_confidence:
+            top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
+            print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
         if not result.items and not result.facts:
             print("nothing matched", file=out)
         return 0
@@ -211,19 +241,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
         return 0
 
     if args.command in ("approve", "decline", "exclude", "include"):
+        import getpass
+
+        actor = f"cli:{getpass.getuser()}"
         if args.command == "approve":
-            fact = await engine.approve(space, args.fact_id)
+            fact = await engine.approve(space, args.fact_id, actor=actor)
         elif args.command == "decline":
-            fact = await engine.decline(space, args.fact_id, args.reason)
+            fact = await engine.decline(space, args.fact_id, args.reason, actor=actor)
         elif args.command == "exclude":
-            fact = await engine.exclude(space, args.fact_id, args.reason)
+            fact = await engine.exclude(space, args.fact_id, args.reason, actor=actor)
         else:
-            fact = await engine.include(space, args.fact_id)
+            fact = await engine.include(space, args.fact_id, actor=actor)
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 
     if args.command == "close":
-        fact = await engine.close_fact(space, args.fact_id, args.reason)
+        import getpass
+
+        fact = await engine.close_fact(space, args.fact_id, args.reason, actor=f"cli:{getpass.getuser()}")
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 
@@ -252,6 +287,86 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
                 print(f"- {line}", file=out)
         return 0
 
+    if args.command == "distill":
+        from .config import build_worker
+
+        worker = build_worker(engine, settings, [space])
+        if worker is None:
+            print("error: no consolidation model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)", file=sys.stderr)
+            return 2
+        worker.batch = args.limit
+        report = await worker.run_once(space)
+        if args.json:
+            emit({"space": space, **report.as_payload()})
+        else:
+            print(f"read {report.episodes} episode(s): {report.proposed} proposed, {report.accepted} accepted, "
+                  f"{report.closed} closed, {report.skipped} restated, {report.parked} parked"
+                  + (f"; error: {report.error}" if report.error else ""), file=out)
+        return 0 if report.error is None else 1
+
+    if args.command == "bench":
+        from collections import defaultdict
+
+        from .bench import load_items, run as run_bench
+        from .config import build_embedder, build_documents, build_events, build_vectors
+
+        items = load_items(args.dataset)
+        if args.stratified:
+            by_type: dict = defaultdict(list)
+            for it in items:
+                if len(by_type[it.question_type]) < args.stratified:
+                    by_type[it.question_type].append(it)
+            items = [it for group in by_type.values() for it in group]
+        if args.first:
+            items = items[: args.first]
+        ks = tuple(int(k) for k in args.k.split(",") if k.strip())
+        embedder = build_embedder(settings)  # one embedder (model load) shared across items
+
+        async def make():
+            # Fresh stores per item so nothing leaks between questions; the
+            # bench always uses in-process stores, so the number measures the
+            # engine, not a database.
+            from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+
+            return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+
+        def progress(n, total):
+            if not args.json:
+                print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+        report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
+                                 dataset=str(args.dataset), progress=progress, history=args.history)
+        if not args.json:
+            print("", file=sys.stderr)
+        if args.out:
+            pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
+        if args.json:
+            emit(report.as_dict(with_items=False))
+        else:
+            print(f"{report.scored} scored of {report.items} items ({'with' if report.include_abstention else 'without'} abstention), "
+                  f"embedder {report.embedder}, {report.errors} error(s)", file=out)
+            for k in report.ks:
+                print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
+            print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
+                  f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
+            for qt, row in report.by_type.items():
+                print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+            if report.history:
+                print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
+                      + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
+            if report.similarity_floor is not None:
+                print(f"  similarity floor {report.similarity_floor}: " + ", ".join(f"{k} {v}" for k, v in sorted(report.low_confidence_counts.items())), file=out)
+            sweep = report.abstention
+            if sweep is None:
+                print("  abstention sweep: not measurable (no item without evidence ran)", file=out)
+            else:
+                print(f"  abstention sweep over {sweep['no_evidence_n']} no-evidence and {sweep['evidence_n']} evidence item(s): "
+                      "floor -> abstained / wrongly withheld", file=out)
+                for f in sweep["floors"]:
+                    withheld = sweep["false_abstain_rate"][f]
+                    print(f"    {f:.2f} -> {sweep['abstain_rate'][f] * 100:5.1f}% / " + ("   n/a" if withheld is None else f"{withheld * 100:5.1f}%"), file=out)
+        return 0
+
     if args.command == "export":
         async for record in engine.export(space):
             emit(record)
@@ -270,8 +385,15 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
 
 
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None, stdin=None, out=None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args, rest = build_parser().parse_known_args(raw)
     env = os.environ if env is None else env
+    if args.command == "agent-hook":
+        from .agent_hook import run_hook
+
+        return run_hook(rest, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
+    if rest:
+        build_parser().error(f"unrecognized arguments: {' '.join(rest)}")
     settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve
@@ -281,8 +403,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
     async def go() -> int:
         engine = await build_engine(settings)
+
         try:
-            return await run(args, engine, stdin or sys.stdin, out or sys.stdout)
+            return await run(args, engine, stdin or sys.stdin, out or sys.stdout, settings)
         finally:
             for store in (engine.documents, engine.vectors):
                 if hasattr(store, "close"):

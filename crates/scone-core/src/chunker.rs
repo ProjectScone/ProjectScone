@@ -135,6 +135,113 @@ pub fn syntax_for(source: Option<&str>) -> Syntax {
     }
 }
 
+/// The declaration a byte offset sits under: the nearest line at or
+/// before `at` that opens one, trimmed and without its opening brace.
+/// None when nothing above it declares anything (a file header, a
+/// script with no functions). This is what a chunk cut from the
+/// middle of a function has lost, and what a contextual embedding
+/// gives back to it.
+pub fn enclosing_declaration(text: &str, at: usize) -> Option<&str> {
+    enclosing_declaration_at(text, at).map(|(_, line)| line)
+}
+
+/// As `enclosing_declaration`, with the byte offset of the declaration
+/// line as well.
+fn enclosing_declaration_at(text: &str, at: usize) -> Option<(usize, &str)> {
+    let at = at.min(text.len());
+    let mut found = None;
+    let mut pos = 0usize;
+    for line in text.split_inclusive('\n') {
+        if pos > at {
+            break;
+        }
+        if starts_declaration(line) {
+            found = Some((pos, line));
+        }
+        pos += line.len();
+    }
+    found.map(|(pos, line)| (pos, line.trim().trim_end_matches('{').trim_end()))
+}
+
+/// The comment block sitting directly above a declaration: contiguous
+/// lines of `///`, `//!`, `//`, `#` or `--` comments (and attribute
+/// lines, which are skipped over), with the markers stripped and the
+/// lines joined by spaces. This is where the words a person uses for a
+/// function usually live, when its body and signature do not carry
+/// them. None when the declaration has no comment above it.
+pub fn doc_comment_above(text: &str, declaration_start: usize) -> Option<String> {
+    let above = &text[..declaration_start.min(text.len())];
+    let mut lines: Vec<&str> = Vec::new();
+    for line in above.lines().rev() {
+        let t = line.trim();
+        if t.starts_with("#[") || t.starts_with("@") {
+            continue; // attributes and decorators sit between comment and declaration
+        }
+        let body = ["///", "//!", "//", "#", "--"]
+            .iter()
+            .find_map(|m| t.strip_prefix(m))
+            .map(str::trim);
+        match body {
+            Some(b) if !b.is_empty() => lines.push(b),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    Some(lines.join(" "))
+}
+
+/// A short, single-line rendering of the doc comment above the
+/// declaration that encloses `at`, if there is one; capped so a long
+/// essay above a function cannot outweigh the function itself.
+pub fn enclosing_doc_comment(text: &str, at: usize) -> Option<String> {
+    let (start, _) = enclosing_declaration_at(text, at)?;
+    doc_comment_above(text, start).map(|c| {
+        if c.chars().count() > 300 {
+            let cut: String = c.chars().take(300).collect();
+            cut
+        } else {
+            c
+        }
+    })
+}
+
+/// What a code chunk is embedded as when contextual embedding is on:
+/// the file's name, the declaration the chunk sits under, then the
+/// chunk itself. The stored chunk is still the raw span; only the
+/// vector sees the context.
+pub fn contextual_code_text(source: Option<&str>, text: &str, span: ChunkSpan) -> String {
+    let file = source
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .unwrap_or("");
+    let chunk = &text[span.start..span.end];
+    let comment = enclosing_doc_comment(text, span.start);
+    let decl = enclosing_declaration(text, span.start);
+    let mut head: Vec<&str> = Vec::new();
+    if !file.is_empty() {
+        head.push(file);
+    }
+    if let Some(d) = decl {
+        head.push(d);
+    }
+    let mut out = head.join(" | ");
+    if let Some(c) = &comment {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(c);
+    }
+    if out.is_empty() {
+        return chunk.to_owned();
+    }
+    out.push('\n');
+    out.push_str(chunk);
+    out
+}
+
 pub fn chunk_text(text: &str, target_bytes: usize) -> Vec<ChunkSpan> {
     chunk_syntax(text, target_bytes, Syntax::Prose)
 }

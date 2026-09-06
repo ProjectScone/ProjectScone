@@ -14,8 +14,10 @@ from typing import Mapping, Optional
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+
+from contextlib import asynccontextmanager
 
 from .. import metrics
 from ..engine import MemoryEngine
@@ -49,6 +51,7 @@ class FactBody(BaseModel):
     source_episode_id: Optional[int] = None
     origin: str = "stated"
     proposed: bool = False
+    quote: Optional[str] = None
 
 
 class CloseBody(BaseModel):
@@ -74,17 +77,48 @@ class FeedbackBody(BaseModel):
 
 
 CONSOLE = Path(__file__).with_name("console.html")
+PLAYGROUND = Path(__file__).with_name("playground.html")
+MARK = Path(__file__).with_name("scone-mark.png")
+
+
+def mark_data_uri() -> str:
+    """The Scone mark, embedded so the page loads nothing external. The
+    packaged playground carries its own copy; the console shares the file."""
+    import base64
+
+    if not MARK.exists():
+        return ""
+    return "data:image/png;base64," + base64.b64encode(MARK.read_bytes()).decode()
 
 
 def create_app(
-    engine: MemoryEngine, keys: Mapping[str, str], console: bool = True, console_key: Optional[str] = None
+    engine: MemoryEngine,
+    keys: Mapping[str, str],
+    console: bool = True,
+    console_key: Optional[str] = None,
+    worker=None,
+    reload_pages: bool = False,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
-    no baked key the page asks for one and keeps it in the tab."""
-    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None)
+    no baked key the page asks for one and keeps it in the tab.
+    ``worker`` is a ConsolidationWorker started with the app and stopped
+    with it; None means no distiller runs on this server. ``reload_pages``
+    re-reads the console and playground files on every request, for
+    editing them with the server running; off in normal use."""
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if worker is not None:
+            worker.start()
+        yield
+        if worker is not None:
+            await worker.stop()
+
+    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.engine = engine
     app.state.keys = dict(keys)
+    app.state.worker = worker
 
     def space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -95,6 +129,18 @@ def create_app(
         if space is None:
             raise Unauthorized("unknown key")
         return space
+
+    def actor_for(request: Request) -> str:
+        """Who judged: a fingerprint of the bearer key (never the key) plus an
+        optional label the caller sends in X-Scone-Actor, so a review event
+        can say "the console" or "playwright smoke" and can always be tied
+        to the key that made it."""
+        import hashlib
+
+        token = request.headers.get("authorization", "").partition(" ")[2].strip()
+        fingerprint = hashlib.sha256(token.encode()).hexdigest()[:12] if token else "anonymous"
+        label = request.headers.get("x-scone-actor", "").strip()[:64]
+        return f"key:{fingerprint}" + (f" {label}" if label else "")
 
     @app.exception_handler(Unauthorized)
     async def _unauthorized(_: Request, e: Unauthorized) -> JSONResponse:
@@ -119,13 +165,53 @@ def create_app(
         return {"ok": True}
 
     if console:
-        page = CONSOLE.read_text(encoding="utf-8")
-        if console_key:
-            page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
-
-        @app.get("/", response_class=HTMLResponse)
-        async def console_page() -> str:
+        def render_console() -> str:
+            # Two page generations share this route: the packaged React app,
+            # which carries a __SCONE_TOKEN__ placeholder like the playground,
+            # and the earlier inline page, which took the key on its first
+            # <script> as data-token. Both get the key; neither logs it.
+            page = CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
+            if console_key:
+                if "__SCONE_TOKEN__" in page:
+                    page = page.replace("__SCONE_TOKEN__", console_key)
+                else:
+                    page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
             return page
+
+        def render_playground() -> str:
+            # Shared asset owned in ui/playground.html and copied here by
+            # scripts/sync-playground.cjs; same key placeholder as the console.
+            page = PLAYGROUND.read_text(encoding="utf-8")
+            return page.replace("__SCONE_TOKEN__", console_key) if console_key else page
+
+        console_html = None if reload_pages else render_console()
+        playground_html = None if (reload_pages or not PLAYGROUND.exists()) else render_playground()
+
+        def revision(path: Path) -> str:
+            # File identity only (mtime and size): says "changed", carries no content or key.
+            st = path.stat()
+            return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+
+        def page_response(body: str, path: Path) -> Response:
+            headers = {"ETag": revision(path)}
+            if reload_pages:
+                headers["Cache-Control"] = "no-store"
+            return HTMLResponse(body, headers=headers)
+
+        # /memory is the canonical address of the memory console (the
+        # playground lives at /playground); / stays as a compatible alias.
+        @app.api_route("/memory", methods=["GET", "HEAD"])
+        @app.api_route("/", methods=["GET", "HEAD"])
+        async def console_page() -> Response:
+            return page_response(console_html if console_html is not None else render_console(), CONSOLE)
+
+        if PLAYGROUND.exists():
+            # GET and HEAD: the console probes with HEAD to decide whether to
+            # show its Playground link; in development the page polls HEAD
+            # and reloads when the ETag changes.
+            @app.api_route("/playground", methods=["GET", "HEAD"])
+            async def playground_page() -> Response:
+                return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND)
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
@@ -161,16 +247,25 @@ def create_app(
         as_of: Optional[str] = None,
         tags: Optional[str] = None,
         where: Optional[str] = None,
+        history: bool = False,
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
         result = await engine.recall(
-            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where)
+            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
+            kind=kind, source_prefix=source_prefix, since=since, until=until,
         )
         return {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
+            "history": [fact_json(f) for f in result.history],
+            "top_similarity": result.top_similarity,
+            "low_confidence": result.low_confidence,
             "degraded": result.degraded,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
@@ -200,28 +295,29 @@ def create_app(
             source_episode_id=body.source_episode_id,
             origin=body.origin,
             proposed=body.proposed,
+            quote=body.quote,
         )
         return fact_json(fact)
 
     @app.post("/v1/facts/{fact_id}/approve")
-    async def post_fact_approve(fact_id: int, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.approve(space, fact_id))
+    async def post_fact_approve(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.approve(space, fact_id, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/decline")
-    async def post_fact_decline(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.decline(space, fact_id, body.reason))
+    async def post_fact_decline(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.decline(space, fact_id, body.reason, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/exclude")
-    async def post_fact_exclude(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.exclude(space, fact_id, body.reason))
+    async def post_fact_exclude(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.exclude(space, fact_id, body.reason, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/include")
-    async def post_fact_include(fact_id: int, space: str = Depends(space_for)) -> dict:
-        return fact_json(await engine.include(space, fact_id))
+    async def post_fact_include(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        return fact_json(await engine.include(space, fact_id, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/close")
-    async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for)) -> dict:
-        closed = await engine.close_fact(space, fact_id, body.reason)
+    async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
+        closed = await engine.close_fact(space, fact_id, body.reason, actor=actor)
         return {"closed": closed.fact_id, "reason": closed.closed_reason}
 
     @app.get("/v1/profile")
@@ -235,16 +331,26 @@ def create_app(
 
     @app.get("/v1/events")
     async def get_events(
-        kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100, space: str = Depends(space_for)
+        kind: Optional[str] = None, since: Optional[str] = None, limit: int = 100, after_id: Optional[int] = None,
+        space: str = Depends(space_for),
     ) -> dict:
+        """Newest first by default. With after_id, oldest first and strictly
+        after that id: a cursor a live reader can follow without losing a
+        burst. next_after_id is the last id returned, or the cursor itself
+        when nothing new arrived."""
         if engine.events is None:
             return {"events": [], "evidence": "none: no event log attached"}
-        events = await engine.events.query(space, kind=kind, since=since, limit=max(1, min(limit, 1000)))
-        return {
+        limit = max(1, min(limit, 1000))
+        events = await engine.events.query(space, kind=kind, since=since, limit=limit, after_id=after_id)
+        body = {
             "events": [event_json(e) for e in events],
             "evidence": engine.events.name,
             "queries_recorded": "text" if engine.record_queries else "hash",
+            "truncated": len(events) >= limit,
         }
+        if after_id is not None:
+            body["next_after_id"] = events[-1].event_id if events else after_id
+        return body
 
     @app.post("/v1/events")
     async def post_event(body: ExternalEventBody, space: str = Depends(space_for)) -> dict:
@@ -269,6 +375,15 @@ def create_app(
         report = metrics.compute(events, since=since, until=until, truncated=len(events) >= limit)
         return {"evidence": engine.events.name, **report.as_dict()}
 
+    @app.get("/v1/graph")
+    async def get_graph(
+        session_id: Optional[str] = None, episode_id: Optional[int] = None, since: Optional[str] = None,
+        limit: int = 400, space: str = Depends(space_for),
+    ) -> dict:
+        """Recorded relations only; see scone_memory/graph.py."""
+        g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit)
+        return {"evidence": engine.events.name if engine.events else "none", **g.as_dict()}
+
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
         return {"scopes": await engine.scopes(space)}
@@ -276,12 +391,19 @@ def create_app(
     @app.get("/v1/status")
     async def get_status(space: str = Depends(space_for)) -> dict:
         status = await engine.status(space)
+        pending = await engine.pending_distillation(space)
+        if worker is None:
+            lane = "manual"  # claims arrive through POST /v1/facts, MCP, or the CLI
+        elif worker.running:
+            lane = "active"
+        else:
+            lane = "stopped"
+        last = worker.last.get(space) if worker is not None else None
         return {
             **status.model_dump(),
-            # No distiller runs in this stack yet; facts arrive through
-            # POST /v1/facts. Named so the shared client can tell.
-            "semantic_lane": "manual",
-            "pending_distill": 0,
+            "semantic_lane": lane,
+            "pending_distill": pending,
+            "last_distill": last.as_payload() if last else None,
         }
 
     return app
@@ -344,4 +466,7 @@ def fact_json(fact: Fact) -> dict:
         "source_episode_id": fact.source_episode_id,
         "origin": fact.origin,
         "excluded_reason": fact.excluded_reason,
+        "superseded_by": fact.superseded_by,
+        "quote": fact.quote,
+        "grounded": fact.grounded,
     }

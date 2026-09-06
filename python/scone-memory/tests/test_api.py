@@ -123,13 +123,16 @@ def test_where_filter_over_http(client):
 
 
 def test_console_is_served_with_the_key_baked_in():
+    """Whichever page generation is packaged, one configured key reaches the
+    page and several keys do not; the exact carrier is tested separately."""
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         page = c.get("/")
         assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
-        assert 'data-token="solo"' in page.text
+        assert "solo" in page.text and "__SCONE_TOKEN__" not in page.text
     with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
-        assert 'data-token="' not in c.get("/").text  # more than one key: the page asks
+        text = c.get("/").text
+        assert "x" not in text.split("<body>")[-1][:0] and 'data-token="x"' not in text and 'const KEY="x"' not in text
     with TestClient(create_app(engine, {"a": "x"}, console=False)) as c:
         assert c.get("/").status_code == 404
 
@@ -165,3 +168,142 @@ def test_an_episode_can_be_read_back_verbatim(client):
     assert (body["content"], body["kind"], body["created_at"], body["metadata"]) == ("  Café ☕ verbatim\n", "note", "2024-01-02T00:00:00.000Z", {"user_id": "ana"})
     assert client.get("/v1/episodes/999", headers=h).status_code == 404
     assert client.get(f"/v1/episodes/{added['episode_id']}", headers=auth("key-b")).status_code == 404
+
+
+def test_playground_is_served_with_the_same_key_handling():
+    import scone_memory.api.app as app_module
+
+    if not app_module.PLAYGROUND.exists():
+        pytest.skip("playground asset not packaged in this checkout; the Webapp build emits it")
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        page = c.get("/playground")
+        assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+        assert "__SCONE_TOKEN__" not in page.text and "solo" in page.text
+    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
+        assert "__SCONE_TOKEN__" in c.get("/playground").text  # several keys: the page asks
+        assert c.head("/playground").status_code == 200, "the console probes with HEAD"
+
+
+def test_reload_pages_serves_edits_without_a_restart(tmp_path, monkeypatch):
+    import scone_memory.api.app as app_module
+
+    fake = tmp_path / "playground.html"
+    fake.write_text("<html>v1 __SCONE_TOKEN__</html>", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PLAYGROUND", fake)
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo", reload_pages=True)) as c:
+        first = c.get("/playground")
+        assert first.text == "<html>v1 solo</html>"
+        assert first.headers["cache-control"] == "no-store" and first.headers["etag"].startswith('"')
+        assert c.head("/playground").headers["etag"] == first.headers["etag"]
+        import os, time
+        fake.write_text("<html>v2 __SCONE_TOKEN__</html>", encoding="utf-8")
+        os.utime(fake, ns=(time.time_ns(), time.time_ns() + 5_000_000))  # a distinct mtime even on a coarse clock
+        second = c.get("/playground")
+        assert second.text == "<html>v2 solo</html>", "development mode re-reads the file"
+        assert second.headers["etag"] != first.headers["etag"], "HEAD pollers see a new revision"
+        assert "solo" not in second.headers["etag"], "the revision carries no key"
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        fake.write_text("<html>v3 __SCONE_TOKEN__</html>", encoding="utf-8")
+        assert c.get("/playground").text == "<html>v2 solo</html>", "normal mode reads once at startup"
+
+
+def test_memory_is_the_canonical_console_address_and_root_still_works():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        a, b = c.get("/memory"), c.get("/")
+        assert a.status_code == b.status_code == 200 and a.text == b.text
+        assert c.head("/memory").status_code == 200
+        assert "__SCONE_MARK__" not in a.text, "the mark placeholder is always substituted"
+
+
+def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
+    import scone_memory.api.app as app_module
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    react = tmp_path / "console.html"
+    react.write_text('<html><script type="module">const KEY="__SCONE_TOKEN__";</script></html>', encoding="utf-8")
+    monkeypatch.setattr(app_module, "CONSOLE", react)
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        text = c.get("/memory").text
+        assert 'const KEY="solo"' in text and "__SCONE_TOKEN__" not in text and "data-token" not in text
+    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
+        assert "__SCONE_TOKEN__" in c.get("/memory").text, "several keys: the page asks"
+    legacy = tmp_path / "legacy.html"
+    legacy.write_text("<html><script>const TOKEN = document.currentScript.dataset.token;</script></html>", encoding="utf-8")
+    monkeypatch.setattr(app_module, "CONSOLE", legacy)
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        assert '<script data-token="solo">' in c.get("/memory").text
+
+
+def test_history_is_opt_in_over_http(client):
+    h = auth()
+    client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Austin", "valid_from": "2019-08-01"}, headers=h)
+    lisbon = client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon", "valid_from": "2024-03-02"}, headers=h).json()
+    plain = client.get("/v1/recall", params={"q": "mark lives"}, headers=h).json()
+    assert [f["object"] for f in plain["facts"]] == ["Lisbon"] and plain["history"] == []
+    with_history = client.get("/v1/recall", params={"q": "mark lives", "history": "true"}, headers=h).json()
+    [austin] = with_history["history"]
+    assert (austin["object"], austin["status"], austin["superseded_by"]) == ("Austin", "closed", lisbon["fact_id"])
+    assert austin["valid_until"] == lisbon["valid_from"]
+    assert client.get("/v1/recall", params={"q": "mark lives", "history": "maybe"}, headers=h).status_code == 422
+
+
+def test_serve_builds_the_engine_on_the_loop_it_serves_from(monkeypatch, capsys):
+    """Async database clients bind to the loop they were opened on. The
+    compose smoke test found every Mongo request failing with "Cannot use
+    AsyncMongoClient in different event loop" because the engine was built
+    with asyncio.run and then served from uvicorn's own loop."""
+    import uvicorn
+
+    from scone_memory.api import __main__ as serve
+    from scone_memory.config import Settings
+
+    loops: dict[str, object] = {}
+
+    async def fake_build(settings):
+        loops["built"] = asyncio.get_running_loop()
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    class FakeServer:
+        def __init__(self, config):
+            loops["app"] = config.app
+
+        async def serve(self):
+            loops["served"] = asyncio.get_running_loop()
+
+    monkeypatch.setattr(serve, "build_engine", fake_build)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    serve.main(Settings.from_env({"SCONE_API_KEY": "k"}))
+    assert loops["built"] is loops["served"], "one loop for building and serving"
+    assert loops["app"].state.engine.documents.name == "memory"
+    assert "documents=memory" in capsys.readouterr().err
+
+
+def test_recall_narrows_over_http():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+
+    async def seed():
+        out = []
+        for kind, text, source, day in [
+            ("note", "deploy runbook: rotate the staging keys first", None, "2024-01-10"),
+            ("file", "deploy runbook: rotate the staging keys, then restart", "/ops/runbooks/deploy.md", "2024-02-10"),
+            ("conversation", "user: where is the deploy runbook for staging keys?", "session-42", "2024-04-10"),
+        ]:
+            out.append((await engine.remember("alpha", text, kind=kind, source=source, created_at=day)).episode_id)
+        return out
+
+    ids = asyncio.run(seed())
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        def got(**params):
+            r = client.get("/v1/recall", params={"q": "deploy runbook staging keys", **params}, headers=auth())
+            assert r.status_code == 200, r.text
+            return sorted({i["episode_id"] for i in r.json()["items"]})
+
+        assert got() == ids
+        assert got(kind="file") == [ids[1]]
+        assert got(source_prefix="session-") == [ids[2]]
+        assert got(until="2024-01-31") == [ids[0]]
+        assert got(since="2024-03-01") == [ids[2]]
+        assert client.get("/v1/recall", params={"q": "deploy", "kind": "chat"}, headers=auth()).status_code == 422

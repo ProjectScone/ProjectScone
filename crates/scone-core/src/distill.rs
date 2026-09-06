@@ -27,6 +27,9 @@ pub struct ApplyReport {
     pub added: usize,
     pub closed: usize,
     pub deduplicated: usize,
+    /// Landed as `proposed` because their confidence sat below the
+    /// engine's gate; a person decides (see `facts_approve`).
+    pub proposed: usize,
 }
 
 fn canonicalize(name: &str) -> String {
@@ -188,11 +191,15 @@ impl Engine {
             }
 
             // Exact restatement: strengthen, never duplicate (bugs.md P-5).
+            // A proposal restated stays a proposal with a higher
+            // confidence; repetition is evidence for the reviewer, not
+            // approval. A declined fact restated stays declined: the
+            // person's decision holds until they change it.
             let existing: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM facts
                      WHERE space_id = ?1 AND subject_entity = ?2 AND predicate = ?3
-                       AND object = ?4 AND status = 'active'",
+                       AND object = ?4 AND status IN ('active', 'proposed', 'declined')",
                     rusqlite::params![space.id(), subject, predicate, object],
                     |r| r.get(0),
                 )
@@ -214,17 +221,24 @@ impl Engine {
                 continue;
             }
 
+            // Below the gate the fact is a proposal: stored with its
+            // provenance so a reviewer can read where it came from, but
+            // it neither supersedes nor is superseded until approved.
+            let proposed = self
+                .propose_below
+                .is_some_and(|threshold| fact.confidence < threshold);
             tx.execute(
                 "INSERT INTO facts
-                     (space_id, subject_entity, predicate, object, confidence, valid_from)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (space_id, subject_entity, predicate, object, confidence, valid_from, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     space.id(),
                     subject,
                     predicate,
                     object,
                     fact.confidence,
-                    happened_at
+                    happened_at,
+                    if proposed { "proposed" } else { "active" }
                 ],
             )?;
             let new_id = tx.last_insert_rowid();
@@ -232,52 +246,138 @@ impl Engine {
                 "INSERT INTO fact_provenance (fact_id, episode_id) VALUES (?1, ?2)",
                 rusqlite::params![new_id, episode_id],
             )?;
-            report.added += 1;
-
-            // Contradiction: same subject+predicate, different object →
-            // close the old interval, keep the history (I2/I3).
-            // Only a fact that is actually newer may supersede:
-            // backfilling an old document must not overwrite what we
-            // have learned since.
-            let closed = tx.execute(
-                "UPDATE facts SET status = 'closed',
-                        valid_until = ?5,
-                        status_reason = 'superseded by fact ' || ?1
-                 WHERE space_id = ?2 AND subject_entity = ?3 AND predicate = ?4
-                   AND status = 'active' AND id != ?1 AND valid_from <= ?5",
-                rusqlite::params![new_id, space.id(), subject, predicate, happened_at],
-            )?;
-            report.closed += closed;
-
-            // The new fact lost to something already on record: it is
-            // history the moment it lands, not the current answer.
-            let newer: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM facts
-                     WHERE space_id = ?1 AND subject_entity = ?2 AND predicate = ?3
-                       AND status = 'active' AND id != ?4 AND valid_from > ?5
-                     ORDER BY valid_from DESC LIMIT 1",
-                    rusqlite::params![space.id(), subject, predicate, new_id, happened_at],
-                    |r| r.get(0),
-                )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(SconeError::Db(other)),
-                })?;
-            if let Some(winner) = newer {
-                tx.execute(
-                    "UPDATE facts SET status = 'closed',
-                            valid_until = (SELECT valid_from FROM facts WHERE id = ?2),
-                            status_reason = 'superseded by fact ' || ?2
-                     WHERE id = ?1",
-                    rusqlite::params![new_id, winner],
-                )?;
+            if proposed {
+                report.proposed += 1;
+                continue;
             }
+            report.added += 1;
+            report.closed +=
+                settle_active_fact(&tx, space.id(), subject, &predicate, new_id, &happened_at)?;
         }
         tx.commit()?;
         Ok(report)
     }
+
+    /// Facts waiting for a person: `proposed`, oldest first, with the
+    /// same shape as `facts_list` so surfaces render them the same way.
+    pub fn facts_pending(&self, space: &ScopedSpace) -> Result<Vec<crate::FactItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, en.canonical, f.predicate, f.object, f.confidence,
+                    f.valid_from, f.valid_until, f.status
+             FROM facts f JOIN entities en ON en.id = f.subject_entity
+             WHERE f.space_id = ?1 AND f.status = 'proposed'
+             ORDER BY f.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![space.id()], |r| {
+            Ok(crate::FactItem {
+                fact_id: r.get(0)?,
+                subject: r.get(1)?,
+                predicate: r.get(2)?,
+                object: r.get(3)?,
+                confidence: r.get(4)?,
+                valid_from: r.get(5)?,
+                valid_until: r.get(6)?,
+                status: r.get(7)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(SconeError::Db)).collect()
+    }
+
+    /// Accept a proposal: it becomes active from its own valid_from and
+    /// takes its place in the ledger exactly as an extracted fact above
+    /// the gate would have, closing what it supersedes or being closed
+    /// by what is newer. Returns how many older facts it closed.
+    pub fn facts_approve(&mut self, space: &ScopedSpace, fact_id: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let (subject, predicate, valid_from): (i64, String, String) = tx
+            .query_row(
+                "SELECT subject_entity, predicate, valid_from FROM facts
+                 WHERE id = ?1 AND space_id = ?2 AND status = 'proposed'",
+                rusqlite::params![fact_id, space.id()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => SconeError::NotFound(format!(
+                    "proposed fact {fact_id} in space {}",
+                    space.name()
+                )),
+                other => SconeError::Db(other),
+            })?;
+        tx.execute(
+            "UPDATE facts SET status = 'active', status_reason = 'approved' WHERE id = ?1",
+            rusqlite::params![fact_id],
+        )?;
+        let closed =
+            settle_active_fact(&tx, space.id(), subject, &predicate, fact_id, &valid_from)?;
+        tx.commit()?;
+        Ok(closed)
+    }
+
+    /// Turn a proposal down with a reason. The row stays, so the same
+    /// extraction arriving again is a restatement of a declined fact,
+    /// not a fresh proposal; nothing is deleted.
+    pub fn facts_decline(&mut self, space: &ScopedSpace, fact_id: i64, reason: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE facts SET status = 'declined', status_reason = ?1
+             WHERE id = ?2 AND space_id = ?3 AND status = 'proposed'",
+            rusqlite::params![reason, fact_id, space.id()],
+        )?;
+        if changed == 0 {
+            return Err(SconeError::NotFound(format!(
+                "proposed fact {fact_id} in space {}",
+                space.name()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Place a newly active fact in the ledger: close the older active facts
+/// on the same subject and predicate that it supersedes, and if a newer
+/// one is already on record, close the new fact instead. Only a fact
+/// that is actually newer may supersede: backfilling an old document
+/// must not overwrite what has been learned since (I2/I3). Returns how
+/// many older facts were closed.
+fn settle_active_fact(
+    tx: &rusqlite::Transaction<'_>,
+    space_id: i64,
+    subject: i64,
+    predicate: &str,
+    new_id: i64,
+    happened_at: &str,
+) -> Result<usize> {
+    let closed = tx.execute(
+        "UPDATE facts SET status = 'closed',
+                valid_until = ?5,
+                status_reason = 'superseded by fact ' || ?1
+         WHERE space_id = ?2 AND subject_entity = ?3 AND predicate = ?4
+           AND status = 'active' AND id != ?1 AND valid_from <= ?5",
+        rusqlite::params![new_id, space_id, subject, predicate, happened_at],
+    )?;
+    let newer: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM facts
+             WHERE space_id = ?1 AND subject_entity = ?2 AND predicate = ?3
+               AND status = 'active' AND id != ?4 AND valid_from > ?5
+             ORDER BY valid_from DESC LIMIT 1",
+            rusqlite::params![space_id, subject, predicate, new_id, happened_at],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(SconeError::Db(other)),
+        })?;
+    if let Some(winner) = newer {
+        tx.execute(
+            "UPDATE facts SET status = 'closed',
+                    valid_until = (SELECT valid_from FROM facts WHERE id = ?2),
+                    status_reason = 'superseded by fact ' || ?2
+             WHERE id = ?1",
+            rusqlite::params![new_id, winner],
+        )?;
+    }
+    Ok(closed)
 }
 
 /// One provenance link: which episode taught us a fact.

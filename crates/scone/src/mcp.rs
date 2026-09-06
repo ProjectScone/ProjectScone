@@ -46,6 +46,15 @@ pub struct RecallParams {
     pub tags: Option<Vec<String>>,
     /// Evaluate fact validity at this ISO-8601 instant (time travel)
     pub as_of: Option<String>,
+    /// Only episodes of this kind (note, file, conversation, ...)
+    pub kind: Option<String>,
+    /// Only episodes whose source starts with this text (a path, a
+    /// session id, a URL origin); literal, not a pattern
+    pub source_prefix: Option<String>,
+    /// Only episodes that happened at or after this RFC 3339 instant
+    pub since: Option<String>,
+    /// Only episodes that happened at or before this RFC 3339 instant
+    pub until: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -206,6 +215,17 @@ impl SconeMcp {
         let limit = p.limit.unwrap_or(5).clamp(1, MAX_LIMIT);
         let include_profile = p.include_profile.unwrap_or(true);
         let result = self.with_space(&p.space, |engine, space| {
+            // Date arithmetic is computed, not generated, on this surface
+            // too: measured on 40 temporal questions at temperature 0 the
+            // reader scored 47.5% with computed answers against 37.5%
+            // without, and where the planner answers at all it gained
+            // three items in seventeen (E28). The planner declines anything
+            // it cannot read confidently, so most queries never see it.
+            let now = p
+                .as_of
+                .clone()
+                .unwrap_or_else(scone_core::temporal::now_rfc3339);
+            let computed = engine.answer_temporally(space, &p.query, Some(&now))?;
             let profile = if include_profile {
                 Some(engine.profile(space, 5)?)
             } else {
@@ -221,13 +241,23 @@ impl SconeMcp {
                     expand_neighbors: true,
                     decompose: true,
                     tags: p.tags.clone().unwrap_or_default(),
+                    kind: p.kind.clone(),
+                    source_prefix: p.source_prefix.clone(),
+                    since: p.since.clone(),
+                    until: p.until.clone(),
                 },
             )?;
-            Ok((profile, pack))
+            Ok((computed, profile, pack))
         });
         Ok(match result {
-            Ok((profile, pack)) => {
+            Ok((computed, profile, pack)) => {
                 let mut out = String::new();
+                if let Some(answer) = computed {
+                    out.push_str(&format!(
+                        "computed: {}\nderived from: {}\n",
+                        answer.value, answer.derivation
+                    ));
+                }
                 if let Some(profile) = profile {
                     if !profile.static_facts.is_empty() {
                         out.push_str(

@@ -11,11 +11,13 @@ from scone_memory.metrics import compute, nearest_rank
 from scone_memory.ports import Event
 
 
-def recall(i, ts, total, lanes, similarity=0.5, returned=10, space_bytes=100, where=None, error=None, embedder="hash-256"):
+def recall(i, ts, total, lanes, similarity=0.5, returned=10, space_bytes=100, where=None, error=None, embedder="hash-256",
+           low_confidence=None, floor=None):
     payload = {
         "embedder": embedder, "latency_ms": {"total": total, "embed": 1.0, "vector": total / 2, "text": 1.0},
         "items": [{"chunk_id": 1, "episode_id": 1, "score": 1.0, "similarity": similarity, "lanes": lanes}] if lanes is not None else [],
         "returned_bytes": returned, "space_bytes": space_bytes, "where": where or {}, "degraded": [],
+        "low_confidence": low_confidence, "similarity_floor": floor,
     }
     if error:
         payload["error"] = error
@@ -134,3 +136,18 @@ def test_metrics_endpoint_reports_evidence_source_and_coverage():
         assert by_name["recall.latency_ms.p50"]["value"] > 0
         assert by_name["ingest.fresh_episodes"]["value"] == 1
         assert c.get("/v1/metrics", params={"limit": "1"}, headers=h).json()["coverage"]["truncated"] is True
+
+
+def test_low_confidence_share_counts_only_judged_recalls():
+    events = [
+        recall(1, "2025-01-01T10:00:00.000Z", 10.0, {"vector": 1}, similarity=0.9, low_confidence=False, floor=0.5),
+        recall(2, "2025-01-01T11:00:00.000Z", 10.0, {"vector": 1}, similarity=0.2, low_confidence=True, floor=0.5),
+        recall(3, "2025-01-01T12:00:00.000Z", 10.0, None, low_confidence=True, floor=0.5),  # found nothing
+        recall(4, "2025-01-01T13:00:00.000Z", 10.0, {"text": 1}, similarity=None),  # no floor: not judged
+        recall(5, "2025-01-01T14:00:00.000Z", 5.0, None, error="both lanes failed", low_confidence=True, floor=0.5),
+    ]
+    m = metric(compute(events), "recall.low_confidence_share")
+    assert (m.value, m.n) == (round(2 / 3, 4), 3), "two of the three judged recalls were flagged; the failed one and the unjudged one are outside"
+    assert "0.5" in m.definition and "abstention accuracy" in m.caveat
+    none = metric(compute([events[3]]), "recall.low_confidence_share")
+    assert (none.value, none.n) == (None, 0), "no judged recall, no share"

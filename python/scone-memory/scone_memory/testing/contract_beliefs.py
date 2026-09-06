@@ -112,6 +112,69 @@ async def test_origin_survives_export_and_import(engine):
         await engine.assert_fact("default", "a", "b", "c", origin="rumour")
 
 
+async def test_a_quoted_claim_is_checked_against_its_source(engine):
+    """A quote is the exact text the claim rests on. It must be in the
+    source episode; a claim with a source but no quote is stored and reads
+    as ungrounded; a quote with no source has nothing to be checked against."""
+    ep = await engine.remember("default", "Ana moved to Lisbon in March 2024 for the harbour job.", created_at="2024-03-02")
+    grounded = await engine.assert_fact("default", "ana", "lives_in", "Lisbon", valid_from="2024-03-02", origin="extracted",
+                                        proposed=True, source_episode_id=ep.episode_id, quote="Ana moved to Lisbon in March 2024")
+    assert grounded.quote == "Ana moved to Lisbon in March 2024" and grounded.grounded is True
+    with pytest.raises(InvalidInput, match="not a substring"):
+        await engine.assert_fact("default", "ana", "works_at", "the harbour", origin="extracted", proposed=True,
+                                 source_episode_id=ep.episode_id, quote="Ana works at the harbour")
+    with pytest.raises(InvalidInput, match="empty"):
+        await engine.assert_fact("default", "ana", "works_at", "x", source_episode_id=ep.episode_id, quote="   ")
+    with pytest.raises(InvalidInput, match="source_episode_id"):
+        await engine.assert_fact("default", "ana", "works_at", "x", quote="Ana moved")
+    with pytest.raises(NotFound):
+        await engine.assert_fact("default", "ana", "works_at", "x", source_episode_id=999, quote="Ana moved")
+    ungrounded = await engine.assert_fact("default", "ana", "prefers", "mornings", origin="extracted", proposed=True, source_episode_id=ep.episode_id)
+    assert ungrounded.quote is None and ungrounded.grounded is False, "legacy or quote-less extractions read as ungrounded"
+    stated = await engine.assert_fact("default", "ana", "name", "Ana")
+    assert stated.grounded is None, "a stated claim with no source is neither grounded nor ungrounded"
+    assert [f.fact_id for f in await engine.facts("default", status="proposed")] == [grounded.fact_id, ungrounded.fact_id]
+    # the quote survives approval and export
+    await engine.approve("default", grounded.fact_id)
+    dump = [r async for r in engine.export("default")]
+    assert next(r for r in dump if r.get("type") == "fact" and r["object"] == "Lisbon")["quote"] == "Ana moved to Lisbon in March 2024"
+    await engine.import_records("other", dump)
+    moved = next(f for f in await engine.facts("other") if f.object == "Lisbon")
+    assert moved.quote == "Ana moved to Lisbon in March 2024"
+
+
+async def test_history_returns_the_chain_behind_a_matched_claim(engine):
+    """Research experiment 3: a knowledge-update question needs what was
+    believed before as well as what holds now. History is opt-in, oldest
+    first, and made only of closed ledger facts on the same subject and
+    predicate: not proposals, not excluded facts, not another subject's
+    closed facts."""
+    await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2019-08-01")
+    await engine.assert_fact("default", "mark", "lives_in", "Berlin", valid_from="2022-01-01")
+    lisbon = await engine.assert_fact("default", "mark", "lives_in", "Lisbon", valid_from="2024-03-02")
+    await engine.assert_fact("default", "ana", "lives_in", "Rome", valid_from="2020-01-01")  # another subject's chain stays out
+    await engine.assert_fact("default", "ana", "lives_in", "Oslo", valid_from="2021-01-01")
+    hidden = await engine.assert_fact("default", "mark", "lives_in", "Nowhere", valid_from="2018-01-01")  # closed, then excluded
+    await engine.exclude("default", hidden.fact_id, "a joke")
+    await engine.assert_fact("default", "mark", "lives_in", "Porto", valid_from="2025-01-01", origin="extracted", proposed=True)
+
+    plain = await engine.recall("default", "where does mark live")
+    assert [f.object for f in plain.facts] == ["Lisbon"] and plain.history == []
+
+    with_history = await engine.recall("default", "where does mark live", history=True)
+    assert [f.object for f in with_history.facts] == ["Lisbon"]
+    chain = with_history.history
+    assert [f.object for f in chain] == ["Austin", "Berlin"], "oldest first; the excluded one and the proposal are not history"
+    assert all(f.status == "closed" for f in chain)
+    assert chain[0].valid_until == "2022-01-01T00:00:00.000Z" and chain[1].valid_until == lisbon.valid_from
+    assert chain[1].closed_reason == f"superseded by fact {lisbon.fact_id}"
+
+    await engine.assert_fact("default", "mark", "lives_in", "Madrid", valid_from="2025-06-01")  # closes Lisbon too
+    then = await engine.recall("default", "where does mark live", as_of="2023-01-01", history=True)
+    assert [f.object for f in then.facts] == ["Berlin"]
+    assert [f.object for f in then.history] == ["Austin"], "only what came before the boundary; Lisbon is closed too but began after it"
+
+
 __all__ = [
     "test_a_proposal_answers_nothing_until_a_person_approves_it",
     "test_a_proposal_is_not_touched_by_later_assertions",
@@ -119,4 +182,6 @@ __all__ = [
     "test_approving_a_duplicate_proposal_returns_the_held_fact",
     "test_excluding_hides_a_fact_without_rewriting_its_history",
     "test_origin_survives_export_and_import",
+    "test_a_quoted_claim_is_checked_against_its_source",
+    "test_history_returns_the_chain_behind_a_matched_claim",
 ]

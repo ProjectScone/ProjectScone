@@ -18,12 +18,25 @@ The engine is written against three small protocols (documents, vectors,
 embedder), so the same code runs in-process with no server, or against
 MongoDB and Qdrant behind FastAPI. The in-process stores are the reference
 implementation; the database adapters pass the same contract tests.
+Vector indexes: in-memory, SQLite, Qdrant, Chroma (embedded or server),
+LanceDB (embedded), Milvus (Milvus Lite embedded or server), PostgreSQL
+with pgvector, Redis with RediSearch, Elasticsearch. Document stores: in-memory, SQLite, MongoDB, PostgreSQL,
+Elasticsearch. Evidence: in-memory, SQLite, MongoDB, PostgreSQL,
+Elasticsearch. With `SCONE_DOCUMENTS=postgres` or `=elasticsearch` the
+vectors and the evidence log default to the same database through one
+connection.
 
 ## Install
 
 ```sh
 pip install scone-memory                 # core, in-process stores
 pip install 'scone-memory[mongo,qdrant]' # database adapters
+pip install 'scone-memory[postgres]'     # PostgreSQL + pgvector for documents, vectors and evidence (SCONE_POSTGRES_URL)
+pip install 'scone-memory[chroma]'       # Chroma vectors (SCONE_VECTORS=chroma; SCONE_CHROMA_PATH or SCONE_CHROMA_URL)
+pip install 'scone-memory[lancedb]'      # LanceDB vectors (SCONE_VECTORS=lancedb, SCONE_LANCEDB_PATH)
+pip install 'scone-memory[redis]'        # Redis Stack vectors (SCONE_VECTORS=redis, SCONE_REDIS_URL)
+pip install 'scone-memory[milvus-lite]'  # Milvus vectors, embedded (SCONE_VECTORS=milvus, SCONE_MILVUS_URI=./milvus.db); [milvus] for a server
+pip install 'scone-memory[elasticsearch]' # Elasticsearch 8 for documents, vectors and evidence (SCONE_ELASTICSEARCH_URL)
 pip install 'scone-memory[api]'          # FastAPI server
 pip install 'scone-memory[local-embed]'  # bge-small ONNX, same model as the Rust core
 ```
@@ -70,7 +83,7 @@ outside the space it was issued for.
 |---|---|
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |
-| `GET /v1/recall?q&limit&as_of&tags` | hybrid recall plus the facts that held at `as_of` |
+| `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
 
@@ -84,6 +97,139 @@ chunk). Two lanes, vector and lexical, are fused by reciprocal rank with a
 small recency term, capped at two chunks per episode. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
+
+`top_similarity` is the best cosine the vector lane saw for the query.
+With `SCONE_SIMILARITY_FLOOR` set (a cosine, e.g. `0.45`), a recall whose
+best hit falls below it, or that finds nothing, carries
+`low_confidence: true` so the reader can decline to answer from weak
+evidence; without a floor the field is `null` and nothing is judged. The
+floor has no default because the right value depends on the embedder:
+`scone-memory bench` prints, for each candidate floor, how many
+no-evidence questions it would catch and how many answerable ones it
+would wrongly withhold, and that sweep is where a floor comes from.
+
+`history=true` (CLI `--history`) adds, for every matched fact, the closed
+facts that held before it for the same subject and predicate, oldest
+first, each with its interval and closing reason, bounded by `as_of`.
+
+## What survives a crash
+
+A `remember` marks the episode's identity in the document store before
+it writes, and clears the mark only after the rows and the vectors are
+all durable. On the next open the engine finishes or forgets whatever
+was cut off in between: chunks are rebuilt from the stored content when
+they are missing, vectors are re-embedded when they are missing, and a
+mark with no episode behind it is dropped. Each open that had anything
+to repair records one `recover` event with the counts. The guarantee:
+an episode you can see is complete, or it is absent; it is never
+searchable by one lane and not the other. This holds on every document
+store below (the recovery contract in `tests/test_contract.py` plays the
+crash at each step of the write).
+
+## Stores and what each one promises
+
+Every store below runs the same 37 contract tests (`tests/test_contract.py`)
+and every evidence sink the same 8 (`tests/test_events.py`). "Verified"
+says how: embedded means in-process in the test suite and CI; container
+means against a real server in Docker locally and as a CI service.
+
+| Store | Documents | Vectors | Evidence | Verified | Notes |
+|---|---|---|---|---|---|
+| in-memory | yes | yes | yes | embedded | reference implementation |
+| SQLite | yes | yes | yes | embedded | FTS5 lexical lane; WAL; schema stamped, additive steps from v5 (quote column, inflight table) |
+| MongoDB | yes | | yes | container (local; CI when `SCONE_TEST_MONGO_URL` is set) | `$text` lexical lane; TTL retention |
+| PostgreSQL + pgvector | yes | yes | yes | container | tsvector lexical lane, HNSW cosine, one pool for all three |
+| Elasticsearch 8 | yes | yes | yes | container | BM25 lexical lane, float32 HNSW (int8 would round cosine), refresh per write |
+| Qdrant | | yes | | embedded (local mode) and container | payload filters server-side |
+| Redis Stack | | yes | | container | TAG/NUMERIC prefilters inside the KNN query |
+| Chroma | | yes | | embedded; server by URL | width recorded in collection metadata |
+| LanceDB | | yes | | embedded | SQL predicates, quotes doubled |
+| Milvus | | yes | | embedded (Milvus Lite); server by URI | filter expressions with JSON literals |
+| any LangChain VectorStore | | yes | | embedded (`InMemoryVectorStore`, FAISS) | needs a `filter_builder` and a stated `score`; see below |
+
+Intentional differences: lexical scores are each store's own (BM25,
+`$text`, `ts_rank`); only their order reaches the fusion, so ranking
+agrees across stores while the raw numbers do not. Retention is a TTL
+index on MongoDB and a clock-driven sweep elsewhere. No store migrates
+another build's data: each stamps a schema version and refuses a
+mismatch, SQLite excepted for the one recorded step.
+
+## Any LangChain VectorStore as the vector index
+
+```python
+from langchain_community.vectorstores import FAISS   # or Pinecone, Weaviate, PGVector, Azure Search, ...
+from scone_memory.backends import LangChainVectorIndex
+
+from scone_memory.backends.langchain import LangChainVectorIndex as Bridge
+
+def faiss_filter(space, as_of_ts, tags, where):          # FAISS hands a callable the metadata dict
+    return lambda meta: Bridge._matches(meta, space, as_of_ts, tags, where)
+
+index = LangChainVectorIndex(score="cosine_similarity", filter_builder=faiss_filter)
+index.bind(FAISS(embedding_function=index.embeddings, index=faiss.IndexFlatIP(dim), docstore=InMemoryDocstore(),
+                 index_to_docstore_id={}, distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT, normalize_L2=True))
+engine = MemoryEngine(documents, index, embedder)
+```
+
+The bridge makes the three things that differ between stores explicit
+rather than guessing: vectors reach the store through `index.embeddings`
+(or `add_embeddings` where the store has it); scope filters need a
+`filter_builder(space, as_of_ts, tags, where)` that returns the store's
+own filter, and without one the bridge over-fetches and filters on its
+metadata, refusing (the lane reads as degraded, the lexical lane still
+answers) whenever the window filled with out-of-scope candidates before
+`limit` matches were found; and `score` names what the store's number
+means (`cosine_similarity`, `cosine_distance`, `unit_l2_squared`, or the
+default `unknown`, under which the order still drives fusion but no
+similarity is shown and no confidence verdict is derived). The contract
+runs through the bridge over `langchain_core`'s `InMemoryVectorStore`,
+filtered and post-filtered, and over FAISS (inner product on unit
+vectors, a callable filter over the metadata dict), which is the recipe
+above.
+
+## Using it from a framework
+
+Three adapters live under `scone_memory.integrations`; each needs its
+framework installed (`pip install 'scone-memory[langchain]'`,
+`[llamaindex]`, `[openai-agents]`) and says so if it is missing.
+
+```python
+from scone_memory import SyncMemoryEngine
+from scone_memory.integrations.langchain import SconeRetriever, SconeChatMessageHistory
+
+memory = SyncMemoryEngine.from_env()
+retriever = SconeRetriever(memory=memory, space="default", limit=5, where={"user_id": "mark"}, include_facts=True)
+docs = retriever.invoke("where is the deploy runbook")   # Documents with episode_id, score, similarity, lanes in metadata
+history = SconeChatMessageHistory(memory, "default", session_id="chat-1", extra={"user_id": "mark"})
+history.add_messages([...])                              # one episode per message, in order, recallable like any memory
+```
+
+`scone_memory.integrations.llamaindex.SconeRetriever(memory, space, ...)`
+returns `NodeWithScore` nodes (`retrieve` needs a `SyncMemoryEngine`,
+`aretrieve` takes either); `scone_memory.integrations.openai_agents.SconeSession(engine, space, session_id)`
+is a `Session` for the Agents SDK runner (`get_items`, `add_items`,
+`pop_item`, `clear_session`).
+
+Conversation turns are stored one episode each with `session_id`, `role`
+and `seq` metadata. A plain text message is stored as its text so recall
+reads well over the transcript; anything else (tool calls, structured
+content, extra fields) is stored verbatim as JSON. Either way what was
+added is what comes back. Turns are deduplicated by position, not text
+(`Record.dedup_key`), so the second "ok" in a conversation is a second
+turn; a dump carries each episode's identity, so a re-imported transcript
+keeps its repeats.
+
+## Running it as a service
+
+```sh
+docker build -t scone-memory .                      # server image; add --build-arg EXTRAS=api,mongo,qdrant,postgres,local-embed for the ONNX embedder
+SCONE_API_KEY=change-me docker compose up --build   # MongoDB + Qdrant + scone-memory on :7437, data in named volumes
+scripts/compose-smoke.sh                            # brings the stack up, round-trips an episode, tears it down
+```
+
+The image refuses to start without `SCONE_API_KEY`. Its `/data` volume
+holds the SQLite file when no database is configured, and the embedder's
+model cache.
 
 ## Tests
 

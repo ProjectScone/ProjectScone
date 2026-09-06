@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
 from array import array
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -48,7 +49,7 @@ CREATE TABLE IF NOT EXISTS facts (
     subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
     confidence REAL NOT NULL, valid_from TEXT NOT NULL, valid_until TEXT,
     status TEXT NOT NULL, closed_reason TEXT, source_episode_id INTEGER,
-    origin TEXT NOT NULL DEFAULT 'stated', excluded_reason TEXT);
+    origin TEXT NOT NULL DEFAULT 'stated', excluded_reason TEXT, superseded_by INTEGER, quote TEXT);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(space, subject, predicate);
 CREATE TABLE IF NOT EXISTS revisions (space TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vectors (
@@ -57,12 +58,24 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS vectors_space ON vectors(space, created_at);
 CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
 """
 
-#: Shared spec 3.6. Bumped on any incompatible change; while the package
-#: is pre-release nothing is migrated: a file from an older build is
-#: refused with a message, not rewritten.
-SCHEMA_VERSION = 4  # 4: facts carry origin and excluded_reason
+#: Shared spec 3.6. Bumped on any incompatible change. A file from an
+#: older build is refused with a message, not rewritten, unless this build
+#: knows the one additive step from that exact version (STEPS below).
+SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
+
+#: Additive steps this build can apply, keyed by the version they start
+#: from. A version gets a step only once a live store has held it (the
+#: first was v5, the live ProjectScone store on 2026-09-06); any other
+#: version is refused, because a guess about an unknown layout is worse
+#: than a clear stop. A step runs with its version bump in one transaction,
+#: after a backup copy of the file is written beside it.
+STEPS: dict[int, tuple[str, ...]] = {
+    5: ("ALTER TABLE facts ADD COLUMN quote TEXT",),
+    6: ("CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash))",),
+}
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -71,31 +84,120 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(Path(path).expanduser()) if str(path) != ":memory:" else path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    enable_wal(conn)
     conn.executescript(SCHEMA)
-    check_schema(conn)
+    check_schema(conn, path)
     return conn
 
 
+def enable_wal(conn: sqlite3.Connection, attempts: int = 100, pause_s: float = 0.02) -> None:
+    """Switch a file to write-ahead logging. The switch opens a read
+    transaction and upgrades it to a write; if another connection holds
+    the reserved lock at that moment SQLite refuses at once instead of
+    calling the busy handler (its deadlock rule). Several openers starting
+    on a rollback-journal file together therefore failed in CI with
+    "database is locked". The mode is persistent, so whoever wins settles
+    it and the others retry until their own switch goes through."""
+    for attempt in range(attempts):
+        try:
+            # An in-memory database answers "memory" and stays that way;
+            # that is not a failure. Only a lock error is retried.
+            conn.execute("PRAGMA journal_mode = WAL").fetchall()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or attempt == attempts - 1:
+                raise
+        time.sleep(pause_s)
+
+
 def schema_version(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    if row:
-        return int(row["value"])
-    has_rows = conn.execute("SELECT 1 FROM episodes LIMIT 1").fetchone() is not None
+    # fetchall, not fetchone: an exhausted statement releases its read lock,
+    # and a read lock still held when BEGIN IMMEDIATE is attempted makes
+    # SQLite refuse at once (deadlock avoidance) instead of waiting.
+    rows = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
+    if rows:
+        return int(rows[0]["value"])
+    has_rows = bool(conn.execute("SELECT 1 FROM episodes LIMIT 1").fetchall())
     return 1 if has_rows else SCHEMA_VERSION
 
 
-def check_schema(conn: sqlite3.Connection) -> None:
-    """Stamp a fresh file; refuse a file another build wrote."""
+def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> None:
+    """Stamp a fresh file; walk a file forward through every known step
+    from its version to this build's, one transaction and one backup per
+    step; refuse a version with no step from it."""
     version = schema_version(conn)
-    if version != SCHEMA_VERSION:
+    if version == SCHEMA_VERSION:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.commit()
+        return
+    if version > SCHEMA_VERSION or version not in STEPS:
         raise SchemaMismatch(
-            f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION}. "
-            "scone-memory is pre-release and does not migrate: export with the build that "
-            "wrote the file, delete it, and import again."
+            f"this file holds schema v{version}; this build writes v{SCHEMA_VERSION} and knows no step from v{version}. "
+            "Export with the build that wrote the file, delete it, and import again."
         )
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
-    conn.commit()
+    while version < SCHEMA_VERSION:
+        if version not in STEPS:
+            raise SchemaMismatch(
+                f"this file reached schema v{version} but this build knows no step from there to v{SCHEMA_VERSION}."
+            )
+        apply_step(conn, version, path)
+        version = schema_version(conn)
+
+
+def backup_before_step(path: "str | Path", version: int) -> None:
+    """``<name>.v<version>.bak`` through SQLite's online backup, read by its
+    own connection so it copies the committed file, which under the
+    caller's write lock is exactly the pre-step state. An existing backup
+    is kept."""
+    target = Path(path).expanduser()
+    backup = target.with_name(target.name + f".v{version}.bak")
+    if backup.exists():
+        return
+    source, dest = sqlite3.connect(target), sqlite3.connect(backup)
+    try:
+        source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+
+
+def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None") -> None:
+    """Run the additive statements for ``version`` and bump to version + 1 in
+    one transaction. For a file store a backup is taken first, inside the
+    write lock: two openers racing on the same file used to both find no
+    backup and both write one, and the second failed with "database is
+    locked" on the backup file itself (seen in CI). Under the lock only the
+    opener that applies the step takes the backup; the others find the
+    version already bumped and do nothing."""
+    conn.isolation_level = None  # explicit transaction control below
+    conn.execute("BEGIN IMMEDIATE")  # takes the write lock; a second opener waits here
+    try:
+        # Re-read under the lock: if another opener applied the step while we
+        # waited, there is nothing left to do and applying it twice would
+        # fail on the duplicate column.
+        rows = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchall()
+        current = int(rows[0][0]) if rows else version
+        if current != version:
+            conn.execute("COMMIT")
+            # Another opener applied this step, and perhaps the ones after
+            # it, while we waited; the caller's walk re-reads and carries on.
+            if current < version or current > SCHEMA_VERSION:
+                raise SchemaMismatch(
+                    f"schema changed to v{current} while opening; expected v{version} to v{SCHEMA_VERSION}"
+                )
+            return
+        if path is not None and str(path) != ":memory:":
+            backup_before_step(path, version)
+        for statement in STEPS[version]:
+            conn.execute(statement)
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(version + 1),))
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = ""  # back to the module's default (implicit transactions)
 
 
 class SchemaMismatch(SconeError):
@@ -145,6 +247,8 @@ def _fact(row: sqlite3.Row) -> Fact:
         source_episode_id=row["source_episode_id"],
         origin=row["origin"],
         excluded_reason=row["excluded_reason"],
+        superseded_by=row["superseded_by"],
+        quote=row["quote"],
     )
 
 
@@ -208,6 +312,24 @@ class SqliteDocumentStore:
         ).fetchall()
         return [_chunk(r) for r in rows]
 
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        rows = self.conn.execute(
+            "SELECT * FROM chunks WHERE space = ? AND episode_id = ? ORDER BY ordinal", (space, episode_id)
+        ).fetchall()
+        return [_chunk(r) for r in rows]
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO inflight (space, content_hash) VALUES (?, ?)", (space, content_hash))
+        self.conn.commit()
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        self.conn.execute("DELETE FROM inflight WHERE space = ? AND content_hash = ?", (space, content_hash))
+        self.conn.commit()
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        rows = self.conn.execute("SELECT space, content_hash FROM inflight ORDER BY space, content_hash").fetchall()
+        return [(r["space"], r["content_hash"]) for r in rows]
+
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
@@ -259,11 +381,11 @@ class SqliteDocumentStore:
     async def insert_fact(self, new: NewFact) -> Fact:
         cur = self.conn.execute(
             "INSERT INTO facts (space, subject, predicate, object, confidence, valid_from, valid_until, status,"
-            " closed_reason, source_episode_id, origin, excluded_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " closed_reason, source_episode_id, origin, excluded_reason, superseded_by, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 new.space, new.subject, new.predicate, new.object, new.confidence, new.valid_from,
                 new.valid_until, new.status, new.closed_reason, new.source_episode_id, new.origin,
-                new.excluded_reason,
+                new.excluded_reason, new.superseded_by, new.quote,
             ),
         )
         self.conn.commit()
@@ -272,10 +394,10 @@ class SqliteDocumentStore:
     async def update_fact(self, fact: Fact) -> None:
         cur = self.conn.execute(
             "UPDATE facts SET object = ?, confidence = ?, valid_from = ?, valid_until = ?, status = ?,"
-            " closed_reason = ?, origin = ?, excluded_reason = ? WHERE id = ? AND space = ?",
+            " closed_reason = ?, origin = ?, excluded_reason = ?, superseded_by = ? WHERE id = ? AND space = ?",
             (
                 fact.object, fact.confidence, fact.valid_from, fact.valid_until, fact.status,
-                fact.closed_reason, fact.origin, fact.excluded_reason, fact.fact_id, fact.space,
+                fact.closed_reason, fact.origin, fact.excluded_reason, fact.superseded_by, fact.fact_id, fact.space,
             ),
         )
         self.conn.commit()

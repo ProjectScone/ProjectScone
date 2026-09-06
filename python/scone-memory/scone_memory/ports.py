@@ -53,7 +53,9 @@ class NewFact:
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
     origin: str = "stated"
+    superseded_by: Optional[int] = None
     excluded_reason: Optional[str] = None
+    quote: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,22 @@ class DocumentStore(Protocol):
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]: ...
     async def get_chunks(self, space: str, chunk_ids: Sequence[int]) -> list[Chunk]: ...
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        """Every chunk of one episode, in ordinal order."""
+        ...
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        """Record that a write for this episode identity has started and
+        its vectors may not have landed. Cleared by ``clear_inflight``
+        once the whole episode (rows and vectors) is durable; anything
+        still marked when the engine next opens is repaired first. Marks
+        are idempotent per (space, hash)."""
+        ...
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None: ...
+    async def inflight(self) -> list[tuple[str, str]]:
+        """Every (space, content_hash) still marked, any space."""
+        ...
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
@@ -161,6 +179,11 @@ class NewEvent:
     kind: str
     payload: Mapping[str, object]
     schema_version: int = EVENT_SCHEMA_VERSION
+    #: Connector-supplied identity for an externally reported event, unique
+    #: per space. A second append with the same key returns the stored
+    #: event when the payload matches and raises DuplicateEvent when it
+    #: differs. None for engine events.
+    dedup_key: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +194,15 @@ class Event:
     kind: str
     payload: Mapping[str, object]
     schema_version: int = EVENT_SCHEMA_VERSION
+    dedup_key: Optional[str] = None
+
+
+class DuplicateEvent(Exception):
+    """The dedup_key is already stored with a different payload."""
+
+    def __init__(self, existing: "Event") -> None:
+        super().__init__(f"event {existing.event_id} already holds dedup key {existing.dedup_key!r} with a different payload")
+        self.existing = existing
 
 
 @runtime_checkable
@@ -181,7 +213,12 @@ class EventLog(Protocol):
 
     name: str
 
-    async def append(self, new: NewEvent) -> Event: ...
+    async def append(self, new: NewEvent) -> Event:
+        """Store and return. With a dedup_key: return the existing event if
+        one holds the same key and payload in this space; raise
+        DuplicateEvent if the payload differs. Atomic per sink."""
+        ...
+
     async def get(self, space: str, event_id: int) -> Optional[Event]: ...
     async def query(
         self,
@@ -189,8 +226,13 @@ class EventLog(Protocol):
         kind: Optional[str] = None,
         since: Optional[str] = None,
         limit: int = 100,
+        after_id: Optional[int] = None,
     ) -> list[Event]:
-        """Newest first. ``since`` is inclusive on the event timestamp."""
+        """Newest first. ``since`` is inclusive on the event timestamp.
+
+        With ``after_id``, oldest first and only events with a larger id:
+        a stable cursor for a reader that must not miss a burst, since
+        ids are assigned at receipt and never reused."""
         ...
 
 

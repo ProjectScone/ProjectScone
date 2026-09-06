@@ -1,0 +1,10 @@
+.venv
+tests
+*.egg-info
+__pycache__
+*.pyc
+.pytest_cache
+Dockerfile
+docker-compose.yml
+dist
+build

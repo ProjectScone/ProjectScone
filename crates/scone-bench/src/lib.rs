@@ -323,6 +323,7 @@ pub fn run_item_with(
                 expand_neighbors: false,
                 decompose: opts.decompose,
                 tags: Vec::new(),
+                ..Default::default()
             },
         )
         .map_err(|e| e.to_string())?;

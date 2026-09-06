@@ -12,6 +12,17 @@ __all__ = [
     "SqliteVectorIndex",
     "MongoDocumentStore",
     "QdrantVectorIndex",
+    "ChromaVectorIndex",
+    "LanceDBVectorIndex",
+    "PostgresDocumentStore",
+    "PostgresVectorIndex",
+    "PostgresEventLog",
+    "RedisVectorIndex",
+    "MilvusVectorIndex",
+    "LangChainVectorIndex",
+    "ElasticsearchDocumentStore",
+    "ElasticsearchVectorIndex",
+    "ElasticsearchEventLog",
 ]
 
 
@@ -24,4 +35,32 @@ def __getattr__(name: str):
         from .qdrant import QdrantVectorIndex
 
         return QdrantVectorIndex
+    if name == "ChromaVectorIndex":
+        from .chroma import ChromaVectorIndex
+
+        return ChromaVectorIndex
+    if name == "LanceDBVectorIndex":
+        from .lancedb import LanceDBVectorIndex
+
+        return LanceDBVectorIndex
+    if name == "RedisVectorIndex":
+        from .redis import RedisVectorIndex
+
+        return RedisVectorIndex
+    if name == "MilvusVectorIndex":
+        from .milvus import MilvusVectorIndex
+
+        return MilvusVectorIndex
+    if name == "LangChainVectorIndex":
+        from .langchain import LangChainVectorIndex
+
+        return LangChainVectorIndex
+    if name in ("ElasticsearchDocumentStore", "ElasticsearchVectorIndex", "ElasticsearchEventLog"):
+        from . import elastic
+
+        return getattr(elastic, name)
+    if name in ("PostgresDocumentStore", "PostgresVectorIndex", "PostgresEventLog"):
+        from . import postgres
+
+        return getattr(postgres, name)
     raise AttributeError(name)

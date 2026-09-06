@@ -1,0 +1,52 @@
+# scone-memory with MongoDB for documents and evidence and Qdrant for
+# vectors. Set SCONE_API_KEY in the environment (or a .env file) before
+# `docker compose up`; the server refuses to start without it.
+#
+#   SCONE_API_KEY=change-me docker compose up --build
+#   curl -H "Authorization: Bearer change-me" localhost:7437/v1/status
+#
+# Data lives in the named volumes; `docker compose down -v` deletes it.
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  scone-memory:
+    build: .
+    environment:
+      SCONE_API_KEY: ${SCONE_API_KEY:?set SCONE_API_KEY}
+      SCONE_DOCUMENTS: mongo
+      SCONE_MONGO_URL: mongodb://mongo:27017
+      SCONE_VECTORS: qdrant
+      SCONE_QDRANT_URL: http://qdrant:6333
+      SCONE_EMBEDDER: ${SCONE_EMBEDDER:-hash}
+    ports:
+      - "${SCONE_PORT:-7437}:7437"
+    volumes:
+      - scone-data:/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
+  qdrant-data:
+  scone-data:

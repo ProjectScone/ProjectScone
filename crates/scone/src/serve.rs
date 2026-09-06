@@ -223,6 +223,7 @@ async fn get_recall(
             .as_deref()
             .map(|t| t.split(',').map(|x| x.trim().to_owned()).collect())
             .unwrap_or_default(),
+        ..Default::default()
     };
     match with_engine(&state, &headers, |engine, space| {
         engine.recall(space, &query.q, &opts)

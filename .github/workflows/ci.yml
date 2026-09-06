@@ -29,12 +29,61 @@ jobs:
     defaults:
       run:
         working-directory: python/scone-memory
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: scone
+          POSTGRES_PASSWORD: scone
+          POSTGRES_DB: scone
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scone"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis/redis-stack-server:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.19.4
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fsS http://localhost:9200/_cluster/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install
-        run: python -m pip install -q -e '.[test,qdrant,mongo]'
+        run: |
+          python -m pip install -q -e '.[test,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents]'
+          python -m pip install -q faiss-cpu langchain-community  # a real third-party store for the LangChain bridge's contract run
       - name: Tests
+        env:
+          SCONE_TEST_POSTGRES_URL: postgresql://scone:scone@localhost:5432/scone
+          SCONE_TEST_REDIS_URL: redis://localhost:6379
+          SCONE_TEST_ELASTICSEARCH_URL: http://localhost:9200
         run: python -m pytest -q -p no:warnings
+      - name: Package
+        # Build the sdist and wheel and check their metadata the way PyPI
+        # would; nothing is uploaded.
+        run: |
+          python -m pip install -q build twine
+          python -m build -q
+          python -m twine check dist/*

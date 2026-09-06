@@ -36,7 +36,7 @@ Stored claims, including model extractions, are not independently verified truth
 | | |
 |---|---|
 | 🧠 **Temporal memory** | Claims with validity intervals and recorded closure reasons. Rust and Python both maintain a fact ledger; their backfill behavior is not yet fully conformant. Rust also supports decay and strengthening. |
-| 🧮 **Computed answers (Rust)** | Retrieve dated evidence and compute date differences with a derivation. A historical 40-question Rust experiment measured 47.5% versus 37.5% for generated answers; this is not a Python result or general answer-quality claim. |
+| 🧮 **Computed answers (Rust)** | Retrieve dated evidence and compute date differences with a derivation, on `scone ask` and at the top of the MCP `memory_recall` pack (`computed: 7 days` with its derivation). A historical 40-question Rust experiment at temperature 0 measured 47.5% versus 37.5% for generated answers, gaining 3 of the 17 items the planner answers; this is not a Python result or general answer-quality claim. |
 | 🕰️ **Time travel** | `search --as-of 2026-03-15` selects records valid at that time according to the current ledger. It does not reconstruct what the store believed before later corrections arrived. |
 | 🔍 **Hybrid search** | BM25, vectors, facts, and recency fused in one query, with provenance on every result. Local ONNX embeddings by default; it works on a plane. |
 | 🏷️ **Tags** | Tag anything on the way in (`--tag research`), then retrieve only that: papers, a client, one knowledge base. Works on the CLI, MCP, and HTTP surfaces. |

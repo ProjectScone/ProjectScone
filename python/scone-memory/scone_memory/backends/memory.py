@@ -33,6 +33,7 @@ class InMemoryDocumentStore:
         self._fact_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
+        self._inflight: set[tuple[str, str]] = set()
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
         episode = Episode(episode_id=next(self._episode_ids), **new.__dict__)
@@ -59,6 +60,19 @@ class InMemoryDocumentStore:
             del self._chunks[chunk_id]
             self._bm25[space].remove(chunk_id)
         return removed
+
+    async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
+        found = [c for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
+        return sorted(found, key=lambda c: c.ordinal)
+
+    async def mark_inflight(self, space: str, content_hash: str) -> None:
+        self._inflight.add((space, content_hash))
+
+    async def clear_inflight(self, space: str, content_hash: str) -> None:
+        self._inflight.discard((space, content_hash))
+
+    async def inflight(self) -> list[tuple[str, str]]:
+        return sorted(self._inflight)
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
         out = []

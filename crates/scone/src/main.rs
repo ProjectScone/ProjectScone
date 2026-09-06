@@ -39,6 +39,18 @@ struct Cli {
     /// (downloads bge-reranker-base once into the data dir)
     #[arg(long, global = true)]
     reranker: bool,
+    /// Hold extracted facts below this confidence (0..=1) as proposed,
+    /// out of recall until `facts approve`; unset means every extracted
+    /// fact is active on arrival
+    #[arg(long, global = true, value_name = "CONFIDENCE")]
+    propose_below: Option<f32>,
+    /// Embed code chunks with their file name, enclosing declaration and
+    /// doc comment in front (stored bytes unchanged). Measured on a
+    /// 20-question probe of this repository as 19/20 against 14/20 at
+    /// Recall@5, but the questions paraphrased the doc comments; off
+    /// until held-out phrasing confirms it (E31)
+    #[arg(long, global = true)]
+    contextual_code: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -196,6 +208,17 @@ enum FactsCmd {
     Why { id: i64 },
     /// Close a fact by hand with a reason (never deletes)
     Close {
+        id: i64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// List proposed facts waiting for a decision
+    Pending,
+    /// Accept a proposed fact: it becomes active and takes its place in
+    /// the ledger, superseding older answers on the same subject
+    Approve { id: i64 },
+    /// Turn a proposed fact down with a reason (the row stays, declined)
+    Decline {
         id: i64,
         #[arg(long)]
         reason: String,
@@ -367,6 +390,10 @@ fn run() -> Result<(), String> {
         Engine::open(&dir, embedder).map_err(|e| e.to_string())?
     };
     engine.set_llm(make_llm(cli.llm, &dir)?);
+    engine
+        .set_propose_below(cli.propose_below)
+        .map_err(|e| e.to_string())?;
+    engine.set_contextual_code(cli.contextual_code);
     #[cfg(feature = "local-embed")]
     if cli.reranker {
         engine.set_reranker(Some(Box::new(
@@ -704,8 +731,33 @@ fn run() -> Result<(), String> {
                         .map_err(|e| e.to_string())?;
                     println!("closed fact {id}: {reason}");
                 }
+                FactsCmd::Pending => {
+                    let facts = engine.facts_pending(&space).map_err(|e| e.to_string())?;
+                    if facts.is_empty() {
+                        println!("nothing pending");
+                    }
+                    for f in facts {
+                        println!(
+                            "[{}] {} {} {}  (conf {:.2}, proposed, from {})",
+                            f.fact_id, f.subject, f.predicate, f.object, f.confidence, f.valid_from
+                        );
+                    }
+                }
+                FactsCmd::Approve { id } => {
+                    let closed = engine
+                        .facts_approve(&space, *id)
+                        .map_err(|e| e.to_string())?;
+                    println!("approved fact {id} ({closed} older fact(s) closed)");
+                }
+                FactsCmd::Decline { id, reason } => {
+                    engine
+                        .facts_decline(&space, *id, reason)
+                        .map_err(|e| e.to_string())?;
+                    println!("declined fact {id}: {reason}");
+                }
             }
         }
+
         Cmd::Watch {
             dir: watch_dir,
             once,

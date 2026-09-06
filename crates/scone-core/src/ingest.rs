@@ -121,8 +121,26 @@ impl Engine {
         self.require_writable()?;
 
         let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        let spans = chunk_syntax(content, self.chunk_target, chunker::syntax_for(source));
-        let texts: Vec<&str> = spans.iter().map(|s| &content[s.start..s.end]).collect();
+        let syntax = chunker::syntax_for(source);
+        let spans = chunk_syntax(content, self.chunk_target, syntax);
+        // What the vector sees. Prose is embedded as itself. Code, when
+        // contextual embedding is on, is embedded with its file name and
+        // enclosing declaration in front, so a chunk cut from the middle
+        // of a function still knows whose body it is. The stored span is
+        // the raw bytes either way (invariant I1).
+        let contextual: Vec<String> = if self.contextual_code && syntax == chunker::Syntax::Code {
+            spans
+                .iter()
+                .map(|s| chunker::contextual_code_text(source, content, *s))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let texts: Vec<&str> = if contextual.is_empty() {
+            spans.iter().map(|s| &content[s.start..s.end]).collect()
+        } else {
+            contextual.iter().map(String::as_str).collect()
+        };
         let embeddings = self.embedder.embed(&texts)?;
 
         let tx = self.conn.transaction()?;
