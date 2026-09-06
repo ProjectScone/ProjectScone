@@ -1,7 +1,7 @@
 import {readScope,type RecallScope} from './recall-scope.ts';
 export type SessionState = 'created'|'running'|'stopping'|'ended'|'failed'|'interrupted';
 export interface ConversationSession {session_id:string;space:string;state:SessionState;revision:number;created_at:string;active_request_id?:string|null;latest_request_id?:string|null;recall_scope?:RecallScope}
-export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean;transcript_pagination:boolean;recall_scope:boolean}
+export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean;transcript_pagination:boolean;recall_scope:boolean;streaming:boolean}
 export interface Episode {episode_id:number;content:string;metadata:Record<string,unknown>;created_at?:string}
 export interface Transcript {episodes:Episode[];has_more:boolean;next_before:string|null}
 export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[]}}
@@ -15,7 +15,11 @@ function text(value:unknown):string{if(typeof value!=='string')throw Error('Inva
 export function capabilities(value:unknown):Capabilities{
   const v=record(value);
   if(v.schema_version!==1||typeof v.text_configured!=='boolean'||v.reply_transport!=='poll'||(v.reply_replay!=='process_lifetime'&&v.reply_replay!=='durable_receipts'))throw Error('This conversation service has an unsupported capability contract.');
-  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true,turn_cancellation:v.turn_cancellation===true,transcript_pagination:v.transcript_pagination===true,recall_scope:v.recall_scope===true};
+  const stream=v.text_stream as Record<string,unknown>|null|undefined;
+  const streaming=v.streaming===true&&stream?.transport==='sse'&&stream.replay==='active_window'
+    &&typeof stream.max_bytes==='number'&&Number.isSafeInteger(stream.max_bytes)&&stream.max_bytes>0
+    &&typeof stream.max_chunks==='number'&&Number.isSafeInteger(stream.max_chunks)&&stream.max_chunks>0;
+  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true,turn_cancellation:v.turn_cancellation===true,transcript_pagination:v.transcript_pagination===true,recall_scope:v.recall_scope===true,streaming};
 }
 export function session(value:unknown):ConversationSession{
   const v=record(value);

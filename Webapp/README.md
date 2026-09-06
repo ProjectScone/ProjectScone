@@ -149,9 +149,9 @@ CLIs retain their own independently tested workflows.
 - `src/memory/`: typed Memory page components, coordinated with Fable.
 - `src/playground/`: scoped graph, record search, source inspection and recall.
 - `src/conversations/`: capability-checked text session controls, saved
-  transcripts, request polling and source evidence. Uses the optional Python
-  conversation API; provider configuration is server-owned. No voice/video or
-  browser token-stream support is claimed.
+  transcripts, public-text previews, request polling and source evidence. Uses
+  the optional Python conversation API; provider configuration is server-owned.
+  No voice/video or token-level telemetry is claimed.
 - `src/api.ts`, `src/types.ts`: authenticated API client and evidence wire types.
 - `src/local-session.ts`: explicit local development bootstrap.
 - `src/components/DevReload.tsx`: opt-in ETag reload for native development previews.
@@ -180,6 +180,30 @@ from one that cannot currently be read, and never resends either automatically.
 It rechecks known receipts, clears revoked reply evidence and protects newer
 commands/session selections from stale polling responses. These are outcome
 receipts, not proof of provider delivery or a reconstructed token stream.
+
+When the service explicitly advertises `streaming: true` with an SSE
+`active_window` contract, accepted turns also show a **Live preview**. This reads
+real public-text chunks using authenticated fetch; the key is never put in a URL,
+redirects are rejected, and no stream is opened on older aggregate-only servers.
+The preview is separate from Saved messages. Only the existing polled receipt
+and transcript establish a retained reply; streamed text is not a capture receipt.
+
+**Reconnect preview** resumes the same turn from its last sequence without
+posting another message. There is no automatic reconnect loop. If the server has
+evicted a prefix, the UI labels the gap and shows only the latest continuous
+segment instead of stitching disconnected passages together. A reload can read
+the active window, not an unlimited history of chunks. The final saved reply
+remains readable through ordinary receipts/transcripts when available.
+
+Each SSE frame is bounded to 524,288 decoded UTF-16 code units including framing,
+and the visible preview to 1 MiB of UTF-8 text. Reaching that limit stops the stream and waits for the
+saved outcome. Thirty seconds without incoming stream bytes interrupts the
+preview; receipt polling continues. These are client safeguards, not provider
+queue or whole-browser memory guarantees. Cancel, end, session/space changes,
+and terminal outcomes remove provisional text and close its reader. A failed,
+forgotten or unreadable reply cannot be replaced with the old preview. Hidden
+reasoning is not displayed; chunk counts are not token counts. Voice and video
+remain separate, unfinished transport work.
 
 For isolated conversation UI checks, build with Vite, package with `--output`
 as above, and pass that path as `SCONE_CONVERSATIONS_HTML` to

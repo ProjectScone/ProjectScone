@@ -64,12 +64,12 @@ export function ConversationPage({api,enabled}:{api:ApiClient;enabled:boolean}){
       {after&&<button onClick={more}>Load more sessions</button>}
       <p className="conversation-list-note">Sessions belong to this memory space. Switching views does not stop an active conversation.</p>
     </aside>
-    {enabled&&cap&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed} textConfigured={cap.text_configured} deletionSupported={cap.session_deletion} cancellationSupported={cap.turn_cancellation} paginationSupported={cap.transcript_pagination} onRemoved={deleted}/>:<section className="conversation-landing">
+    {enabled&&cap&&sid&&idPattern.test(sid)?<ConversationSession key={sid} api={api} sid={sid} onSession={changed} textConfigured={cap.text_configured} deletionSupported={cap.session_deletion} cancellationSupported={cap.turn_cancellation} paginationSupported={cap.transcript_pagination} streamingSupported={cap.streaming} onRemoved={deleted}/>:<section className="conversation-landing">
       <span className="conversation-orbit" aria-hidden="true">✳</span><span className="eyebrow">Context that carries forward</span>
       <h2>{!enabled?'Connect your memory first':cap&&!cap.text_configured?'Text runtime not configured':sid&&!idPattern.test(sid)?'Invalid session address':'Good conversations build on what you know.'}</h2>
       <p>{!enabled?'Use Connect memory to authorize this workspace.':cap&&!cap.text_configured?'Saved conversations remain available. Configure a text model on this server to start or send messages. No provider key belongs in this page.':'Start a text session or open a saved conversation. Inspect the original sources alongside each exchange.'}</p>
       <div className="conversation-landing-facts"><div><b>01</b><strong>Bring context</strong><span>Recall from your authorized memory.</span></div><div><b>02</b><strong>Keep the original</strong><span>Public messages become source records.</span></div><div><b>03</b><strong>See the evidence</strong><span>Inspect what was prepared and saved.</span></div></div>
-      <p className="conversation-caption">This workspace supports completed text replies. Voice and video controls will arrive with verified transport support.</p>
+      <p className="conversation-caption">{cap?.streaming?'This server supports live public-text previews and saved replies.':'This workspace supports completed text replies.'} Voice and video controls will arrive with verified transport support.</p>
     </section>}
     </div>
     {dialog&&<Modal title="Start a conversation" onClose={()=>{if(!starting)setDialog(false);}}><p className="setup-intro">Your configured text model can receive context retrieved from this memory space. Public messages and replies will be saved as sources.</p>

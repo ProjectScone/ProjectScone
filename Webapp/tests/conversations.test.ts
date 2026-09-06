@@ -2,6 +2,19 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {capabilities, session, transcript, turnReceipt} from '../src/conversations/contracts.ts';
 
+test('live text requires an explicit supported SSE active-window contract',()=>{
+  const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
+  const text_stream={transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256};
+  assert.equal(capabilities({...wire,streaming:true,text_stream}).streaming,true);
+  for(const extra of [{},{streaming:'true',text_stream},{streaming:false,text_stream},{streaming:true},
+    {streaming:true,text_stream:{...text_stream,transport:'websocket'}},
+    {streaming:true,text_stream:{...text_stream,replay:'durable'}},
+    {streaming:true,text_stream:{...text_stream,max_bytes:0}},
+    {streaming:true,text_stream:{...text_stream,max_chunks:'256'}}]){
+    assert.equal(capabilities({...wire,...extra}).streaming,false);
+  }
+});
+
 test('recall scope requires explicit support and missing scope remains unknown',()=>{
   const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
   for(const value of [undefined,false,'true',1])assert.equal(capabilities({...wire,recall_scope:value}).recall_scope,false);

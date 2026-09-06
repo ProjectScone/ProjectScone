@@ -12,7 +12,6 @@ if os.environ.get("SCONE_TEST_EXTRA_SITEPACKAGES"):
     sys.path.append(os.environ["SCONE_TEST_EXTRA_SITEPACKAGES"])
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python/scone-memory"))
 
-import uvicorn
 import httpx
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
@@ -21,8 +20,10 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameProcessor
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import conversations
+from scone_memory.api.conversation_server import create_server
 from scone_memory.integrations.pipecat_text import PipecatTextConversation
 
+release_reply = asyncio.Event()
 
 class ScriptedModel(FrameProcessor):
     async def process_frame(self, frame, direction):
@@ -32,6 +33,15 @@ class ScriptedModel(FrameProcessor):
             return
         messages = frame.context.get_messages()
         assert any("Juniper is calibrated with Polaris." in m["content"] for m in messages)
+        if messages[-1]["content"] == "Stream Juniper":
+            await self.push_frame(LLMFullResponseStartFrame())
+            await self.push_frame(LLMThoughtTextFrame("private-fixture-thought-must-not-be-captured"))
+            await self.push_frame(LLMTextFrame("Juniper 🌿 "))
+            print("CONVERSATIONS_MODEL_WAITING", flush=True)
+            await release_reply.wait()
+            await self.push_frame(LLMTextFrame("uses Polaris."))
+            await self.push_frame(LLMFullResponseEndFrame())
+            return
         if messages[-1]["content"] == "Wait for cancellation":
             print("CONVERSATIONS_MODEL_WAITING", flush=True)
             await asyncio.Event().wait()
@@ -79,6 +89,7 @@ async def run():
             lambda space, sid: PipecatTextConversation(memory, space, sid, ScriptedModel,
                                                       where={"collection": "manuals"}),
             console=True,
+            public_text_streaming="--streaming" in sys.argv[2:],
             **({"scoped_runtime_factory": lambda space, sid, scope: PipecatTextConversation(
                 memory, space, sid, ScopedModel, **scope.kwargs())} if "--scoped" in sys.argv[2:] else {}),
         )
@@ -112,10 +123,13 @@ async def run():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             print("CONVERSATIONS_READY " + str(sock.getsockname()[1]), flush=True)
-            server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+            server = create_server(app, host="127.0.0.1", port=0)
             loop = asyncio.get_running_loop()
             def stop_from_parent():
-                os.read(sys.stdin.fileno(), 64)
+                command = os.read(sys.stdin.fileno(), 64)
+                if command == b"release\n":
+                    release_reply.set()
+                    return
                 loop.remove_reader(sys.stdin.fileno())
                 server.should_exit = True
             loop.add_reader(sys.stdin.fileno(), stop_from_parent)

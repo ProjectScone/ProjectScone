@@ -4,6 +4,29 @@ import { createServer } from 'node:http';
 import { createApiClient, ApiError } from '../src/api.ts';
 import { createHash } from 'node:crypto';
 
+test('conversation streams authenticate a read-only cursor and reject redirects, unsafe paths and non-SSE responses',async()=>{
+  let status=200,type='text/event-stream; charset=utf-8',denied=false,calls=0;
+  const server=createServer((req,res)=>{
+    calls++;assert.equal(req.method,'GET');assert.equal(req.url,'/v1/conversations/session/turns/turn/stream?after=7');
+    assert.equal(req.headers.authorization,'Bearer allowed');assert.equal(req.headers.accept,'text/event-stream');
+    res.writeHead(status,{'content-type':type,location:'/unexpected'});res.end(': keep-alive\n\n');
+  });
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();if(!address||typeof address==='string')throw Error('missing address');
+  const client=createApiClient('allowed',()=>{denied=true;},`http://127.0.0.1:${address.port}`);
+  const controller=new AbortController();
+  try{
+    assert.equal(typeof client.conversationStream,'function');
+    const stream=await client.conversationStream('session','turn',7,controller.signal);
+    assert.equal(await new Response(stream).text(),': keep-alive\n\n');
+    for(const bad of ['../secret','..','.','https://elsewhere','with/slash'])await assert.rejects(client.conversationStream(bad,'turn',7,controller.signal));
+    await assert.rejects(client.conversationStream('session','turn',-1,controller.signal));assert.equal(calls,1);
+    type='application/json';await assert.rejects(client.conversationStream('session','turn',7,controller.signal),/stream/i);
+    type='text/event-stream';status=302;await assert.rejects(client.conversationStream('session','turn',7,controller.signal));assert.equal(calls,3);
+    status=401;await assert.rejects(client.conversationStream('session','turn',7,controller.signal),e=>e instanceof ApiError&&e.status===401);assert.equal(denied,true);
+  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test('an acknowledged no-content delete succeeds but an empty read still fails', async()=>{
   const server=createServer((req,res)=>{assert.equal(req.headers.authorization,'Bearer allowed');res.writeHead(204);res.end();});
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));

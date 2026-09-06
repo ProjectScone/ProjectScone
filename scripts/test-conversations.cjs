@@ -8,18 +8,38 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
   let turn=null,posts=0,checks=0;const requested=[],creates=new Map();
+  const streams=new Set(),chunks=[];
+  const frame=(sequence,text)=>`event: text\nid: ${sequence}\ndata: ${JSON.stringify({sequence,text,provisional:true})}\n\n`;
+  function emit(text){chunks.push(text);for(const stream of streams)stream.write(frame(chunks.length,text));}
+  function finish(status='completed',availability='available'){
+    turn.status=status;turn.result_state=status==='completed'?availability:'unavailable';
+    if(status==='completed'&&availability==='available'){
+      turn.result={text:'Saved complete answer.',user_episode_id:10,assistant_episode_id:11};
+      saved.current.push({episode_id:11,content:turn.result.text,metadata:{role:'assistant'}});
+    }else turn.result=null;
+    const value=sessions.find(s=>s.session_id==='current');value.active_request_id=null;value.latest_request_id=turn.request_id;
+    for(const stream of streams)stream.end(`event: terminal\ndata: ${JSON.stringify({request_id:turn.request_id,status,read_receipt:true})}\n\n`);
+  }
   const server=http.createServer(async(req,res)=>{
     requested.push(req.url);res.setHeader('content-type','application/json');
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped,streaming,text_stream:streaming?{transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256}:null}));
+    if(streaming&&/\/stream\?after=\d+$/.test(req.url)){
+      assert.equal(req.method,'GET');assert.equal(req.headers.accept,'text/event-stream');
+      res.setHeader('content-type','text/event-stream');res.flushHeaders();streams.add(res);res.on('close',()=>streams.delete(res));
+      if(turn&&turn.status!=='pending')return res.end(`event: terminal\ndata: ${JSON.stringify({request_id:turn.request_id,status:turn.status,read_receipt:true})}\n\n`);
+      const after=Number(new URL(req.url,'http://fixture').searchParams.get('after'));
+      for(let i=after;i<chunks.length;i++)res.write(frame(i+1,chunks[i]));
+      return;
+    }
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
@@ -49,7 +69,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
         if(turn?.status==='cancelled')return res.end(JSON.stringify(turn));
         if(recovered&&value.session_id==='previous')return res.end(JSON.stringify({request_id:'a-newer',status:'completed',result_state:'forgotten',result:null}));
         if(!turn){res.statusCode=404;return res.end('{"error":"receipt unavailable"}');}
-        checks++;if(checks>1){turn.status='completed';turn.result={text:'Use Polaris.',user_episode_id:10,assistant_episode_id:11,provider_completion:'unverified',memory_context:{status:'prepared',references:[{episode_id:7,chunk_id:8}]}};value.active_request_id=null;saved.current=[saved.current[0],{episode_id:11,content:'Use Polaris.',metadata:{role:'assistant'}}];}
+        checks++;if(checks>1&&!streaming){turn.status='completed';turn.result={text:'Use Polaris.',user_episode_id:10,assistant_episode_id:11,provider_completion:'unverified',memory_context:{status:'prepared',references:[{episode_id:7,chunk_id:8}]}};value.active_request_id=null;saved.current=[saved.current[0],{episode_id:11,content:'Use Polaris.',metadata:{role:'assistant'}}];}
         return res.end(JSON.stringify(turn));
       }
     }
@@ -60,7 +80,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
   page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
-  return {page,requested,posts:()=>posts};
+  return {page,requested,posts:()=>posts,emit,finish,streams,endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
 }
 async function start(page){
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
@@ -69,6 +89,84 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
+
+for(const mobile of [false,true])test(`live public chunks stay provisional until a saved receipt, mobile=${mobile}`,async t=>{
+  const {page,emit,finish,posts,requested}=await fixture(t,{streaming:true,mobile});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Show the reply');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();
+  emit('Hello 🌿 <script>literal</script>');
+  await preview.getByText('Hello 🌿 <script>literal</script>',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Start with a question.',exact:true}).count(),0,'an active reply must not keep the empty-conversation invitation');
+  assert.equal(await page.getByRole('region',{name:'Saved messages'}).getByText('Hello 🌿 <script>literal</script>',{exact:true}).count(),0);
+  assert.ok(requested.some(path=>path.endsWith('/stream?after=0')));
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`scone-live-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+  finish();await page.getByRole('region',{name:'Saved messages'}).getByText('Saved complete answer.',{exact:true}).waitFor();
+  assert.equal(await preview.count(),0);assert.equal(posts(),1);
+});
+
+test('an interrupted preview reconnects with its last sequence without resending, and gaps replace the discontinuous prefix',async t=>{
+  const {page,emit,streams,posts,requested,finish}=await fixture(t,{streaming:true});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Stream');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();emit('First segment');await preview.getByText('First segment',{exact:true}).waitFor();
+  for(const stream of streams)stream.end();
+  const reconnected=page.waitForRequest(r=>r.url().endsWith('/stream?after=1'));
+  await preview.getByRole('button',{name:'Reconnect preview'}).click();await reconnected;
+  await preview.getByText('Connecting to live reply…',{exact:true}).waitFor();
+  for(const stream of streams)stream.write('event: gap\ndata: {"after":1,"next_sequence":9}\n\nevent: text\nid: 9\ndata: {"sequence":9,"text":"Latest tail","provisional":true}\n\n');
+  await preview.getByText('Latest tail',{exact:true}).waitFor();assert.equal(await preview.getByText('First segment',{exact:true}).count(),0);
+  await preview.getByText(/Earlier live text is missing/).waitFor();assert.equal(posts(),1);
+  finish('failed');await preview.waitFor({state:'detached'});assert.equal(await page.getByText('Latest tail',{exact:true}).count(),0);
+});
+
+test('a fast completed turn uses a terminal-only stream and the saved receipt',async t=>{
+  const {page,finish,posts}=await fixture(t,{streaming:true});await start(page);
+  await page.route('**/turns',async route=>{const response=await route.fetch();finish();await route.fulfill({response});});
+  await page.getByLabel('Message',{exact:true}).fill('Fast');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('region',{name:'Saved messages'}).getByText('Saved complete answer.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Live reply preview'}).count(),0);assert.equal(posts(),1);
+});
+
+test('switching sessions closes the preview reader and cannot render late text in another session',async t=>{
+  const {page,emit,streams,posts}=await fixture(t,{streaming:true});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Stream');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();emit('Current only');await preview.getByText('Current only',{exact:true}).waitFor();
+  const closed=Promise.all([...streams].map(stream=>new Promise(resolve=>stream.once('close',resolve))));
+  await page.getByRole('link',{name:/previous/}).click();await closed;
+  emit('Must not cross sessions');await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(await preview.count(),0);assert.equal(await page.getByText(/Current only|Must not cross sessions/).count(),0);assert.equal(posts(),1);
+});
+
+test('an externally ended session clears provisional text even when its receipt read stalls',async t=>{
+  const {page,emit,endExternally}=await fixture(t,{streaming:true});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Stream');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();emit('No longer active');await preview.getByText('No longer active',{exact:true}).waitFor();
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  await page.route('**/turns/*',async route=>{await gate;await route.continue().catch(()=>{});});
+  endExternally();
+  try{
+    await page.getByRole('heading',{name:'Conversation ended',exact:true}).waitFor();
+    assert.equal(await preview.count(),0,'a known ended session must not retain an unconfirmed live preview');
+  }finally{release();}
+});
+
+test('oversized live previews stop reading without growing unbounded or resubmitting',async t=>{
+  const {page,emit,finish,posts}=await fixture(t,{streaming:true});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Large reply');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();
+  for(let i=0;i<17;i++)emit('a'.repeat(65536));
+  await preview.getByText(/Preview size limit reached/).waitFor();
+  assert.equal((await preview.getByLabel('Provisional reply text').textContent()).length,1048576);
+  assert.equal(await preview.getByRole('button',{name:'Reconnect preview'}).count(),0);
+  finish();await page.getByRole('region',{name:'Saved messages'}).getByText('Saved complete answer.',{exact:true}).waitFor();assert.equal(posts(),1);
+});
+
+for(const outcome of ['forgotten','unreadable','unavailable'])test(`a terminal ${outcome} receipt never promotes provisional text`,async t=>{
+  const {page,emit,finish}=await fixture(t,{streaming:true});await start(page);
+  await page.getByLabel('Message',{exact:true}).fill('Stream');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();emit('Not a retained reply');await preview.getByText('Not a retained reply',{exact:true}).waitFor();
+  finish('completed',outcome);await preview.waitFor({state:'detached'});assert.equal(await page.getByText('Not a retained reply',{exact:true}).count(),0);
+});
 
 for(const mobile of [false,true])test(`session scope is chosen before capture and visible afterward, mobile=${mobile}`,async t=>{
   const {page}=await fixture(t,{scoped:true,mobile});const writes=[];

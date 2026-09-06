@@ -2,6 +2,7 @@ export interface ApiClient {
   request<T>(path: string, options?: RequestInit): Promise<T>;
   image(attachment: ImageAttachment, signal?: AbortSignal): Promise<Blob>;
   uploadImage(file: File, signal?: AbortSignal): Promise<ImageAttachment>;
+  conversationStream(sid: string, requestId: string, after: number, signal: AbortSignal): Promise<ReadableStream<Uint8Array>>;
 }
 
 export interface ImageAttachment { attachment_id: string; media_type: string; bytes: number; filename?: string | null }
@@ -15,6 +16,24 @@ export class ApiError extends Error {
 
 export function createApiClient(key: string, unauthorized: () => void, base = ''): ApiClient {
   return {
+    async conversationStream(sid, requestId, after, signal) {
+      if (![sid,requestId].every(id=>/^[A-Za-z0-9._:-]{1,128}$/.test(id)&&id!=='.'&&id!=='..')
+        ||!Number.isSafeInteger(after)||after<0) throw Error('Invalid conversation stream address');
+      const path='/v1/conversations/'+encodeURIComponent(sid)+'/turns/'+encodeURIComponent(requestId)+'/stream?after='+after;
+      const response=await fetch(base+path,{
+        method:'GET',headers:{Authorization:'Bearer '+key,Accept:'text/event-stream'},signal,
+        cache:'no-store',redirect:'error',credentials:'omit',referrerPolicy:'no-referrer',
+      });
+      if(!response.ok){
+        await response.body?.cancel();
+        if(response.status===401||response.status===403)unauthorized();
+        throw new ApiError(response.status,`Live preview request failed (${response.status})`);
+      }
+      if(response.headers.get('content-type')?.split(';')[0].trim()!=='text/event-stream'||!response.body){
+        await response.body?.cancel();throw Error('Invalid conversation stream response');
+      }
+      return response.body;
+    },
     async uploadImage(file: File, signal?: AbortSignal): Promise<ImageAttachment> {
       if (!PREVIEW_TYPES.has(file.type)) throw Error('Choose a PNG, JPEG, GIF or WebP image');
       if (!file.size || file.size > MAX_IMAGE_BYTES) throw Error('Image size must be between 1 byte and 25 MB');

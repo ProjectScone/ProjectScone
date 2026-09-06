@@ -7,11 +7,11 @@ const path=require('node:path');
 const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
 
-async function fixture(t,{reopened=false,scoped=false}={}){
+async function fixture(t,{reopened=false,scoped=false,streaming=false}={}){
   const html=process.env.SCONE_CONVERSATIONS_HTML;
   assert.ok(html,'SCONE_CONVERSATIONS_HTML must name the verified isolated webapp artifact');
   const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(root,'python/scone-memory/.venv/bin/python'),
-    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[]),...(scoped?['--scoped']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[]),...(scoped?['--scoped']:[]),...(streaming?['--streaming']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
   let browser,logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
   const closed=once(server,'close');
   let modelEntered;const modelWaiting=new Promise(resolve=>{modelEntered=resolve;});
@@ -44,8 +44,51 @@ async function fixture(t,{reopened=false,scoped=false}={}){
   browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});
   const page=await browser.newPage({viewport:{width:1320,height:940}});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  return {page,base,errors,modelWaiting};
+  return {page,base,errors,modelWaiting,release:()=>server.stdin.write('release\n')};
 }
+
+for(const outcome of ['complete','cancel','stop','switch-space'])test(`native Pipecat public-text preview → ${outcome}`,{timeout:60000},async t=>{
+  const {page,base,errors,release,modelWaiting}=await fixture(t,{streaming:true});page.setDefaultTimeout(8000);
+  await page.goto(base+'/conversations');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  let posts=0;page.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/turns'))posts++;});
+  await page.getByLabel('Message',{exact:true}).fill('Stream Juniper');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await modelWaiting;
+  const preview=page.getByRole('region',{name:'Live reply preview'});
+  await preview.getByText('Juniper 🌿',{exact:true}).waitFor();
+  const sid=new URL(page.url()).pathname.split('/').at(-1),headers={authorization:'Bearer conversation-fixture-alpha'};
+  const read=async()=>await(await fetch(base+'/v1/conversations/'+sid+'/transcript',{headers})).json();
+  assert.deepEqual((await read()).episodes.map(e=>e.content),['Stream Juniper'],'public chunks precede final capture');
+  assert.ok(!(await page.innerText('body')).includes('private-fixture-thought'));
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`native-live-${outcome}.png`),fullPage:true});
+  if(outcome==='complete'){
+    // A full page reload loses all browser preview state; the active window
+    // replays public text without submitting another model request.
+    await page.reload();
+    await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+    await preview.getByText('Juniper 🌿',{exact:true}).waitFor();
+    release();await page.getByRole('region',{name:'Saved messages'}).getByText('Juniper 🌿 uses Polaris.',{exact:true}).waitFor();
+    assert.deepEqual((await read()).episodes.map(e=>e.content),['Stream Juniper','Juniper 🌿 uses Polaris.']);
+  }else if(outcome==='switch-space'){
+    await page.getByRole('button',{name:'Memory connection',exact:true}).click();
+    await page.getByLabel('Use a different Scone space key',{exact:true}).fill('conversation-fixture-beta');
+    await page.getByRole('button',{name:'Switch space',exact:true}).click();
+    await page.locator('#space').getByText('beta',{exact:true}).waitFor();
+    await preview.waitFor({state:'detached'});
+    assert.equal(await page.getByText('Juniper 🌿',{exact:true}).count(),0);
+    assert.deepEqual((await read()).episodes.map(e=>e.content),['Stream Juniper']);
+    assert.equal((await fetch(base+'/v1/conversations/'+sid,{headers:{authorization:'Bearer conversation-fixture-beta'}})).status,404);
+  }else{
+    await page.getByRole('button',{name:outcome==='cancel'?'Cancel reply':'End conversation',exact:true}).click();
+    await preview.waitFor({state:'detached'});
+    await page.getByText(outcome==='cancel'?/Reply cancelled locally/:/Conversation ended/).first().waitFor();
+    assert.deepEqual((await read()).episodes.map(e=>e.content),['Stream Juniper']);
+  }
+  await preview.waitFor({state:'detached'});assert.equal(posts,1);assert.deepEqual(errors,[]);
+});
 
 test('Documents browse native inventory, import retained text, and inspect saved image evidence',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t);page.setDefaultTimeout(8000);
