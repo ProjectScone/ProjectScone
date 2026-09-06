@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Mapping, Optional
 
 from .engine import MemoryEngine
@@ -57,6 +58,9 @@ class Settings:
     vectors: str = "memory"
     embedder: str = "hash"
     sqlite_path: str = "~/.scone-memory/memory.db"
+    #: Where attachment bytes live. Empty means beside the SQLite file
+    #: when there is one, and in memory when there is not.
+    blob_dir: str = ""
     mongo_url: Optional[str] = None
     mongo_db: str = "scone"
     postgres_url: Optional[str] = None
@@ -105,6 +109,7 @@ class Settings:
             vectors=env.get("SCONE_VECTORS", "memory"),
             embedder=env.get("SCONE_EMBEDDER", "hash"),
             sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
+            blob_dir=env.get("SCONE_BLOB_DIR", ""),
             mongo_url=env.get("SCONE_MONGO_URL"),
             mongo_db=env.get("SCONE_MONGO_DB", "scone"),
             postgres_url=env.get("SCONE_POSTGRES_URL"),
@@ -359,6 +364,20 @@ def build_events(settings: Settings, documents=None):
     raise InvalidInput(f"unknown SCONE_EVENTS {settings.events!r}")
 
 
+def build_blobs(settings: Settings):
+    """Where attachments are kept. SCONE_BLOB_DIR wins; otherwise a
+    directory beside the SQLite file, because a server whose database is
+    on disk should not lose its evidence on a restart. With no database on
+    disk there is nowhere obvious to write, so bytes stay in memory."""
+    from .blobs import FileBlobStore, InMemoryBlobStore
+
+    if settings.blob_dir:
+        return FileBlobStore(Path(settings.blob_dir).expanduser())
+    if settings.documents == "sqlite" and settings.sqlite_path not in ("", ":memory:"):
+        return FileBlobStore(Path(settings.sqlite_path).expanduser().parent / "attachments")
+    return InMemoryBlobStore()
+
+
 async def build_engine(settings: Settings) -> MemoryEngine:
     documents = build_documents(settings)
     if hasattr(documents, "open"):
@@ -377,6 +396,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         contextual_embeddings=settings.contextual_embeddings,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
+        blobs=build_blobs(settings),
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])

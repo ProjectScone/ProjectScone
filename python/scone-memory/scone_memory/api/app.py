@@ -9,6 +9,8 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -22,7 +24,15 @@ from contextlib import asynccontextmanager
 from .. import metrics
 from ..engine import MemoryEngine
 from ..errors import Conflict, InvalidInput, NotFound
-from ..models import Fact, RecallItem
+from ..models import Attachment, Fact, RecallItem
+
+
+#: Types a browser may render in place. Everything else is handed back as
+#: a download: an SVG or an HTML file served inline is script running in
+#: this origin, and the bytes are kept as evidence either way.
+INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
 class DecideBody(BaseModel):
@@ -47,6 +57,8 @@ class EpisodeBody(BaseModel):
 
     content: str
     tags: list[str] = Field(default_factory=list)
+    #: Attachments stored earlier by POST /v1/attachments.
+    attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
     kind: str = "note"
@@ -230,6 +242,36 @@ def create_app(
             async def playground_page() -> Response:
                 return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND)
 
+    @app.post("/v1/attachments")
+    async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:
+        """Bytes an episode will carry. The id is the SHA-256 of the body,
+        so storing the same screenshot twice stores it once."""
+        stored = await engine.attach(
+            space,
+            await request.body(),
+            media_type=(request.headers.get("content-type") or "").split(";")[0].strip(),
+            filename=request.headers.get("x-filename"),
+        )
+        return stored.model_dump()
+
+    @app.get("/v1/attachments/{attachment_id}")
+    async def get_attachment(attachment_id: str, space: str = Depends(space_for)) -> Response:
+        # The id is a digest, never a path. Anything else names nothing.
+        if not _DIGEST.fullmatch(attachment_id):
+            raise NotFound(f"attachment {attachment_id!r} not found in {space!r}")
+        stored, data = await engine.attachment(space, attachment_id)
+        inline = stored.media_type in INLINE_TYPES
+        name = _SAFE_FILENAME.sub("_", stored.filename or attachment_id)[:120]
+        return Response(
+            content=data,
+            media_type=stored.media_type if inline else "application/octet-stream",
+            headers={
+                "content-disposition": f'{"inline" if inline else "attachment"}; filename="{name}"',
+                "x-content-type-options": "nosniff",
+                "cache-control": "private, max-age=31536000, immutable",
+            },
+        )
+
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
         added = await engine.remember(
@@ -240,6 +282,7 @@ def create_app(
             tags=body.tags,
             created_at=body.created_at,
             metadata=body.metadata,
+            attachment_ids=body.attachment_ids,
         )
         return added.model_dump()
 
@@ -528,6 +571,14 @@ def episode_json(episode) -> dict:
         "episode_id": episode.episode_id, "kind": episode.kind, "content": episode.content,
         "source": episode.source, "tags": list(episode.tags), "metadata": dict(episode.metadata),
         "created_at": episode.created_at, "ingested_at": episode.ingested_at,
+        "attachments": [attachment_json(a) for a in episode.attachments],
+    }
+
+
+def attachment_json(attachment: Attachment) -> dict:
+    return {
+        "attachment_id": attachment.attachment_id, "media_type": attachment.media_type,
+        "bytes": attachment.bytes, "filename": attachment.filename,
     }
 
 

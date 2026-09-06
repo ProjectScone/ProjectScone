@@ -29,6 +29,20 @@ FactOrigin = Literal["stated", "extracted", "inferred"]
 MAX_CONTENT_BYTES = 2_000_000
 
 
+class Attachment(BaseModel):
+    """Bytes an episode carries, named by the SHA-256 of those bytes. The
+    same screenshot remembered twice is one attachment with two
+    references; an id can be re-fetched forever because nothing stored is
+    rewritten."""
+
+    model_config = ConfigDict(frozen=True)
+
+    attachment_id: str
+    media_type: str
+    bytes: int
+    filename: Optional[str] = None
+
+
 class Episode(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -47,6 +61,9 @@ class Episode(BaseModel):
     created_at: str
     #: When the engine first saw it; the ordering key for "recent".
     ingested_at: str
+    #: Filled by the engine from the blob store, not by the document
+    #: store, so a backend needs no column for it.
+    attachments: tuple[Attachment, ...] = ()
 
 
 class Chunk(BaseModel):

@@ -21,9 +21,11 @@ from . import fusion
 from .chunker import DEFAULT_TARGET, byte_spans, chunk_spans
 from .errors import Conflict, InvalidInput, NotFound
 from .lexical import tokenize
+from .blobs import BlobStore, InMemoryBlobStore
 from .models import (
     MAX_CONTENT_BYTES,
     Added,
+    Attachment,
     BatchDecision,
     DecisionOutcome,
     Episode,
@@ -87,6 +89,16 @@ EXTERNAL_EVENT_KINDS = ("job", "agent")
 ORIGINS = ("stated", "extracted", "inferred")
 STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
+#: What an attachment may be. Anything not here is refused rather than
+#: stored under a type the server would have to guess at on the way out.
+ATTACHMENT_TYPES = (
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+    "application/pdf", "application/json", "text/plain", "text/markdown", "text/csv",
+    "audio/mpeg", "audio/wav", "audio/webm", "video/mp4", "video/webm",
+)
+#: Bytes one attachment may carry. Evidence, not a file share.
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
 #: What one reviewed batch may do to the facts it names.
 DECISIONS = ("approve", "decline", "exclude")
 #: Ids one batch may carry. A review queue, not a migration.
@@ -193,12 +205,18 @@ class MemoryEngine:
         contextual_embeddings: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = False,
+        blobs: Optional[BlobStore] = None,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         self.documents = documents
         self.vectors = vectors
         self.embedder = embedder
+        #: Where an attachment's bytes live. In memory unless a store is
+        #: given, so an engine with no configured blob directory keeps
+        #: nothing across a restart rather than writing somewhere unasked.
+        self.blobs = blobs if blobs is not None else InMemoryBlobStore()
+        self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
         self.clock = clock
         #: Evidence sink. None means no evidence is kept, and no metric
@@ -313,12 +331,40 @@ class MemoryEngine:
         tags: Sequence[str] = (),
         created_at: Optional[str] = None,
         metadata: Mapping[str, str] | None = None,
+        attachment_ids: Sequence[str] = (),
     ) -> Added:
         [added] = await self.remember_many(
             space,
             [Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}))],
         )
+        for attachment_id in dict.fromkeys(attachment_ids):
+            await self.blobs.link(space, attachment_id, added.episode_id)
         return added
+
+    # -- attachments ------------------------------------------------------
+
+    async def attach(
+        self, space: str, data: bytes, media_type: str, filename: Optional[str] = None
+    ) -> Attachment:
+        """Store bytes an episode will carry, addressed by their SHA-256.
+        The same bytes stored twice are one attachment: the digest is the
+        id, so a second store is a second reference."""
+        check_space(space)
+        if not data:
+            raise InvalidInput("an attachment needs bytes")
+        if len(data) > self.max_attachment_bytes:
+            raise InvalidInput(
+                f"an attachment takes at most {self.max_attachment_bytes} bytes, got {len(data)}"
+            )
+        if media_type not in ATTACHMENT_TYPES:
+            raise InvalidInput(f"media_type must be one of {ATTACHMENT_TYPES}, got {media_type!r}")
+        return await self.blobs.put(space, data, media_type, filename)
+
+    async def attachment(self, space: str, attachment_id: str) -> tuple[Attachment, bytes]:
+        """The stored bytes, for the space that stored them. A key for
+        another space gets the same answer as an id that never existed."""
+        check_space(space)
+        return await self.blobs.get(space, attachment_id)
 
     async def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
@@ -498,7 +544,8 @@ class MemoryEngine:
         found = await self.documents.get_episode(space, episode_id)
         if found is None:
             raise NotFound(f"episode {episode_id} not found in {space!r}")
-        return found
+        carried = await self.blobs.for_episode(space, episode_id)
+        return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
 
     # -- recall -----------------------------------------------------------
 
