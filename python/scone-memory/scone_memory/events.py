@@ -18,8 +18,12 @@ from itertools import count
 from pathlib import Path
 from typing import Callable, Optional
 
-from .ports import Event, NewEvent
+from .ports import DuplicateEvent, Event, NewEvent
 from .timeutil import format_rfc3339, now, parse_rfc3339
+
+
+def _same_payload(a, b) -> bool:
+    return json.dumps(dict(a), sort_keys=True, default=str) == json.dumps(dict(b), sort_keys=True, default=str)
 
 
 class InMemoryEventLog:
@@ -29,10 +33,21 @@ class InMemoryEventLog:
         self.max_events = max_events
         self._events: deque[Event] = deque(maxlen=max_events)
         self._ids = count(1)
+        #: (space, dedup_key) -> event; kept past ring eviction so a replay
+        #: after the ring turned over still deduplicates.
+        self._keys: dict[tuple[str, str], Event] = {}
 
     async def append(self, new: NewEvent) -> Event:
+        if new.dedup_key is not None:
+            existing = self._keys.get((new.space, new.dedup_key))
+            if existing is not None:
+                if _same_payload(existing.payload, new.payload):
+                    return existing
+                raise DuplicateEvent(existing)
         event = Event(event_id=next(self._ids), **new.__dict__)
         self._events.append(event)
+        if new.dedup_key is not None:
+            self._keys[(new.space, new.dedup_key)] = event
         return event
 
     async def get(self, space: str, event_id: int) -> Optional[Event]:
@@ -67,9 +82,10 @@ class SqliteEventLog:
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY, ts TEXT NOT NULL, space TEXT NOT NULL, kind TEXT NOT NULL,
-        schema_version INTEGER NOT NULL, payload TEXT NOT NULL);
+        schema_version INTEGER NOT NULL, payload TEXT NOT NULL, dedup_key TEXT);
     CREATE INDEX IF NOT EXISTS events_space_kind ON events(space, kind, id);
     CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+    CREATE UNIQUE INDEX IF NOT EXISTS events_dedup ON events(space, dedup_key) WHERE dedup_key IS NOT NULL;
     """
     SWEEP_EVERY = 100
 
@@ -94,10 +110,19 @@ class SqliteEventLog:
         self.conn.close()
 
     async def append(self, new: NewEvent) -> Event:
-        cur = self.conn.execute(
-            "INSERT INTO events (ts, space, kind, schema_version, payload) VALUES (?, ?, ?, ?, ?)",
-            (new.ts, new.space, new.kind, new.schema_version, json.dumps(dict(new.payload), ensure_ascii=False)),
-        )
+        payload = json.dumps(dict(new.payload), ensure_ascii=False)
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO events (ts, space, kind, schema_version, payload, dedup_key) VALUES (?, ?, ?, ?, ?, ?)",
+                (new.ts, new.space, new.kind, new.schema_version, payload, new.dedup_key),
+            )
+        except sqlite3.IntegrityError:
+            # The unique index is the atomic check; decide same-or-conflict after it fires.
+            row = self.conn.execute("SELECT * FROM events WHERE space = ? AND dedup_key = ?", (new.space, new.dedup_key)).fetchone()
+            existing = _event(row)
+            if _same_payload(existing.payload, new.payload):
+                return existing
+            raise DuplicateEvent(existing) from None
         self.conn.commit()
         self._appends += 1
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
@@ -149,6 +174,7 @@ def _event(row: sqlite3.Row) -> Event:
         kind=row["kind"],
         payload=json.loads(row["payload"]),
         schema_version=row["schema_version"],
+        dedup_key=row["dedup_key"] if "dedup_key" in row.keys() else None,
     )
 
 
@@ -169,6 +195,9 @@ class MongoEventLog:
     async def open(self) -> "MongoEventLog":
         await self.events.create_index([("space", 1), ("kind", 1), ("_id", -1)])
         await self.events.create_index([("space", 1), ("ts", 1)])
+        await self.events.create_index(
+            [("space", 1), ("dedup_key", 1)], unique=True, partialFilterExpression={"dedup_key": {"$type": "string"}}
+        )
         if self.max_age_days is not None:
             # Mongo expires on a BSON date, so the timestamp is stored twice:
             # the canonical string for reads and a date for the TTL index.
@@ -183,14 +212,25 @@ class MongoEventLog:
         await self.client.close()
 
     async def append(self, new: NewEvent) -> Event:
+        from pymongo.errors import DuplicateKeyError
+
         doc = await self.counters.find_one_and_update(
             {"_id": "events"}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
         )
         event_id = int(doc["seq"])
-        await self.events.insert_one({
+        record = {
             "_id": event_id, "ts": new.ts, "ts_date": parse_rfc3339(new.ts), "space": new.space,
             "kind": new.kind, "schema_version": new.schema_version, "payload": dict(new.payload),
-        })
+        }
+        if new.dedup_key is not None:
+            record["dedup_key"] = new.dedup_key
+        try:
+            await self.events.insert_one(record)
+        except DuplicateKeyError:
+            existing = _mongo_event(await self.events.find_one({"space": new.space, "dedup_key": new.dedup_key}))
+            if _same_payload(existing.payload, new.payload):
+                return existing
+            raise DuplicateEvent(existing) from None
         return Event(event_id=event_id, **new.__dict__)
 
     async def get(self, space: str, event_id: int) -> Optional[Event]:
@@ -220,4 +260,5 @@ def _mongo_event(doc) -> Event:
         kind=doc["kind"],
         payload=doc.get("payload", {}),
         schema_version=int(doc.get("schema_version", 1)),
+        dedup_key=doc.get("dedup_key"),
     )

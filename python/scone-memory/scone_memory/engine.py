@@ -30,6 +30,7 @@ from .models import (
 )
 from .ports import (
     DocumentStore,
+    DuplicateEvent,
     Embedder,
     Event,
     EventLog,
@@ -165,10 +166,10 @@ class MemoryEngine:
         #: a second log of everything asked of it.
         self.record_queries = record_queries
 
-    async def _emit(self, space: str, kind: str, payload: dict) -> Optional[Event]:
+    async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
             return None
-        return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload))
+        return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload, dedup_key=dedup_key))
 
     def _query_for_evidence(self, query: str) -> dict:
         if self.record_queries:
@@ -566,13 +567,14 @@ class MemoryEngine:
         if p.get("episode_id") is not None and await self.documents.get_episode(space, int(p["episode_id"])) is None:
             # A link is connector-reported provenance; it must at least point inside this space.
             raise InvalidInput(f"episode {p['episode_id']} is not in {space!r}")
-        if source_event_id is not None:
-            # Idempotent receipt: a retried post of the same connector event
-            # returns the event already kept instead of a duplicate.
-            for existing in await self.events.query(space, kind="agent", limit=1000):
-                if existing.payload.get("session_id") == sid and existing.payload.get("source_event_id") == source_event_id:
-                    return existing
-        return await self._emit(space, "agent", p)  # type: ignore[return-value]
+        # Idempotent receipt is the sink's job: the key is unique per space,
+        # a retry with the same payload returns the stored event, and the
+        # same key with a different payload is a conflict, never a silent drop.
+        key = f"agent:{p['agent']}:{sid}:{source_event_id}" if source_event_id is not None else None
+        try:
+            return await self._emit(space, "agent", p, dedup_key=key)  # type: ignore[return-value]
+        except DuplicateEvent as e:
+            raise InvalidInput(f"source_event_id {source_event_id!r} was already recorded with a different payload (event {e.existing.event_id})") from e
 
     async def graph(
         self,

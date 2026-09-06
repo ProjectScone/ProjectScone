@@ -231,8 +231,13 @@ async def test_agent_events_are_validated_scrubbed_and_idempotent():
     assert first.kind == "agent"
     assert "sk-live-" not in first.payload["text"] and "hunter2pass" not in first.payload["text"]
     assert "[redacted]" in first.payload["text"]
-    again = await engine.record("default", "agent", {"agent": "claude-code", "session_id": "s-1", "event": "prompt", "source_event_id": "p-1"})
+    same = {"agent": "claude-code", "session_id": "s-1", "project": "scone", "event": "prompt",
+            "text": "please rotate token sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ and see https://user:hunter2pass@host/db",
+            "episode_id": ep.episode_id, "source_event_id": "p-1"}
+    again = await engine.record("default", "agent", same)
     assert again.event_id == first.event_id, "a retried connector event is not duplicated"
+    with pytest.raises(InvalidInput, match="different payload"):
+        await engine.record("default", "agent", {**same, "text": "something else entirely"})
     for bad in (
         {"agent": "hal", "session_id": "s", "event": "prompt"},
         {"agent": "codex", "session_id": "s", "event": "thinking"},

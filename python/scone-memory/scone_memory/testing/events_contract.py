@@ -8,7 +8,9 @@ tested beside each sink, not here.
 
 from __future__ import annotations
 
-from ..ports import NewEvent
+import pytest
+
+from ..ports import DuplicateEvent, NewEvent
 
 
 def ev(space, kind, ts="2025-01-01T00:00:00.000Z", **payload):
@@ -71,6 +73,21 @@ async def test_after_id_is_a_stable_forward_cursor(sink):
     assert [e.event_id for e in await sink.query("alpha", after_id=0, kind="recall", limit=100)] == ids
 
 
+async def test_dedup_key_is_atomic_per_space_and_conflicts_on_a_different_payload(sink):
+    a = await sink.append(NewEvent("2025-01-01T00:00:00.000Z", "alpha", "agent", {"n": 1}, dedup_key="k1"))
+    again = await sink.append(NewEvent("2025-01-01T00:00:01.000Z", "alpha", "agent", {"n": 1}, dedup_key="k1"))
+    assert again.event_id == a.event_id
+    with pytest.raises(DuplicateEvent) as err:
+        await sink.append(NewEvent("2025-01-01T00:00:02.000Z", "alpha", "agent", {"n": 2}, dedup_key="k1"))
+    assert err.value.existing.event_id == a.event_id
+    other = await sink.append(NewEvent("2025-01-01T00:00:03.000Z", "beta", "agent", {"n": 2}, dedup_key="k1"))
+    assert other.event_id != a.event_id, "keys are per space"
+    b = await sink.append(NewEvent("2025-01-01T00:00:04.000Z", "alpha", "recall", {"n": 3}))
+    c = await sink.append(NewEvent("2025-01-01T00:00:05.000Z", "alpha", "recall", {"n": 3}))
+    assert b.event_id != c.event_id, "events without a key never deduplicate"
+    assert (await sink.get("alpha", a.event_id)).dedup_key == "k1"
+
+
 __all__ = [
     "test_events_come_back_newest_first_with_increasing_ids",
     "test_kind_since_and_limit_compose",
@@ -78,4 +95,5 @@ __all__ = [
     "test_payloads_round_trip_with_nesting_and_unicode",
     "test_since_accepts_any_rfc3339_form",
     "test_after_id_is_a_stable_forward_cursor",
+    "test_dedup_key_is_atomic_per_space_and_conflicts_on_a_different_payload",
 ]
