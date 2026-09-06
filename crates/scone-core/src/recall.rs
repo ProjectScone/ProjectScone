@@ -136,6 +136,17 @@ pub struct RecallOpts {
     /// Focus retrieval to episodes carrying ALL of these tags (facts
     /// narrow through provenance). Empty = no tag filter.
     pub tags: Vec<String>,
+    /// Only episodes of this kind (note, file, conversation, ...).
+    pub kind: Option<String>,
+    /// Only episodes whose source starts with this text: a path prefix,
+    /// a session id, a URL origin. Matched literally, not as a pattern.
+    pub source_prefix: Option<String>,
+    /// Only episodes that happened at or after this instant (RFC 3339).
+    /// This bounds created_at; `as_of` is about fact validity and the
+    /// anchor for relative dates, and stays separate.
+    pub since: Option<String>,
+    /// Only episodes that happened at or before this instant.
+    pub until: Option<String>,
 }
 
 impl Default for RecallOpts {
@@ -147,6 +158,10 @@ impl Default for RecallOpts {
             expand_neighbors: false,
             decompose: false,
             tags: Vec::new(),
+            kind: None,
+            source_prefix: None,
+            since: None,
+            until: None,
         }
     }
 }
@@ -329,12 +344,36 @@ impl Engine {
                     normalized_tags.len()
                 )
             };
+            // Kind, source prefix and the created_at bounds narrow the same
+            // way tags do: on the candidates fusion produced, so a filter
+            // that matches nothing in the candidate window yields nothing.
+            // The prefix is matched with substr(), never LIKE, so "%" and
+            // "_" in a path or URL are literal.
+            let mut narrow = String::new();
+            let mut narrow_params: Vec<rusqlite::types::Value> = Vec::new();
+            if let Some(kind) = &opts.kind {
+                narrow.push_str(" AND e.kind = ?");
+                narrow_params.push(kind.clone().into());
+            }
+            if let Some(prefix) = &opts.source_prefix {
+                narrow.push_str(" AND substr(e.source, 1, ?) = ?");
+                narrow_params.push((prefix.chars().count() as i64).into());
+                narrow_params.push(prefix.clone().into());
+            }
+            if let Some(since) = &opts.since {
+                narrow.push_str(" AND e.created_at >= ?");
+                narrow_params.push(since.clone().into());
+            }
+            if let Some(until) = &opts.until {
+                narrow.push_str(" AND e.created_at <= ?");
+                narrow_params.push(until.clone().into());
+            }
             let sql = format!(
                 "SELECT c.episode_id, c.start_byte, c.end_byte, e.content, e.source,
                         e.created_at,
                         (julianday('now') - julianday(e.created_at)) AS age_days
                  FROM chunks c JOIN episodes e ON e.id = c.episode_id
-                 WHERE c.id = ?1 AND e.space_id = ?2{tag_filter}"
+                 WHERE c.id = ?1 AND e.space_id = ?2{tag_filter}{narrow}"
             );
             let mut stmt = self.conn.prepare(&sql)?;
             for (chunk_id, fused_score) in &fused {
@@ -342,6 +381,9 @@ impl Engine {
                     vec![Box::new(*chunk_id as i64), Box::new(space.id())];
                 for tag in &normalized_tags {
                     params.push(Box::new(tag.clone()));
+                }
+                for value in &narrow_params {
+                    params.push(Box::new(value.clone()));
                 }
                 let row = stmt.query_row(
                     rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),

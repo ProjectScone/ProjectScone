@@ -46,6 +46,15 @@ pub struct RecallParams {
     pub tags: Option<Vec<String>>,
     /// Evaluate fact validity at this ISO-8601 instant (time travel)
     pub as_of: Option<String>,
+    /// Only episodes of this kind (note, file, conversation, ...)
+    pub kind: Option<String>,
+    /// Only episodes whose source starts with this text (a path, a
+    /// session id, a URL origin); literal, not a pattern
+    pub source_prefix: Option<String>,
+    /// Only episodes that happened at or after this RFC 3339 instant
+    pub since: Option<String>,
+    /// Only episodes that happened at or before this RFC 3339 instant
+    pub until: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -232,6 +241,10 @@ impl SconeMcp {
                     expand_neighbors: true,
                     decompose: true,
                     tags: p.tags.clone().unwrap_or_default(),
+                    kind: p.kind.clone(),
+                    source_prefix: p.source_prefix.clone(),
+                    since: p.since.clone(),
+                    until: p.until.clone(),
                 },
             )?;
             Ok((computed, profile, pack))
