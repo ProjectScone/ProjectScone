@@ -285,3 +285,18 @@ def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeyp
     out = io.StringIO()
     assert cli.main(["distill", "--json"], env=env2, stdin=io.StringIO(), out=out) == 1, "a failed pass exits 1"
     assert json.loads(out.getvalue())["error"].startswith("DistillError")
+
+
+def test_cli_agent_hook_accepts_its_own_flags_first(tmp_path):
+    """The hook is invoked as `scone-memory agent-hook --agent claude-code ...`;
+    argparse REMAINDER refused a leading flag with exit 2, which would have
+    made an installed hook fail on every call."""
+    env = {"SCONE_API_KEY": "k", "SCONE_HOOK_PROJECTS": f"scone={tmp_path}"}
+    out = io.StringIO()
+    payload = json.dumps({"hook_event_name": "Stop", "session_id": "s", "cwd": str(tmp_path), "last_assistant_message": "x"})
+    code = cli.main(["agent-hook", "--agent", "claude-code", "--feed", "metadata", "--server", "http://127.0.0.1:1"], env=env, stdin=io.StringIO(payload), out=out)
+    assert code == 0, "the hook never blocks the agent, even when the server is down"
+    assert out.getvalue().strip() == "{}"
+    with pytest.raises(SystemExit) as exit_info:  # other commands still reject unknown flags
+        cli.main(["status", "--bogus"], env={"SCONE_SQLITE_PATH": str(tmp_path / "x.db")}, stdin=io.StringIO(), out=io.StringIO())
+    assert exit_info.value.code == 2

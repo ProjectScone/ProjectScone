@@ -123,9 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stratified", type=int, help="N items per question type, in file order")
     p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
+    # The hook's own flags are parsed by agent_hook; this subparser accepts
+    # anything after its name and hands it over untouched. parse_known_args
+    # is used at the call site because REMAINDER does not capture a flag
+    # that appears first (argparse reports it as unknown and exits 2).
     p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
                        add_help=False)
-    p.add_argument("hook_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -350,12 +353,15 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
 
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None, stdin=None, out=None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args, rest = build_parser().parse_known_args(raw)
     env = os.environ if env is None else env
     if args.command == "agent-hook":
         from .agent_hook import run_hook
 
-        return run_hook(args.hook_args, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
+        return run_hook(rest, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
+    if rest:
+        build_parser().error(f"unrecognized arguments: {' '.join(rest)}")
     settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve
