@@ -3,446 +3,654 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scone memory</title>
+<title>Scone</title>
 <style>
   :root {
-    --bg: #fbfaf8; --panel: #ffffff; --ink: #1c1a17; --muted: #6b655c;
-    --line: #e6e1d8; --accent: #8a5a2b; --accent-soft: #f3ece2;
-    --warn: #8a2b2b; --ok: #2f6b3a; --lane-v: #3b5f8a; --lane-t: #7a5a1e;
+    --bg: #f7f6f3; --surface: #ffffff; --line: #e4e0d8; --ink: #1c1a17; --muted: #6b665d;
+    --accent: #8a5a2b; --accent-soft: #f1eadf; --on-accent: #ffffff; --ok: #2f6b3a; --warn: #8a2b2b;
+    --nav-w: 220px;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #171614; --panel: #1f1e1b; --ink: #ece8e1; --muted: #9a938a;
-      --line: #33302b; --accent: #d9a066; --accent-soft: #2a251e;
-      --warn: #e08585; --ok: #8cc79a; --lane-v: #8db1dd; --lane-t: #d9b26a;
+    :root:not([data-scheme="light"]) {
+      --bg: #14130f; --surface: #1d1c18; --line: #2f2c26; --ink: #ebe7df; --muted: #9c958a;
+      --accent: #d9a066; --accent-soft: #2a251e; --on-accent: #14130f; --ok: #8cc79a; --warn: #e08585;
     }
   }
+  :root[data-scheme="dark"] {
+    --bg: #14130f; --surface: #1d1c18; --line: #2f2c26; --ink: #ebe7df; --muted: #9c958a;
+    --accent: #d9a066; --accent-soft: #2a251e; --on-accent: #14130f; --ok: #8cc79a; --warn: #e08585;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-         font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 16px 24px;
-           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
-  h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
-  h1 span { color: var(--muted); font-weight: 400; }
-  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
-  nav button { font: inherit; background: none; border: 1px solid transparent; color: var(--muted);
-               padding: 5px 11px; border-radius: 7px; cursor: pointer; }
-  nav button:hover { color: var(--ink); }
-  nav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
-  main { padding: 22px 24px 60px; max-width: 980px; }
-  .row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
-  input, select { font: inherit; padding: 8px 11px; border-radius: 8px; border: 1px solid var(--line);
-                  background: var(--panel); color: var(--ink); }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  #q { flex: 1; min-width: 240px; }
-  .narrow { width: 180px; }
-  button.go { font: inherit; padding: 8px 16px; border-radius: 8px; cursor: pointer;
-              border: 1px solid var(--line); background: var(--accent); color: #fff; }
-  button.go:hover { filter: brightness(1.08); }
-  button.quiet { font: inherit; font-size: 12.5px; background: none; cursor: pointer; border: 1px solid var(--line);
-                 border-radius: 6px; padding: 2px 9px; color: var(--muted); }
-  button.quiet.warn { color: var(--warn); }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; margin-bottom: 10px; }
-  .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
-  .tag { background: var(--accent-soft); color: var(--accent); border-radius: 5px; padding: 1px 7px; font-size: 11.5px; }
-  .scope { border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; font-size: 11.5px; color: var(--ink); cursor: pointer; }
-  .scope b { color: var(--muted); font-weight: 500; }
-  .lane { border-radius: 5px; padding: 1px 7px; font-size: 11.5px; color: #fff; }
-  .lane.v { background: var(--lane-v); } .lane.t { background: var(--lane-t); }
-  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .muted { color: var(--muted); }
-  .err { color: var(--warn); }
-  .empty { color: var(--muted); padding: 26px 0; }
-  .bar { height: 5px; border-radius: 3px; background: var(--accent-soft); margin: 4px 0 8px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--accent); }
-  .chain { margin-bottom: 14px; }
-  .chain h3 { font-size: 14px; margin: 0 0 6px; font-weight: 600; }
-  .chain h3 span { color: var(--muted); font-weight: 400; }
-  .timeline { display: flex; height: 26px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
-  .seg { display: flex; align-items: center; padding: 0 8px; font-size: 12px; white-space: nowrap; overflow: hidden;
-         text-overflow: ellipsis; border-right: 1px solid var(--line); background: var(--accent-soft); color: var(--muted); }
-  .seg.active { background: var(--accent); color: #fff; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  /* shell */
+  .shell { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); min-height: 100%; }
+  .shell > * { min-width: 0; }
+  nav.side {
+    border-right: 1px solid var(--line); padding: 28px 16px 24px; position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column; gap: 28px; background: var(--bg);
+  }
+  .brand { padding: 0 8px; }
+  .brand .name { font-size: 17px; font-weight: 600; letter-spacing: 0.01em; }
+  .brand .space { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .group h2 { margin: 0 0 6px; padding: 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+              text-transform: uppercase; color: var(--muted); }
+  .group button.nav {
+    display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left;
+    padding: 7px 8px; border-radius: 6px; border: 0; background: none; color: var(--ink); cursor: pointer;
+  }
+  .group button.nav:hover { background: var(--accent-soft); }
+  .group button.nav[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .count { font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--line);
+           border-radius: 10px; padding: 0 7px; line-height: 18px; }
+  .group button.nav[aria-current="true"] .count { color: var(--accent); }
+  nav.side .foot { margin-top: auto; color: var(--muted); font-size: 12px; padding: 0 8px; }
+
+  main { padding: 36px 40px 80px; max-width: 920px; width: 100%; min-width: 0; overflow-wrap: anywhere; }
+  .page-head { margin-bottom: 28px; }
+  .page-head h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+  .page-head p { margin: 0; color: var(--muted); max-width: 60ch; }
+
+  /* topbar for narrow screens */
+  .topbar { display: none; }
+  .scrim { display: none; }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; }
+    nav.side { position: fixed; inset: 0 auto 0 0; width: min(80vw, 300px); transform: translateX(-100%);
+               transition: transform .18s ease; z-index: 20; border-right: 1px solid var(--line); }
+    nav.side.open { transform: none; }
+    .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 15; display: none; }
+    .scrim.open { display: block; }
+    .topbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line);
+              position: sticky; top: 0; background: var(--bg); z-index: 10; }
+    .topbar .name { font-weight: 600; }
+    .topbar button { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+    main { padding: 24px 16px 64px; }
+    .page-head h1 { font-size: 21px; }
+    .ev { grid-template-columns: 48px 1fr !important; }
+    .ev .k { display: none; }
+    .proposal { grid-template-columns: 1fr !important; }
+  }
+
+  /* search */
+  .search { display: flex; gap: 8px; }
+  .search input {
+    flex: 1; height: 44px; padding: 0 14px; font: inherit; font-size: 15px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink); min-width: 0;
+  }
+  .search input::placeholder { color: var(--muted); }
+  .btn { height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+         color: var(--on-accent); cursor: pointer; font-weight: 600; }
+  .btn:hover { filter: brightness(1.06); }
+  .btn.small { height: 30px; padding: 0 12px; font-weight: 500; }
+  .btn.quiet { background: none; color: var(--ink); border-color: var(--line); }
+  .btn.quiet:hover { background: var(--accent-soft); filter: none; }
+  .btn.danger { background: none; color: var(--warn); border-color: var(--line); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; align-items: center; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 6px; font-size: 13px;
+          background: var(--accent-soft); color: var(--ink); border: 1px solid transparent; }
+  .chip b { font-weight: 500; color: var(--muted); }
+  .chip button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; line-height: 1; }
+  .chip button:hover { color: var(--warn); }
+  .chip.add { background: none; border: 1px dashed var(--line); color: var(--muted); cursor: pointer; }
+  .chip.add:hover { border-color: var(--accent); color: var(--accent); }
+  .addrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .addrow[hidden] { display: none; }
+  .addrow input, .addrow select { height: 34px; padding: 0 10px; font: inherit; border-radius: 6px; border: 1px solid var(--line);
+                                  background: var(--surface); color: var(--ink); }
+  .summary-line { color: var(--muted); font-size: 13px; margin: 20px 0 8px; }
+
+  /* rows */
+  .rows { border-top: 1px solid var(--line); }
+  .row { padding: 16px 0; border-bottom: 1px solid var(--line); }
+  .row .meta { color: var(--muted); font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .row .text { font-size: 15px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .row .text .label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  details.why { margin-top: 8px; }
+  details.why summary { cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; display: inline-flex; gap: 6px; align-items: center; }
+  details.why summary::-webkit-details-marker { display: none; }
+  details.why summary::before { content: "▸"; font-size: 11px; }
+  details.why[open] summary::before { content: "▾"; }
+  .why-body { margin-top: 10px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+              display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; align-items: center; }
+  .why-body .k { color: var(--muted); }
+  .rank { height: 4px; border-radius: 2px; background: var(--accent-soft); width: 160px; overflow: hidden; display: inline-block; vertical-align: middle; }
+  .rank i { display: block; height: 100%; background: var(--accent); }
+  .fb { display: flex; gap: 8px; align-items: center; }
+  .fb button { height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line); background: none; cursor: pointer; font-size: 12.5px; }
+  .fb button.set { border-color: var(--accent); color: var(--accent); }
+
+  /* facts */
+  .facts-inline { padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+  .facts-inline h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .fact { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; padding: 3px 0; }
+  .fact .s { font-weight: 600; } .fact .p { color: var(--muted); } .fact .since { color: var(--muted); font-size: 12px; }
+  .origin { font-size: 12px; color: var(--muted); }
+  .origin.extracted, .origin.inferred { color: var(--accent); }
+
+  /* beliefs */
+  .subject { margin: 28px 0 10px; font-size: 16px; font-weight: 600; text-transform: capitalize; }
+  .subject:first-child { margin-top: 0; }
+  .belief { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .belief .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .belief .pred { color: var(--muted); font-size: 13px; }
+  .belief .now { font-weight: 600; }
+  .belief .head .spacer { flex: 1; }
+  .timeline { display: flex; height: 22px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+  .seg { display: flex; align-items: center; padding: 0 8px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+         border-right: 1px solid var(--line); background: var(--accent-soft); color: var(--muted); min-width: 0; }
+  .seg.active { background: var(--accent); color: var(--on-accent); }
+  .seg.excluded { background: transparent; color: var(--muted); border: 1px dashed var(--muted); }
   .seg:last-child { border-right: 0; }
-  .legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 3px; }
-  .reason { color: var(--muted); font-size: 12.5px; margin-top: 5px; }
-  .stat { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--line); }
-  .stat:last-child { border-bottom: 0; }
-  .topo { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 8px; align-items: center; margin: 6px 0 14px; }
-  .node { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--panel); text-align: center; }
-  .node small { display: block; color: var(--muted); font-size: 11.5px; }
-  .arrow { color: var(--muted); text-align: center; }
-  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
-  .kv .scope { justify-self: start; }
-  .kv .bar { margin: 0; width: 100%; }
-  .keyform { max-width: 420px; margin: 60px auto; }
-  .pill { border-radius: 5px; padding: 1px 7px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); }
-  .pill.ok { color: var(--ok); border-color: var(--ok); }
-  .pill.bad { color: var(--warn); border-color: var(--warn); }
-  .pill.run { color: var(--lane-v); border-color: var(--lane-v); }
-  table.live { width: 100%; border-collapse: collapse; font-size: 13px; }
-  table.live td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  table.live td:first-child { white-space: nowrap; color: var(--muted); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
-  .panel h3 { margin: 0 0 8px; font-size: 13.5px; font-weight: 600; }
-  .panel h3 span { color: var(--muted); font-weight: 400; }
-  .fig { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  details.actions { position: relative; }
+  details.actions summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 2px 8px; border-radius: 6px; border: 1px solid transparent; }
+  details.actions summary::-webkit-details-marker { display: none; }
+  details.actions summary:hover { border-color: var(--line); }
+  details.actions .menu { position: absolute; right: 0; top: 100%; z-index: 5; margin-top: 4px; min-width: 220px; background: var(--surface);
+                          border: 1px solid var(--line); border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  details.actions .menu button { text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  details.actions .menu button:hover { background: var(--accent-soft); }
+  details.actions .menu button.danger { color: var(--warn); }
+
+  /* review */
+  .proposal { padding: 16px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; }
+  .proposal .triple { font-size: 15px; }
+  .proposal .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .proposal .excerpt { grid-column: 1 / -1; margin-top: 6px; padding: 10px 12px; border-left: 2px solid var(--line); color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+  .proposal .excerpt .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; display: block; margin-bottom: 4px; }
+  .proposal .decide { display: flex; gap: 8px; align-items: flex-start; }
+
+  /* live */
+  .statusline { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; vertical-align: middle; }
+  .dot.off { background: var(--warn); }
+  .statusline select { height: 30px; padding: 0 8px; font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+  .minute { margin: 18px 0 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ev { display: grid; grid-template-columns: 52px 96px 1fr; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; align-items: baseline; }
+  .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .ev .k { color: var(--muted); font-size: 12.5px; }
+  .ev .d { overflow-wrap: anywhere; }
+  .state { font-size: 12px; margin-left: 8px; }
+  .state.ok { color: var(--ok); } .state.bad { color: var(--warn); } .state.run { color: var(--accent); }
+  .jobs h3 { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .job { padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; }
+  .job .name { font-weight: 600; } .job .sub { color: var(--muted); font-size: 12.5px; grid-column: 1; }
+  .job .prog { font-variant-numeric: tabular-nums; text-align: right; }
+
+  /* analytics */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+  .panel h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .panel .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+  .fig { display: grid; grid-template-columns: 1fr auto; gap: 0 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .fig:last-child { border-bottom: 0; }
-  .fig .l { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fig .l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .fig .v { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-  .fig .n { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+  .fig .n { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; line-height: 1.35; }
   .none { color: var(--muted); font-style: italic; }
-  .spark { display: flex; gap: 2px; align-items: flex-end; height: 40px; margin-top: 6px; }
-  .spark i { display: block; flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
-  .thumbs button { font: inherit; font-size: 12px; background: none; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; cursor: pointer; color: var(--muted); }
-  .thumbs button.set { color: var(--accent); border-color: var(--accent); }
+  .foot { margin-top: 20px; color: var(--muted); font-size: 12.5px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px 24px; }
+  .foot b { color: var(--ink); font-weight: 500; }
+  .spark { display: flex; gap: 2px; align-items: flex-end; height: 36px; margin-top: 8px; }
+  .spark i { display: block; flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .85; }
+
+  /* scopes, status */
+  .kv { display: grid; grid-template-columns: max-content 1fr auto; gap: 8px 16px; align-items: center; }
+  .bar { height: 5px; border-radius: 3px; background: var(--accent-soft); overflow: hidden; min-width: 120px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .stat { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .stat:last-child { border-bottom: 0; }
+  .stat span:last-child { color: var(--muted); text-align: right; }
+  .flow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+  .flow .node { padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .flow .node small { display: block; color: var(--muted); font-size: 11.5px; }
+  .flow .arrow { color: var(--muted); }
+
+  .empty { color: var(--muted); padding: 32px 0; }
+  .empty code { font-size: 13px; background: var(--accent-soft); padding: 1px 6px; border-radius: 4px; }
+  .err { color: var(--warn); }
+  .keyform { max-width: 440px; margin: 48px auto; padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  .keyform input { width: 100%; height: 40px; padding: 0 12px; margin: 12px 0; font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .linkish { border: 0; background: none; padding: 0; color: inherit; cursor: pointer; font-size: inherit; }
+  .linkish:hover { color: var(--accent); text-decoration: underline; }
 </style>
 </head>
 <body>
-<header>
-  <h1>🥐 Scone <span id="space">memory</span></h1>
-  <nav>
-    <button data-view="search" aria-current="true">Memory</button>
-    <button data-view="ledger">Ledger</button>
-    <button data-view="scopes">Scopes</button>
-    <button data-view="live">Live</button>
-    <button data-view="analytics">Analytics</button>
-    <button data-view="status">Status</button>
+<div class="topbar">
+  <button id="menu" aria-label="Open navigation">Menu</button>
+  <span class="name">Scone</span>
+  <span id="topspace" style="color:var(--muted);font-size:12px"></span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <nav class="side" id="side">
+    <div class="brand"><div class="name">Scone</div><div class="space" id="space">memory</div></div>
+    <div class="group"><h2>Memory</h2>
+      <button class="nav" data-view="search">Search</button>
+      <button class="nav" data-view="beliefs">Beliefs</button>
+      <button class="nav" data-view="review">Review <span class="count" id="review-count" hidden>0</span></button>
+    </div>
+    <div class="group"><h2>Activity</h2>
+      <button class="nav" data-view="live">Live</button>
+      <button class="nav" data-view="analytics">Analytics</button>
+    </div>
+    <div class="group"><h2>System</h2>
+      <button class="nav" data-view="scopes">Scopes</button>
+      <button class="nav" data-view="status">Status</button>
+    </div>
+    <div class="foot" id="foot"></div>
   </nav>
-</header>
-<main>
-  <div id="controls">
-    <div class="row">
-      <input type="search" id="q" placeholder="Ask your memory" autocomplete="off">
-      <button class="go" id="run">Recall</button>
-    </div>
-    <div class="row">
-      <input type="text" id="where" class="narrow" placeholder="scope  user_id:alice" autocomplete="off" title="key:value, comma-separated">
-      <input type="date" id="asof" class="narrow" title="as of this date">
-      <input type="text" id="tags" class="narrow" placeholder="tags  work,planning" autocomplete="off">
-    </div>
-  </div>
-  <div id="out"><p class="empty">Ask, or press Enter to see what is here.</p></div>
-</main>
+  <main>
+    <div class="page-head"><h1 id="title">Search</h1><p id="intro"></p></div>
+    <div id="out"></div>
+  </main>
+</div>
 <script>
 const BAKED = document.currentScript.dataset.token || "__SCONE_TOKEN__";
 let TOKEN = BAKED.startsWith("__") ? (sessionStorage.getItem("scone-key") || "") : BAKED;
 const out = document.getElementById("out");
-const q = document.getElementById("q");
-const controls = document.getElementById("controls");
 let view = "search";
+let gen = 0;  // bumped on every navigation; async work compares before writing
+const state = { q: "", where: {}, tags: [], asOf: "" };
+const stale = (g) => g !== gen;
 
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
-  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const day = (s) => (s || "").slice(0, 10);
+const clock = (s) => (s || "").slice(11, 19);
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: {
-    authorization: "Bearer " + TOKEN, "content-type": "application/json", ...(opts.headers || {}) } });
+  const res = await fetch(path, { ...opts, headers: { authorization: "Bearer " + TOKEN, "content-type": "application/json", ...(opts.headers || {}) } });
   const body = await res.json().catch(() => ({}));
-  if (res.status === 401) { TOKEN = ""; sessionStorage.removeItem("scone-key"); askKey(); throw new Error("key needed"); }
+  if (res.status === 401) { TOKEN = ""; sessionStorage.removeItem("scone-key"); gen += 1; askKey(); throw new Error("key needed"); }
   if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
   return body;
 }
-function show(html) { out.innerHTML = html; }
-function fail(e) { if (e.message !== "key needed") show('<p class="err">' + esc(e.message) + "</p>"); }
-function none(what) { return '<p class="empty">No ' + what + " yet.</p>"; }
+const show = (html) => { out.innerHTML = html; };
+const safeHref = (url) => { try { const u = new URL(url, location.href); return u.protocol === "http:" || u.protocol === "https:" ? u.href : null; } catch (_) { return null; } };
+const sourceHtml = (src) => { if (!src) return ""; const href = safeHref(src); return href ? `<a href="${esc(href)}" target="_blank" rel="noreferrer noopener">${esc(src)}</a>` : `<span title="source">${esc(src)}</span>`; };
+const fail = (e) => { if (e.message !== "key needed") show(`<p class="err">${esc(e.message)}</p>`); };
+const setHead = (title, intro) => { document.getElementById("title").textContent = title; document.getElementById("intro").textContent = intro; };
 
 function askKey() {
-  controls.style.display = "none";
-  show(`<form class="card keyform" id="keyform">
-    <p>This server has more than one key, so the console needs to know which space you mean.</p>
-    <div class="row"><input type="password" id="key" placeholder="bearer key" style="flex:1"><button class="go">Open</button></div>
-    <p class="muted">Kept in this tab only.</p></form>`);
+  setHead("Which space?", "");
+  show(`<form class="keyform" id="keyform">
+    <p>This server has more than one key. Enter the key for the space you want to open; it stays in this tab.</p>
+    <input type="password" id="key" placeholder="bearer key" autocomplete="off">
+    <button class="btn">Open</button></form>`);
   document.getElementById("keyform").onsubmit = (e) => {
     e.preventDefault();
     TOKEN = document.getElementById("key").value.trim();
     sessionStorage.setItem("scone-key", TOKEN);
-    controls.style.display = view === "search" ? "block" : "none";
-    views[view]();
+    activate(view);
   };
 }
 
-const scopeChips = (meta) => Object.entries(meta || {}).map(([k, v]) =>
-  `<span class="scope" data-where="${esc(k)}:${esc(v)}"><b>${esc(k)}</b> ${esc(v)}</span>`).join("");
+/* ---------- search ---------- */
+const chipHtml = () => {
+  const chips = [];
+  for (const [k, v] of Object.entries(state.where)) chips.push(`<span class="chip"><b>${esc(k)}</b> ${esc(v)} <button data-rm-where="${esc(k)}" aria-label="remove">×</button></span>`);
+  for (const t of state.tags) chips.push(`<span class="chip"><b>tag</b> ${esc(t)} <button data-rm-tag="${esc(t)}" aria-label="remove">×</button></span>`);
+  if (state.asOf) chips.push(`<span class="chip"><b>as of</b> ${esc(state.asOf)} <button data-rm-asof aria-label="remove">×</button></span>`);
+  chips.push(`<button class="chip add" id="addchip">+ filter</button>`);
+  return `<div class="chips" id="chips">${chips.join("")}</div>
+    <div class="addrow" id="addrow" hidden>
+      <select id="fkind"><option value="where">scope key = value</option><option value="tag">tag</option><option value="asof">as of date</option></select>
+      <input id="fkey" placeholder="user_id" style="width:130px"><input id="fval" placeholder="alice" style="width:160px">
+      <button class="btn small quiet" id="fadd">Add</button>
+    </div>`;
+};
 
-async function search() {
-  const term = q.value.trim();
-  const params = new URLSearchParams({ q: term || "*", limit: "25" });
-  const where = document.getElementById("where").value.trim();
-  const asof = document.getElementById("asof").value;
-  const tags = document.getElementById("tags").value.trim();
+function searchShell(resultsHtml) {
+  setHead("Search", "Ask in plain words. Results are excerpts of what was stored, with the facts that held at the time.");
+  show(`<div class="search"><input type="search" id="q" placeholder="Where does Bob live?" autocomplete="off" value="${esc(state.q)}"><button class="btn" id="run">Recall</button></div>
+    ${chipHtml()}<div id="results">${resultsHtml || ""}</div>`);
+  const q = document.getElementById("q");
+  document.getElementById("run").onclick = () => { state.q = q.value.trim(); runSearch(); };
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { state.q = q.value.trim(); runSearch(); } });
+  const kind = document.getElementById("fkind");
+  kind.onchange = () => {
+    const k = document.getElementById("fkey"), v = document.getElementById("fval");
+    k.hidden = kind.value !== "where"; v.type = kind.value === "asof" ? "date" : "text";
+    v.placeholder = kind.value === "tag" ? "work" : "alice";
+  };
+  document.getElementById("addchip").onclick = () => { const r = document.getElementById("addrow"); r.hidden = !r.hidden; kind.onchange(); };
+  document.getElementById("fadd").onclick = () => {
+    const k = document.getElementById("fkey").value.trim(), v = document.getElementById("fval").value.trim();
+    if (kind.value === "where" && k && v) state.where[k] = v;
+    if (kind.value === "tag" && v && !state.tags.includes(v)) state.tags.push(v);
+    if (kind.value === "asof" && v) state.asOf = v;
+    runSearch();
+  };
+}
+
+async function runSearch() {
+  const g = gen;
+  searchShell(`<p class="empty">Searching…</p>`);
+  const params = new URLSearchParams({ q: state.q || "*", limit: "25" });
+  const where = Object.entries(state.where).map(([k, v]) => `${k}:${v}`).join(",");
   if (where) params.set("where", where);
-  if (asof) params.set("as_of", asof);
-  if (tags) params.set("tags", tags);
+  if (state.tags.length) params.set("tags", state.tags.join(","));
+  if (state.asOf) params.set("as_of", state.asOf);
   try {
     const r = await api("/v1/recall?" + params.toString());
+    const results = document.getElementById("results");
+    if (stale(g) || !results) return;
     const items = r.items || [], facts = r.facts || [];
-    if (!items.length && !facts.length) return show(none("matching memory"));
-    const factsHtml = facts.length ? `<div class="card"><div class="meta">Facts that hold${asof ? " as of " + esc(asof) : ""}</div>` +
-      facts.map((f) => `<div class="body"><strong>${esc(f.subject)}</strong> ${esc(f.predicate)} ${esc(f.object)}
-        <span class="muted">since ${esc(day(f.valid_from))}</span></div>`).join("") + "</div>" : "";
-    const saved = r.context_reduction != null
-      ? `<p class="muted">${items.length} item(s); ${Math.round(r.context_reduction * 100)}% of the space's bytes left behind.` +
-        (r.degraded && r.degraded.length ? ` <span class="err">Degraded: ${esc(r.degraded.join("; "))}</span>` : "") + "</p>" : "";
-    show(saved + factsHtml + items.map((i) => `
-      <div class="card">
-        <div class="meta">
-          <span>${esc(day(i.created_at))}</span>
-          <span>episode ${esc(i.episode_id)}</span>
-          ${i.lanes && i.lanes.vector ? `<span class="lane v">vector #${i.lanes.vector}${i.similarity != null ? " · " + i.similarity.toFixed(2) : ""}</span>` : ""}
-          ${i.lanes && i.lanes.text ? `<span class="lane t">text #${i.lanes.text}</span>` : ""}
-          ${(i.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}
-          ${scopeChips(i.metadata)}
-          ${i.source ? `<a href="${esc(i.source)}" target="_blank" rel="noreferrer">source</a>` : ""}
-        </div>
-        <div class="bar"><i style="width:${Math.round((i.score || 0) * 100)}%"></i></div>
-        <div class="body">${esc(i.text)}</div>
-        ${r.event_id != null ? `<div class="meta thumbs" style="margin-top:8px">
-          <span>Useful?</span>
-          <button data-fb="1" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">yes</button>
-          <button data-fb="0" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">no</button></div>` : ""}
-      </div>`).join(""));
+    if (!items.length && !facts.length) { results.innerHTML = `<p class="empty">Nothing matched. Store something with <code>scone-memory remember</code> and ask again.</p>`; return; }
+    const factsHtml = facts.length ? `<div class="facts-inline"><h3>Recorded claims that held${state.asOf ? " on " + esc(state.asOf) : ""}</h3>` +
+      facts.map((f) => `<div class="fact"><span class="s">${esc(f.subject)}</span><span class="p">${esc(f.predicate.replace(/_/g, " "))}</span><span>${esc(f.object)}</span>
+        <span class="since">since ${esc(day(f.valid_from))}</span><span class="origin ${esc(f.origin || "stated")}">${esc(f.origin || "stated")}</span></div>`).join("") + "</div>" : "";
+    const line = `<p class="summary-line">${items.length} excerpt${items.length === 1 ? "" : "s"}${r.context_reduction != null && r.space_bytes ? `, ${Math.round(r.context_reduction * 100)}% of stored bytes left behind` : ""}${r.degraded && r.degraded.length ? ` <span class="err">· one lane failed: ${esc(r.degraded.join("; "))}</span>` : ""}</p>`;
+    results.innerHTML = line + factsHtml + `<div class="rows">` + items.map((i) => `
+      <div class="row">
+        <div class="meta"><span>${esc(day(i.created_at))}</span>${sourceHtml(i.source)}
+          ${Object.entries(i.metadata || {}).map(([k, v]) => `<button class="linkish" data-where="${esc(k)}:${esc(v)}" title="Search within ${esc(k)} ${esc(v)}">${esc(k.replace(/_/g, " "))} ${esc(v)}</button>`).join("")}
+          ${(i.tags || []).map((t) => `<button class="linkish" data-tag="${esc(t)}" title="Add tag filter ${esc(t)}">#${esc(t)}</button>`).join("")}</div>
+        <div class="text"><span class="label">excerpt</span>${esc(i.text)}</div>
+        <details class="why"><summary>why this</summary><div class="why-body">
+          <span class="k">rank in this query</span><span><span class="rank"><i style="width:${Math.round((i.score || 0) * 100)}%"></i></span> <span style="color:var(--muted);font-size:12px">${(i.score || 0).toFixed(2)}, top is 1.00</span></span>
+          <span class="k">found by</span><span>${i.lanes && i.lanes.vector ? `vector lane, rank ${i.lanes.vector}` : ""}${i.lanes && i.lanes.vector && i.lanes.text ? " and " : ""}${i.lanes && i.lanes.text ? `text lane, rank ${i.lanes.text}` : ""}${!i.lanes || (!i.lanes.vector && !i.lanes.text) ? "unknown" : ""}</span>
+          ${i.similarity != null ? `<span class="k">cosine similarity</span><span>${i.similarity.toFixed(3)} <span style="color:var(--muted);font-size:12px">uncalibrated</span></span>` : ""}
+          <span class="k">episode</span><span>#${i.episode_id}, chunk #${i.chunk_id}</span>
+          ${r.event_id != null ? `<span class="k">useful?</span><span class="fb"><button data-fb="1" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">yes</button><button data-fb="0" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">no</button></span>` : ""}
+        </div></details>
+      </div>`).join("") + "</div>";
   } catch (e) { fail(e); }
 }
 
-const summarise = (e) => {
-  const p = e.payload || {};
-  switch (e.kind) {
-    case "recall": {
-      const top = (p.items || [])[0];
-      const lanes = top && top.lanes ? Object.keys(top.lanes).join("+") : "none";
-      const q = p.query_hashed ? `hash ${esc(p.query)}` : esc(p.query);
-      return `${q} · ${(p.items || []).length} item(s) · top via ${lanes}` +
-        (p.latency_ms && p.latency_ms.total != null ? ` · ${p.latency_ms.total.toFixed(1)} ms` : "") +
-        (p.degraded && p.degraded.length ? ` · degraded: ${esc(p.degraded.join("; "))}` : "");
-    }
-    case "remember": return `${p.fresh ?? "?"} fresh, ${p.deduplicated ?? 0} known, ${p.chunks ?? 0} chunks, ${p.bytes ?? 0} B` +
-      (p.latency_ms != null ? ` · ${Number(p.latency_ms).toFixed(1)} ms` : "");
-    case "fact_assert": return `${esc(p.subject)} ${esc(p.predicate)} → ${esc(p.outcome)}` +
-      (p.superseded && p.superseded.length ? `, superseded #${p.superseded.join(", #")}` : "");
-    case "fact_close": return `fact #${p.fact_id} closed (${esc(p.reason_kind)})`;
-    case "forget": return `episode #${p.episode_id}, ${p.chunks_removed ?? 0} chunk(s) removed`;
-    case "feedback": return `recall #${p.recall_event_id} chunk #${p.chunk_id}: ${p.useful ? "useful" : "not useful"}`;
-    case "job": return `${esc(p.name)} [${esc(p.job_id)}]` +
-      (p.progress ? ` · ${p.progress.done}/${p.progress.total}` : "") + (p.adapter ? ` · ${esc(p.adapter)}` : "") +
-      (p.detail ? ` · ${esc(p.detail)}` : "");
-    default: return esc(JSON.stringify(p)).slice(0, 160);
-  }
-};
-const stateOf = (e) => {
-  const p = e.payload || {};
-  if (e.kind === "job") return p.status === "running" ? ["run", "running"] : p.status === "failed" ? ["bad", "failed"] : ["ok", "completed"];
-  return p.error ? ["bad", "failed"] : ["ok", "completed"];
-};
-
-let liveTimer = null, livePaused = false, liveKind = "", liveLast = null, liveErr = null;
-async function livePoll() {
-  if (view !== "live" || livePaused) return;
-  try {
-    const params = new URLSearchParams({ limit: "60" });
-    if (liveKind) params.set("kind", liveKind);
-    const r = await api("/v1/events?" + params.toString());
-    liveLast = new Date(); liveErr = null;
-    renderLive(r);
-  } catch (e) { liveErr = e.message; renderLive(null); }
-}
-function renderLive(r) {
-  const head = `<div class="row" style="align-items:center">
-    <span class="pill ${liveErr ? "bad" : "ok"}">${liveErr ? "disconnected: " + esc(liveErr) : "connected"}</span>
-    <span class="muted">polling every 3 s${liveLast ? ", updated " + Math.round((Date.now() - liveLast) / 1000) + " s ago" : ""}</span>
-    <button class="quiet" id="pause">${livePaused ? "resume" : "pause"}</button>
-    <select id="kind"><option value="">all kinds</option>${["recall","remember","fact_assert","fact_close","forget","feedback","job"]
-      .map((k) => `<option ${k === liveKind ? "selected" : ""}>${k}</option>`).join("")}</select>
-    ${r ? `<span class="muted">evidence: ${esc(r.evidence)}, queries ${esc(r.queries_recorded)}, newest 60 shown</span>` : ""}
-  </div>`;
-  if (!r) { show(head + '<p class="empty">No data until the connection returns.</p>'); return wire(); }
-  const events = r.events || [];
-  if (!events.length) { show(head + '<p class="empty">No events recorded yet. Recall or store something and they appear here.</p>'); return wire(); }
-  const seen = new Set(), rows = [];
-  for (const e of events) {
-    if (e.kind === "job") { const id = e.payload.job_id; if (seen.has(id)) continue; seen.add(id); }
-    const [cls, label] = stateOf(e);
-    rows.push(`<tr><td>${esc(e.ts.slice(11, 19))}<br><small>${esc(e.ts.slice(0, 10))}</small></td>
-      <td><span class="pill">${esc(e.kind)}</span></td><td><span class="pill ${cls}">${label}</span></td>
-      <td>${summarise(e)}${e.payload.error ? `<div class="err">${esc(e.payload.error)}</div>` : ""}</td></tr>`);
-  }
-  show(head + `<table class="live">${rows.join("")}</table>`);
-  wire();
-  function wire() {
-    const b = document.getElementById("pause"); if (b) b.onclick = () => { livePaused = !livePaused; if (!livePaused) livePoll(); else renderLive(r); };
-    const k = document.getElementById("kind"); if (k) k.onchange = () => { liveKind = k.value; livePoll(); };
-  }
-}
-async function live() {
-  if (liveTimer) clearInterval(liveTimer);
-  await livePoll();
-  liveTimer = setInterval(livePoll, 3000);
-}
-
-const fmt = (m) => {
-  if (m.value == null) return '<span class="none">no evidence yet</span>';
-  if (typeof m.value === "number") return m.unit === "share" || m.unit === "share of bytes" ? (m.value * 100).toFixed(1) + "%" :
-    m.unit === "ms" ? m.value.toFixed(1) + " ms" : String(m.value);
-  if (typeof m.value === "object") return esc(Object.entries(m.value).map(([k, v]) =>
-    `${k} ${typeof v === "number" ? v.toFixed(3) : typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "));
-  return esc(m.value);
-};
-const label = (name) => name.split(".").slice(1).join(" ").replace(/_/g, " ")
-  .replace("latency ms ", "latency ").replace("top item ", "top item via ").replace(" share", "")
-  .replace("top similarity ", "top similarity, ");
-const fig = (m) => m ? `<div class="fig" title="${esc(m.definition)}${m.caveat ? "\n" + esc(m.caveat) : ""}">
-  <span class="l">${esc(label(m.name))}</span><span class="v">${fmt(m)}</span>
-  <span class="n">n = ${m.n} ${esc(m.denominator)}</span></div>` : "";
-
-async function analytics() {
-  try {
-    const r = await api("/v1/metrics");
-    if (!r.coverage) return show(none("evidence log attached, so no metrics can be computed"));
-    const by = Object.fromEntries((r.metrics || []).map((m) => [m.name, m]));
-    const cov = r.coverage;
-    const panel = (title, names, extra = "") => `<div class="card panel"><h3>${title}</h3>${names.map((n) => fig(by[n])).join("")}${extra}</div>`;
-    const days = Object.entries(r.daily || {});
-    const max = Math.max(1, ...days.map(([, kinds]) => Object.values(kinds).reduce((a, b) => a + b, 0)));
-    const spark = days.length ? `<div class="spark">${days.map(([d, kinds]) => { const t = Object.values(kinds).reduce((a, b) => a + b, 0);
-      return `<i style="height:${Math.round((t / max) * 100)}%" title="${d}: ${t} event(s)"></i>`; }).join("")}</div>
-      <div class="legend"><span>${esc(days[0][0])}</span><span>${esc(days[days.length - 1][0])}</span></div>` : "";
-    show(`<p class="muted">Every figure is computed from the ${cov.events_considered} retained event(s)${cov.earliest_retained ? " since " + esc(cov.earliest_retained.slice(0, 19)) : ""}${cov.truncated ? '; <span class="err">the read was truncated, coverage is partial</span>' : ""}. n and denominator are shown next to each value; hover for the definition. Operational figures are not answer quality.</p>
-      <div class="grid">
-      ${panel("Recall <span>evidence of use and timing</span>", ["recall.count", "recall.latency_ms.p50", "recall.latency_ms.p95", "recall.latency_ms.embed.p50", "recall.latency_ms.vector.p50", "recall.latency_ms.text.p50", "recall.degraded_count", "recall.byte_context_reduction.median"])}
-      ${panel("Lanes <span>agreement, not relevance</span>", ["recall.top_item.both_lanes_share", "recall.top_item.vector_only_share", "recall.top_item.text_only_share", ...Object.keys(by).filter((k) => k.startsWith("recall.top_similarity."))])}
-      ${panel("Ingest", ["ingest.calls", "ingest.fresh_episodes", "ingest.deduplicated", "ingest.dedup_fraction", "ingest.stored_bytes", "ingest.chunks"])}
-      ${panel("Ledger <span>events, not accuracy</span>", ["ledger.asserted", "ledger.asserted_already_closed", "ledger.restated", "ledger.superseded", "ledger.manual_closures"])}
-      ${panel("Feedback <span>what people judged</span>", ["feedback.judged_items", "feedback.useful_share", "feedback.coverage"])}
-      ${panel("Coverage", [], `<div class="fig"><span>events considered</span><span class="v">${cov.events_considered}</span></div>
-        <div class="fig"><span>failures</span><span class="v">${esc(Object.entries(r.failures || {}).map(([k, v]) => k + " " + v).join(", ") || "none")}</span></div>
-        <div class="fig"><span>embedders seen</span><span class="v">${esc((r.embedders || []).join(", ") || "none")}</span></div>
-        <div class="fig"><span>schema versions</span><span class="v">${esc((cov.schema_versions || []).join(", ") || "none")}</span></div>
-        <div class="fig"><span>scope filters used</span><span class="v">${fmt(by["recall.where_values.top5"] || { value: null })}</span></div>
-        ${spark}`)}
-      </div>`);
-  } catch (e) { fail(e); }
-}
-
+/* ---------- beliefs ---------- */
 function chains(facts) {
-  const groups = new Map();
+  const bySubject = new Map();
   for (const f of facts) {
-    const key = f.subject + " → " + f.predicate;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(f);
+    if (!bySubject.has(f.subject)) bySubject.set(f.subject, new Map());
+    const preds = bySubject.get(f.subject);
+    if (!preds.has(f.predicate)) preds.set(f.predicate, []);
+    preds.get(f.predicate).push(f);
   }
-  for (const list of groups.values()) list.sort((a, b) => a.valid_from.localeCompare(b.valid_from) || a.fact_id - b.fact_id);
-  return groups;
+  for (const preds of bySubject.values()) for (const list of preds.values()) list.sort((a, b) => a.valid_from.localeCompare(b.valid_from) || a.fact_id - b.fact_id);
+  return bySubject;
 }
 
-async function ledger() {
+async function beliefs() {
+  const g = gen;
+  setHead("Beliefs", "What is believed, subject by subject, and how each belief changed over time. Closing ends a belief; excluding hides it from recall without rewriting its history.");
   try {
-    const r = await api("/v1/facts?all=true");
-    const list = r.facts || [];
-    if (!list.length) return show(none("facts in the ledger"));
+    const r = await api("/v1/facts?all=true&excluded=true");
+    if (stale(g)) return;
+    const list = (r.facts || []).filter((f) => f.status === "active" || f.status === "closed");
+    if (!list.length) return show(`<p class="empty">No beliefs yet. Assert one with <code>scone-memory assert</code>, or approve a proposal under Review.</p>`);
     const now = Date.now();
-    let html = `<p class="muted">${list.length} fact(s), ${list.filter((f) => f.status === "active").length} active. Each row is one subject and predicate over time; the highlighted segment is what holds now.</p>`;
-    for (const [key, facts] of chains(list)) {
-      const start = Math.min(...facts.map((f) => Date.parse(f.valid_from)));
-      const span = Math.max(now - start, 86400000);
-      const segs = facts.map((f) => {
-        const from = Date.parse(f.valid_from), to = f.valid_until ? Date.parse(f.valid_until) : now;
-        const width = Math.max(((to - from) / span) * 100, 6);
-        return `<div class="seg ${f.status === "active" ? "active" : ""}" style="flex:${width.toFixed(2)} 0 0" title="${esc(f.object)} ${esc(day(f.valid_from))} → ${f.valid_until ? esc(day(f.valid_until)) : "now"}${f.closed_reason ? "\n" + esc(f.closed_reason) : ""}">${esc(f.object)}</div>`;
-      }).join("");
-      const closedReasons = facts.filter((f) => f.closed_reason && !/^superseded by fact/.test(f.closed_reason))
-        .map((f) => `<div class="reason">${esc(f.object)} closed ${esc(day(f.valid_until))}: ${esc(f.closed_reason)}</div>`).join("");
-      const active = facts.filter((f) => f.status === "active");
-      html += `<div class="card chain">
-        <h3>${esc(key.split(" → ")[0])} <span>${esc(key.split(" → ")[1])}</span>
-          ${active.map((f) => `<button class="quiet warn" data-close="${f.fact_id}" style="float:right">Close #${f.fact_id}</button>`).join("")}
-        </h3>
-        <div class="timeline">${segs}</div>
-        <div class="legend"><span>${esc(day(facts[0].valid_from))}</span><span>now</span></div>
-        ${closedReasons}
-      </div>`;
+    let html = "";
+    for (const [subject, preds] of chains(list)) {
+      html += `<div class="subject">${esc(subject)}</div>`;
+      for (const [pred, facts] of preds) {
+        const start = Math.min(...facts.map((f) => Date.parse(f.valid_from)));
+        const span = Math.max(now - start, 86400000);
+        const current = facts.find((f) => f.status === "active" && !f.excluded_reason);
+        const segs = facts.map((f) => {
+          const from = Date.parse(f.valid_from), to = f.valid_until ? Date.parse(f.valid_until) : now;
+          const w = Math.max(((to - from) / span) * 100, 8);
+          const cls = f.excluded_reason ? "excluded" : f.status === "active" ? "active" : "";
+          return `<div class="seg ${cls}" style="flex:${w.toFixed(2)} 0 0" title="${esc(f.object)}, ${esc(day(f.valid_from))} to ${f.valid_until ? esc(day(f.valid_until)) : "now"}${f.closed_reason ? "\n" + esc(f.closed_reason) : ""}${f.excluded_reason ? "\nexcluded: " + esc(f.excluded_reason) : ""}">${esc(f.object)}</div>`;
+        }).join("");
+        const notes = facts.filter((f) => (f.closed_reason && !/^superseded by fact/.test(f.closed_reason)) || f.excluded_reason)
+          .map((f) => `<div class="note">${esc(f.object)}: ${f.excluded_reason ? "excluded from recall, " + esc(f.excluded_reason) : "closed " + esc(day(f.valid_until)) + ", " + esc(f.closed_reason)}</div>`).join("");
+        const origins = [...new Set(facts.map((f) => f.origin || "stated"))].filter((o) => o !== "stated");
+        html += `<div class="belief"><div class="head"><span class="pred">${esc(pred.replace(/_/g, " "))}</span>
+            <span class="now">${current ? esc(current.object) : `<span style="color:var(--muted);font-weight:400">nothing holds now</span>`}</span>
+            ${current && current.origin && current.origin !== "stated" ? `<span class="origin ${esc(current.origin)}">${esc(current.origin)}</span>` : ""}
+            <span class="spacer"></span>
+            <details class="actions"><summary>actions</summary><div class="menu">
+              ${facts.filter((f) => f.status === "active" && !f.excluded_reason).map((f) => `<button data-close="${f.fact_id}">Close “${esc(f.object)}” with a reason</button>`).join("")}
+              ${facts.filter((f) => !f.excluded_reason).map((f) => `<button data-exclude="${f.fact_id}">Exclude “${esc(f.object)}” from recall</button>`).join("")}
+              ${facts.filter((f) => f.excluded_reason).map((f) => `<button data-include="${f.fact_id}">Include “${esc(f.object)}” again</button>`).join("")}
+            </div></details></div>
+          <div class="timeline">${segs}</div>
+          <div class="legend"><span>${esc(day(facts[0].valid_from))}</span><span>${origins.length ? "origin: " + esc(origins.join(", ")) : ""}</span><span>now</span></div>${notes}</div>`;
+      }
     }
     show(html);
   } catch (e) { fail(e); }
 }
 
-async function scopes() {
+/* ---------- review ---------- */
+async function review() {
+  const g = gen;
+  setHead("Review", "Facts a model read out of your memory. Nothing here holds until you approve it; declining keeps your reason.");
   try {
-    const r = await api("/v1/scopes");
-    const keys = Object.entries(r.scopes || {});
-    if (!keys.length) return show(none("scoped memory. Store episodes with metadata such as user_id or agent_id to see who has memory here"));
-    show(`<p class="muted">Episodes per scope value. Click a value to recall inside it.</p>` + keys.map(([key, values]) => {
-      const max = Math.max(...Object.values(values));
-      return `<div class="card"><div class="meta">${esc(key)}</div><div class="kv">` +
-        Object.entries(values).map(([v, n]) => `<span class="scope" data-where="${esc(key)}:${esc(v)}"><b>${esc(key)}</b> ${esc(v)}</span>
-          <div style="display:flex;align-items:center;gap:8px;min-width:200px"><div class="bar" style="flex:1"><i style="width:${Math.round((n / max) * 100)}%"></i></div><span class="muted">${n}</span></div>`).join("") +
-        "</div></div>";
-    }).join(""));
+    const r = await api("/v1/facts?status=proposed");
+    if (stale(g)) return;
+    const list = r.facts || [];
+    updateReviewCount(list.length);
+    if (!list.length) return show(`<p class="empty">Nothing awaits review.</p>`);
+    const excerpts = {};
+    await Promise.all([...new Set(list.map((f) => f.source_episode_id).filter((x) => x != null))].map(async (id) => {
+      try { excerpts[id] = await api("/v1/episodes/" + id); } catch (_) { excerpts[id] = null; }
+    }));
+    if (stale(g)) return;
+    show(`<div class="rows">` + list.map((f) => {
+      const ep = f.source_episode_id != null ? excerpts[f.source_episode_id] : null;
+      return `<div class="proposal">
+        <div><div class="triple"><b>${esc(f.subject)}</b> <span style="color:var(--muted)">${esc(f.predicate.replace(/_/g, " "))}</span> ${esc(f.object)}</div>
+          <div class="sub">${esc(f.origin)} · confidence ${Number(f.confidence).toFixed(2)} (the model's number, not calibrated) · from ${esc(day(f.valid_from))}</div></div>
+        <div class="decide"><button class="btn small" data-approve="${f.fact_id}">Approve</button><button class="btn small danger" data-decline="${f.fact_id}">Decline</button></div>
+        ${ep ? `<div class="excerpt"><span class="label">source excerpt, episode #${ep.episode_id}, ${esc(day(ep.created_at))}</span>${esc(ep.content.slice(0, 600))}${ep.content.length > 600 ? "…" : ""}</div>`
+             : `<div class="excerpt"><span class="label">source</span>${f.source_episode_id != null ? "episode #" + f.source_episode_id + " is no longer available" : "no episode recorded for this proposal"}</div>`}
+      </div>`;
+    }).join("") + "</div>");
+  } catch (e) { fail(e); }
+}
+async function updateReviewCount(n) {
+  const el = document.getElementById("review-count");
+  if (n == null) { try { n = ((await api("/v1/facts?status=proposed")).facts || []).length; } catch (_) { return; } }
+  el.textContent = n; el.hidden = !n;
+}
+
+/* ---------- live ---------- */
+const summarise = (e) => {
+  const p = e.payload || {};
+  switch (e.kind) {
+    case "recall": { const top = (p.items || [])[0]; const lanes = top && top.lanes ? Object.keys(top.lanes).join(" and ") : "no";
+      return `recall ${p.query_hashed ? "(query hashed)" : esc(p.query)}: ${(p.items || []).length} excerpt(s), top via ${lanes} lane${p.latency_ms && p.latency_ms.total != null ? `, ${p.latency_ms.total.toFixed(1)} ms` : ""}${p.degraded && p.degraded.length ? `, degraded: ${esc(p.degraded.join("; "))}` : ""}`; }
+    case "remember": return `stored ${p.fresh ?? "?"} new, ${p.deduplicated ?? 0} already known, ${p.chunks ?? 0} chunk(s), ${p.bytes ?? 0} B${p.latency_ms != null ? `, ${Number(p.latency_ms).toFixed(1)} ms` : ""}`;
+    case "fact_assert": return `belief ${esc(p.subject)} ${esc((p.predicate || "").replace(/_/g, " "))}: ${esc(p.outcome)}${p.origin && p.origin !== "stated" ? ` (${esc(p.origin)})` : ""}${p.superseded && p.superseded.length ? `, superseded #${p.superseded.join(", #")}` : ""}`;
+    case "fact_close": return `belief #${p.fact_id} closed by a person`;
+    case "fact_review": return `proposal #${p.fact_id} ${esc(p.decision)}${p.of ? ` of #${p.of}` : ""}`;
+    case "fact_exclude": return `belief #${p.fact_id} ${p.action === "exclude" ? "excluded from recall" : "included again"}`;
+    case "forget": return `episode #${p.episode_id} forgotten, ${p.chunks_removed ?? 0} chunk(s) removed`;
+    case "feedback": return `recall #${p.recall_event_id}, chunk #${p.chunk_id} marked ${p.useful ? "useful" : "not useful"}`;
+    default: return esc(JSON.stringify(p)).slice(0, 160);
+  }
+};
+const stateOf = (e) => { const p = e.payload || {}; if (e.kind === "job") return p.status === "running" ? ["run", "running"] : p.status === "failed" ? ["bad", "failed"] : ["ok", "completed"]; return p.error ? ["bad", "failed"] : ["ok", "completed"]; };
+let liveTimer = null, livePaused = false, liveKind = "", liveLast = null, liveErr = null, liveData = null, liveInFlight = false;
+async function livePoll() {
+  if (view !== "live" || livePaused || liveInFlight) return;
+  const g = gen;
+  liveInFlight = true;
+  try { const params = new URLSearchParams({ limit: "80" }); if (liveKind) params.set("kind", liveKind);
+    const data = await api("/v1/events?" + params.toString());
+    if (stale(g)) return;
+    liveData = data; liveLast = new Date(); liveErr = null; }
+  catch (e) { if (stale(g) || e.message === "key needed") return; liveErr = e.message; }
+  finally { liveInFlight = false; }
+  renderLive();
+}
+function renderLive() {
+  if (view !== "live") return;
+  setHead("Live", "Everything the engine did, as it happened. Failures are shown as failures; a job that stops reporting keeps its last status.");
+  const r = liveData;
+  const head = `<div class="statusline"><span><span class="dot ${liveErr ? "off" : ""}"></span>${liveErr ? "disconnected, " + esc(liveErr) : "connected"}</span>
+    <span>polling every 3 s${liveLast ? ", updated " + Math.round((Date.now() - liveLast) / 1000) + " s ago" : ""}</span>
+    <button class="btn small quiet" id="pause">${livePaused ? "Resume" : "Pause"}</button>
+    <select id="kind"><option value="">all kinds</option>${["recall","remember","fact_assert","fact_review","fact_exclude","fact_close","forget","feedback","job"].map((k) => `<option ${k === liveKind ? "selected" : ""}>${k}</option>`).join("")}</select>
+    ${r ? `<span>evidence in ${esc(r.evidence)}, queries ${r.queries_recorded === "hash" ? "hashed" : "recorded"}, newest 80</span>` : ""}</div>`;
+  if (!r) { show(head + `<p class="empty">Waiting for the connection.</p>`); return wire(); }
+  const events = r.events || [];
+  if (!events.length) { show(head + `<p class="empty">No activity recorded yet. Recall or store something and it appears here within a few seconds.</p>`); return wire(); }
+  const jobs = new Map();
+  const rows = [];
+  let minute = null;
+  for (const e of events) {
+    if (e.kind === "job") { if (!jobs.has(e.payload.job_id)) jobs.set(e.payload.job_id, e); continue; }
+    const m = e.ts.slice(0, 16);
+    if (m !== minute) { minute = m; rows.push(`<div class="minute">${esc(day(e.ts))} ${esc(e.ts.slice(11, 16))}</div>`); }
+    const [cls, label] = stateOf(e);
+    rows.push(`<div class="ev"><span class="t">${esc(clock(e.ts))}</span><span class="k">${esc(e.kind.replace(/_/g, " "))}</span><span class="d">${summarise(e)}${cls === "bad" ? `<span class="state bad">${label}${e.payload.error ? ": " + esc(e.payload.error) : ""}</span>` : ""}</span></div>`);
+  }
+  const jobsHtml = jobs.size ? `<div class="jobs"><h3>Jobs</h3>` + [...jobs.values()].map((e) => { const p = e.payload, [cls, label] = stateOf(e);
+    return `<div class="job"><span class="name">${esc(p.name)} <span class="state ${cls}">${label}</span></span><span class="prog">${p.progress ? `${p.progress.done} / ${p.progress.total}` : ""}</span>
+      <span class="sub">${esc(p.job_id)}${p.adapter ? ", " + esc(p.adapter) : ""}${p.product ? ", " + esc(p.product) : ""}, last report ${esc(clock(e.ts))}${p.detail ? " · " + esc(p.detail) : ""}${p.error ? ` · <span class="err">${esc(p.error)}</span>` : ""}</span></div>`; }).join("") + `</div>` : "";
+  show(head + jobsHtml + rows.join(""));
+  wire();
+  function wire() {
+    const b = document.getElementById("pause"); if (b) b.onclick = () => { livePaused = !livePaused; if (!livePaused) livePoll(); else renderLive(); };
+    const k = document.getElementById("kind"); if (k) k.onchange = () => { liveKind = k.value; livePoll(); };
+  }
+}
+async function live() { if (liveTimer) clearInterval(liveTimer); await livePoll(); liveTimer = setInterval(livePoll, 3000); }
+
+/* ---------- analytics ---------- */
+const fmt = (m) => {
+  if (m.value == null) return `<span class="none">no evidence yet</span>`;
+  if (typeof m.value === "number") return m.unit === "share" || m.unit === "share of bytes" ? (m.value * 100).toFixed(1) + "%" : m.unit === "ms" ? m.value.toFixed(1) + " ms" : String(m.value);
+  if (typeof m.value === "object") return esc(Object.entries(m.value).map(([k, v]) => `${k} ${typeof v === "number" ? v.toFixed(3) : typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "));
+  return esc(m.value);
+};
+const label = (name) => name.split(".").slice(1).join(" ").replace(/_/g, " ").replace("latency ms ", "latency ").replace("top item ", "top excerpt via ").replace(" share", "").replace("top similarity ", "top similarity, ");
+const fig = (m) => m ? `<div class="fig" title="${esc(m.definition)}${m.caveat ? "\n" + esc(m.caveat) : ""}"><span class="l">${esc(label(m.name))}</span><span class="v">${fmt(m)}</span><span class="n">n = ${m.n} ${esc(m.denominator)}</span></div>` : "";
+async function analytics() {
+  const g = gen;
+  setHead("Analytics", "Figures computed from recorded activity only. Each shows how many events it rests on. None of them measures answer quality.");
+  try {
+    const r = await api("/v1/metrics");
+    if (stale(g)) return;
+    if (!r.coverage) return show(`<p class="empty">No event log is attached to this server, so nothing can be computed.</p>`);
+    const by = Object.fromEntries((r.metrics || []).map((m) => [m.name, m]));
+    const cov = r.coverage;
+    if (!cov.events_considered) return show(`<p class="empty">No activity recorded yet. Once memory is used, its figures appear here.</p>`);
+    const panel = (title, sub, names) => `<div class="panel"><h3>${title}</h3><div class="sub">${sub}</div>${names.map((n) => fig(by[n])).join("")}</div>`;
+    const days = Object.entries(r.daily || {}); const max = Math.max(1, ...days.map(([, k]) => Object.values(k).reduce((a, b) => a + b, 0)));
+    show(`<div class="grid">
+      ${panel("Recall", "use and timing", ["recall.count", "recall.latency_ms.p50", "recall.latency_ms.p95", "recall.degraded_count", "recall.byte_context_reduction.median"])}
+      ${panel("Ingest", "what was stored", ["ingest.calls", "ingest.fresh_episodes", "ingest.deduplicated", "ingest.dedup_fraction", "ingest.stored_bytes"])}
+      ${panel("Beliefs", "ledger events, not accuracy", ["ledger.asserted", "ledger.asserted_already_closed", "ledger.restated", "ledger.superseded", "ledger.manual_closures"])}
+      ${panel("Feedback", "what people judged", ["feedback.judged_items", "feedback.useful_share", "feedback.coverage"])}
+      ${panel("Lanes", "retrievers agreeing, not relevance", ["recall.top_item.both_lanes_share", "recall.top_item.vector_only_share", "recall.top_item.text_only_share", ...Object.keys(by).filter((k) => k.startsWith("recall.top_similarity."))])}
+      ${panel("Steps", "median latency by step", ["recall.latency_ms.embed.p50", "recall.latency_ms.vector.p50", "recall.latency_ms.text.p50"])}
+    </div>
+    <div class="foot">
+      <span><b>${cov.events_considered}</b> events considered</span><span>from <b>${esc((cov.earliest_retained || "").slice(0, 16))}</b></span>
+      <span>to <b>${esc((cov.latest || "").slice(0, 16))}</b></span><span>${cov.truncated ? `<span class="err">read truncated, coverage partial</span>` : "read complete"}</span>
+      <span>failures: <b>${esc(Object.entries(r.failures || {}).map(([k, v]) => k + " " + v).join(", ") || "none")}</b></span>
+      <span>embedders: <b>${esc((r.embedders || []).join(", ") || "none")}</b></span>
+    </div>
+    ${days.length ? `<div class="spark">${days.map(([d, k]) => { const t = Object.values(k).reduce((a, b) => a + b, 0); return `<i style="height:${Math.round((t / max) * 100)}%" title="${d}: ${t} event(s)"></i>`; }).join("")}</div>
+      <div class="legend"><span>${esc(days[0][0])}</span><span>events per day</span><span>${esc(days[days.length - 1][0])}</span></div>` : ""}`);
   } catch (e) { fail(e); }
 }
 
+/* ---------- scopes, status ---------- */
+async function scopes() {
+  const g = gen;
+  setHead("Scopes", "Who has memory here: episodes per user, agent or session, as recorded on them. Filters, not permissions.");
+  try {
+    const r = await api("/v1/scopes"); if (stale(g)) return; const keys = Object.entries(r.scopes || {});
+    if (!keys.length) return show(`<p class="empty">No scoped memory yet. Store episodes with metadata such as user_id or agent_id and they are counted here.</p>`);
+    show(keys.map(([key, values]) => { const max = Math.max(...Object.values(values));
+      return `<div class="panel" style="margin-bottom:16px"><h3>${esc(key.replace(/_/g, " "))}</h3><div class="sub">${Object.keys(values).length} value(s), choose one to search within it</div><div class="kv">` +
+        Object.entries(values).map(([v, n]) => `<button class="linkish" style="text-align:left" data-where="${esc(key)}:${esc(v)}">${esc(v)}</button><div class="bar"><i style="width:${Math.round((n / max) * 100)}%"></i></div><span style="color:var(--muted)">${n}</span>`).join("") + "</div></div>"; }).join(""));
+  } catch (e) { fail(e); }
+}
 async function status() {
+  const g = gen;
+  setHead("Status", "What this server is made of and how much it holds.");
   try {
     const r = await api("/v1/status");
-    const topo = `<div class="topo">
-      <div class="node">episodes<small>${esc(r.episodes)} stored, ${esc(r.chunks)} chunks</small></div><div class="arrow">→</div>
-      <div class="node">${esc(r.embedder)}<small>embedder</small></div><div class="arrow">→</div>
-      <div class="node">${esc(r.vector_index)}<small>vector index</small></div>
-    </div>
-    <div class="topo" style="grid-template-columns:1fr auto 1fr"><div></div><div class="arrow">documents, facts, lexical lane in</div>
-      <div class="node">${esc(r.document_store)}<small>document store</small></div></div>`;
-    const rows = [["Space", r.space], ["Episodes", r.episodes], ["Chunks", r.chunks], ["Bytes", r.bytes],
-                  ["Revision", r.revision], ["Facts", r.semantic_lane === "manual" ? "asserted explicitly (no distiller configured)" : r.semantic_lane]];
-    show(topo + '<div class="card">' + rows.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><span class="muted">${esc(v)}</span></div>`).join("") + "</div>");
+    if (stale(g)) return;
+    show(`<div class="flow"><span class="node">episodes<small>${esc(r.episodes)} stored, ${esc(r.chunks)} chunks</small></span><span class="arrow">→</span>
+      <span class="node">${esc(r.embedder)}<small>embedder</small></span><span class="arrow">→</span><span class="node">${esc(r.vector_index)}<small>vector index</small></span>
+      <span class="arrow">+</span><span class="node">${esc(r.document_store)}<small>documents, facts, text lane</small></span></div>
+      <div class="panel">${[["Space", r.space], ["Episodes", r.episodes], ["Chunks", r.chunks], ["Stored bytes", r.bytes], ["Awaiting review", r.pending_review], ["Revision", r.revision],
+        ["Facts", r.semantic_lane === "manual" ? "asserted by people and agents; no distiller configured on this server" : r.semantic_lane]]
+        .map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join("")}</div>`);
   } catch (e) { fail(e); }
 }
 
-const views = { search, ledger, scopes, live, analytics, status };
-
+/* ---------- shell ---------- */
+const views = {
+  search: () => (state.q || Object.keys(state.where).length || state.tags.length || state.asOf) ? runSearch() : searchShell(`<p class="empty">Ask a question, or press Enter to see the most recent memory.</p>`),
+  beliefs, review, live, analytics, scopes, status,
+};
 function activate(name) {
-  if (!views[name]) return;
+  if (!views[name]) name = "search";
   if (liveTimer && name !== "live") { clearInterval(liveTimer); liveTimer = null; }
   view = name;
-  document.querySelectorAll("nav button").forEach((o) => o.setAttribute("aria-current", String(o.dataset.view === name)));
-  controls.style.display = name === "search" ? "block" : "none";
-  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
-  show('<p class="empty">Loading…</p>');
+  gen += 1;
+  document.querySelectorAll("button.nav").forEach((b) => b.setAttribute("aria-current", String(b.dataset.view === name)));
+  if (location.hash !== "#" + name) history.replaceState(null, "", location.pathname + location.search + "#" + name);
+  closeNav();
+  if (!TOKEN) return askKey();
   views[name]();
 }
-document.querySelectorAll("nav button").forEach((b) => { b.onclick = () => activate(b.dataset.view); });
+document.querySelectorAll("button.nav").forEach((b) => { b.onclick = () => activate(b.dataset.view); });
+const side = document.getElementById("side"), scrim = document.getElementById("scrim");
+const menuBtn = document.getElementById("menu"), mainEl = document.querySelector("main");
+const closeNav = () => {
+  if (!side.classList.contains("open")) return;
+  side.classList.remove("open"); scrim.classList.remove("open"); mainEl.inert = false; menuBtn.setAttribute("aria-expanded", "false"); menuBtn.focus();
+};
+const openNav = () => {
+  side.classList.add("open"); scrim.classList.add("open"); mainEl.inert = true; menuBtn.setAttribute("aria-expanded", "true");
+  const current = side.querySelector('button.nav[aria-current="true"]') || side.querySelector("button.nav"); if (current) current.focus();
+};
+menuBtn.setAttribute("aria-expanded", "false"); menuBtn.setAttribute("aria-controls", "side");
+menuBtn.onclick = () => (side.classList.contains("open") ? closeNav() : openNav());
+scrim.onclick = closeNav;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeNav(); });
 
 out.addEventListener("click", async (e) => {
-  const chip = e.target.closest(".scope");
-  if (chip) {
-    document.getElementById("where").value = chip.dataset.where;
-    activate("search");
-    return;
-  }
+  const rmW = e.target.closest("[data-rm-where]"); if (rmW) { delete state.where[rmW.dataset.rmWhere]; return runSearch(); }
+  const rmT = e.target.closest("[data-rm-tag]"); if (rmT) { state.tags = state.tags.filter((t) => t !== rmT.dataset.rmTag); return runSearch(); }
+  if (e.target.closest("[data-rm-asof]")) { state.asOf = ""; return runSearch(); }
+  const w = e.target.closest("[data-where]"); if (w) { const [k, v] = w.dataset.where.split(":"); state.where[k] = v; return activate("search"); }
+  const tg = e.target.closest("[data-tag]"); if (tg) { if (!state.tags.includes(tg.dataset.tag)) state.tags.push(tg.dataset.tag); return runSearch(); }
   const fb = e.target.closest("[data-fb]");
-  if (fb) {
-    try {
-      await api("/v1/feedback", { method: "POST", body: JSON.stringify({
-        recall_event_id: Number(fb.dataset.ev), chunk_id: Number(fb.dataset.chunk), useful: fb.dataset.fb === "1" }) });
-      fb.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("set", b === fb));
-    } catch (err) { fail(err); }
-    return;
-  }
-  const btn = e.target.closest("[data-close]");
-  if (!btn) return;
-  const reason = prompt("Why does this stop holding?", "closed from the console");
-  if (!reason) return;
-  btn.disabled = true;
-  try {
-    await api("/v1/facts/" + encodeURIComponent(btn.dataset.close) + "/close", { method: "POST", body: JSON.stringify({ reason }) });
-    ledger();
-  } catch (err) { btn.disabled = false; fail(err); }
+  if (fb) { try { await api("/v1/feedback", { method: "POST", body: JSON.stringify({ recall_event_id: Number(fb.dataset.ev), chunk_id: Number(fb.dataset.chunk), useful: fb.dataset.fb === "1" }) });
+      fb.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("set", b === fb)); } catch (err) { fail(err); } return; }
+  const act = e.target.closest("[data-close],[data-exclude],[data-include],[data-approve],[data-decline]");
+  if (!act) return;
+  const id = act.dataset.close || act.dataset.exclude || act.dataset.include || act.dataset.approve || act.dataset.decline;
+  let path, body = null;
+  if (act.dataset.close) { const reason = prompt("Why did this stop holding?"); if (!reason) return; path = "close"; body = { reason }; }
+  else if (act.dataset.exclude) { const reason = prompt("Why hide this from recall? Its history is kept."); if (!reason) return; path = "exclude"; body = { reason }; }
+  else if (act.dataset.include) path = "include";
+  else if (act.dataset.approve) path = "approve";
+  else { const reason = prompt("Why decline this proposal?"); if (!reason) return; path = "decline"; body = { reason }; }
+  act.disabled = true;
+  try { await api(`/v1/facts/${encodeURIComponent(id)}/${path}`, { method: "POST", body: body ? JSON.stringify(body) : undefined }); activate(view); updateReviewCount(); }
+  catch (err) { act.disabled = false; fail(err); }
 });
 
-document.getElementById("run").onclick = search;
-q.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
 const params = new URLSearchParams(location.search);
-if (params.get("q")) q.value = params.get("q");
-if (params.get("where")) document.getElementById("where").value = params.get("where");
-if (!TOKEN) askKey(); else activate(location.hash.slice(1) || "search");
+if (params.get("scheme") === "light" || params.get("scheme") === "dark") document.documentElement.dataset.scheme = params.get("scheme");
+if (params.get("q")) state.q = params.get("q");
+if (params.get("where")) for (const pair of params.get("where").split(",")) { const [k, v] = pair.split(":"); if (k && v) state.where[k] = v; }
+api("/v1/status").then((r) => { document.getElementById("space").textContent = r.space; document.getElementById("topspace").textContent = r.space;
+  document.getElementById("foot").textContent = `${r.document_store} · ${r.vector_index} · ${r.embedder}`; updateReviewCount(r.pending_review); }).catch(() => {});
+activate(location.hash.slice(1) || "search");
 </script>
 </body>
 </html>

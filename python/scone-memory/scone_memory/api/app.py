@@ -140,6 +140,15 @@ def create_app(
         )
         return added.model_dump()
 
+    @app.get("/v1/episodes/{episode_id}")
+    async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
+        episode = await engine.episode(space, episode_id)
+        return {
+            "episode_id": episode.episode_id, "kind": episode.kind, "content": episode.content,
+            "source": episode.source, "tags": list(episode.tags), "metadata": dict(episode.metadata),
+            "created_at": episode.created_at, "ingested_at": episode.ingested_at,
+        }
+
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         await engine.forget(space, episode_id)

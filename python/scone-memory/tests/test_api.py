@@ -156,3 +156,12 @@ def test_review_and_exclusion_over_http(client):
     assert client.post(f"/v1/facts/{proposed['fact_id']}/include", headers=h).json()["excluded_reason"] is None
     assert client.post(f"/v1/facts/{held['fact_id']}/decline", json={"reason": "x"}, headers=h).status_code == 422
     assert client.post("/v1/facts/999/approve", headers=h).status_code == 404
+
+
+def test_an_episode_can_be_read_back_verbatim(client):
+    h = auth()
+    added = client.post("/v1/episodes", json={"content": "  Café ☕ verbatim\n", "created_at": "2024-01-02", "metadata": {"user_id": "ana"}}, headers=h).json()
+    body = client.get(f"/v1/episodes/{added['episode_id']}", headers=h).json()
+    assert (body["content"], body["kind"], body["created_at"], body["metadata"]) == ("  Café ☕ verbatim\n", "note", "2024-01-02T00:00:00.000Z", {"user_id": "ana"})
+    assert client.get("/v1/episodes/999", headers=h).status_code == 404
+    assert client.get(f"/v1/episodes/{added['episode_id']}", headers=auth("key-b")).status_code == 404
