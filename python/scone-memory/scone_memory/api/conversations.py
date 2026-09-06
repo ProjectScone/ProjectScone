@@ -316,6 +316,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
                 settle(space, sid, request_id, "completed",
                        episode_id=result.get("assistant_episode_id") if isinstance(result, dict) else None)
         except asyncio.CancelledError:
+            # A cancel of this one turn has already decided the outcome and
+            # left the conversation running; only a stop or a crash makes
+            # the session itself interrupted.
+            if receipt.get("status") == "cancelled":
+                raise
             receipt["status"] = "interrupted"
             settle(space, sid, request_id, "interrupted")
             current = journal.get(space, sid)
@@ -407,6 +412,32 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
             await engine.forget(space, episode_id)
         journal.delete_session(space, sid)
         return Response(status_code=204)
+
+    @app.post("/v1/conversations/{sid}/turns/{request_id}/cancel")
+    async def cancel(sid: str, request_id: str, space=Depends(space_for)):
+        """End one turn without ending the conversation.
+
+        Terminal and idempotent: the provider may already have been asked,
+        so a later retry of the same request id answers with the
+        cancellation instead of asking again. Recorded before the task is
+        touched, so a reply that lands during the unwinding cannot
+        overwrite the decision.
+        """
+        current = journal.get(space, sid)
+        kept = journal.turn(space, sid, request_id)
+        if kept["status"] == "cancelled":
+            return await resolved(space, kept, owned.get((space, sid)))
+        # A turn that already settled is refused by the journal itself,
+        # with the same 409; a second guard here would be untestable,
+        # because the conflict handler says one thing for every conflict.
+        settled = journal.finish_turn(space, sid, request_id, "cancelled")
+        entry = owned.get((space, sid))
+        if entry is not None and request_id in entry.turns:
+            entry.turns[request_id]["receipt"]["status"] = "cancelled"
+        if entry is not None and entry.active_id == request_id and entry.active is not None:
+            entry.active.cancel()
+            await asyncio.gather(entry.active, return_exceptions=True)
+        return await resolved(space, settled, entry)
 
     @app.post("/v1/conversations/{sid}/stop")
     async def stop(sid: str, body: Stop, space=Depends(space_for)):

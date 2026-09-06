@@ -38,7 +38,7 @@ _TURNS_TABLE = """CREATE TABLE session_turns (
     PRIMARY KEY(space, session_id, request_id))"""
 #: What a turn can be. "accepted" is the only one a process is still
 #: working on, which is what makes recovery decidable after a restart.
-_TURN_STATUSES = ("accepted", "completed", "interrupted", "failed")
+_TURN_STATUSES = ("accepted", "completed", "interrupted", "failed", "cancelled")
 
 
 def _key(value: str) -> None:
