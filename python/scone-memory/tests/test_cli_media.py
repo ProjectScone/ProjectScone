@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import sqlite3
 
 import pytest
 
@@ -23,6 +24,80 @@ def invoke(env, arguments, note="Juniper calibration screenshot"):
     output = io.StringIO()
     status = main(["--space", "photos", "--json", "remember", *arguments], env=env, stdin=io.StringIO(note), out=output)
     return status, output.getvalue()
+
+
+def test_attachments_lists_retained_metadata_without_changing_store(tmp_path):
+    original = tmp_path / "source.bin"
+    original.write_bytes(PNG)
+    env = environment(tmp_path)
+    code, raw = invoke(env, ["--image", str(original)])
+    assert code == 0
+    episode_id = json.loads(raw)["episode_id"]
+    with sqlite3.connect(env["SCONE_SQLITE_PATH"]) as db:
+        before = list(db.iterdump())
+    output = io.StringIO()
+    assert main(["attachments", str(episode_id), "--space", "photos", "--json"], env=env, out=output) == 0
+    assert json.loads(output.getvalue()) == {
+        "space": "photos", "episode_id": episode_id,
+        "attachments": [{"attachment_id": hashlib.sha256(PNG).hexdigest(),
+                         "media_type": "image/png", "bytes": len(PNG), "filename": "source.bin"}],
+    }
+    with sqlite3.connect(env["SCONE_SQLITE_PATH"]) as db:
+        assert list(db.iterdump()) == before
+
+
+def test_attachments_human_output_identifies_original_without_printing_source(tmp_path):
+    original = tmp_path / "source.bin"
+    original.write_bytes(PNG)
+    env = environment(tmp_path)
+    code, raw = invoke(env, ["--image", str(original)])
+    assert code == 0
+    episode_id = json.loads(raw)["episode_id"]
+    output = io.StringIO()
+    assert main(["--space", "photos", "attachments", str(episode_id)], env=env, out=output) == 0
+    text = output.getvalue()
+    for part in (str(episode_id), "photos", "source.bin", "image/png", f"{len(PNG)} bytes", hashlib.sha256(PNG).hexdigest()):
+        assert part in text
+    assert "Juniper" not in text
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_attachments_empty_episode_is_not_missing(tmp_path, json_output):
+    env = environment(tmp_path)
+    code, raw = invoke(env, [])
+    assert code == 0
+    episode_id = json.loads(raw)["episode_id"]
+    output = io.StringIO()
+    assert main(["attachments", str(episode_id), "--space", "photos", *(["--json"] if json_output else [])], env=env, out=output) == 0
+    if json_output:
+        assert json.loads(output.getvalue()) == {"space": "photos", "episode_id": episode_id, "attachments": []}
+    else:
+        assert "no attachments" in output.getvalue().lower()
+
+
+@pytest.mark.parametrize("case", ["wrong-space", "missing", "forgotten"])
+def test_attachments_missing_source_never_reports_empty_success(tmp_path, capsys, case):
+    original = tmp_path / "source.bin"
+    original.write_bytes(PNG)
+    env = environment(tmp_path)
+    code, raw = invoke(env, ["--image", str(original)])
+    assert code == 0
+    episode_id = json.loads(raw)["episode_id"]
+    if case == "forgotten":
+        assert main(["forget", str(episode_id), "--space", "photos"], env=env, out=io.StringIO()) == 0
+    output = io.StringIO()
+    assert main(["attachments", str(episode_id + 100 if case == "missing" else episode_id),
+                 "--space", "other" if case == "wrong-space" else "photos", "--json"], env=env, out=output) == 2
+    assert output.getvalue() == ""
+    assert "not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("episode_id", ["0", "-1", str(2**63)])
+def test_attachments_rejects_out_of_range_identifiers(tmp_path, capsys, episode_id):
+    output = io.StringIO()
+    assert main(["attachments", episode_id, "--json"], env=environment(tmp_path), out=output) == 2
+    assert output.getvalue() == ""
+    assert "positive 64-bit" in capsys.readouterr().err
 
 
 def test_cli_original_survives_reopen_and_is_not_shared_across_spaces(tmp_path):

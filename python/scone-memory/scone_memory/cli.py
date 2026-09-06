@@ -80,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", help="only episodes that happened at or after this instant")
     p.add_argument("--until", help="only episodes that happened at or before this instant")
 
+    p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
+    p.add_argument("episode_id", type=int)
+
     p = sub.add_parser("forget", help="delete an episode")
     p.add_argument("episode_id", type=int)
 
@@ -392,6 +395,23 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
         if not result.items and not result.facts:
             print("nothing matched", file=out)
+        return 0
+
+    if args.command == "attachments":
+        if not 0 < args.episode_id < 2**63:
+            raise InvalidInput("episode_id must be a positive 64-bit signed integer")
+        episode = await engine.episode(space, args.episode_id)
+        if args.json:
+            emit({"space": space, "episode_id": episode.episode_id,
+                  "attachments": [item.model_dump() for item in episode.attachments]})
+        else:
+            print(f"episode {episode.episode_id} in {space}: {len(episode.attachments)} attachment(s)", file=out)
+            for item in episode.attachments:
+                # Quote untrusted filenames so terminal control characters stay inert.
+                name = json.dumps(item.filename, ensure_ascii=True) if item.filename is not None else "(unnamed)"
+                print(f"{item.attachment_id}  {item.media_type}  {item.bytes} bytes  {name}", file=out)
+            if not episode.attachments:
+                print("no attachments", file=out)
         return 0
 
     if args.command == "forget":

@@ -178,6 +178,22 @@ an episode. Repeated identical images reuse their content-addressed attachment.
 Source and session metadata follow the existing episode deduplication rules;
 reusing a note does not create a new session record or replace its metadata.
 
+Inspect the retained originals using the episode ID returned by `remember`:
+
+```sh
+scone-memory attachments 42 --space my-project
+scone-memory attachments 42 --space my-project --json
+```
+
+This lists the episode's linked attachment IDs, media types, byte counts and
+filenames. JSON returns one object with `space`, `episode_id` and `attachments`
+(an empty array for an existing text-only episode). Missing, forgotten or
+other-space episodes fail with exit status 2, not an empty success. This is a
+metadata read: it does not download, decode, or verify the current blob bytes,
+and does not describe image contents. Use the attachment ID with the native
+`engine.attachment(space, id)` API or an authorized `GET /v1/attachments/{id}`
+request when you want the original bytes.
+
 This CLI opens the configured native stores, **not** the browser's HTTP server.
 To inspect the result in the webapp, both must use the same authorized memory
 space and document/blob configuration. SQLite defaults keep originals in an
