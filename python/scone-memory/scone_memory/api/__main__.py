@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from typing import Optional
 
 from ..config import Settings, build_engine
 from .app import create_app
 
 
-def main() -> None:
-    settings = Settings.from_env()
+def main(settings: Optional[Settings] = None) -> None:
+    settings = settings or Settings.from_env()
     if not settings.keys:
         print("refusing to serve without a key: set SCONE_API_KEY or SCONE_API_KEYS", file=sys.stderr)
         sys.exit(2)

@@ -175,3 +175,15 @@ async def test_a_batch_that_fails_leaves_nothing_behind():
         added = await engine.remember_many("default", [Record("first"), Record("second"), Record("first")])
         assert [a.deduplicated for a in added] == [False, False, True]
         assert added[2].episode_id == added[0].episode_id
+
+
+def test_serve_uses_the_same_store_defaults_as_the_other_commands(monkeypatch, tmp_path):
+    captured = {}
+    import scone_memory.api.__main__ as serve_module
+
+    monkeypatch.setattr(serve_module, "main", lambda settings=None: captured.setdefault("settings", settings))
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "s.db"), "SCONE_API_KEY": "k"}
+    assert cli.main(["serve"], env=env, stdin=io.StringIO(), out=io.StringIO()) == 0
+    assert captured["settings"] is not None
+    assert (captured["settings"].documents, captured["settings"].vectors) == ("sqlite", "sqlite")
+    assert captured["settings"].sqlite_path == str(tmp_path / "s.db")

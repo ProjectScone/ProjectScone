@@ -228,12 +228,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None, stdin=None, out=None) -> int:
     args = build_parser().parse_args(argv)
     env = os.environ if env is None else env
+    settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve
 
-        serve()
+        serve(settings)  # same SQLite default as the other commands
         return 0
-    settings = settings_for_cli(env)
 
     async def go() -> int:
         engine = await build_engine(settings)

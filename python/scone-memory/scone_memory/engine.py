@@ -396,12 +396,17 @@ class MemoryEngine:
     ) -> Fact:
         """Record that ``subject predicate object`` holds from ``valid_from``.
 
-        An active fact with the same subject and predicate but a
-        different object is closed at the new fact's start, with the
-        reason naming what superseded it. A fact that arrives late (its
-        start precedes an existing fact's start) is stored already
-        closed against that existing fact rather than closing it: a
-        stale record must not overwrite a fresher one.
+        Every fact with the same subject and predicate takes part, whatever
+        its status, so the ledger stays a partition of time:
+
+        - a fact with the same object whose interval covers the start is a
+          restatement and is returned unchanged;
+        - any fact whose interval covers the start (open or closed) ends at
+          the start, with the reason naming what superseded it. A reason a
+          person wrote is kept; only the bound moves;
+        - the first fact that starts after the new one bounds it: the new
+          fact is stored closed at that point. A stale record arriving late
+          never overwrites a fresher one.
         """
         check_space(space)
         subject = normalise_term(subject, "subject")
@@ -412,32 +417,15 @@ class MemoryEngine:
         if not 0.0 <= confidence <= 1.0:
             raise InvalidInput("confidence must be within 0..=1")
         start = normalise_time(valid_from) if valid_from else self.clock()
+        start_dt = parse_rfc3339(start)
 
-        rivals = [
-            f for f in await self.documents.facts_for(space, subject, predicate) if f.status == "active"
-        ]
-        for rival in rivals:
+        rivals = await self.documents.facts_for(space, subject, predicate)
+        covering = [r for r in rivals if _covers(r, start_dt)]
+        for rival in covering:
             if rival.object == object:
                 return rival
-        newer = [r for r in rivals if parse_rfc3339(r.valid_from) > parse_rfc3339(start)]
-        if newer:
-            blocker = min(newer, key=lambda f: parse_rfc3339(f.valid_from))
-            stale = await self.documents.insert_fact(
-                NewFact(
-                    space=space,
-                    subject=subject,
-                    predicate=predicate,
-                    object=object,
-                    valid_from=start,
-                    valid_until=blocker.valid_from,
-                    confidence=confidence,
-                    status="closed",
-                    closed_reason=f"superseded by fact {blocker.fact_id}",
-                    source_episode_id=source_episode_id,
-                )
-            )
-            await self.documents.bump_revision(space)
-            return stale
+        later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
+        successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
 
         fact = await self.documents.insert_fact(
             NewFact(
@@ -446,19 +434,19 @@ class MemoryEngine:
                 predicate=predicate,
                 object=object,
                 valid_from=start,
+                valid_until=successor.valid_from if successor else None,
                 confidence=confidence,
+                status="closed" if successor else "active",
+                closed_reason=f"superseded by fact {successor.fact_id}" if successor else None,
                 source_episode_id=source_episode_id,
             )
         )
-        for rival in rivals:
+        for rival in covering:
+            reason = rival.closed_reason
+            if reason is None or reason.startswith("superseded by fact "):
+                reason = f"superseded by fact {fact.fact_id}"
             await self.documents.update_fact(
-                rival.model_copy(
-                    update={
-                        "status": "closed",
-                        "valid_until": start,
-                        "closed_reason": f"superseded by fact {fact.fact_id}",
-                    }
-                )
+                rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason})
             )
         await self.documents.bump_revision(space)
         return fact
@@ -599,6 +587,13 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _covers(fact: Fact, instant) -> bool:
+    """True when ``instant`` lies in ``[valid_from, valid_until)``."""
+    if parse_rfc3339(fact.valid_from) > instant:
+        return False
+    return fact.valid_until is None or parse_rfc3339(fact.valid_until) > instant
 
 
 def check_space(space: str) -> None:
