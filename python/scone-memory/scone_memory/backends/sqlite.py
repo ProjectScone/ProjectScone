@@ -20,6 +20,7 @@ from typing import Mapping, Optional, Sequence
 from ..lexical import tokenize
 from ..models import Chunk, Episode, Fact
 from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from .validation import validate_vector
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -188,21 +189,17 @@ class SqliteDocumentStore:
         if filter.as_of:
             sql += " AND c.created_at <= ?"
             params.append(filter.as_of)
+        # Apply every scope condition before LIMIT so unrelated memories
+        # cannot crowd all matching candidates out of the lexical lane.
+        for tag in filter.tags:
+            sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) AS tag WHERE tag.value = ?)"
+            params.append(tag)
+        for key, value in filter.where.items():
+            sql += " AND EXISTS (SELECT 1 FROM json_each(e.metadata) AS meta WHERE meta.key = ? AND meta.value = ?)"
+            params.extend((key, value))
         sql += " ORDER BY rank, c.id LIMIT ?"
-        # Tags and metadata are checked in Python, so over-fetch when they apply.
-        params.append(limit * 8 if (filter.tags or filter.where) else limit)
-        out: list[tuple[int, float]] = []
-        for row in self.conn.execute(sql, params):
-            if filter.tags and not set(filter.tags) <= set(json.loads(row["tags"])):
-                continue
-            if filter.where:
-                meta = json.loads(row["metadata"])
-                if any(meta.get(k) != v for k, v in filter.where.items()):
-                    continue
-            out.append((row["id"], -row["rank"]))
-            if len(out) == limit:
-                break
-        return out
+        params.append(limit)
+        return [(row["id"], -row["rank"]) for row in self.conn.execute(sql, params)]
 
     async def recent_episodes(self, space: str, limit: int) -> list[Episode]:
         rows = self.conn.execute(
@@ -299,6 +296,8 @@ class SqliteVectorIndex:
         self.conn.commit()
 
     async def upsert(self, points: Sequence[VectorPoint]) -> None:
+        for point in points:
+            validate_vector(point.vector, self.dim)
         self.conn.executemany(
             "INSERT OR REPLACE INTO vectors (chunk_id, space, episode_id, created_at, tags, metadata, vector)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -321,6 +320,7 @@ class SqliteVectorIndex:
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
+        validate_vector(vector, self.dim)
         sql = "SELECT chunk_id, tags, metadata, vector FROM vectors WHERE space = ?"
         params: list[object] = [space]
         if as_of:

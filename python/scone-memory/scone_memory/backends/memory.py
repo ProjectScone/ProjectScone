@@ -18,6 +18,7 @@ from ..lexical import Bm25
 from ..models import Chunk, Episode, Fact
 from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
 from ..timeutil import is_before_or_at
+from .validation import validate_vector
 
 
 class InMemoryDocumentStore:
@@ -168,6 +169,8 @@ class InMemoryVectorIndex:
 
     async def upsert(self, points: Sequence[VectorPoint]) -> None:
         for point in points:
+            validate_vector(point.vector, self.dim)
+        for point in points:
             self._points[point.chunk_id] = point
 
     async def search(
@@ -179,6 +182,7 @@ class InMemoryVectorIndex:
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
+        validate_vector(vector, self.dim)
         scored = []
         for point in self._points.values():
             if point.space != space:

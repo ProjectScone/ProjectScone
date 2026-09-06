@@ -12,6 +12,7 @@ from typing import Mapping, Optional, Sequence
 
 from ..ports import VectorPoint
 from ..timeutil import epoch_seconds
+from .validation import validate_vector
 
 
 class QdrantVectorIndex:
@@ -63,6 +64,8 @@ class QdrantVectorIndex:
 
         if not points:
             return
+        for point in points:
+            validate_vector(point.vector, self.dim)
         await self.client.upsert(
             self.collection,
             points=[
@@ -93,6 +96,7 @@ class QdrantVectorIndex:
     ) -> list[tuple[int, float]]:
         from qdrant_client import models
 
+        validate_vector(vector, self.dim)
         must: list = [models.FieldCondition(key="space", match=models.MatchValue(value=space))]
         if as_of:
             must.append(models.FieldCondition(key="created_ts", range=models.Range(lte=epoch_seconds(as_of))))
