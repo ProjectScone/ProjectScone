@@ -313,7 +313,7 @@ const chipHtml = () => {
 };
 
 function searchShell(resultsHtml) {
-  setHead("Search", "Ask in plain words. Results are excerpts of what was stored, with the facts that held at the time.");
+  setHead("Search", "Ask in plain words. Results are excerpts of what was stored, with the recorded claims that held at the time and where each came from.");
   show(`<div class="search"><input type="search" id="q" placeholder="Where does Bob live?" autocomplete="off" value="${esc(state.q)}"><button class="btn" id="run">Recall</button></div>
     ${chipHtml()}<div id="results">${resultsHtml || ""}</div>`);
   const q = document.getElementById("q");
