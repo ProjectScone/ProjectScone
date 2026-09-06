@@ -9,11 +9,23 @@ import pathlib
 from scone_memory import agent_hook
 from scone_memory.prompting import CONTEXT_PREFIX, INSTRUCTIONS, additional_context, clean_request, compile_payload, hook_output
 
-FIXTURE = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "prompt-contract.json"
+#: The shared fixture. The repository root copy (tests/fixtures/) is the
+#: one both compilers are held to; this package keeps a byte-identical
+#: copy so its own tests run from a checkout that has only the package.
+PACKAGE_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "prompt-contract.json"
+ROOT_FIXTURE = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "prompt-contract.json"
 
 
 def load():
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+    return json.loads(PACKAGE_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_package_fixture_is_identical_to_the_shared_one():
+    import pytest
+
+    if not ROOT_FIXTURE.exists():
+        pytest.skip("repository-root fixture not present in this checkout")
+    assert PACKAGE_FIXTURE.read_bytes() == ROOT_FIXTURE.read_bytes(), "copies drifted; update the package copy from tests/fixtures/"
 
 
 def test_prefix_and_instructions_match_the_shared_fixture():

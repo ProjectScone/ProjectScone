@@ -168,6 +168,10 @@ def test_an_episode_can_be_read_back_verbatim(client):
 
 
 def test_playground_is_served_with_the_same_key_handling():
+    import scone_memory.api.app as app_module
+
+    if not app_module.PLAYGROUND.exists():
+        pytest.skip("playground asset not packaged in this checkout; the Webapp build emits it")
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         page = c.get("/playground")
