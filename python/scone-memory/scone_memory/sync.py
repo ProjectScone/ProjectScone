@@ -10,19 +10,28 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from .models import Added, Episode, Fact, RecallResult, Status
 
 
 class SyncMemoryEngine:
-    def __init__(self, engine: MemoryEngine) -> None:
-        self._engine = engine
+    """``engine`` may be a MemoryEngine or a coroutine function that builds
+    one. The builder form runs on the wrapper's own loop, which matters
+    for stores whose async clients bind to the loop they were opened on
+    (pymongo, psycopg's pool): built anywhere else, every later call
+    would fail with "cannot use ... in a different event loop"."""
+
+    def __init__(self, engine: MemoryEngine | Callable[[], Awaitable[MemoryEngine]]) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="scone-memory", daemon=True)
         self._thread.start()
-        self._run(engine.open())
+        if callable(engine):
+            self._engine = self._run(engine())
+        else:
+            self._engine = engine
+        self._run(self._engine.open())
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "SyncMemoryEngine":
@@ -31,12 +40,7 @@ class SyncMemoryEngine:
         from .config import Settings, build_engine
 
         settings = Settings.from_env(env if env is not None else os.environ)
-        loop = asyncio.new_event_loop()
-        try:
-            engine = loop.run_until_complete(build_engine(settings))
-        finally:
-            loop.close()
-        return cls(engine)
+        return cls(lambda: build_engine(settings))
 
     @property
     def engine(self) -> MemoryEngine:

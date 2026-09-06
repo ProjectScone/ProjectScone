@@ -139,6 +139,18 @@ added is what comes back. Turns are deduplicated by position, not text
 turn; a dump carries each episode's identity, so a re-imported transcript
 keeps its repeats.
 
+## Running it as a service
+
+```sh
+docker build -t scone-memory .                      # server image; add --build-arg EXTRAS=api,mongo,qdrant,postgres,local-embed for the ONNX embedder
+SCONE_API_KEY=change-me docker compose up --build   # MongoDB + Qdrant + scone-memory on :7437, data in named volumes
+scripts/compose-smoke.sh                            # brings the stack up, round-trips an episode, tears it down
+```
+
+The image refuses to start without `SCONE_API_KEY`. Its `/data` volume
+holds the SQLite file when no database is configured, and the embedder's
+model cache.
+
 ## Tests
 
 ```sh

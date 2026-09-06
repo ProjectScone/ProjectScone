@@ -248,3 +248,34 @@ def test_history_is_opt_in_over_http(client):
     assert (austin["object"], austin["status"], austin["superseded_by"]) == ("Austin", "closed", lisbon["fact_id"])
     assert austin["valid_until"] == lisbon["valid_from"]
     assert client.get("/v1/recall", params={"q": "mark lives", "history": "maybe"}, headers=h).status_code == 422
+
+
+def test_serve_builds_the_engine_on_the_loop_it_serves_from(monkeypatch, capsys):
+    """Async database clients bind to the loop they were opened on. The
+    compose smoke test found every Mongo request failing with "Cannot use
+    AsyncMongoClient in different event loop" because the engine was built
+    with asyncio.run and then served from uvicorn's own loop."""
+    import uvicorn
+
+    from scone_memory.api import __main__ as serve
+    from scone_memory.config import Settings
+
+    loops: dict[str, object] = {}
+
+    async def fake_build(settings):
+        loops["built"] = asyncio.get_running_loop()
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    class FakeServer:
+        def __init__(self, config):
+            loops["app"] = config.app
+
+        async def serve(self):
+            loops["served"] = asyncio.get_running_loop()
+
+    monkeypatch.setattr(serve, "build_engine", fake_build)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    serve.main(Settings.from_env({"SCONE_API_KEY": "k"}))
+    assert loops["built"] is loops["served"], "one loop for building and serving"
+    assert loops["app"].state.engine.documents.name == "memory"
+    assert "documents=memory" in capsys.readouterr().err
