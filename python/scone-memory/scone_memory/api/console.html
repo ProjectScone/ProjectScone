@@ -51,11 +51,12 @@
   .brand .space { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .group h2 { margin: 0 0 6px; padding: 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
               text-transform: uppercase; color: var(--muted); }
-  .group button.nav {
+  .group button.nav, .group a.nav {
     display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left;
-    padding: 7px 8px; border-radius: 6px; border: 0; background: none; color: var(--ink); cursor: pointer;
+    padding: 7px 8px; border-radius: 6px; border: 0; background: none; color: var(--ink); cursor: pointer; text-decoration: none;
   }
-  .group button.nav:hover { background: var(--surface-2); }
+  .group a.nav[hidden] { display: none; }
+  .group button.nav:hover, .group a.nav:hover { background: var(--surface-2); text-decoration: none; }
   .group button.nav[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   .count { font-size: 11px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--line);
            border-radius: 10px; padding: 0 7px; line-height: 18px; }
@@ -255,6 +256,7 @@
     <div class="group"><h2>Activity</h2>
       <button class="nav" data-view="live">Live</button>
       <button class="nav" data-view="analytics">Analytics</button>
+      <a class="nav" id="playground-link" href="/playground" hidden>Playground <span class="count">preview</span></a>
     </div>
     <div class="group"><h2>System</h2>
       <button class="nav" data-view="scopes">Scopes</button>
@@ -659,6 +661,9 @@ const params = new URLSearchParams(location.search);
 if (params.get("scheme") === "light" || params.get("scheme") === "dark") document.documentElement.dataset.scheme = params.get("scheme");
 if (params.get("q")) state.q = params.get("q");
 if (params.get("where")) for (const pair of params.get("where").split(",")) { const [k, v] = pair.split(":"); if (k && v) state.where[k] = v; }
+// The playground is a separate page served by this host when its asset is
+// packaged; show the link only when it answers, never a dead entry.
+fetch("/playground", { method: "HEAD" }).then((r) => { if (r.ok) document.getElementById("playground-link").hidden = false; }).catch(() => {});
 api("/v1/status").then((r) => { document.getElementById("space").textContent = r.space; document.getElementById("topspace").textContent = r.space;
   document.getElementById("foot").textContent = `${r.document_store} · ${r.vector_index} · ${r.embedder}`; updateReviewCount(r.pending_review); }).catch(() => {});
 activate(location.hash.slice(1) || "search");
