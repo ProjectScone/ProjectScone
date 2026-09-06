@@ -615,13 +615,25 @@ class MemoryEngine:
         g = G.Graph()
         if self.events is None:
             return g
-        events = await self.events.query(space, since=since, limit=limit)
-        g.truncated = len(events) >= limit
-        if session_id is not None:
-            events = [e for e in events if e.kind != "agent" or e.payload.get("session_id") == session_id]
-        agent_events = [e for e in events if e.kind == "agent"]
-        recall_events = [e for e in events if e.kind == "recall" and "error" not in e.payload]
-        feedback_events = [e for e in events if e.kind == "feedback"]
+        focused = session_id is not None or episode_id is not None
+        # A focused graph must reach the events that mention its subject even
+        # when they are older than the window, and must leave out agent
+        # events that merely happened nearby. A session focus keeps that
+        # session's events; an episode focus keeps the agent events linked to
+        # that episode. Unfocused: the newest window, as is.
+        window = await self.events.query(space, since=since, limit=limit)
+        g.truncated = len(window) >= limit
+        if focused:
+            scan = await self.events.query(space, kind="agent", since=since, limit=2000)
+            g.truncated = g.truncated or len(scan) >= 2000
+            if session_id is not None:
+                agent_events = [e for e in scan if e.payload.get("session_id") == session_id]
+            else:
+                agent_events = [e for e in scan if e.payload.get("episode_id") == episode_id]
+        else:
+            agent_events = [e for e in window if e.kind == "agent"]
+        recall_events = [e for e in window if e.kind == "recall" and "error" not in e.payload]
+        feedback_events = [e for e in window if e.kind == "feedback"]
 
         episode_ids: set[int] = set()
         if episode_id is not None:
@@ -634,7 +646,6 @@ class MemoryEngine:
             for item in e.payload.get("items") or []:
                 chunk_ids.add(int(item["chunk_id"]))
         chunks = await self.documents.get_chunks(space, sorted(chunk_ids)) if chunk_ids else []
-        focused = session_id is not None or episode_id is not None
         if focused:
             keep = {c.chunk_id for c in chunks if c.episode_id in episode_ids}
             recall_events = [e for e in recall_events if any(int(i["chunk_id"]) in keep for i in e.payload.get("items") or [])]

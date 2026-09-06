@@ -323,3 +323,22 @@ def test_http_judgements_carry_a_key_fingerprint_and_optional_label():
         fp = hashlib.sha256(b"reviewer-key").hexdigest()[:12]
         assert [e["payload"]["actor"] for e in events] == [f"key:{fp}", f"key:{fp} console"]
         assert "reviewer-key" not in json.dumps(events), "the key itself never appears"
+
+
+async def test_episode_focus_reaches_its_own_turn_past_the_window_and_excludes_neighbours():
+    """Seen on the live store: focusing on episode 11 returned 373 tool calls
+    from other sessions and no edge to episode 11, because the linking event
+    was older than the 400-event window and agent events were only filtered
+    by session. A focused graph follows its subject, not the clock."""
+    engine = await fresh_engine()
+    ep = await engine.remember("default", "resume", created_at="2026-09-06")
+    turn = await engine.record("default", "agent", {"agent": "codex", "session_id": "c-1", "event": "prompt", "text": "resume", "episode_id": ep.episode_id, "source_event_id": "p1"})
+    for i in range(60):  # newer, unrelated activity from another session pushes the turn out of a small window
+        await engine.record("default", "agent", {"agent": "claude-code", "session_id": "other", "event": "tool_use", "tool_name": "Bash", "source_event_id": f"t{i}"})
+    g = await engine.graph("default", episode_id=ep.episode_id, limit=20)
+    ids = set(g.nodes)
+    assert f"episode:{ep.episode_id}" in ids and f"turn:{turn.event_id}" in ids and "session:codex:c-1" in ids
+    assert not any(n.kind == "tool_call" for n in g.nodes.values()), "neighbouring sessions' tool calls are not part of this episode's graph"
+    assert (f"turn:{turn.event_id}", f"episode:{ep.episode_id}", "captured_as") in {(e.source, e.target, e.kind) for e in g.edges}
+    by_session = await engine.graph("default", session_id="other", limit=20)
+    assert by_session.as_dict()["counts"].get("tool_call") == 60, "a session focus reaches all of that session's events, not only the window"
