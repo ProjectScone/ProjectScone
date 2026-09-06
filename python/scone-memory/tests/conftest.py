@@ -11,19 +11,10 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.testing import Clock
 
 MONGO_URL = os.environ.get("SCONE_TEST_MONGO_URL")
 QDRANT_URL = os.environ.get("SCONE_TEST_QDRANT_URL")
-
-
-class Clock:
-    """A clock the test moves by hand, so "now" is a value, not a race."""
-
-    def __init__(self, start: str = "2025-01-01T00:00:00.000Z") -> None:
-        self.now = start
-
-    def __call__(self) -> str:
-        return self.now
 
 
 def backends():
