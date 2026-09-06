@@ -470,6 +470,20 @@ controls. `POST /v1/conversations/{sid}/turns` accepts `request_id`, `text` and
 identical request returns its receipt without invoking the model again; changing
 its input conflicts. Revisions track session lifecycle, not turn numbering.
 
+When capabilities explicitly report `turn_cancellation: true`, the workspace
+offers **Cancel reply** for a pending turn. It sends
+`POST /v1/conversations/{sid}/turns/{request_id}/cancel` and checks the existing
+receipt without resubmitting the message. A cancelled receipt stays cancelled,
+even if a custom runtime returns late. Cancellation is local, not proof that an
+external provider stopped processing; the submitted message remains captured.
+
+The Pipecat text runtime can accept another turn after model cancellation only
+when owned processor cleanup succeeds. Interrupted capture or failed cleanup
+interrupts the session instead. Custom runtimes must explicitly expose
+`closed is False` after cancellation to allow continuation; absent or uncertain
+state is treated conservatively. The UI preserves the next draft and waits for
+verified session readiness before enabling Send.
+
 `POST /v1/conversations/{sid}/stop` takes `request_id` and `expected_revision`.
 Cleanup continues if the requesting browser disconnects. A matching stop retry
 returns current state (possibly `stopping`), not a fabricated original event.

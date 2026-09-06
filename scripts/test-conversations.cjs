@@ -8,7 +8,7 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
@@ -18,7 +18,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion}));
+    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation}));
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
@@ -39,6 +39,8 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
         res.statusCode=uncertain?503:202;return res.end(JSON.stringify(uncertain?{error:'Delivery uncertain'}:turn));
       }
       if(match[2].startsWith('/turns/')){
+        if(match[2].endsWith('/cancel')&&req.method==='POST'){turn.status='cancelled';turn.result=null;turn.result_state='unavailable';value.active_request_id=null;value.latest_request_id=turn.request_id;return res.end(JSON.stringify(turn));}
+        if(turn?.status==='cancelled')return res.end(JSON.stringify(turn));
         if(recovered&&value.session_id==='previous')return res.end(JSON.stringify({request_id:'a-newer',status:'completed',result_state:'forgotten',result:null}));
         if(!turn){res.statusCode=404;return res.end('{"error":"receipt unavailable"}');}
         checks++;if(checks>1){turn.status='completed';turn.result={text:'Use Polaris.',user_episode_id:10,assistant_episode_id:11,provider_completion:'unverified',memory_context:{status:'prepared',references:[{episode_id:7,chunk_id:8}]}};value.active_request_id=null;saved.current=[saved.current[0],{episode_id:11,content:'Use Polaris.',metadata:{role:'assistant'}}];}
@@ -228,11 +230,64 @@ test('late polling cannot reopen a conversation after an acknowledged end',async
   assert.match(await page.locator('nav[aria-label="Saved conversations"] a.active').textContent(),/ended/);
 });
 
+test('cancel reply preserves the next draft and never resends the cancelled turn',async t=>{
+  const {page,posts}=await fixture(t,{cancellation:true});await start(page);
+  const cancels=[];page.on('request',r=>{if(r.url().endsWith('/cancel'))cancels.push(r.url());});
+  await page.getByLabel('Message',{exact:true}).fill('First question');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).waitFor();
+  await page.getByLabel('Message',{exact:true}).fill('Keep this next question');
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).click();
+  await page.getByText(/Reply cancelled/).waitFor();
+  await page.waitForFunction(()=>!document.querySelector('button[aria-label="Send message"]')?.disabled);
+  assert.equal(await page.getByLabel('Message',{exact:true}).inputValue(),'Keep this next question');
+  assert.equal(posts(),1);assert.equal(cancels.length,1);
+  await page.getByRole('button',{name:'Send message',exact:true}).click();await page.getByText('Use Polaris.',{exact:true}).waitFor();
+  assert.equal(posts(),2);
+});
+
+test('an uncertain cancellation checks the existing outcome without another POST',async t=>{
+  const {page,posts}=await fixture(t,{cancellation:true});await start(page);let cancels=0;
+  await page.route('**/turns/*/cancel',async route=>{cancels++;await route.fetch();await route.fulfill({status:503,json:{error:'acknowledgment lost'}});});
+  await page.getByLabel('Message',{exact:true}).fill('Question');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).click();
+  await page.getByText(/Cancellation was not confirmed/).waitFor();
+  await page.getByText(/Reply cancelled locally/).waitFor();
+  assert.equal(cancels,1);assert.equal(posts(),1);
+});
+
+test('an old cancellation response cannot replace a newly selected conversation',async t=>{
+  const {page}=await fixture(t,{cancellation:true});await start(page);
+  let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  await page.route('**/turns/*/cancel',async route=>{
+    await gate;await route.fulfill({json:{request_id:new URL(route.request().url()).pathname.split('/').at(-2),status:'cancelled',result_state:'unavailable',result:null}}).catch(()=>{});
+  });
+  await page.getByLabel('Message',{exact:true}).fill('Question');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).click();
+  await page.getByRole('button',{name:'Cancelling…',exact:true}).waitFor();
+  await page.getByRole('link',{name:/previous/}).click();await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  release();await page.waitForTimeout(150);
+  assert.match(page.url(),/\/previous$/);assert.equal(await page.getByText(/Reply cancelled locally/).count(),0);
+});
+
+test('failed receipt reads keep Send paused while cancelled cleanup is active',async t=>{
+  const {page,posts}=await fixture(t);await start(page);let reads=0;
+  await page.route('**/current/turns/*',route=>{
+    reads++;
+    return reads===1?route.fulfill({json:{request_id:new URL(route.request().url()).pathname.split('/').at(-1),status:'cancelled',result_state:'unavailable',result:null}}):route.fulfill({status:503,json:{error:'temporarily unavailable'}});
+  });
+  await page.getByLabel('Message',{exact:true}).fill('Cancelled request');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText(/Reply cancelled/).waitFor();
+  await page.getByLabel('Message',{exact:true}).fill('Keep this draft');
+  await page.getByText('Reply receipt unavailable. No message was resent.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+  assert.equal(posts(),1);
+});
+
 test('a cancelled receipt settles without replaying the message',async t=>{
   const {page,posts}=await fixture(t);await start(page);
   await page.route('**/current/turns/*',route=>route.fulfill({json:{request_id:new URL(route.request().url()).pathname.split('/').at(-1),status:'cancelled',result_state:'unavailable',result:null}}));
   await page.getByLabel('Message',{exact:true}).fill('Cancelled request');await page.getByRole('button',{name:'Send message',exact:true}).click();
-  await page.getByText('Reply cancelled',{exact:true}).waitFor();
+  await page.getByText(/Reply cancelled/).waitFor();
   assert.equal(posts(),1);
 });
 

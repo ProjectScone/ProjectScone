@@ -18,6 +18,74 @@ from scone_memory.api.conversations import create_conversation_app
 from scone_memory.integrations.pipecat_text import PipecatTextConversation
 
 
+async def test_cancelled_pipecat_turn_can_be_followed_by_a_completed_reply(tmp_path):
+    from test_pipecat_text import ScriptedModel
+    from test_conversations_api import client_for, create
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    waiting = ScriptedModel(mode="wait")
+    following = ScriptedModel("A new answer")
+    models = iter([waiting, following])
+    app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db",
+                                 lambda space, sid: PipecatTextConversation(memory, space, sid, lambda: next(models)))
+    async with client_for(app) as client:
+        created = await create(client)
+        url = "/v1/conversations/" + created["session_id"]
+        def body(key, text):
+            return {"request_id": key, "text": text, "expected_revision": created["revision"]}
+        original = body("cancel-this", "Regretted question")
+        assert (await client.post(url + "/turns", json=original)).status_code == 202
+        await asyncio.wait_for(waiting.entered.wait(), 3)
+        assert (await client.post(url + "/turns/cancel-this/cancel")).json()["status"] == "cancelled"
+        assert (await client.get(url)).json()["state"] == "running"
+        assert (await client.post(url + "/turns", json=original)).json()["status"] == "cancelled"
+        assert (await client.post(url + "/turns", json=body("new-turn", "A different question"))).status_code == 202
+        async def settled():
+            while True:
+                receipt = (await client.get(url + "/turns/new-turn")).json()
+                if receipt["status"] != "pending":
+                    return receipt
+                await asyncio.sleep(0.01)
+        receipt = await asyncio.wait_for(settled(), 5)
+        assert receipt["status"] == "completed", receipt
+        assert receipt["result"]["text"] == "A new answer"
+        transcript = (await client.get(url + "/transcript")).json()["episodes"]
+        assert [e["content"] for e in transcript] == ["Regretted question", "A different question", "A new answer"]
+        assert len(waiting.requests) == len(following.requests) == 1
+        assert {"role": "user", "content": "Regretted question"} not in following.requests[0]
+        assert (await client.get("/v1/conversations/capabilities")).json()["turn_cancellation"] is True
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+async def test_cancellation_during_capture_does_not_leave_a_closed_runtime_running(tmp_path, monkeypatch, role):
+    from test_pipecat_text import ScriptedModel
+    from test_conversations_api import client_for, create
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    recording = asyncio.Event()
+    remember = memory.remember_many
+    async def pause_capture(space, records):
+        records = list(records)
+        added = await remember(space, records)
+        if records[0].metadata.get("role") == role:
+            recording.set()
+            await asyncio.Event().wait()  # write happened; acknowledgment is interrupted
+        return added
+    monkeypatch.setattr(memory, "remember_many", pause_capture)
+    runtime = PipecatTextConversation(memory, "alpha", "capture-session", ScriptedModel)
+    app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db", lambda space, sid: runtime)
+    async with client_for(app) as client:
+        created = await create(client)
+        url = "/v1/conversations/" + created["session_id"]
+        body = {"request_id": "capture-turn", "text": "Question", "expected_revision": created["revision"]}
+        assert (await client.post(url + "/turns", json=body)).status_code == 202
+        await asyncio.wait_for(recording.wait(), 3)
+        assert (await client.post(url + "/turns/capture-turn/cancel")).json()["status"] == "cancelled"
+        assert (await client.get(url)).json()["state"] == "interrupted"
+        assert (await client.post(url + "/turns", json={**body, "request_id": "do-not-run"})).status_code == 409
+        assert (await client.get(url + "/turns/capture-turn")).json()["status"] == "cancelled"
+
+
 async def test_identical_public_messages_remain_distinct_and_delete_only_their_session(tmp_path):
     """Real capture keys must include session, turn and speaker, not just text.
 

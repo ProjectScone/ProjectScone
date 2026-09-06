@@ -11,18 +11,26 @@ async function fixture(t,{reopened=false}={}){
   const html=process.env.SCONE_CONVERSATIONS_HTML;
   assert.ok(html,'SCONE_CONVERSATIONS_HTML must name the verified isolated webapp artifact');
   const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(root,'python/scone-memory/.venv/bin/python'),
-    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[])],{cwd:root,stdio:['ignore','pipe','pipe']});
-  let logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
+    ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+  let browser,logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
+  const closed=once(server,'close');
+  let modelEntered;const modelWaiting=new Promise(resolve=>{modelEntered=resolve;});
   t.after(async()=>{
-    if(server.exitCode!==null||server.signalCode!==null)return;
-    const exited=once(server,'exit');server.kill('SIGTERM');
-    const timeout=setTimeout(()=>server.kill('SIGKILL'),5000);
-    try{await exited;}finally{clearTimeout(timeout);}
+    if(server.exitCode===null&&server.signalCode===null){
+      server.stdin.end('stop\n');
+      const timeout=setTimeout(()=>server.kill('SIGKILL'),5000);
+      try{await closed;}finally{clearTimeout(timeout);}
+    }
+    await closed; // stderr is drained before checking shutdown diagnostics
+    await browser?.close(); // do not leak Chrome when a shutdown assertion fails
+    assert.notEqual(server.signalCode,'SIGKILL','fixture required forced shutdown: '+logs);
+    assert.equal(server.exitCode,0,'fixture did not exit cleanly: '+logs);
+    assert.doesNotMatch(logs,/Traceback \(most recent call last\)|AttributeError/,'fixture shutdown failed');
   });
   const port=await new Promise((resolve,reject)=>{
     const timer=setTimeout(()=>reject(Error('Fixture startup timed out: '+logs)),20000);
     let data='';
-    server.stdout.on('data',part=>{data+=part;const m=data.match(/CONVERSATIONS_READY (\d+)/);if(m){clearTimeout(timer);resolve(Number(m[1]));}});
+    server.stdout.on('data',part=>{data+=part;if(data.includes('CONVERSATIONS_MODEL_WAITING'))modelEntered();const m=data.match(/CONVERSATIONS_READY (\d+)/);if(m){clearTimeout(timer);resolve(Number(m[1]));}});
     server.once('error',error=>{clearTimeout(timer);reject(error);});
     server.once('exit',code=>{clearTimeout(timer);reject(Error(`Fixture exited ${code}: ${logs}`));});
   });
@@ -33,12 +41,36 @@ async function fixture(t,{reopened=false}={}){
     await new Promise(resolve=>setTimeout(resolve,25));
   }
   assert.ok(ready,'isolated API became ready: '+logs);
-  const browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});
-  t.after(()=>browser.close());
+  browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});
   const page=await browser.newPage({viewport:{width:1320,height:940}});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  return {page,base,errors};
+  return {page,base,errors,modelWaiting};
 }
+
+test('the browser cancels a real Pipecat reply and completes the next question',{timeout:60000},async t=>{
+  const {page,base,errors,modelWaiting}=await fixture(t);page.setDefaultTimeout(8000);
+  const writes=[];page.on('request',request=>{if(request.method()==='POST')writes.push(new URL(request.url()).pathname);});
+  await page.goto(base+'/conversations');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Message',{exact:true}).fill('Wait for cancellation');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await modelWaiting;
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).waitFor();
+  await page.getByLabel('Message',{exact:true}).fill('How is Juniper calibrated?');
+  await page.getByRole('button',{name:'Cancel reply',exact:true}).click();
+  await page.getByText(/Reply cancelled locally/).waitFor();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Scripted answer: use Polaris.',{exact:true}).waitFor();
+  const sid=new URL(page.url()).pathname.split('/').at(-1),headers={authorization:'Bearer conversation-fixture-alpha'};
+  const transcript=await(await fetch(base+'/v1/conversations/'+sid+'/transcript',{headers})).json();
+  assert.deepEqual(transcript.episodes.map(e=>e.content),['Wait for cancellation','How is Juniper calibrated?','Scripted answer: use Polaris.']);
+  assert.equal(writes.filter(p=>p.endsWith('/turns')).length,2,'the cancelled turn was not resubmitted');
+  assert.equal(writes.filter(p=>p.endsWith('/cancel')).length,1);
+  assert.equal((await(await fetch(base+'/v1/conversations/'+sid,{headers})).json()).state,'running');
+  assert.deepEqual(errors,[]);
+});
 
 test('conversation deep links, public capture and sources work through native Pipecat',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t);

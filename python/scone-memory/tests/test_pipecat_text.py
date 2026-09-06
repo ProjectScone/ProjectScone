@@ -60,6 +60,24 @@ class ScriptedModel(FrameProcessor):
                 await self.push_error_frame(ErrorFrame("private finalization error"))
 
 
+async def test_cancelled_turn_with_failed_processor_cleanup_closes_conversation(memory):
+    class BrokenCleanup(ScriptedModel):
+        async def cleanup(self):
+            await super().cleanup()
+            raise RuntimeError("processor cleanup failed")
+
+    model = BrokenCleanup(mode="wait")
+    conversation = PipecatTextConversation(memory, "alpha", "cleanup-failure", lambda: model)
+    pending = asyncio.create_task(conversation.reply("first"))
+    await asyncio.wait_for(model.entered.wait(), 5)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert conversation.closed is True
+    with pytest.raises(RuntimeError, match="closed"):
+        await conversation.reply("must not continue")
+
+
 async def test_multi_turn_context_and_memory_preserve_only_public_messages(memory):
     await memory.remember("alpha", "Polaris calibrates Juniper.", metadata={"collection": "manuals"})
     models = []

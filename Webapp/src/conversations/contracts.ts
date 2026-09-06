@@ -1,6 +1,6 @@
 export type SessionState = 'created'|'running'|'stopping'|'ended'|'failed'|'interrupted';
 export interface ConversationSession {session_id:string;space:string;state:SessionState;revision:number;created_at:string;active_request_id?:string|null;latest_request_id?:string|null}
-export interface Capabilities {text_configured:boolean;session_deletion:boolean}
+export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean}
 export interface Episode {episode_id:number;content:string;metadata:Record<string,unknown>;created_at?:string}
 export interface Transcript {episodes:Episode[];has_more:boolean}
 export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[]}}
@@ -14,7 +14,7 @@ function text(value:unknown):string{if(typeof value!=='string')throw Error('Inva
 export function capabilities(value:unknown):Capabilities{
   const v=record(value);
   if(v.schema_version!==1||typeof v.text_configured!=='boolean'||v.reply_transport!=='poll'||(v.reply_replay!=='process_lifetime'&&v.reply_replay!=='durable_receipts'))throw Error('This conversation service has an unsupported capability contract.');
-  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true};
+  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true,turn_cancellation:v.turn_cancellation===true};
 }
 export function session(value:unknown):ConversationSession{
   const v=record(value);

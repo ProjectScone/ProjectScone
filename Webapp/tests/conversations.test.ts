@@ -8,6 +8,12 @@ test('conversation deletion requires an explicit true capability',()=>{
   assert.equal(capabilities({...wire,session_deletion:true}).session_deletion,true);
 });
 
+test('reply cancellation is enabled only by an explicit capability',()=>{
+  const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
+  for(const value of [undefined,false,'true',1])assert.equal(capabilities({...wire,turn_cancellation:value}).turn_cancellation,false);
+  assert.equal(capabilities({...wire,turn_cancellation:true}).turn_cancellation,true);
+});
+
 test('a cancelled turn is a settled receipt, not missing work to resend',()=>{
   const receipt=turnReceipt({request_id:'cancelled-turn',status:'cancelled',result_state:'unavailable',result:null});
   assert.equal(receipt.status,'cancelled');assert.equal(receipt.result,undefined);

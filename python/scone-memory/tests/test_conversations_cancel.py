@@ -15,6 +15,38 @@ from scone_memory.session_journal import SessionJournal
 from test_conversations_api import client_for, configured, create, engine  # noqa: F401
 
 
+@pytest.mark.parametrize("outcome", ["return", "error", "unknown-state"])
+async def test_a_runtime_that_returns_after_cancel_cannot_overwrite_the_cancelled_receipt(engine, tmp_path, outcome):
+    from scone_memory.api.conversations import create_conversation_app
+    started = asyncio.Event()
+    class LateRuntime:
+        closed = False
+        async def reply(self, text):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if outcome == "error":
+                    raise RuntimeError("cleanup failed")
+                return {"text": "Late public answer"}
+        async def close(self):
+            self.closed = True
+    if outcome == "unknown-state":
+        del LateRuntime.closed
+    app = create_conversation_app(engine, {"alpha-key": "alpha"}, tmp_path / "late.db", lambda space, sid: LateRuntime())
+    async with client_for(app) as client:
+        created = await create(client)
+        url = "/v1/conversations/" + created["session_id"]
+        body = {"request_id": "late", "text": "Question", "expected_revision": created["revision"]}
+        await client.post(url + "/turns", json=body)
+        await asyncio.wait_for(started.wait(), 1)
+        receipt = (await client.post(url + "/turns/late/cancel")).json()
+        assert receipt["status"] == "cancelled" and receipt["result"] is None
+        assert (await client.get(url + "/turns/late")).json()["status"] == "cancelled"
+        assert (await client.post(url + "/turns", json=body)).json()["status"] == "cancelled"
+        assert (await client.get(url)).json()["state"] == ("running" if outcome == "return" else "interrupted")
+
+
 async def test_cancelling_a_turn_ends_it_and_leaves_the_conversation_running(engine, tmp_path):
     path = tmp_path / "sessions.db"
     app, runtimes = configured(engine, path, blocked=True)

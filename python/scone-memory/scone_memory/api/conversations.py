@@ -215,6 +215,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return {"schema_version": 1, "text_configured": runtime_factory is not None,
                 "voice": False, "video": False, "streaming": False,
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
+                "session_deletion": True,
+                "turn_cancellation": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
     @app.get("/v1/conversations")
@@ -309,10 +311,22 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         except (Conflict, NotFound, InvalidInput):
             pass
 
+    def after_cancel(space, sid, entry, *, failed=False):
+        # Only a runtime explicitly reporting reusable state can keep serving.
+        # Capture/cleanup uncertainty closes the session, not just the receipt.
+        if failed or getattr(entry.runtime, "closed", True) is not False:
+            current = journal.get(space, sid)
+            if current["state"] == "running":
+                journal.transition(space, sid, "cancel-interrupted:" + uuid4().hex, "interrupt", current["revision"])
+                entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
+
     async def run_turn(space, sid, entry, request_id, text):
         receipt = entry.turns[request_id]["receipt"]
         try:
             result = await entry.runtime.reply(text)
+            if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry)
+                return  # a late result must not overwrite the terminal decision
             if journal.get(space, sid)["state"] != "running":
                 receipt["status"] = "interrupted"
                 settle(space, sid, request_id, "interrupted")
@@ -323,10 +337,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
                 settle(space, sid, request_id, "completed",
                        episode_id=result.get("assistant_episode_id") if isinstance(result, dict) else None)
         except asyncio.CancelledError:
-            # A cancel of this one turn has already decided the outcome and
-            # left the conversation running; only a stop or a crash makes
-            # the session itself interrupted.
+            # The cancelled receipt survives even if capture/cleanup uncertainty
+            # means this runtime cannot accept another turn.
             if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry)
                 raise
             receipt["status"] = "interrupted"
             settle(space, sid, request_id, "interrupted")
@@ -335,6 +349,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
                 journal.transition(space, sid, "interrupted:" + uuid4().hex, "interrupt", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
         except Exception:
+            if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry, failed=True)
+                return
             receipt.update(status="failed", error="conversation turn failed; do not automatically retry")
             settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)

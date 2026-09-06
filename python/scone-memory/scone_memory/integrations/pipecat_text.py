@@ -76,13 +76,30 @@ class _PublicReply(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class _OwnedPipeline(Pipeline):
+    """Observe cleanup directly; the runner can absorb worker failures."""
+
+    cleanup_complete = False
+
+    async def _cleanup_processors(self, processors):
+        outcomes = await asyncio.gather(*(p.cleanup() for p in processors), return_exceptions=True)
+        if any(isinstance(outcome, BaseException) for outcome in outcomes):
+            raise RuntimeError("owned processor cleanup failed")
+
+    async def cleanup(self):
+        self.cleanup_complete = False
+        await super().cleanup()
+        self.cleanup_complete = True
+
+
 class PipecatTextConversation:
     """One active turn, fixed scope, fresh processor per turn, in-memory history.
 
     Factory must return a fresh, compatible text model FrameProcessor whose
     cleanup releases its owned clients. Configure credentials and endpoints
-    server-side. Failures and cancellation close the
-    instance: callers must not silently retry uncertain provider or store writes.
+    server-side. Failures and interrupted capture close the instance. Cancellation
+    during model execution can continue only after successful owned cleanup;
+    callers must not silently retry uncertain provider or store writes.
     This boundary supports neither tools nor media nor live output streaming.
     """
 
@@ -114,6 +131,12 @@ class PipecatTextConversation:
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task | None = None
         self._closed = False
+        self._cancel_reusable = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether lifecycle owners must refuse further turns."""
+        return self._closed
 
     async def reply(self, text: str) -> dict:
         if self._closed:
@@ -128,6 +151,9 @@ class PipecatTextConversation:
         self._active = asyncio.create_task(self._reply(messages))
         try:
             return await self._active
+        except asyncio.CancelledError:
+            self._closed = self._closed or not self._cancel_reusable
+            raise
         except BaseException:
             self._closed = True
             raise
@@ -142,6 +168,8 @@ class PipecatTextConversation:
             await asyncio.gather(active, return_exceptions=True)
 
     async def _record(self, turn_id: str, role: str, text: str) -> int:
+        # An interrupted write acknowledgment cannot prove what was persisted.
+        self._cancel_reusable = False
         metadata = {"integration": "pipecat-text", "session_id": self._session_id,
                     "turn_id": turn_id, "role": role, "representation": "aggregated_text",
                     "capture_status": "submitted" if role == "user" else "aggregated"}
@@ -179,7 +207,8 @@ class PipecatTextConversation:
         if not isinstance(model, FrameProcessor):
             raise TypeError("model_factory must return a Pipecat FrameProcessor")
         collector = _PublicReply(done, self._max_reply)
-        worker = PipelineWorker(Pipeline([recall, model, collector]),
+        pipeline = _OwnedPipeline([recall, model, collector])
+        worker = PipelineWorker(pipeline,
                                 enable_rtvi=False, cancel_on_idle_timeout=False,
                                 cancel_timeout_secs=1)
         runner = WorkerRunner(handle_sigint=False, check_dangling_tasks=False)
@@ -218,7 +247,7 @@ class PipecatTextConversation:
             # WorkerRunner handles its own CancelledError during teardown. Do
             # not let that consume the enclosing turn deadline/cancellation.
             await asyncio.shield(running)
-            if pipeline_failed or collector.unsupported:
+            if pipeline_failed or collector.unsupported or not pipeline.cleanup_complete:
                 raise RuntimeError("model pipeline failed during finalization")
             return text, recall.last_receipt.as_metadata() if recall.last_receipt else None
         finally:
@@ -227,6 +256,11 @@ class PipecatTextConversation:
                 await asyncio.wait_for(running, 5)
             if done.done() and not done.cancelled():
                 done.exception()  # observe startup/error receipt even when cancellation won
+            self._cancel_reusable = (
+                running is not None and running.done() and not running.cancelled()
+                and running.exception() is None and pipeline.cleanup_complete
+                and not pipeline_failed and not collector.unsupported
+            )
 
 
 __all__ = ["PipecatTextConversation"]
