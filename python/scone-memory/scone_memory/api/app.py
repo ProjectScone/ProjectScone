@@ -248,27 +248,39 @@ def create_app(
         so storing the same screenshot twice stores it once."""
         stored = await engine.attach(
             space,
-            await request.body(),
+            await read_bounded(request, engine.max_attachment_bytes),
             media_type=(request.headers.get("content-type") or "").split(";")[0].strip(),
             filename=request.headers.get("x-filename"),
         )
         return stored.model_dump()
 
     @app.get("/v1/attachments/{attachment_id}")
-    async def get_attachment(attachment_id: str, space: str = Depends(space_for)) -> Response:
+    async def get_attachment(request: Request, attachment_id: str, space: str = Depends(space_for)) -> Response:
         # The id is a digest, never a path. Anything else names nothing.
         if not _DIGEST.fullmatch(attachment_id):
             raise NotFound(f"attachment {attachment_id!r} not found in {space!r}")
+        # The lookup happens before any 304, so losing access to an
+        # attachment takes effect on the next request rather than
+        # whenever a browser decides its copy has expired.
         stored, data = await engine.attachment(space, attachment_id)
+        tag = f'"{attachment_id}"'
+        headers = {
+            "etag": tag,
+            # The bytes never change; who may read them does. So the
+            # client revalidates every time and pays a 304 for it.
+            "cache-control": "private, no-cache",
+            "x-content-type-options": "nosniff",
+        }
+        if request.headers.get("if-none-match") == tag:
+            return Response(status_code=304, headers=headers)
         inline = stored.media_type in INLINE_TYPES
         name = _SAFE_FILENAME.sub("_", stored.filename or attachment_id)[:120]
         return Response(
             content=data,
             media_type=stored.media_type if inline else "application/octet-stream",
             headers={
+                **headers,
                 "content-disposition": f'{"inline" if inline else "attachment"}; filename="{name}"',
-                "x-content-type-options": "nosniff",
-                "cache-control": "private, max-age=31536000, immutable",
             },
         )
 
@@ -518,6 +530,25 @@ class Unauthorized(Exception):
 #: Ids one batch episode read may ask for. A review page asks for the
 #: sources of the rows on screen, not for the space.
 MAX_IDS = 100
+
+
+async def read_bounded(request: Request, limit: int) -> bytes:
+    """The request body, refused as soon as it passes ``limit``.
+
+    Reading it whole and then measuring it lets the caller decide how much
+    memory the server spends, which is the cap not existing. A declared
+    length over the limit is refused before a byte is read.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise InvalidInput(f"an attachment takes at most {limit} bytes, got {declared}")
+    read, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise InvalidInput(f"an attachment takes at most {limit} bytes")
+        read.append(chunk)
+    return b"".join(read)
 
 
 def parse_ids(text: str) -> list[int]:

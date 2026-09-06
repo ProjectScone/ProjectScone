@@ -154,3 +154,65 @@ async def test_a_configured_server_keeps_attachments_across_a_restart(tmp_path):
     moved = await build_engine(Settings.from_env(elsewhere))
     await moved.attach(SPACE, PNG, media_type="image/png")
     assert (tmp_path / "elsewhere" / "blobs" / stored.attachment_id[:2] / stored.attachment_id).exists()
+
+
+async def test_a_body_over_the_cap_stops_being_read_at_the_cap():
+    """The cap has to bind the request, not just the store. Reading the
+    whole body and then measuring it lets the caller decide how much
+    memory the server spends, which is the cap not existing. Driven
+    through a real ASGI receive channel, because an HTTP client buffers
+    the body itself and would hide exactly the thing under test."""
+    from starlette.requests import Request
+
+    from scone_memory.api.app import read_bounded
+
+    chunks_read = 0
+
+    async def receive():
+        nonlocal chunks_read
+        chunks_read += 1
+        return {"type": "http.request", "body": b"x" * 200, "more_body": chunks_read < 20}
+
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [],
+                       "query_string": b""}, receive)
+
+    with pytest.raises(InvalidInput):
+        await read_bounded(request, 1000)
+    assert chunks_read < 20, f"the whole body was read before it was refused ({chunks_read} chunks)"
+
+
+async def test_a_declared_length_over_the_cap_is_refused_before_a_byte_is_read():
+    """A caller that announces 40 MB is told no without sending it."""
+    from starlette.requests import Request
+
+    from scone_memory.api.app import read_bounded
+
+    async def receive():  # pragma: no cover - reaching this is the failure
+        raise AssertionError("the body was read despite an oversized content-length")
+
+    request = Request({"type": "http", "method": "POST", "path": "/", "query_string": b"",
+                       "headers": [(b"content-length", b"40000000")]}, receive)
+
+    with pytest.raises(InvalidInput):
+        await read_bounded(request, 1000)
+
+
+def test_bytes_are_revalidated_so_access_can_be_taken_away(client):
+    """An attachment's bytes never change, so a long cache looks free. It
+    is not: the thing that changes is whether this key may still read
+    them. The client revalidates, and gets a cheap 304 when nothing has."""
+    stored = client.post("/v1/attachments", content=PNG,
+                         headers={**auth(), "content-type": "image/png"}).json()
+
+    got = client.get(f"/v1/attachments/{stored['attachment_id']}", headers=auth())
+    assert got.headers["etag"] == f'"{stored["attachment_id"]}"'
+    assert "no-cache" in got.headers["cache-control"]
+    assert "31536000" not in got.headers["cache-control"]
+
+    again = client.get(f"/v1/attachments/{stored['attachment_id']}",
+                       headers={**auth(), "if-none-match": got.headers["etag"]})
+    assert again.status_code == 304 and again.content == b""
+
+    # A key that may not read it gets nothing, whatever it claims to hold.
+    assert client.get(f"/v1/attachments/{stored['attachment_id']}",
+                      headers={**auth("key-b"), "if-none-match": got.headers["etag"]}).status_code == 404
