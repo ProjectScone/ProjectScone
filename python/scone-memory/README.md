@@ -473,6 +473,37 @@ runtimes additionally need the optional Pipecat environment described above.
 The caller owns the open engine; the ASGI lifespan owns its journal and runtime
 tasks. This factory does not launch a server or select a provider for you.
 
+The CLI can launch that service without a custom ASGI entry point:
+
+```sh
+# Uses the existing SCONE_API_KEY / SCONE_API_KEYS and native store settings.
+# Create the journal's parent directory first; never use the native memory DB.
+scone-memory serve-conversations --journal ./conversation-sessions.db --history-only --console
+
+# Explicit model opt-in, from a trusted Python module on your import path:
+scone-memory serve-conversations --journal ./conversation-sessions.db --model-factory my_models:create --console
+```
+
+`my_models:create` must be a synchronous, zero-argument callable returning a
+**fresh Pipecat FrameProcessor per turn**. Importing the module executes trusted
+Python code; use only operator-controlled modules. The launcher checks the
+callable without invoking it; the text runtime invokes it when a turn runs.
+Provider credentials, dependencies and client lifecycle belong to that factory.
+No default provider is selected, and `SCONE_CHAT_*` consolidation settings do not
+configure the conversation model. Configured remote stores or embedders can
+still perform their normal network access at startup or during memory requests.
+
+`--history-only` does not import Pipecat or accept new text sessions. It permits
+inspection of saved conversations and retains the authenticated native memory
+routes; it is **not a read-only memory server**. `--console` opts into the packaged
+React pages, with no keys embedded. The CLI uses SQLite persistence by default,
+and the same host/port environment settings as `serve`. Stop the other server or
+choose a different `SCONE_PORT` before launching. This command does not start a
+consolidation worker. It builds and serves native memory on one event loop and
+closes owned backends after shutdown. Journal locking requires Linux/macOS and a
+local filesystem. Voice, video, streaming replies and live-provider certification
+remain separate work; the existing `serve` command is unchanged.
+
 ```python
 from scone_memory.api.conversations import create_conversation_app
 from scone_memory.integrations.pipecat_text import PipecatTextConversation

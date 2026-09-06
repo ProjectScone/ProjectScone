@@ -130,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
+    p = sub.add_parser("serve-conversations", help="run the optional authenticated conversation service")
+    p.add_argument("--journal", required=True, help="separate conversation SQLite database; parent must exist")
+    runtime = p.add_mutually_exclusive_group(required=True)
+    runtime.add_argument("--model-factory", help="trusted module:callable returning a fresh Pipecat processor")
+    runtime.add_argument("--history-only", action="store_true", help="inspect saved conversations without a model")
+    p.add_argument("--console", action="store_true", help="serve the packaged React workspace (no keys embedded)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
     p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("bench", help="measure retrieval on a LongMemEval-style file with the Rust harness's definitions")
@@ -565,6 +571,20 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         return run_hook(rest, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
     if rest:
         build_parser().error(f"unrecognized arguments: {' '.join(rest)}")
+    if args.command == "serve-conversations":
+        try:
+            settings = settings_for_cli(env)
+        except (ValueError, SconeError):
+            print("invalid conversation server settings; check SCONE_* configuration", file=sys.stderr)
+            return 2
+        try:
+            from .api.conversation_server import main as serve_conversations
+        except ImportError:
+            print("conversation serving needs pip install 'scone-memory[api]'", file=sys.stderr)
+            return 2
+
+        return serve_conversations(settings, journal=args.journal,
+                                   model_factory=args.model_factory, console=args.console)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from .api.__main__ import main as serve
