@@ -154,6 +154,42 @@ index on MongoDB and a clock-driven sweep elsewhere. No store migrates
 another build's data: each stamps a schema version and refuses a
 mismatch, SQLite excepted for the one recorded step.
 
+## Preserve an original image from the CLI
+
+```sh
+scone-memory remember source-note.txt --image screenshot.png \
+  --space my-project --source manual-import \
+  --meta session_id=my-session --json
+```
+
+The note is searchable text; the image is an original attachment, not OCR or a
+model-generated description. The CLI reads only the explicitly selected file,
+never paths mentioned inside the note or an agent transcript. One image can be
+linked per invocation; `--jsonl` and `--image` cannot be combined. Files must be
+nonempty regular files up to 25 MB. PNG, JPEG, GIF and WebP are identified by
+their byte signatures rather than filename extensions. Signature recognition
+does not validate decoding or bound decoded image dimensions.
+
+The command stores exact bytes through the configured blob store, links them to
+the episode and reads back the link before reporting success. With `--json`, the
+receipt additionally contains the selected attachment's digest, type, byte count
+and basename; text-only receipt shape is unchanged. Identical note text may reuse
+an episode. Repeated identical images reuse their content-addressed attachment.
+Source and session metadata follow the existing episode deduplication rules;
+reusing a note does not create a new session record or replace its metadata.
+
+This CLI opens the configured native stores, **not** the browser's HTTP server.
+To inspect the result in the webapp, both must use the same authorized memory
+space and document/blob configuration. SQLite defaults keep originals in an
+attachment directory beside the database; `SCONE_BLOB_DIR` selects another
+location. In-memory blob configuration does not persist originals across runs.
+
+Image storage and episode linking are separate operations. An error after a
+write can leave bytes or an episode behind; the command reports an unconfirmed
+save and does not retry. Inspect the store before repeating it. There is no
+automatic host image capture, missing-image reconstruction or Rust CLI parity
+claim. Export/import still carries references, not a portable copy of image bytes.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
@@ -189,7 +225,7 @@ above.
 
 ## Using it from a framework
 
-Three adapters live under `scone_memory.integrations`; each needs its
+Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,
 `[llamaindex]`, `[openai-agents]`) and says so if it is missing.
 
@@ -218,6 +254,278 @@ added is what comes back. Turns are deduplicated by position, not text
 (`Record.dedup_key`), so the second "ok" in a conversation is a second
 turn; a dump carries each episode's identity, so a re-imported transcript
 keeps its repeats.
+
+### Pipecat public transcripts
+
+Install `pip install 'scone-memory[pipecat]'` in a **Python 3.11+** environment.
+This optional extra pins the tested Pipecat 1.8.1 release; base Scone still
+supports Python 3.10 and does not import or install Pipecat.
+
+Provision NLTK's `punkt_tab` resource during environment/image setup and set
+`NLTK_DATA` to its directory. Otherwise Pipecat's tokenizer warm-up may attempt a
+download at runtime, even in a text-only pipeline:
+
+```sh
+python -m nltk.downloader -d ./nltk_data punkt_tab
+export NLTK_DATA="$PWD/nltk_data"
+```
+
+For an existing Pipecat `LLMContextAggregatorPair`, attach before running:
+
+```python
+from scone_memory.integrations.pipecat import SconePipecatMemory
+
+capture = SconePipecatMemory(engine, "default", session_id="conversation-1")
+capture.attach(context_aggregators)
+try:
+    await runner.run()  # your configured Pipecat pipeline, including its cleanup
+    capture.raise_if_failed()  # finishing a conversation does not prove capture succeeded
+finally:
+    capture.detach()
+
+result = await engine.recall("default", "telescope", where={"session_id": "conversation-1"})
+```
+
+Only user `on_user_turn_message_added` and assistant `on_assistant_turn_stopped`
+events become conversation episodes. User records have `capture_status=context_message`;
+assistant records have `aggregated` or `interrupted`. A user context message may
+be a segment rather than a complete turn. An assistant aggregation can be flushed
+at shutdown: it does **not** prove normal response completion or audio playback.
+Pipecat's supplied text is preserved, not the original audio or raw token sequence.
+Thought events, interim transcription frames, tools and whole context snapshots
+are not subscribed to. Empty events are counted without fabricating memory text.
+
+The episode retains session, role, capture identity, observation sequence and
+the supplied timestamp/user ID when available. Source timestamps describe what
+Pipecat reported, not an independently verified clock. Each adapter instance has
+a new capture identity; repeated text and reconnects stay distinct. This does not
+deduplicate replay after a crash or provide a durable delivery queue.
+
+Capture runs in Pipecat's event tasks, serializing writes within an adapter.
+`write_timeout` defaults to 5 seconds (including waiting for another write) and
+`max_pending` to 128 admitted callbacks. A timeout, cancellation, overflow or
+storage failure latches `capture.error`; subsequent nonempty events increment
+`unrecorded_count` instead of silently resuming past the gap. Poll that error
+during a live session and call `raise_if_failed()` after Pipecat cleanup. An
+already-running write may still take effect; inspect stored records before
+retrying. The limits do not bound Pipecat's own event dispatch queue, and timeouts
+require cancellation-cooperative dependencies. `stored_count` counts acknowledged
+writes, not proof of crash-safe storage on every backend.
+
+This is a Python-native transcript integration, not a configured voice service:
+browser devices, transport/provider setup, audio/video recording,
+Rust HTTP interoperability and graph session-event wiring
+remain separate work. Never use transcripts as approved facts without review.
+See [the isolated pipeline example](examples/pipecat_memory.py) for a runnable,
+credential-free capture-and-recall demonstration using clearly labeled fixtures.
+
+### Pipecat request memory
+
+The same optional extra includes `SconeMemoryContextProcessor`. Place it after
+the user aggregator and before a compatible text LLM service:
+
+```python
+from pipecat.pipeline.pipeline import Pipeline
+from scone_memory.integrations.pipecat_context import SconeMemoryContextProcessor
+
+memory_context = SconeMemoryContextProcessor(
+    engine, "default", session_id="conversation-1",
+    where={"collection": "manuals"},  # optional metadata filter inside the space
+    limit=5, max_context_bytes=8000, recall_timeout=2.0,
+)
+# `pair` is your LLMContextAggregatorPair; `llm` is your configured text service.
+pipeline = Pipeline([pair.user(), memory_context, llm, pair.assistant()])
+```
+
+This is a native Python adapter, not an HTTP client. The caller must authorize
+the fixed space and filters. `session_id` labels receipts; it neither grants
+access nor restricts recall to that session. Without `where`, recall searches
+the fixed space. Use a knowledge collection filter when current conversation
+capture should not feed the same prompt back into retrieval.
+
+For a latest plain-text user message, the processor recalls source passages and
+copies the request context. It inserts a user-level, explicitly untrusted JSON
+source block immediately before that request, preserving source text, episode /
+chunk IDs, source identity, creation time and capture status. It does **not**
+modify the shared aggregator history or turn retrieved material into a captured
+user message. Tools and tool choice are carried into the copied request.
+
+The byte budget covers the UTF-8 source block, not the entire model request or
+its token count. Oversized passages are omitted whole; they are never silently
+clipped. A configured engine low-similarity warning suppresses the block.
+Otherwise ranking alone does not establish relevance, approval or truth. The
+JSON boundary labels untrusted data; it is not a guarantee against prompt injection.
+
+Each forwarded context frame carries `metadata["scone_memory"]`: status,
+request/session/source-frame IDs, selected references, exact-block SHA-256 and
+byte count, omitted count, and the engine's recall event ID when available.
+Statuses are `prepared`, `empty`, `skipped` or `failed`; cancelled and superseded
+requests are discarded and reported through `last_receipt`. A failed recall
+passes the original request with a failed receipt, not cached or invented memory.
+Surface that state in your application. `last_error` holds the actual local
+exception; frame receipts contain only its type, not raw diagnostic text.
+
+Receipts establish preparation/forwarding, **not provider delivery or model
+use**. Frame metadata and `last_receipt` are not a durable delivery journal. A
+configured Scone event log separately records retrieval. Recall timeouts are
+cooperative; interruptions and a changed current request discard stale results.
+
+Multimodal inputs, tool continuations and non-user final messages pass through
+without recall. Provider compatibility and tool-loop context continuity are not
+certified by the pipeline tests. Live voice/video, durable delivery, Rust HTTP
+interoperability and a browser session service remain unfinished.
+
+Run `python examples/pipecat_context.py` after the NLTK setup above for an
+[isolated source-to-request-to-capture example](examples/pipecat_context.py).
+It uses real Pipecat scheduling and native Scone retrieval, but an explicitly
+scripted responder instead of a model; all fixture data stays in process memory.
+
+### Pipecat text conversation runtime (service foundation)
+
+`scone_memory.integrations.pipecat_text.PipecatTextConversation` runs role-separated
+text exchanges through a supplied Pipecat model processor. It requires the same
+optional Pipecat environment and NLTK provisioning described above. Supply an
+already-open native engine, an authorized space and session ID, and a **factory**
+that creates a fresh compatible `FrameProcessor` for each turn. The processor's
+cleanup must release any clients it owns; a provider class is not automatically
+certified merely because it is a Pipecat processor.
+
+```python
+from scone_memory.integrations.pipecat_text import PipecatTextConversation
+
+# memory is your open native engine; model_factory is your configured factory.
+conversation = PipecatTextConversation(
+    memory, "default", "conversation-1", model_factory,
+    where={"collection": "manuals"},
+)
+try:
+    first = await conversation.reply("What does the calibration manual say?")
+    followup = await conversation.reply("Explain the next step.")
+finally:
+    await conversation.close()
+```
+
+Each result contains `turn_id`, `text`, `user_episode_id`,
+`assistant_episode_id`, `memory_context`, and `provider_completion="unverified"`.
+The model receives previous user/assistant messages plus a transient source block.
+Neither that source block nor model-side context mutations rewrite stored history.
+Public user and assistant text becomes scoped conversation episodes. Thought
+frames are not captured. Assistant metadata says `aggregated` and records
+`completion_evidence=response_end_frame`: that frame alone cannot prove a provider
+stopped successfully, so it is not labeled as verified provider completion.
+
+One turn may run at a time. Input is bounded to 32,000 UTF-8 bytes; defaults are
+64,000 reply bytes, 128,000 history bytes, and a 30-second turn deadline. History
+budget counts JSON-encoded role/text messages; the retrieved source block has its
+own budget. Turn errors, pipeline errors/timeouts, unsupported tool flow and
+interruptions prevent a successful result and close the instance. `close()`
+cancels an active turn. A submitted user message can remain after a failed reply;
+a timed-out store write may have committed and is not automatically retried.
+Deadlines rely on cooperative providers/stores, not hard process termination.
+
+History is in-process, not automatically restored after restart. This module has
+no session authentication, browser routes, durable request-id replay, live output
+stream or audio/video transport. Tests use real Pipecat scheduling with an
+explicitly scripted processor—not live inference. Provider-specific completion,
+retry policy and client cleanup, the authenticated service, React controls and
+Rust HTTP interoperability remain release gates.
+
+### Authenticated conversation API (optional, single-process)
+
+`scone_memory.api.conversations.create_conversation_app` exposes the journal and
+a configured text runtime under `/v1/conversations`, with the existing native
+memory routes mounted at the same origin. Install the `api` extra; Pipecat-backed
+runtimes additionally need the optional Pipecat environment described above.
+The caller owns the open engine; the ASGI lifespan owns its journal and runtime
+tasks. This factory does not launch a server or select a provider for you.
+
+```python
+from scone_memory.api.conversations import create_conversation_app
+from scone_memory.integrations.pipecat_text import PipecatTextConversation
+
+# memory, space_keys and model_factory are explicit server configuration.
+# Never use your native memory database as the conversation journal.
+app = create_conversation_app(
+    memory, space_keys, "conversation-sessions.db",
+    lambda space, sid: PipecatTextConversation(memory, space, sid, model_factory),
+)
+```
+
+Bearer keys determine the space. Provider credentials never belong in request
+bodies or query strings. Send `POST /v1/conversations` with a stable `request_id`
+and `capture: true`; use the returned `session_id` and lifecycle `revision` for
+controls. `POST /v1/conversations/{sid}/turns` accepts `request_id`, `text` and
+`expected_revision`, returning a 202 receipt. Poll
+`GET /v1/conversations/{sid}/turns/{request_id}` for the result. Repeating an
+identical request returns its receipt without invoking the model again; changing
+its input conflicts. Revisions track session lifecycle, not turn numbering.
+
+`POST /v1/conversations/{sid}/stop` takes `request_id` and `expected_revision`.
+Cleanup continues if the requesting browser disconnects. A matching stop retry
+returns current state (possibly `stopping`), not a fabricated original event.
+`GET /v1/conversations/{sid}/events` exposes durable lifecycle event receipts;
+`GET /v1/conversations` lists bounded pages using `after`/`limit`.
+`GET /v1/conversations/{sid}/transcript` reads the first 200 native episodes
+attributed to that session, with `has_more` for a partial transcript. It checks
+session ownership before reading memory and does not reconstruct reply receipts.
+
+Turn-result replay is **process-lifetime only**. Restart never resubmits a model
+request: abandoned sessions become interrupted, while captured episodes follow
+the configured engine's persistence. Transcript history is not automatically
+restored into a new model session. Defaults admit 100 create IDs per process
+(including failed starts and terminal sessions), and 100 turns per session.
+Matching retries remain available at capacity; new work returns 429.
+
+This first service requires one worker on Linux/macOS and an application-owned
+local directory. A persistent canonical-path `.owner.lock` sidecar prevents
+multiple service owners; hard-linked journals are refused. Do not delete or
+replace either file while running. This is not distributed leasing, protection
+against a hostile filesystem owner, or support for uncooperative runtimes.
+
+Capabilities explicitly report configured text, polling, no voice/video, and no
+token stream. `runtime_factory=None` reports text unavailable and refuses starts.
+Tests connect HTTP controls to real Pipecat scheduling and native memory using a
+scripted model; they do not certify a live provider. Provider configuration,
+React conversation controls, durable reply replay, Rust HTTP memory adapters and
+voice/video remain required product work. Existing live servers are unchanged.
+
+### Conversation lifecycle journal (service foundation)
+
+`SessionJournal` persists explicit session state and ordered lifecycle receipts
+in a **separate SQLite database**. It does not start a conversation, call a model,
+or expose browser routes. Select a new path, never your native memory database:
+
+```python
+from scone_memory.session_journal import SessionJournal
+
+with SessionJournal("conversation-sessions.db") as journal:
+    created = journal.create("default", "create-1", mode="text")
+    session_id = created["session_id"]
+    # A runtime would issue this only when it actually starts the session.
+    started = journal.transition("default", session_id, "start-1", "start", 1)
+    page = journal.events("default", session_id, after=0, limit=100)
+```
+
+The caller must authorize the space; this is storage, not authentication.
+Request IDs are opaque identifiers, not messages or credentials. Matching retries
+return their original receipt, even after the session advances. Reusing an ID
+for a different command or acting on an old revision raises `Conflict`; its
+`revision` is the current **session** revision, not a memory-space revision.
+State and event insertion commit together. Replay returns `events`, `next_after`
+and `has_more`, with page limits of 1–200.
+
+States are created, running, stopping, ended, failed and interrupted. Terminal
+sessions cannot restart. Reopening preserves recorded state; `running` does not
+prove a provider task is still alive. Runtime ownership and crash reconciliation
+are not implemented by this journal. The text/voice mode field is metadata, not
+a claim that either runtime is configured. No transcripts or media are stored.
+
+Unrelated and unsupported-version databases are refused. Use one owned connection
+per serialized caller, not one connection shared across threads. Separate
+connections serialize writes through SQLite. Protect the selected path with
+appropriate filesystem permissions. Authenticated session APIs, model execution,
+the conversation UI, transport/reconnect handling and voice/video remain separate
+work; the existing memory server is not a conversation server.
 
 ## Running it as a service
 

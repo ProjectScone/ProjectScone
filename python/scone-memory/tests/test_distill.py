@@ -4,6 +4,7 @@ dated facts, with the engine's supersession rules doing the rest."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +17,17 @@ from scone_memory.testing import Clock
 SPACE = "default"
 AUSTIN = json.dumps([{"subject": "Ana", "predicate": "lives_in", "object": "Austin", "confidence": 0.9}])
 LISBON = json.dumps([{"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])
+
+
+def grounded(subject, predicate, object, quote, statement_type="observation", confidence=0.9):
+    return {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "confidence": confidence,
+        "statement_type": statement_type,
+        "quote": quote,
+    }
 
 
 @pytest.fixture
@@ -40,7 +52,9 @@ async def test_facts_inherit_the_episode_date_and_name_their_source(engine):
         ]
     )
 
-    outcome = await Distiller(engine, chat, accept_at=0.0).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(engine, chat, accept_at=0.0, require_grounding=False).distill_episode(
+        SPACE, added.episode_id
+    )
 
     assert (len(outcome.added), outcome.closed, outcome.skipped, outcome.failed) == (2, 0, 0, False)
     facts = await engine.facts(SPACE)
@@ -59,7 +73,9 @@ async def test_a_restated_fact_is_skipped_not_duplicated(engine):
     added = await engine.remember(SPACE, "Ana still lives in Lisbon.", created_at="2024-06-01")
     await engine.assert_fact(SPACE, "ana", "lives_in", "Lisbon", valid_from="2024-03-02")
 
-    outcome = await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(
+        engine, FakeChat([LISBON]), accept_at=0.0, require_grounding=False
+    ).distill_episode(SPACE, added.episode_id)
 
     assert (outcome.added, outcome.closed, outcome.skipped) == ([], 0, 1)
     assert len(await engine.facts(SPACE, include_closed=True)) == 1
@@ -83,7 +99,7 @@ async def test_pending_runs_oldest_first_so_the_newer_fact_supersedes(engine, re
         await engine.remember(SPACE, content, created_at=when)
     chat = FakeChat([AUSTIN, LISBON])
 
-    outcomes = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
+    outcomes = await Distiller(engine, chat, accept_at=0.0, require_grounding=False).distill_pending(SPACE)
 
     assert [user for _, user in chat.calls] == ["Ana lives in Austin now.", "Ana moved to Lisbon."]
     assert [(len(o.added), o.closed) for o in outcomes] == [(1, 0), (1, 1)]
@@ -97,10 +113,14 @@ async def test_pending_runs_oldest_first_so_the_newer_fact_supersedes(engine, re
 
 async def test_a_stale_episode_distilled_late_does_not_overwrite_the_fresher_fact(engine):
     fresh = await engine.remember(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
-    await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_episode(SPACE, fresh.episode_id)
+    await Distiller(
+        engine, FakeChat([LISBON]), accept_at=0.0, require_grounding=False
+    ).distill_episode(SPACE, fresh.episode_id)
     stale = await engine.remember(SPACE, "Ana lives in Austin now.", created_at="2023-01-01")
 
-    outcome = await Distiller(engine, FakeChat([AUSTIN]), accept_at=0.0).distill_episode(SPACE, stale.episode_id)
+    outcome = await Distiller(
+        engine, FakeChat([AUSTIN]), accept_at=0.0, require_grounding=False
+    ).distill_episode(SPACE, stale.episode_id)
 
     assert [f.object for f in await engine.facts(SPACE)] == ["Lisbon"]
     [austin] = outcome.added
@@ -152,7 +172,7 @@ async def test_a_transport_failure_counts_as_an_attempt_and_the_others_still_run
     chat = FakeChat([ChatError("connection refused"), LISBON])
 
     with pytest.raises(DistillError) as raised:
-        await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
+        await Distiller(engine, chat, accept_at=0.0, require_grounding=False).distill_pending(SPACE)
 
     assert raised.value.failed == 1
     assert [o.failed for o in raised.value.outcomes] == [True, False]
@@ -209,6 +229,23 @@ def test_parse_triples_collapses_whitespace():
     assert parse_triples(text) == [Extracted("Ana Silva", "lives_in", "Lisbon, Portugal", 0.5)]
 
 
+def test_parse_triples_preserves_optional_grounding_fields_without_changing_legacy_callers():
+    text = json.dumps(
+        [grounded("Ana", "lives_in", "Lisbon", "Ana lives in Lisbon.")]
+    )
+
+    assert parse_triples(text) == [
+        Extracted(
+            "Ana",
+            "lives_in",
+            "Lisbon",
+            0.9,
+            quote="Ana lives in Lisbon.",
+            statement_type="observation",
+        )
+    ]
+
+
 @pytest.mark.parametrize("text", ["", "no facts", '{"subject": "a"}', "[not json"])
 def test_parse_triples_without_an_array_is_an_error(text):
     with pytest.raises(DistillError):
@@ -246,7 +283,7 @@ async def test_pending_skips_episodes_that_already_have_facts(engine):
     todo = await engine.remember(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
     chat = FakeChat([LISBON])
 
-    outcomes = await Distiller(engine, chat, accept_at=0.0).distill_pending(SPACE)
+    outcomes = await Distiller(engine, chat, accept_at=0.0, require_grounding=False).distill_pending(SPACE)
 
     assert [o.episode_id for o in outcomes] == [todo.episode_id]
     assert [user for _, user in chat.calls] == ["Ana moved to Lisbon."]
@@ -268,7 +305,9 @@ async def test_pending_honours_the_limit_oldest_first(engine):
 
 
 async def test_distill_text_dates_facts_without_an_episode(engine):
-    facts = await Distiller(engine, FakeChat([LISBON]), accept_at=0.0).distill_text(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
+    facts = await Distiller(
+        engine, FakeChat([LISBON]), accept_at=0.0, require_grounding=False
+    ).distill_text(SPACE, "Ana moved to Lisbon.", created_at="2024-03-02")
 
     [fact] = facts
     assert (fact.subject, fact.object, fact.valid_from, fact.source_episode_id) == (
@@ -349,11 +388,12 @@ async def new_engine():
 
 
 async def test_extractions_are_proposed_for_review_by_default():
-    """A model's reading is never presented as an established fact unless
-    the deployer sets accept_at; even then it stays marked extracted."""
+    """A grounded model reading is never presented as established."""
     engine = await new_engine()
-    added = await engine.remember(SPACE, "Ana moved to Lisbon in March 2024.", created_at="2024-03-02")
-    outcome = await Distiller(engine, FakeChat([LISBON])).distill_episode(SPACE, added.episode_id)
+    source = "Ana moved to Lisbon in March 2024."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    reply = json.dumps([grounded("Ana", "moved_to", "Lisbon", source)])
+    outcome = await Distiller(engine, FakeChat([reply])).distill_episode(SPACE, added.episode_id)
     [fact] = outcome.added
     assert (fact.status, fact.origin) == ("proposed", "extracted")
     assert await engine.facts(SPACE) == []
@@ -361,6 +401,345 @@ async def test_extractions_are_proposed_for_review_by_default():
 
     accepted_engine = await new_engine()
     added = await accepted_engine.remember(SPACE, "Ana moved to Lisbon in March 2024.", created_at="2024-03-02")
-    outcome = await Distiller(accepted_engine, FakeChat([LISBON]), accept_at=0.8).distill_episode(SPACE, added.episode_id)
+    outcome = await Distiller(
+        accepted_engine,
+        FakeChat([LISBON]),
+        accept_at=0.8,
+        require_grounding=False,
+    ).distill_episode(SPACE, added.episode_id)
     [fact] = outcome.added
     assert (fact.status, fact.origin) == ("active", "extracted")
+
+
+# -- source-grounded extraction -----------------------------------------------
+
+
+async def test_grounded_observation_is_proposed_even_when_accept_threshold_would_activate_it(engine):
+    source = "Ana lives in Lisbon."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    reply = json.dumps([grounded("Ana", "lives_in", "Lisbon", source, confidence=1.0)])
+
+    outcome = await Distiller(engine, FakeChat([reply]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
+
+    [proposal] = outcome.added
+    assert (proposal.status, proposal.origin, proposal.source_episode_id) == (
+        "proposed",
+        "extracted",
+        added.episode_id,
+    )
+    assert (proposal.quote, proposal.grounded) == (source, True)
+    assert outcome.rejected == []
+    assert await engine.facts(SPACE) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "candidate", "reason"),
+    [
+        (
+            "Ana lives in Lisbon.",
+            grounded("Ana", "lives_in", "Lisbon", "Ana lives in Porto."),
+            "quote_not_in_source",
+        ),
+        (
+            "Ana lives in Lisbon.",
+            {"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9},
+            "missing_quote",
+        ),
+        (
+            "Ana moved recently.",
+            grounded("Ana", "lives_in", "Lisbon", "Ana moved recently."),
+            "object_not_in_quote",
+        ),
+        (
+            "She works at Farfetch.",
+            grounded("Ana", "works_at", "Farfetch", "She works at Farfetch."),
+            "subject_not_in_quote",
+        ),
+    ],
+)
+async def test_grounding_rejects_missing_or_non_supporting_literal_quotes(engine, source, candidate, reason):
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(SPACE, added.episode_id)
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == [reason]
+    assert await engine.facts(SPACE, include_closed=True) == []
+
+
+@pytest.mark.parametrize("predicate", ["dislikes", "does_not_like"])
+async def test_literal_subject_and_object_do_not_make_an_opposite_predicate_supported(engine, predicate):
+    source = "Ana likes Lisbon."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("Ana", predicate, "Lisbon", source)
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["predicate_not_in_quote"]
+
+
+@pytest.mark.parametrize("extra", [" ", "\n"])
+async def test_grounding_does_not_trim_model_added_whitespace_into_a_literal_quote(engine, extra):
+    source = "Zoë uses\nRust\tfor Scone."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("Zoë", "uses", "Rust for Scone", extra + source)
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["quote_not_in_source"]
+
+
+async def test_grounding_accepts_an_exact_unicode_quote_with_internal_source_whitespace(engine):
+    source = "Zoë uses\nRust\tfor Scone."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("Zoë", "uses", "Rust for Scone", source)
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    [proposal] = outcome.added
+    assert proposal.object == "Rust for Scone"
+    assert outcome.rejected == []
+
+
+async def test_grounding_withholds_a_quote_too_long_for_fact_persistence(engine):
+    source = "Ana " + ("x" * 1990) + " Lisbon"
+    assert len(source) > 2000
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("Ana", "lives_in", "Lisbon", source)
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["quote_too_long"]
+
+
+@pytest.mark.parametrize(
+    ("source", "candidate", "reason"),
+    [
+        (
+            "If the hook is installed, it fires on prompt events.",
+            grounded("hook", "fires_on", "prompt events", "the hook is installed, it fires on prompt events"),
+            "context_not_asserted",
+        ),
+        (
+            "The hook might fire on prompt events.",
+            grounded("hook", "fires_on", "prompt events", "The hook might fire on prompt events."),
+            "context_not_asserted",
+        ),
+        (
+            "Verify the hook fires on prompt events.",
+            grounded("hook", "fires_on", "prompt events", "the hook fires on prompt events", "instruction"),
+            "not_an_observation",
+        ),
+        (
+            "Does the hook fire on prompt events?",
+            grounded("hook", "fires_on", "prompt events", "the hook fire on prompt events", "question"),
+            "not_an_observation",
+        ),
+        (
+            "The hook does not fire on prompt events.",
+            grounded("hook", "fires_on", "prompt events", "The hook does not fire on prompt events."),
+            "context_not_asserted",
+        ),
+    ],
+)
+async def test_grounding_preserves_non_asserted_context_instead_of_turning_it_positive(
+    engine, source, candidate, reason
+):
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(SPACE, added.episode_id)
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == [reason]
+
+
+@pytest.mark.parametrize(
+    ("source", "candidate"),
+    [
+        (
+            "Ana doesn't live in Lisbon.",
+            grounded("Ana", "lives_in", "Lisbon", "Ana doesn't live in Lisbon."),
+        ),
+        (
+            "Ana doesn’t live in Lisbon.",
+            grounded("Ana", "lives_in", "Lisbon", "Ana doesn’t live in Lisbon."),
+        ),
+        (
+            "Ana isn't living in Lisbon.",
+            grounded("Ana", "living_in", "Lisbon", "Ana isn't living in Lisbon."),
+        ),
+        (
+            "Ana isn’t living in Lisbon.",
+            grounded("Ana", "living_in", "Lisbon", "Ana isn’t living in Lisbon."),
+        ),
+        (
+            "Ana is unlikely to live in Lisbon.",
+            grounded("Ana", "lives_in", "Lisbon", "Ana is unlikely to live in Lisbon."),
+        ),
+        (
+            "I doubt Ana lives in Lisbon.",
+            grounded("Ana", "lives_in", "Lisbon", "I doubt Ana lives in Lisbon."),
+        ),
+        (
+            "Scone plans to use Rust.",
+            grounded("Scone", "uses", "Rust", "Scone plans to use Rust."),
+        ),
+        (
+            "Scone intends to use Rust.",
+            grounded("Scone", "uses", "Rust", "Scone intends to use Rust."),
+        ),
+        (
+            "Scone won't use Rust.",
+            grounded("Scone", "uses", "Rust", "Scone won't use Rust."),
+        ),
+        (
+            "Scone won’t use Rust.",
+            grounded("Scone", "uses", "Rust", "Scone won’t use Rust."),
+        ),
+        (
+            "Scone cannot use Rust.",
+            grounded("Scone", "uses", "Rust", "Scone cannot use Rust."),
+        ),
+    ],
+)
+async def test_mislabeled_contractions_doubt_likelihood_and_plans_are_not_observations(
+    engine, source, candidate
+):
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["context_not_asserted"]
+
+
+async def test_strict_distillation_accounts_for_every_malformed_array_candidate(engine):
+    source = "Ana lives in Lisbon."
+    await engine.remember(SPACE, source, created_at="2024-03-02")
+    malformed = {"subject": "Ana", "predicate": "lives_in", "confidence": 0.9}
+    reply = json.dumps([malformed, "junk", None])
+    chat = FakeChat([reply])
+    distiller = Distiller(engine, chat)
+
+    [outcome] = await distiller.distill_pending(SPACE)
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["malformed_candidate"] * 3
+    assert outcome.rejected[0].extraction is None
+    assert outcome.rejected[0].raw == malformed
+    assert await engine.facts(SPACE, include_closed=True) == []
+    assert await distiller.distill_pending(SPACE) == []
+    assert len(chat.calls) == 1
+
+
+async def test_repeated_quote_cannot_bypass_a_non_asserted_occurrence(engine):
+    quote = "the hook fires on prompt events"
+    source = f"Observed: {quote}. If configured, {quote}."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("hook", "fires_on", "prompt events", quote)
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["context_not_asserted"]
+
+
+async def test_an_asserted_clause_is_retained_beside_a_separate_hypothetical_clause(engine):
+    source = "The hook fires on prompt events; if the network fails, it may miss responses."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("hook", "fires_on", "prompt events", "The hook fires on prompt events")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    [proposal] = outcome.added
+    assert proposal.object == "prompt events"
+    assert outcome.rejected == []
+
+
+async def test_known_capture_verification_text_produces_no_facts_from_literal_but_non_entailed_quotes(engine):
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "grounding_failure.json").read_text())
+    added = await engine.remember(SPACE, fixture["source"], created_at="2026-09-05")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps(fixture["reply"])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == [
+        "context_not_asserted",
+        "context_not_asserted",
+        "context_not_asserted",
+    ]
+    assert await engine.facts(SPACE, include_closed=True) == []
+
+
+async def test_same_source_conflicts_are_all_rejected_without_ordering_them_as_updates(engine):
+    source = "Ana lives in Austin. Ana lives in Lisbon."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    reply = json.dumps(
+        [
+            grounded("Ana", "lives_in", "Austin", "Ana lives in Austin."),
+            grounded("Ana", "lives_in", "Lisbon", "Ana lives in Lisbon."),
+        ]
+    )
+
+    outcome = await Distiller(engine, FakeChat([reply])).distill_episode(SPACE, added.episode_id)
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["same_source_conflict", "same_source_conflict"]
+    assert await engine.facts(SPACE, include_closed=True) == []
+
+
+async def test_grounded_correction_is_a_proposal_and_does_not_rewrite_approved_history(engine):
+    approved = await engine.assert_fact(SPACE, "Ana", "lives_in", "Austin", valid_from="2024-01-01")
+    source = "Ana lives in Lisbon."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    reply = json.dumps([grounded("Ana", "lives_in", "Lisbon", source)])
+
+    outcome = await Distiller(engine, FakeChat([reply]), accept_at=0.0).distill_episode(SPACE, added.episode_id)
+
+    [proposal] = outcome.added
+    assert proposal.status == "proposed"
+    assert [(f.fact_id, f.object, f.status, f.valid_until) for f in await engine.facts(SPACE)] == [
+        (approved.fact_id, "Austin", "active", None)
+    ]
+
+
+async def test_grounded_distill_text_refuses_a_claim_when_its_quote_cannot_be_persisted(engine):
+    source = "Ana lives in Lisbon."
+    reply = json.dumps([grounded("Ana", "lives_in", "Lisbon", source)])
+
+    with pytest.raises(DistillError, match="stored episode"):
+        await Distiller(engine, FakeChat([reply])).distill_text(
+            SPACE, source, created_at="2024-03-02"
+        )
+
+    assert await engine.facts(SPACE, include_closed=True) == []
+
+
+async def test_legacy_unquoted_replies_require_an_explicit_compatibility_opt_out(engine):
+    added = await engine.remember(SPACE, "Ana lives in Lisbon.", created_at="2024-03-02")
+
+    outcome = await Distiller(
+        engine, FakeChat([LISBON]), accept_at=0.0, require_grounding=False
+    ).distill_episode(SPACE, added.episode_id)
+
+    [fact] = outcome.added
+    assert (fact.object, fact.status) == ("Lisbon", "active")

@@ -22,6 +22,7 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
   const [page, setPage] = useState(0);
   const [focus, setFocus] = useState<string | undefined>();
   const [hovered, setHovered] = useState<string | null>(null);
+  const [keyboardNode, setKeyboardNode] = useState<string | null>(null);
   const network = layout !== 'flow';
   const drag = useRef<Point | null>(null);
   const [size, setSize] = useState({ width: 700, height: 450 });
@@ -36,7 +37,7 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
     return result;
   }, [view.nodes,view.edges,depth,layout]);
   const topology = [...points].map(([id,p])=>`${id}:${p.x}:${p.y}`).sort().join('|');
-  const active = hovered || selected;
+  const active = keyboardNode || hovered || selected;
   const lanes = [...new Set(view.nodes.map(n => n.owner))].map((owner, index) => {
     const members = view.nodes.filter(n => n.owner === owner), ps = members.map(n => points.get(n.id)!);
     const anchor = nodes.find(n => n.id === owner);
@@ -63,7 +64,22 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
   useLayoutEffect(() => { fitted.current = false; }, [depth,layout,group,page,focus,topology]);
   useEffect(() => { if (!nodes.length) {setGroup(undefined);setFocus(undefined);setPage(0);} }, [nodes.length]);
   useLayoutEffect(() => { if (!fitted.current) fit(); }, [fit]);
-  function zoomBy(factor: number) { setCamera(c => { const zoom = Math.max(.12, Math.min(2.5, c.zoom * factor)); return { zoom, x: size.width / 2 - (size.width / 2 - c.x) * zoom / c.zoom, y: size.height / 2 - (size.height / 2 - c.y) * zoom / c.zoom }; }); }
+  const zoomBy = useCallback((factor: number) => { setCamera(c => { const zoom = Math.max(.05, Math.min(2.5, c.zoom * factor)); return { zoom, x: size.width / 2 - (size.width / 2 - c.x) * zoom / c.zoom, y: size.height / 2 - (size.height / 2 - c.y) * zoom / c.zoom }; }); }, [size]);
+  useEffect(() => {
+    const canvas = svg.current;
+    if (!canvas) return;
+    // React's delegated wheel listener is passive. Cancel pinch at the canvas
+    // itself so the browser and graph cannot both consume the same gesture.
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || !event.deltaY) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? size.height : 1);
+      zoomBy(Math.exp(-Math.max(-100, Math.min(100, delta)) * .01));
+    };
+    canvas.addEventListener('wheel', wheel, {passive: false});
+    return () => canvas.removeEventListener('wheel', wheel);
+  }, [zoomBy, size.height]);
   return <>
     <div className="graph-navigation" aria-label="Graph scope">
       <LayoutPicker value={layout} onChange={value=>{setLayout(value);setHovered(null);setGroup(undefined);setFocus(undefined);setPage(0);}}/>
@@ -71,7 +87,9 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
       {view.pages > 1 && <div className="graph-pagination"><button aria-label={view.mode==='group' ? 'Previous group page' : 'Previous graph page'} disabled={view.page === 0} onClick={() => setPage(view.page - 1)}>←</button><span>{view.page + 1} / {view.pages}</span><button aria-label={view.mode==='group' ? 'Next group page' : 'Next graph page'} disabled={view.page + 1 >= view.pages} onClick={() => setPage(view.page + 1)}>→</button></div>}
       {layout!=='growth'&&selected && nodes.some(n => n.id === selected && n.kind !== 'session') && focus !== selected && <button onClick={() => {setFocus(selected);setPage(0);}}>Focus selected</button>}
     </div>
-    <svg ref={svg} id="graph" className={network ? 'network-map' : 'flow-map'} data-layout={layout} aria-label="Memory evidence graph" onWheel={e => zoomBy(e.deltaY < 0 ? 1.08 : 1 / 1.08)}
+    <svg ref={svg} id="graph" className={network ? 'network-map' : 'flow-map'} data-layout={layout} aria-label="Memory evidence graph"
+      onFocusCapture={event => { const node=(event.target as Element).closest('[data-node], [data-group]'); setKeyboardNode(node?.getAttribute('data-node') || node?.getAttribute('data-group') || null); }}
+      onBlurCapture={() => setKeyboardNode(null)}
       onPointerDown={e => { if ((e.target as Element).closest('[data-node], [data-group]')) return; drag.current = { x: e.clientX - camera.x, y: e.clientY - camera.y }; e.currentTarget.setPointerCapture(e.pointerId); }}
       onPointerMove={e => { if (drag.current) { const p = drag.current; setCamera(c => ({ ...c, x: e.clientX - p.x, y: e.clientY - p.y })); } }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
       <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" /></marker></defs>

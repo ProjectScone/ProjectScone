@@ -1,4 +1,14 @@
 reference/
+# Local upstream application reference; never vendor it into Scone.
+/supermemory/
+/pipecat/
+Webapp/node_modules/
+Webapp/dist/
+Webapp/.env*
+# Local generated sessions and rejected/unused image renditions.
+:memory:.ses
+/Webapp/assets/scone-mark-v1.png
+/Webapp/src/assets/scone-mark-v2.png
 target/
 *.db
 .scone/
@@ -9,14 +19,12 @@ memory/
 docs/
 bench-data/
 bench-runs/
-clients/python/**/__pycache__/
-clients/python/.pytest_cache/
-
-# python/scone-memory
-python/scone-memory/.venv/
-python/scone-memory/**/__pycache__/
-python/scone-memory/*.egg-info/
-python/scone-memory/dist/
-python/scone-memory/.pytest_cache/
+# Python packages (native engine and HTTP client)
+python/*/.venv/
+python/**/__pycache__/
+python/*/*.egg-info/
+python/*/build/
+python/*/dist/
+python/*/.pytest_cache/
 # Codex keeps the capability ledger; it is not part of the published tree.
 CAPABILITIES.md

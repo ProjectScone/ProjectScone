@@ -24,6 +24,28 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  episode-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build deterministic Rust probe and run shared fixtures
+        # No model download: this profile uses HashEmbedder in both runtimes.
+        run: |
+          cargo test --locked -p scone-core --no-default-features --test shared_contract
+          cargo build --locked -p scone-core --no-default-features --example episode_roundtrip
+      - name: Install Python conformance dependencies
+        run: python -m pip install -e './python/scone-memory[test]'
+      - name: Exchange real exports in both directions
+        working-directory: python/scone-memory
+        env:
+          SCONE_TEST_RUST_ROUNDTRIP: ${{ github.workspace }}/target/debug/examples/episode_roundtrip
+        run: python -m pytest -q tests/test_cross_language.py -k 'memory or sqlite or probe'
+
   python:
     runs-on: ubuntu-latest
     defaults:

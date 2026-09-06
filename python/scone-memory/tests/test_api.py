@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -51,6 +52,18 @@ def test_no_key_or_wrong_key_is_401(client):
     r = client.get("/v1/status", headers=auth("nope"))
     assert r.status_code == 401
     assert r.json() == {"error": "unknown key"}
+
+
+def test_capabilities_are_authenticated_explicit_and_read_only(client):
+    expected = json.loads((REPO / "tests/fixtures/http-capabilities.json").read_text())["python"]
+    assert client.get("/v1/capabilities").status_code == 401
+    assert client.get("/v1/capabilities", headers=auth("wrong")).status_code == 401
+    before = client.get("/v1/status", headers=auth()).json()
+    for key in ("key-a", "key-b"):
+        response = client.get("/v1/capabilities", headers=auth(key))
+        assert response.status_code == 200
+        assert response.json() == expected
+    assert client.get("/v1/status", headers=auth()).json() == before
 
 
 def test_key_decides_the_space(client):

@@ -38,13 +38,15 @@ struct AppState {
 
 /// The console page, with a placeholder where the session key goes.
 const CONSOLE_HTML: &str = include_str!("console.html");
+const PLAYGROUND_HTML: &str = include_str!("playground.html");
 
 /// Serve the console at `/` on top of the same API the CLI and agents
 /// use. The key is baked into the page rather than the URL so it stays
 /// out of browser history and out of anything the user might paste.
 pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router {
     let page = CONSOLE_HTML.replace("__SCONE_TOKEN__", key);
-    router(engine, config).route(
+    let playground = PLAYGROUND_HTML.replace("__SCONE_TOKEN__", key);
+    router_with_playground(engine, config, playground).route(
         "/",
         get(move || {
             let page = page.clone();
@@ -54,11 +56,26 @@ pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router 
 }
 
 pub fn router(engine: Engine, config: ServeConfig) -> Router {
+    router_with_playground(engine, config, PLAYGROUND_HTML.to_owned())
+}
+
+fn router_with_playground(engine: Engine, config: ServeConfig, playground: String) -> Router {
     let state = AppState {
         engine: Arc::new(Mutex::new(engine)),
         config: Arc::new(config),
     };
     Router::new()
+        .route(
+            "/playground",
+            get(move || {
+                let page = playground.clone();
+                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+            }),
+        )
+        .route("/v1/graph", get(get_graph))
+        .route("/v1/capabilities", get(get_capabilities))
+        .route("/v1/events", get(get_events).post(post_event))
+        .route("/v1/episodes/{id}", get(get_episode))
         .route("/v1/episodes", post(post_episode))
         .route("/v1/recall", get(get_recall))
         .route("/v1/facts", get(get_facts))
@@ -67,6 +84,28 @@ pub fn router(engine: Engine, config: ServeConfig) -> Router {
         .route("/v1/status", get(get_status))
         .route("/v1/tags", get(get_tags))
         .with_state(state)
+}
+
+/// Authenticated discovery of implemented operations, without a memory read.
+async fn get_capabilities(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = space_for(&headers, &state.config) {
+        return response;
+    }
+    // Capability discovery must not open a space or emit a memory event.
+    Json(serde_json::json!({
+        "schema_version": 1,
+        "implementation": "rust",
+        "features": {
+            "recall": true, "facts.read": true, "facts.review": false,
+            "facts.close": true, "facts.exclude": false, "facts.include": false,
+            "events.read": true, "metrics.read": false, "scopes.read": false,
+            "status.read": true
+        }
+    }))
+    .into_response()
 }
 
 /// Error body every failure path shares — no silent shapes.
@@ -124,6 +163,10 @@ fn status_for(e: &scone_core::SconeError) -> StatusCode {
 struct EpisodeBody {
     content: String,
     #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     tags: Vec<String>,
     /// Where this came from, kept as provenance.
     #[serde(default)]
@@ -156,10 +199,21 @@ async fn post_episode(
     if body.tags.len() > 10 {
         return err(StatusCode::UNPROCESSABLE_ENTITY, "at most 10 tags");
     }
+    if body.metadata.len() > 32
+        || body
+            .metadata
+            .iter()
+            .any(|(k, v)| k.is_empty() || k.len() > 64 || v.len() > 256)
+    {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata exceeds 32 keys, 64-byte keys or 256-byte values",
+        );
+    }
     match with_engine(&state, &headers, |engine, space| {
         let outcome = engine.import_episode_outcome(
             space,
-            "note",
+            body.kind.as_deref().unwrap_or("note"),
             &body.content,
             body.source.as_deref(),
             body.created_at.as_deref(),
@@ -168,6 +222,9 @@ async fn post_episode(
             IngestOutcome::Ingested { episode_id, .. }
             | IngestOutcome::Deduplicated { episode_id } => *episode_id,
         };
+        if !body.metadata.is_empty() {
+            engine.set_episode_metadata(space, episode_id, &body.metadata)?;
+        }
         if !body.tags.is_empty() {
             let refs: Vec<&str> = body.tags.iter().map(String::as_str).collect();
             engine.tag_episode(space, episode_id, &refs)?;
@@ -226,9 +283,12 @@ async fn get_recall(
         ..Default::default()
     };
     match with_engine(&state, &headers, |engine, space| {
-        engine.recall(space, &query.q, &opts)
+        let pack = engine.recall(space, &query.q, &opts)?;
+        let event_id = engine.record_recall_evidence(space, &query.q, &pack)?;
+        Ok((pack, event_id))
     }) {
-        Ok(pack) => Json(serde_json::json!({
+        Ok((pack, event_id)) => Json(serde_json::json!({
+            "event_id":event_id,
             "facts": pack.facts.iter().map(|f| serde_json::json!({
                 "fact_id": f.fact_id, "subject": f.subject, "predicate": f.predicate,
                 "object": f.object, "confidence": f.confidence,
@@ -236,7 +296,7 @@ async fn get_recall(
                 "status": f.status,
             })).collect::<Vec<_>>(),
             "items": pack.items.iter().map(|i| serde_json::json!({
-                "episode_id": i.episode_id, "text": i.text, "score": i.score,
+                "episode_id": i.episode_id, "chunk_id":i.chunk_id, "text": i.text, "score": i.score,
                 "source": i.source, "created_at": i.created_at,
             })).collect::<Vec<_>>(),
             "degraded": pack.degraded,
@@ -246,6 +306,83 @@ async fn get_recall(
         }))
         .into_response(),
         Err(response) => response,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventBody {
+    kind: String,
+    payload: serde_json::Value,
+}
+async fn post_event(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<EventBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, e.body_text()),
+    };
+    if body.kind != "agent" {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "only connector-reported agent events may be posted",
+        );
+    }
+    match with_engine(&state, &headers, |engine, space| {
+        engine.record_agent_event(space, body.payload)
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e,
+    }
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceQuery {
+    after_id: Option<i64>,
+    limit: Option<usize>,
+    kind: Option<String>,
+}
+async fn get_events(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<EvidenceQuery>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        engine.evidence_events(space, q.after_id, q.limit.unwrap_or(100), q.kind.as_deref())
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e,
+    }
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphQuery {
+    limit: Option<usize>,
+}
+async fn get_graph(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<GraphQuery>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        engine.evidence_graph(space, q.limit.unwrap_or(200))
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e,
+    }
+}
+async fn get_episode(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        engine.evidence_episode(space, id)
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e,
     }
 }
 

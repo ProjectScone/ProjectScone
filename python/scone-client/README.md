@@ -22,7 +22,7 @@ exactly one space).
 
 | Method | Endpoint | Returns |
 | --- | --- | --- |
-| `add(text, tags=None, source=None)` | `POST /v1/episodes` | `Added(episode_id, deduplicated, chunks)` |
+| `add(text, tags=None, source=None, created_at=None)` | `POST /v1/episodes` | `Added(episode_id, deduplicated, chunks)` |
 | `recall(query, limit=None, as_of=None, tags=None)` | `GET /v1/recall` | `Recall` (iterable over `Memory`) |
 | `facts(include_closed=False)` | `GET /v1/facts` | `list[Fact]` |
 | `close_fact(fact_id, reason)` | `POST /v1/facts/{id}/close` | `int` (the closed id) |
@@ -37,18 +37,17 @@ rejections use).
 
 ## Server behavior worth knowing
 
-- **`source` is not settable over HTTP.** `POST /v1/episodes` accepts only
-  `content` and `tags`; the engine stores notes with `source = NULL`, so
-  every `Memory.source` from HTTP-ingested text is `None`. `add(..., source=...)`
-  raises rather than sending a field the server would silently drop.
+- **Source and event time are supported.** `add(..., source=..., created_at=...)`
+  sends both fields to the Rust server; recall returns the preserved source and
+  event date. They are optional, not fabricated when omitted.
 - **Deduplication is not an error.** Storing identical text twice answers
   `200` with `deduplicated: true` and no `chunks`, instead of `201`.
 - **Profile facts are narrower.** `/v1/profile` omits `valid_from`,
   `valid_until`, and `status`, so those are `None` on a `Fact` from there.
-- **The server returns 500 for some client mistakes.** `serve.rs` maps every
-  engine error to `500`, so closing an absent fact and sending a whitespace-only
-  `q` both come back as `500` rather than `404`/`422`. The client refuses a
-  blank query locally; the fact case is visible as a `SconeError(status=500)`.
+- **Engine errors have HTTP categories.** Missing facts return `404`, invalid
+  engine input returns `422`, and unrecognized keys return `401`. Transport and
+  extractor errors can have other shapes; the client preserves their status
+  and handles plain-text bodies. A blank query is also refused locally.
 
 ## Install
 

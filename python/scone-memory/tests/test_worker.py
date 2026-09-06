@@ -14,8 +14,16 @@ from scone_memory.distill import Distiller
 from scone_memory.testing import Clock
 from scone_memory.worker import ConsolidationWorker
 
-LISBON = json.dumps([{"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])
-COFFEE = json.dumps([{"subject": "Carol", "predicate": "drinks", "object": "black coffee", "confidence": 0.6}])
+LISBON = json.dumps([{
+    "subject": "Ana", "predicate": "moved_to", "object": "Lisbon", "confidence": 0.9,
+    "statement_type": "observation", "quote": "Ana moved to Lisbon.",
+}])
+COFFEE = json.dumps([{
+    "subject": "Carol", "predicate": "drinks", "object": "black coffee", "confidence": 0.6,
+    "statement_type": "observation", "quote": "Carol drinks black coffee.",
+}])
+LEGACY_LISBON = json.dumps([{"subject": "Ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])
+LEGACY_COFFEE = json.dumps([{"subject": "Carol", "predicate": "drinks", "object": "black coffee", "confidence": 0.6}])
 
 
 async def engine_with(*episodes):
@@ -26,7 +34,7 @@ async def engine_with(*episodes):
 
 
 async def test_a_pass_proposes_claims_and_records_a_distill_event():
-    engine = await engine_with("Ana moved to Lisbon.", "Carol takes her coffee black.")
+    engine = await engine_with("Ana moved to Lisbon.", "Carol drinks black coffee.")
     worker = ConsolidationWorker(engine, Distiller(engine, FakeChat([LISBON, COFFEE])), ["default"], interval_s=999)
     report = await worker.run_once("default")
     assert (report.episodes, report.proposed, report.accepted, report.error) == (2, 2, 0, None)
@@ -37,9 +45,18 @@ async def test_a_pass_proposes_claims_and_records_a_distill_event():
     assert worker.passes == 1 and worker.last["default"].proposed == 2
 
 
-async def test_accept_at_admits_confident_extractions_directly():
-    engine = await engine_with("Ana moved to Lisbon.", "Carol takes her coffee black.")
-    worker = ConsolidationWorker(engine, Distiller(engine, FakeChat([LISBON, COFFEE]), accept_at=0.8), ["default"])
+async def test_explicit_legacy_accept_at_admits_confident_extractions_directly():
+    engine = await engine_with("Ana moved to Lisbon.", "Carol drinks black coffee.")
+    worker = ConsolidationWorker(
+        engine,
+        Distiller(
+            engine,
+            FakeChat([LEGACY_LISBON, LEGACY_COFFEE]),
+            accept_at=0.8,
+            require_grounding=False,
+        ),
+        ["default"],
+    )
     report = await worker.run_once("default")
     assert (report.proposed, report.accepted) == (1, 1)  # 0.9 accepted, 0.6 proposed
     assert [f.object for f in await engine.facts("default")] == ["Lisbon"]

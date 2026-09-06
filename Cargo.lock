@@ -3729,6 +3729,7 @@ dependencies = [
  "proptest",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tantivy",
  "tempfile",
  "thiserror",

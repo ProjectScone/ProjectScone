@@ -57,6 +57,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Structure every host prompt locally; reads hook JSON, emits hook JSON.
+    PromptHook,
     /// Ingest files, or a note via --note
     Add {
         /// Files to ingest
@@ -391,6 +393,10 @@ fn data_dir(cli: &Cli) -> Result<PathBuf, String> {
 
 fn run() -> Result<(), String> {
     let mut cli = Cli::parse();
+    if matches!(cli.cmd, Cmd::PromptHook) {
+        scone::prompt::run_stdin();
+        return Ok(());
+    }
     if cli.space == "auto" {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         cli.space = scone::space::auto_space(&cwd);
@@ -417,6 +423,7 @@ fn run() -> Result<(), String> {
     }
 
     match &cli.cmd {
+        Cmd::PromptHook => return Ok(()), // handled before engine/model setup
         Cmd::Add {
             paths,
             note,

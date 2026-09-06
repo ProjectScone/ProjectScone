@@ -27,6 +27,212 @@ fn app(dir: &std::path::Path) -> axum::Router {
     )
 }
 
+#[tokio::test]
+async fn capabilities_are_authenticated_explicit_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/http-capabilities.json"
+    ))
+    .unwrap();
+    for key in [None, Some("wrong")] {
+        let (status, _) = call(&server, "GET", "/v1/capabilities", key, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (_, before) = call(&server, "GET", "/v1/status", Some("sk-alice"), None).await;
+    for key in ["sk-alice", "sk-bob"] {
+        let (status, body) = call(&server, "GET", "/v1/capabilities", Some(key), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected["rust"]);
+    }
+    let (_, after) = call(&server, "GET", "/v1/status", Some("sk-alice"), None).await;
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn evidence_console_and_plain_server_both_serve_playground() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let server = scone::serve::console_router(
+        engine,
+        ServeConfig {
+            keys: vec![SpaceKey {
+                key: "fixture-token".into(),
+                space: "alice".into(),
+            }],
+        },
+        "fixture-token",
+    );
+    let response = server
+        .oneshot(
+            Request::builder()
+                .uri("/playground")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("fixture-token"));
+}
+
+#[tokio::test]
+async fn evidence_is_scoped_persistent_and_retries_do_not_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let payload = serde_json::json!({"kind":"agent","payload":{
+        "agent":"codex","session_id":"s1","event":"prompt",
+        "source_event_id":"input-1","text":"Keep launch local"}});
+    let (status, receipt) = call(
+        &server,
+        "POST",
+        "/v1/events",
+        Some("sk-alice"),
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (_, duplicate) = call(
+        &server,
+        "POST",
+        "/v1/events",
+        Some("sk-alice"),
+        Some(payload),
+    )
+    .await;
+    assert_eq!(receipt["recorded"], duplicate["recorded"]);
+    let (_, events) = call(
+        &server,
+        "GET",
+        "/v1/events?after_id=0",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(events["events"].as_array().unwrap().len(), 1);
+    assert_eq!(events["next_after_id"], receipt["recorded"]);
+    let (_, private) = call(&server, "GET", "/v1/graph", Some("sk-bob"), None).await;
+    assert_eq!(private["nodes"], serde_json::json!([]));
+    drop(server);
+    let reopened = app(dir.path());
+    let (_, graph) = call(&reopened, "GET", "/v1/graph", Some("sk-alice"), None).await;
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["data"]["text"] == "Keep launch local")
+    );
+}
+
+#[tokio::test]
+async fn evidence_links_capture_and_recall_only_to_scoped_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let (status, ep)=call(&server,"POST","/v1/episodes",Some("sk-alice"),Some(serde_json::json!({"kind":"conversation","content":"Keep launch local","metadata":{"agent":"codex","session_id":"s1"}}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{ep}");
+    let event = serde_json::json!({"kind":"agent","payload":{"agent":"codex","session_id":"s1","event":"prompt","source_event_id":"prompt-1","episode_id":ep["episode_id"],"text":"Keep launch local"}});
+    let (status, _) = call(
+        &server,
+        "POST",
+        "/v1/events",
+        Some("sk-bob"),
+        Some(event.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call(&server, "POST", "/v1/events", Some("sk-alice"), Some(event)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, recall) = call(
+        &server,
+        "GET",
+        "/v1/recall?q=launch",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert!(recall["event_id"].as_i64().is_some());
+    let (_, graph) = call(&server, "GET", "/v1/graph", Some("sk-alice"), None).await;
+    let edges = graph["edges"].as_array().unwrap();
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["kind"] == "captured_as" && e["target"] == "episode:1")
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["kind"] == "returned" && e["target"] == "chunk:1")
+    );
+    assert!(!edges.iter().any(|e| e["kind"] == "similar"));
+    let (status, _) = call(&server, "GET", "/v1/episodes/1", Some("sk-bob"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn evidence_rejects_forgery_conflicting_retries_and_invalid_utf8_byte_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    for payload in [
+        serde_json::json!({"kind":"recall","payload":{}}),
+        serde_json::json!({"kind":"agent","payload":{"agent":"codex","session_id":"s1","event":"prompt","text":"🥐".repeat(17000)}}),
+    ] {
+        let (status, _) = call(
+            &server,
+            "POST",
+            "/v1/events",
+            Some("sk-alice"),
+            Some(payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let mut payload = serde_json::json!({"kind":"agent","payload":{"agent":"codex","session_id":"s1","event":"prompt","source_event_id":"p1","text":"first"}});
+    assert_eq!(
+        call(
+            &server,
+            "POST",
+            "/v1/events",
+            Some("sk-alice"),
+            Some(payload.clone())
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    payload["payload"]["text"] = serde_json::json!("different");
+    assert_eq!(
+        call(
+            &server,
+            "POST",
+            "/v1/events",
+            Some("sk-alice"),
+            Some(payload)
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn evidence_accepts_explicit_connector_truncation_without_hiding_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    let (status,_)=call(&server,"POST","/v1/events",Some("sk-alice"),Some(serde_json::json!({"kind":"agent","payload":{"agent":"claude-code","session_id":"s1","event":"tool_result","text":"bounded excerpt","text_truncated":true}}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, page) = call(
+        &server,
+        "GET",
+        "/v1/events?after_id=0",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(page["events"][0]["payload"]["text_truncated"], true);
+}
+
 async fn call(
     app: &axum::Router,
     method: &str,

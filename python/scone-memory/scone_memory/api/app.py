@@ -193,6 +193,16 @@ def create_app(
     async def healthz() -> dict:
         return {"ok": True}
 
+    @app.get("/v1/capabilities")
+    async def capabilities(_space: str = Depends(space_for)) -> dict:
+        """Implemented HTTP operations, not a health check or a ledger read."""
+        return {"schema_version": 1, "implementation": "python", "features": {
+            "recall": True, "facts.read": True, "facts.review": True,
+            "facts.close": True, "facts.exclude": True, "facts.include": True,
+            "events.read": True, "metrics.read": True, "scopes.read": True,
+            "status.read": True, "episodes.attachments": True,
+        }}
+
     if console:
         def render_console() -> str:
             # Two page generations share this route: the packaged React app,

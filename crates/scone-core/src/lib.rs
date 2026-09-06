@@ -9,6 +9,7 @@ mod db;
 pub mod distill;
 pub mod embed;
 mod error;
+pub mod evidence;
 pub mod index;
 mod ingest;
 pub mod llm;
@@ -131,6 +132,7 @@ impl Engine {
     ) -> Result<Engine> {
         std::fs::create_dir_all(data_dir)?;
         let conn = db::open(&data_dir.join("scone.db"))?;
+        evidence::init(&conn)?;
         if !repair {
             let pinned: Option<String> = match conn.query_row(
                 "SELECT value FROM meta WHERE key = 'embedder_id'",

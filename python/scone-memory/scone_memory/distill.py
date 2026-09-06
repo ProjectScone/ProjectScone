@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Iterator, Optional, Sequence
 
@@ -29,9 +30,10 @@ from .timeutil import parse_rfc3339
 EXTRACTION_PROMPT = """\
 You turn a piece of someone's memory into durable facts.
 
-Read the text and list the facts it states about named things: people, \
-places, projects, tools, organisations, dates. Express each fact as a \
-triple with a confidence.
+Read the text and list only durable observations it directly states about \
+named things: people, places, projects, tools, organisations, dates. Do not \
+turn instructions, questions, hypotheticals, uncertainty, negation, or tests \
+that still need to be performed into positive observations.
 
 Reply with a JSON array and nothing else. Each element is an object with \
 exactly these keys:
@@ -39,12 +41,23 @@ exactly these keys:
 - "predicate": a short lowercase verb phrase in snake_case, such as \
 lives_in, works_at, prefers, was_born_on
 - "object": the value, in the text's own words
+- "quote": an exact, contiguous substring of the text that directly supports \
+the whole proposed triple and contains both the subject and object
+- "statement_type": one of observation, instruction, hypothetical, question, \
+or uncertain
 - "confidence": a number from 0 to 1; 1.0 for a fact stated outright, \
-lower for one that is only implied
+lower when wording is less direct. Confidence never substitutes for evidence.
 
 Rules:
-- Record only what the text states or clearly implies. Do not guess, do \
-not add world knowledge, do not fill gaps.
+- Record only direct observations. Do not guess, infer implied claims, add \
+world knowledge, or fill gaps.
+- A quote merely containing words from the triple is not enough. The quote \
+must support the relationship expressed by the subject, predicate, and object.
+- Use predicate wording whose meaningful action or status words occur in the \
+quote. Do not replace them with a synonym or an inferred opposite.
+- Classify instructions, plans, recommendations, conditions, possibilities, \
+questions, uncertainty, and negated statements with their non-observation \
+statement_type. They will not become proposals.
 - Prefer facts that stay true for a while (where someone lives, what \
 they use, what they decided) over passing events.
 - Use the same subject spelling and predicate wording for the same kind \
@@ -57,6 +70,9 @@ text itself.
 
 #: Confidence assumed when the model leaves it out or sends junk.
 DEFAULT_CONFIDENCE = 0.5
+#: Mirrors the fact persistence boundary. Longer evidence cannot be stored,
+#: so the distiller withholds it instead of creating an ungrounded proposal.
+MAX_QUOTE = 2000
 
 
 class DistillError(SconeError):
@@ -79,6 +95,20 @@ class Extracted:
     predicate: str
     object: str
     confidence: float
+    #: Optional only so the public legacy parser keeps accepting its old
+    #: four-field shape. The Distiller requires both fields by default.
+    quote: Optional[str] = None
+    statement_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RejectedExtraction:
+    """A model candidate withheld before it can touch the fact store."""
+
+    extraction: Optional[Extracted]
+    reason: str
+    #: Original array entry when it could not be parsed as an extraction.
+    raw: object = None
 
 
 @dataclass
@@ -92,6 +122,9 @@ class DistillOutcome:
     #: Triples that restated a fact already on record.
     skipped: int = 0
     error: Optional[str] = None
+    #: Candidates withheld by the source-grounding gate. These are audit
+    #: results, not facts and not edits to previously approved history.
+    rejected: list[RejectedExtraction] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
@@ -156,11 +189,25 @@ def _triple(entry: object) -> Optional[Extracted]:
     obj = _clean(entry.get("object"))
     if not (subject and predicate and obj):
         return None
-    return Extracted(subject, predicate, obj, _confidence(entry.get("confidence")))
+    return Extracted(
+        subject,
+        predicate,
+        obj,
+        _confidence(entry.get("confidence")),
+        quote=_literal(entry.get("quote")),
+        statement_type=_clean(entry.get("statement_type")) or None,
+    )
 
 
 def _clean(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def _literal(value: object) -> Optional[str]:
+    """Keep internal whitespace exact because quotes are source spans."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
 
 
 def _confidence(value: object) -> float:
@@ -181,16 +228,21 @@ class Distiller:
         max_attempts: int = 3,
         prompt: str = EXTRACTION_PROMPT,
         accept_at: Optional[float] = None,
+        require_grounding: bool = True,
     ) -> None:
         self.engine = engine
         self.chat = chat
         self.max_attempts = max_attempts
         self.prompt = prompt
-        #: Extractions enter the ledger as proposals for a person to review
-        #: unless their confidence reaches ``accept_at``. None means every
-        #: extraction is proposed: a model's reading is never presented as
-        #: an established fact by default.
+        #: Grounded extractions always enter as proposals. ``accept_at`` is
+        #: retained only for the explicit ``require_grounding=False`` legacy
+        #: path; there, None still means every extraction is proposed.
         self.accept_at = accept_at
+        #: False is an explicit compatibility escape hatch for callers with
+        #: pre-grounding canned responses. It preserves the old parser/apply
+        #: contract and may auto-accept via ``accept_at``. New extraction must
+        #: leave this at True.
+        self.require_grounding = require_grounding
         # Both keyed by (space, episode_id); in memory only, so a new
         # Distiller starts with no history and retries parked episodes.
         self._failures: dict[tuple[str, int], _Attempts] = {}
@@ -209,8 +261,12 @@ class Distiller:
         from ``created_at`` (the engine's clock when omitted) and carry
         no provenance."""
         check_space(space)
-        triples = await self._extract(text)
-        outcome = await self._apply(space, None, triples, created_at)
+        triples, rejected = await self._extract(text)
+        if self.require_grounding and triples:
+            raise DistillError(
+                "source-grounded claims require a stored episode so their quote can be persisted"
+            )
+        outcome = await self._apply(space, None, triples, created_at, rejected)
         return outcome.added
 
     async def distill_episode(self, space: str, episode_id: int) -> DistillOutcome:
@@ -279,12 +335,18 @@ class Distiller:
         return outcome
 
     async def _distill(self, episode: Episode) -> DistillOutcome:
-        triples = await self._extract(episode.content)
-        return await self._apply(episode.space, episode.episode_id, triples, episode.created_at)
+        triples, rejected = await self._extract(episode.content)
+        return await self._apply(
+            episode.space, episode.episode_id, triples, episode.created_at, rejected
+        )
 
-    async def _extract(self, text: str) -> list[Extracted]:
+    async def _extract(self, text: str) -> tuple[list[Extracted], list[RejectedExtraction]]:
         reply = await self.chat.complete(self.prompt, text)
-        return parse_triples(reply)
+        if not self.require_grounding:
+            return parse_triples(reply), []
+        triples, malformed = _strict_triples(reply)
+        grounded, rejected = _grounded(triples, text)
+        return grounded, [*malformed, *rejected]
 
     async def _apply(
         self,
@@ -292,8 +354,9 @@ class Distiller:
         episode_id: Optional[int],
         triples: Sequence[Extracted],
         valid_from: Optional[str],
+        rejected: Sequence[RejectedExtraction] = (),
     ) -> DistillOutcome:
-        outcome = DistillOutcome(episode_id)
+        outcome = DistillOutcome(episode_id, rejected=list(rejected))
         seen: set[int] = set()
         for triple in triples:
             before = await self._active_ids(space, triple.subject, triple.predicate)
@@ -306,7 +369,13 @@ class Distiller:
                 confidence=triple.confidence,
                 source_episode_id=episode_id,
                 origin="extracted",
-                proposed=self.accept_at is None or triple.confidence < self.accept_at,
+                quote=triple.quote if self.require_grounding else None,
+                # Source-grounded model readings remain proposals regardless
+                # of confidence. A person may approve them later; extraction
+                # never rewrites the accepted ledger in this mode.
+                proposed=self.require_grounding
+                or self.accept_at is None
+                or triple.confidence < self.accept_at,
             )
             after = await self._active_ids(space, triple.subject, triple.predicate)
             outcome.closed += len(before - after)
@@ -325,6 +394,184 @@ class Distiller:
         return {f.fact_id for f in found if f.status == "active"}
 
 
+# -- source grounding ---------------------------------------------------------
+
+
+_NON_ASSERTED = re.compile(
+    r"\b(?:if|unless|assuming|suppose|supposing|whether|might|may|could|would|"
+    r"should|perhaps|maybe|possibly|potentially|unclear|unknown|not|never|no|"
+    r"nothing|neither|unlikely|likely|doubt|doubts|doubted|plans?|planned|planning|"
+    r"intends?|intended|intending|intents?|intentions?)\b|"
+    r"\b(?:aren|can|couldn|didn|doesn|don|hadn|hasn|haven|isn|mightn|mustn|"
+    r"needn|shan|shouldn|wasn|weren|won|wouldn)['’]t\b|\bcannot\b|"
+    r"\bevidence\s+to\s+verify\b|\bto\s+verify\b|"
+    r"\bfollowed\s+by\s+confirmation\b",
+    re.IGNORECASE,
+)
+_IMPERATIVE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:please\s+)?(?:verify|confirm|check|ensure|use|run|"
+    r"install|create|open|record|remember|follow|test)\b",
+    re.IGNORECASE,
+)
+_PREDICATE_GLUE = {
+    "a",
+    "an",
+    "are",
+    "at",
+    "be",
+    "been",
+    "by",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "in",
+    "is",
+    "of",
+    "on",
+    "the",
+    "through",
+    "to",
+    "was",
+    "were",
+    "with",
+}
+
+
+def _strict_triples(text: str) -> tuple[list[Extracted], list[RejectedExtraction]]:
+    """Parse every array entry for the strict path without silent loss.
+
+    ``parse_triples`` intentionally retains its legacy behavior of dropping
+    malformed entries. Source-grounded distillation instead reports one
+    rejection for each entry that cannot form a complete triple.
+    """
+    array = _find_array(text)
+    if array is None:
+        parse_triples(text)  # raises the legacy typed error with its message
+        raise AssertionError("parse_triples accepted a missing array")  # pragma: no cover
+    triples: list[Extracted] = []
+    rejected: list[RejectedExtraction] = []
+    for entry in array:
+        triple = _triple(entry)
+        if triple is None:
+            rejected.append(RejectedExtraction(None, "malformed_candidate", raw=entry))
+        else:
+            triples.append(triple)
+    return triples, rejected
+
+
+def _grounded(
+    triples: Sequence[Extracted], source: str
+) -> tuple[list[Extracted], list[RejectedExtraction]]:
+    """Apply necessary, deliberately conservative source checks.
+
+    These checks do not claim to prove semantic entailment. They establish a
+    literal span, require the named endpoints of the relationship in that
+    span, and reject common non-asserted contexts. The surviving candidate is
+    still only a proposal for human review.
+    """
+    reasons: list[Optional[str]] = [_grounding_reason(t, source) for t in triples]
+    groups: dict[tuple[str, str], list[int]] = {}
+    for index, (triple, reason) in enumerate(zip(triples, reasons)):
+        if reason is None:
+            key = (_clean(triple.subject).casefold(), _clean(triple.predicate).casefold())
+            groups.setdefault(key, []).append(index)
+    for indexes in groups.values():
+        objects = {_clean(triples[index].object).casefold() for index in indexes}
+        if len(objects) > 1:
+            for index in indexes:
+                reasons[index] = "same_source_conflict"
+    accepted = [triple for triple, reason in zip(triples, reasons) if reason is None]
+    rejected = [
+        RejectedExtraction(triple, reason)
+        for triple, reason in zip(triples, reasons)
+        if reason is not None
+    ]
+    return accepted, rejected
+
+
+def _grounding_reason(triple: Extracted, source: str) -> Optional[str]:
+    quote = triple.quote
+    if quote is None:
+        return "missing_quote"
+    if len(quote) > MAX_QUOTE:
+        return "quote_too_long"
+    starts = list(_occurrences(source, quote))
+    if not starts:
+        return "quote_not_in_source"
+    if triple.statement_type != "observation":
+        return "not_an_observation"
+    if not _mentions(quote, triple.subject):
+        return "subject_not_in_quote"
+    if not _mentions(quote, triple.object):
+        return "object_not_in_quote"
+    contexts = [_clause_around(source, start, start + len(quote)) for start in starts]
+    # The extraction format carries a quote, not a byte offset. If the same
+    # quote appears in both asserted and non-asserted contexts, accepting the
+    # first occurrence would invent certainty the model did not provide.
+    if any(_is_non_asserted(context) for context in contexts):
+        return "context_not_asserted"
+    if not _predicate_mentioned(quote, triple.predicate):
+        return "predicate_not_in_quote"
+    return None
+
+
+def _mentions(quote: str, value: str) -> bool:
+    words = value.split()
+    if not words:
+        return False
+    phrase = r"\s+".join(re.escape(word) for word in words)
+    return re.search(rf"(?<!\w){phrase}(?!\w)", quote, re.IGNORECASE) is not None
+
+
+def _predicate_mentioned(quote: str, predicate: str) -> bool:
+    terms = [
+        term
+        for term in re.findall(r"[^\W_]+", predicate.casefold())
+        if term not in _PREDICATE_GLUE
+    ]
+    quote_words = re.findall(r"[^\W_]+", quote.casefold())
+    quote_forms = {form for word in quote_words for form in _word_forms(word)}
+    return bool(terms) and all(_word_forms(term) & quote_forms for term in terms)
+
+
+def _word_forms(word: str) -> set[str]:
+    forms = {word}
+    if len(word) > 3 and word.endswith("s"):
+        forms.add(word[:-1])
+    if len(word) > 4 and word.endswith("ed"):
+        forms.update((word[:-2], word[:-1]))
+    if len(word) > 5 and word.endswith("ing"):
+        forms.update((word[:-3], word[:-3] + "e"))
+    return forms
+
+
+def _occurrences(source: str, quote: str) -> Iterator[int]:
+    start = source.find(quote)
+    while start >= 0:
+        yield start
+        start = source.find(quote, start + 1)
+
+
+def _clause_around(source: str, start: int, end: int) -> str:
+    left = max(source.rfind(mark, 0, start) for mark in ".?!;\n") + 1
+    boundaries = [position for mark in ".?!;\n" if (position := source.find(mark, end)) >= 0]
+    right = min(boundaries) + 1 if boundaries else len(source)
+    return source[left:right]
+
+
+def _is_non_asserted(context: str) -> bool:
+    return bool(
+        _NON_ASSERTED.search(context)
+        or _IMPERATIVE.search(context)
+        or context.rstrip().endswith("?")
+    )
+
+
 __all__ = [
     "DEFAULT_CONFIDENCE",
     "EXTRACTION_PROMPT",
@@ -332,5 +579,6 @@ __all__ = [
     "DistillOutcome",
     "Distiller",
     "Extracted",
+    "RejectedExtraction",
     "parse_triples",
 ]

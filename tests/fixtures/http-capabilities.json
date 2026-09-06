@@ -1,0 +1,35 @@
+{
+  "rust": {
+    "schema_version": 1,
+    "implementation": "rust",
+    "features": {
+      "recall": true,
+      "facts.read": true,
+      "facts.review": false,
+      "facts.close": true,
+      "facts.exclude": false,
+      "facts.include": false,
+      "events.read": true,
+      "metrics.read": false,
+      "scopes.read": false,
+      "status.read": true
+    }
+  },
+  "python": {
+    "schema_version": 1,
+    "implementation": "python",
+    "features": {
+      "recall": true,
+      "facts.read": true,
+      "facts.review": true,
+      "facts.close": true,
+      "facts.exclude": true,
+      "facts.include": true,
+      "events.read": true,
+      "metrics.read": true,
+      "scopes.read": true,
+      "status.read": true,
+      "episodes.attachments": true
+    }
+  }
+}

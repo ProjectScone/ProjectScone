@@ -269,7 +269,26 @@ def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeyp
     from scone_memory import FakeChat
     import scone_memory.config as config
 
-    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat([json.dumps([{"subject": "ana", "predicate": "lives_in", "object": "Lisbon", "confidence": 0.9}])]))
+    monkeypatch.setattr(
+        config,
+        "build_chat",
+        lambda settings: FakeChat(
+            [
+                json.dumps(
+                    [
+                        {
+                            "subject": "ana",
+                            "predicate": "moved_to",
+                            "object": "Lisbon",
+                            "confidence": 0.9,
+                            "statement_type": "observation",
+                            "quote": "Ana moved to Lisbon.",
+                        }
+                    ]
+                )
+            ]
+        ),
+    )
     env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "d.db"), "SCONE_CHAT_URL": "http://x", "SCONE_CHAT_MODEL": "m"}
     cli.main(["remember"], env=env2, stdin=io.StringIO("Ana moved to Lisbon."), out=io.StringIO())
     out = io.StringIO()
@@ -278,7 +297,7 @@ def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeyp
     assert (report["episodes"], report["proposed"], report["error"]) == (1, 1, None)
     out = io.StringIO()
     cli.main(["review"], env=env2, stdin=io.StringIO(), out=out)
-    assert "[proposed] [extracted] ana lives_in Lisbon" in out.getvalue()
+    assert "[proposed] [extracted] ana moved_to Lisbon" in out.getvalue()
 
     monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat(["not json"]))
     cli.main(["remember"], env=env2, stdin=io.StringIO("Bob moved to Berlin."), out=io.StringIO())

@@ -21,7 +21,7 @@ without repeatedly explaining the same context. Portability and consistency are
 engineering promises to test, not consequences of storing something as JSON.
 
 Rust and Python are first-class native libraries today. Python also has a
-distinct [HTTP client](clients/python). Neither native library requires the
+distinct [HTTP client](python/scone-client). Neither native library requires the
 other: there is no automatic Rust loading or silent Python fallback. They share
 intended memory semantics, **not yet a common database or full export contract**.
 The shared behavioural specification (private for now) records each rule's
@@ -32,6 +32,35 @@ Typical workflows: an agent resumes project work through MCP; a Python pipeline
 ingests and recalls scoped evidence; a person inspects memory and corrects an
 outdated claim. Explicit team membership and sharing controls remain future work.
 Stored claims, including model extractions, are not independently verified truth.
+
+## Product direction and completion roadmap
+
+ProjectScone is building an open-source persistent-memory and real-time agent
+platform, informed by Supermemory and Pipecat. Native Rust and Python memory
+libraries, CLIs, HTTP and MCP servers are available; live capture and the console
+remain previews.
+Streaming voice/media pipelines and complete cross-language portability are
+completion milestones, not current release claims.
+
+The locally maintained capability baseline maps 65 capability groups to current
+Rust, Python and webapp behavior, source/test evidence, remaining gaps and seven
+milestones: memory lifecycle, reliable live activity, streaming agents, knowledge
+ingestion, integrations and collaboration, evaluation, and production readiness.
+It also specifies the required provider/backend catalog expansion and separate
+installation and benchmark evidence. It is not an exhaustive certification of
+every upstream integration.
+
+The episode-transfer test probe verifies native identity fields before rebuilding
+them for the receiving engine. It rejects custom identities and conflicting
+evidence instead of silently losing them. This is a bounded conformance path;
+full cross-language portability remains an M1 completion requirement.
+
+Both reference projects inform the functional scope. Scone's roadmap includes
+connectors, profiles, temporal relationships, multimodal ingestion, streaming
+voice, agent pipelines, client integrations and operational tooling. Completing
+a UI screen or installing a dependency does not complete the underlying feature.
+Each milestone must verify every affected native library, CLI, shared contract
+and web surface. Neither language inherits the other's benchmark results.
 
 | | |
 |---|---|
@@ -153,11 +182,131 @@ Search your memory, inspect the claims distilled from it, and close one
 that is wrong with a reason attached. Closing does not delete source data;
 the claim remains in historical views. Excluding a claim from recall and
 deleting its underlying data are distinct operations, not synonyms for closure.
-An explicit exclude operation is not implemented yet. The Rust console binds to
+An explicit exclude operation is not implemented in Rust yet. The Rust console binds to
 loopback only and mints a key that lives as long as the process, so it
 authenticates like every other client rather than opening a private
 door into the store. It is one file with no build step and no network
 calls, so it works on a plane like everything else here.
+
+### Live evidence playground (preview)
+
+Open `/playground` on the local console server to inspect recorded sessions,
+episodes, passages, claims and recall results. Select a node for its source and
+recorded connections; use the recall input to query the actual engine. The
+browser refreshes a bounded snapshot every second and labels partial or stale
+data. An online API does **not** mean an agent is connected. Capture requires
+separately configured, project/session-scoped hooks; historical operations are
+not reconstructed. Rust currently records HTTP recall evidence without per-lane
+rank attribution. The UI does not prove that an agent used retrieved evidence.
+The Python server also serves `/playground` with the same key handling as its
+console. The 2D and depth-layout views show identical recorded relationships;
+depth is a layout aid, not a confidence score or a simulated agent interaction.
+Crowded views group records by session and type; these are view-only groups,
+not new memory relationships. Expand a group or focus a record to page through
+its actual evidence. Recall results identify the submitted query, provide
+expandable passages, and label ranking scores as scores—not confidence.
+
+The React + TypeScript frontend lives in [Webapp](Webapp), with React Router,
+Vite Fast Refresh and a real local API proxy. Run
+`cd Webapp && npm ci && npm run dev`, then open
+`http://127.0.0.1:5173/memory` with the native backend running on port 7437.
+The Python console serves the built app directly at `/memory` and `/playground`
+(local preview: `http://127.0.0.1:7437/memory`). Both use one shared visual theme.
+`npm run build` packages the shared playground into both native products and
+the React Memory page into Python; Rust retains its native root console pending
+independent Memory-page compatibility verification.
+`npm run check:assets` detects drift against that build.
+The preview is not yet a lossless event replay or a complete host-activity feed.
+
+The Python Memory page includes a subject-grouped **Review inbox** with search,
+origin/evidence filters, sorting and 25-card pages. Full sources load on demand
+with retryable errors; the queue refreshes every 15 seconds while idle.
+**Approve all matching** confirms a frozen set across all matching pages and
+applies decisions sequentially by effective date. It stops on an unconfirmed
+response, reports partial results and requires a queue refresh before retrying.
+This is not an atomic transaction or automatic approval; there is no bulk undo.
+The server still returns the full pending queue; pagination bounds rendering,
+not API payload size. Rust's native Review console is unchanged in this milestone.
+
+Beliefs actions use inline confirmation: closing ends validity at the server's
+current time, excluding hides a belief from recall while retaining history, and
+including restores recall eligibility without reopening a closed belief. Errors
+remain visible and unconfirmed writes require a refresh before another attempt.
+Close is supported by both HTTP servers; exclude/include are Python HTTP features.
+
+### Local agent capture (preview)
+
+The local development instance on port 7437 uses the persistent `projectscone`
+space, separate from the retained demo database. Claude Code and Codex capture
+have been verified on this workstation from genuine host events through stored
+episodes, graph links and the browser inspector. Verification conversations are
+not imported user history. Each new installation still requires its host's hook
+trust review; receipts here do not establish capture on other installations.
+
+`scripts/observe-agent.cjs` reads the private, gitignored
+`memory/runtime/live-connection.json` (mode `0600`). It accepts only the canonical
+ProjectScone directory or an explicitly configured exact agent/session/cwd
+exception, and sends only to a loopback server. Prompts and completed replies
+are captured with redaction; tool activity is metadata-only. No transcript
+files or hidden reasoning are read. Redaction is not a guarantee that all
+sensitive text is detected. Review the scope before enabling capture elsewhere.
+
+`node scripts/install-capture-hooks.cjs` previews the hook merge; `--apply`
+installs it while preserving existing prompt compilation and unrelated settings.
+It does not grant hook trust. The adapter uses `python -m
+scone_memory.agent_hook` from the project's Python environment. Lifecycle
+capture waits up to five seconds so short-lived hosts can finish delivery;
+tool observers run in the background. Delivery failures never deny a host
+operation, but may leave gaps; this is not a durable delivery queue.
+
+### Source-grounded extraction (Python preview)
+
+The current checkout's Python distiller requires observation classification and
+literal supporting quotes, with conservative checks for uncertainty, instructions,
+negation and conflicting candidates. Surviving readings remain proposals even
+when model confidence is high. The engine rejects a quote that is not a substring
+of its source. Quote presence is not semantic proof: review the source before
+approval. Malformed candidates and other rejections contribute to worker rejection
+counts. The explicit `require_grounding=False` compatibility mode bypasses these
+default distillation checks.
+
+Existing approved history is not silently corrected. A running service must be
+restarted to load changed extraction code. Rust native extraction does not yet
+provide the same quote-validation gate; this is not a cross-language parity claim.
+Review audit records identify the credential fingerprint and optional caller label,
+not a verified human identity. A local model evaluation of the regression passage
+timed out; the regression tests do not establish measured extraction accuracy.
+
+### Automatic prompt processing (preview)
+
+`scone prompt-hook` runs locally at `UserPromptSubmit`, before the existing
+Claude Code or supported Codex host turn. It trims outer ASCII whitespace,
+preserves internal text/code, and emits a versioned JSON task with explicit
+instructions to preserve intent and permission boundaries. This is deterministic
+structuring, not an LLM rewrite or a measured prompt-quality improvement. It
+does not start another model, request per-prompt approval, store conversations,
+or send data to the memory server. The original prompt remains; the structured
+representation is added as context, not promoted to system authority.
+
+From this checkout, the development installer can register an **installed**
+binary in user-level Claude and Codex settings while retaining existing hooks:
+
+```sh
+node scripts/install-prompt-hooks.cjs --binary /absolute/path/to/installed/scone
+# Inspect the dry run, then append --apply to install.
+```
+
+This developer helper requires `apply_patch`, the patch utility supplied in the
+Codex development environment, on `PATH`. It is not yet a standalone installer.
+
+User-level processing applies across projects; memory capture remains a separate
+opt-in. Codex requires a one-time `/hooks` trust review. Host reload behavior and
+current Codex App coverage must be verified; creating a settings entry is not
+proof of execution. Rust ignores malformed/non-prompt input and leaves requests
+above 60,000 UTF-8 bytes unchanged with a notice. Both compilers enforce that
+limit; shared fixtures and an installed-binary comparison cover Unicode, code indentation
+and exact task semantics. Keep the installed binary outside `target/` so cleaning
+build artifacts cannot disable the hook.
 
 ## Connect what you already write in
 
@@ -269,7 +418,7 @@ export/import includes provenance-ID remapping and repeat-import tests; missing
 source records and differing fact annotations still require care. Database files
 are not interchangeable with Rust's store.
 
-The [separate HTTP client](clients/python) uses `from scone import Scone`.
+The [separate HTTP client](python/scone-client) uses `from scone import Scone`.
 It connects to a server; it is not the native `scone_memory` engine. The servers
 have overlapping routes but differ in accepted fields and error behavior.
 
@@ -308,6 +457,20 @@ Install the Python test dependencies and optional Qdrant adapter first. Without
 `SCONE_TEST_RUST_ROUNDTRIP`, cross-runtime cases explicitly skip; native Python
 cases still run. The example is **test-only**, not a migration tool: it refuses
 facts, aliases, nonempty tags/metadata, unsupported kinds and unknown fields.
+Python `content_hash` must match the default SHA-256 identity for the exported
+`space`; older exports without that field require `--python-source-space SPACE`
+on the probe. A supplied flag must agree with the record. Rust `hash`, when
+present, must match BLAKE3 of the original content bytes. Custom turn identities,
+mixed source spaces and conflicting evidence in one deduplication group refuse
+the entire batch before a temporary store is opened. Successful probes emit
+per-record identity-check outcomes on stderr and exported JSONL on stdout.
+
+Source text is never trimmed or normalized during transfer. Python's default
+identity trims boundary whitespace while Rust's does not; the probe rejects
+collisions within the supplied batch, but this **does not establish identical
+deduplication for later writes**, preserve custom IDs, or validate arbitrary
+merges into an existing destination. The nonempty-destination fixture contains
+unrelated evidence only. No live memory is used by these tests.
 This narrow profile is not general lossless export compatibility. Packaged
 installation and OS/Python-version matrices remain separate verification work.
 
@@ -360,5 +523,8 @@ exclusions and failures, with retrieval, answering, abstention, measured tokens,
 bytes, latency, storage and ingestion cost reported separately.
 
 ## License
+
+For the repository layout, local test setup and contribution workflow, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 MIT. Built by studying what came before and keeping the receipts.

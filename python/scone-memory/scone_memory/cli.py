@@ -16,16 +16,18 @@ into a data pipeline step.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import pathlib
 import asyncio
 import json
 import os
 import sys
+import stat
 from typing import Mapping, Optional, Sequence
 
 from .config import Settings, build_engine
 from .engine import MemoryEngine, Record
-from .errors import SconeError
+from .errors import InvalidInput, SconeError
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -64,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--created-at", help="when it happened, RFC 3339 or YYYY-MM-DD")
     p.add_argument("--meta", action="append", default=[], help="key=value scope, repeatable")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
+    p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("recall", help="hybrid recall plus the facts that hold")
     p.add_argument("query")
@@ -285,29 +288,85 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
     return 0
 
 
+def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
+    """Read only the selected regular file, bounded even if its size changes.
+
+    Signatures identify the raster format, not successful decoding or safety.
+    Nonblocking open prevents a selected FIFO from waiting for another writer.
+    """
+    try:
+        descriptor = os.open(filename, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as image:
+            info = os.fstat(image.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise InvalidInput("--image requires a regular file")
+            if not 0 < info.st_size <= limit:
+                raise InvalidInput(f"--image requires a nonempty file up to {limit} bytes")
+            data = image.read(limit + 1)
+    except OSError as exc:
+        raise InvalidInput(f"could not read selected --image file ({type(exc).__name__})") from exc
+    if not 0 < len(data) <= limit:
+        raise InvalidInput(f"--image requires a nonempty file up to {limit} bytes")
+    media_type = (
+        "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else
+        "image/jpeg" if data.startswith(b"\xff\xd8\xff") else
+        "image/gif" if data.startswith((b"GIF87a", b"GIF89a")) else
+        "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else None
+    )
+    if media_type is None:
+        raise InvalidInput("--image requires PNG, JPEG, GIF or WebP bytes, not just an image filename")
+    return data, media_type, pathlib.Path(filename).name
+
+
 async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
 
     if args.command == "remember":
+        if args.image is not None and args.jsonl:
+            raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
         raw = read_source(args.file, stdin)
+        attachment = None
         if args.jsonl:
             records = [Record.from_dict(json.loads(line)) for line in raw.splitlines() if line.strip()]
             added = await engine.remember_many(space, records)
         else:
-            added = [
-                await engine.remember(
+            metadata = parse_pairs(args.meta, "--meta")
+            if args.image is not None:
+                if not raw.strip():
+                    raise InvalidInput("--image needs a nonempty source note for retrieval")
+                from .engine import MAX_ATTACHMENT_BYTES
+
+                data, media_type, name = read_original_image(args.image, min(engine.max_attachment_bytes, MAX_ATTACHMENT_BYTES))
+                try:
+                    attachment = await engine.attach(space, data, media_type, filename=name)
+                    if attachment.attachment_id != hashlib.sha256(data).hexdigest() or attachment.bytes != len(data) or attachment.media_type != media_type:
+                        raise InvalidInput("attachment receipt does not match the selected original")
+                except Exception as exc:
+                    raise InvalidInput("image save unconfirmed; bytes may already be stored. Inspect memory before retrying") from exc
+            try:
+                added = [await engine.remember(
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
-                    created_at=args.created_at, metadata=parse_pairs(args.meta, "--meta"),
-                )
-            ]
+                    created_at=args.created_at, metadata=metadata,
+                    attachment_ids=[attachment.attachment_id] if attachment else [],
+                )]
+                if attachment:
+                    episode = await engine.episode(space, added[0].episode_id)
+                    if not any(item.attachment_id == attachment.attachment_id for item in episode.attachments):
+                        raise InvalidInput("saved episode is missing the original attachment link")
+            except Exception as exc:
+                if attachment:
+                    raise InvalidInput("source save unconfirmed; an image or episode may already be stored. Inspect memory before retrying") from exc
+                raise
         if args.json:
             for a in added:
-                emit(a.model_dump())
+                emit(a.model_dump() | ({"attachments": [attachment.model_dump()]} if attachment else {}))
         else:
             fresh = sum(1 for a in added if not a.deduplicated)
             dup = len(added) - fresh
             print(f"remembered {fresh} episode(s)" + (f", {dup} already known" if dup else ""), file=out)
+            if attachment:
+                print(f"original image linked: {attachment.attachment_id} ({attachment.bytes} bytes)", file=out)
         return 0
 
     if args.command == "recall":

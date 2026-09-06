@@ -36,28 +36,9 @@
 .network-map .atlas-card:hover .node-halo,.network-map .atlas-card:focus .node-halo,.network-map .atlas-card[aria-pressed=true] .node-halo { opacity: .55; stroke-width: 2.5; }
 .network-map .edge-caption { pointer-events: none; fill: #6b5139; font: 10px ui-monospace,monospace; paint-order: stroke; stroke: #fafbf7; stroke-width: 5px; stroke-linejoin: round; }
 .evidence-atlas .network-map [data-edge].highlight,.evidence-atlas .network-map [data-bundle].highlight { stroke: #a16c3f; }
-/* Each perspective has its own visual language; category identity is shared. */
-.workspace .evidence-atlas .constellation-theme { background-color: #202b27; background-image: radial-gradient(#9cae9745 .6px,transparent .8px); background-size: 32px 32px; }
-.constellation-theme .graph-title,.constellation-theme .graph-navigation,.constellation-theme .layout-picker-caption { color: #c6d1bd; }
-.constellation-theme .atlas-legend { color: #cad2c3; }
-.constellation-theme .atlas-legend small { color: #96a58e; }
-.constellation-theme .legend-session::before { background: #d8dfc1; }
-.constellation-theme #coverage { color: #e3b689; }
-.constellation-theme #layout-note { color: #c6d1bd; }
-.constellation-theme .network-map .atlas-card.category-0 { --card-ink: #bac79c; }
-.constellation-theme .network-map .atlas-card.category-1 { --card-ink: #ca9c77; }
-.constellation-theme .network-map .atlas-card.category-2 { --card-ink: #97b582; }
-.constellation-theme .network-map .atlas-card.category-3 { --card-ink: #96bab8; }
-.constellation-theme .network-map .orb-surface { stroke: #26362d; stroke-width: 3; filter: drop-shadow(0 0 8px #b8cca52b); }
-.constellation-theme .network-map .orb-glyph { color: #233028; }
-.constellation-theme .network-map .orb-count { fill: #233028; }
-.constellation-theme .network-map .node-halo { fill: none; opacity: .22; stroke-width: .8; }
-.constellation-theme .network-map .orb-label { fill: #e5e9dc; stroke: #202b27; font-weight: 500; }
-.constellation-theme .network-map .orb-subtitle { fill: #a1b197; stroke: #202b27; }
-.constellation-theme .network-map .edge-caption { fill: #ecd2ae; stroke: #202b27; }
-.evidence-atlas .constellation-theme [data-edge],.evidence-atlas .constellation-theme [data-bundle] { stroke: #a6b795; opacity: .38; }
-.evidence-atlas .constellation-theme [data-edge].highlight,.evidence-atlas .constellation-theme [data-bundle].highlight { stroke: #eac699; opacity: 1; }
-.evidence-atlas .constellation-theme [data-edge].context-edge,.evidence-atlas .constellation-theme [data-bundle].context-edge { opacity: .09; }
+/* Geometry and node treatment distinguish perspectives, not a theme switch. */
+.workspace .evidence-atlas .constellation-theme { background-color: #fcfaf5; }
+.constellation-theme .orb-label,.constellation-theme .orb-subtitle,.constellation-theme .edge-caption { stroke: #fcfaf5; }
 .workspace .evidence-atlas .radial-theme { background-color: #fcfaf5; background-image: none; }
 .radial-guides ellipse { fill: none; stroke: #dedace; stroke-width: 1; stroke-dasharray: 2 7; }
 .radial-guides text { fill: #979581; font: 9px ui-monospace,monospace; letter-spacing: .6px; }

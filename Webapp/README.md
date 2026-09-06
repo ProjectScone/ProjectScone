@@ -1,0 +1,145 @@
+# Scone Webapp
+
+The repository-owned React + TypeScript frontend, using React Router and Vite.
+Work here, not in generated native package HTML copies.
+
+```sh
+cd Webapp
+npm ci
+npm run dev
+```
+
+Open http://127.0.0.1:5173/memory. Vite supplies React Fast Refresh during development.
+The development proxy uses the existing local Scone API on port 7437. Start
+that backend first; the app does not create a mock engine or seed conversations.
+Set `SCONE_DEV_API=http://127.0.0.1:PORT` to select another loopback backend.
+Remote upstreams are intentionally rejected by this development configuration.
+
+In development, the app reads the explicit access-key bootstrap from the same
+local console already serving this browser. It never reads host settings or
+transcripts. If no single key is exposed, the access-key dialog remains available.
+Keys stay in page memory, never `localStorage` or `VITE_` environment variables.
+
+```sh
+npm test
+npm run typecheck
+npm run build
+npm run check:assets
+```
+
+Production packaging embeds built JS, CSS and the original Scone mark into both
+native playground distributions and the Python Memory console. Node is not required to run the packaged Rust
+or Python server. `dist/` and `node_modules/` are ignored. The lockfile belongs to
+this app; the upstream `../supermemory/` directory is ignored reference material.
+
+To test a backend-dependent UI before publishing it to running native servers:
+
+```sh
+npm run typecheck
+npm exec vite build
+node scripts/package.mjs --output /private/tmp/scone-preview.html
+```
+
+Set `SCONE_PLAYGROUND_HTML` to that file when running `scripts/test-playground.cjs`.
+This stages an embedded artifact without replacing the packaged native pages.
+Run the ordinary build/package command only after the target backend supports
+the required contract.
+
+The Memory page discovers supported operations through authenticated
+`GET /v1/capabilities` before loading workflows. Unknown/malformed responses and
+transport failures remain visible and retryable; a failed request never means
+an operation is unsupported. Deep links stay intact. See
+the versioned contract in `tests/fixtures/http-capabilities.json`. This is feature discovery,
+not a replacement for server-side authorization or an uptime guarantee.
+
+## Current boundaries
+
+Source-image previews are implemented for Playground recall, graph source
+inspection, Memory Search and recent-memory results. Select an episode node in
+the graph or Records view, then expand **View source images** in its inspector.
+Chunk, claim and interaction IDs are not treated as episode IDs: follow their
+recorded source connection to an episode first. Switching the inspected record
+closes its previews and releases their temporary URLs.
+
+Expand **View source images** to fetch the episode's saved
+attachment metadata, then authenticated raster bytes. PNG, JPEG, GIF and WebP
+previews validate the recorded size and SHA-256 digest before creating a temporary
+browser object URL. Downloads are bounded to 25 MB per image; URLs are revoked
+when previews unmount. This byte limit is not a decoded-pixel memory guarantee.
+Other media types remain metadata-only; no inline SVG, HTML or PDF rendering.
+
+The Add source form appears when `episodes.attachments` is explicitly true. It
+saves a note with an optional original raster image, verifies the attachment
+receipt against the selected bytes, then reads back the saved episode link.
+Identical text may reuse an existing episode and attach the image there. Closing
+before submitting makes no write; while saving, controls lock against repetition.
+Upload and episode/link writes are not atomic. An unconfirmed outcome locks the
+form and directs the user to inspect Search rather than automatically retrying.
+Do not navigate away during saving; aborting a request does not undo server work.
+The uncertain-write lock is local to this mounted form, not a durable receipt or
+cross-navigation guarantee. A reload/navigation can discard it; server-side
+operation tracking and recovery remain follow-up work.
+
+The native integration test uses the Python attachment API and an isolated
+in-memory store, not the live workspace. Rust attachment parity, automatic image
+capture from agent sessions, bulk/file/URL import, OCR and media-inclusive backup
+are still unfinished. Existing `[Image #1]` text cannot reconstruct missing bytes.
+Missing metadata, missing bytes and transport failures remain distinct states.
+This UI is staged until the running backend is reloaded with its required routes.
+
+Submitted Memory Search queries have independent request state. A changed query
+or filter immediately removes the previous results and image previews; obsolete
+requests are cancelled and late replies ignored. Failed queries expose **Retry
+search** and do not retain another query's error. Requests have a 10-second
+deadline. Editing the input alone does not submit a search; press Search or Enter.
+
+The Review inbox groups recorded subjects, filters by origin and checked quotes,
+and renders 25 cards per page. Sources are loaded only when expanded. Bulk
+approval freezes every matching ID across pages, confirms explicitly, and runs
+oldest effective date first. Confirmed outcomes survive a later failure; uncertain
+writes stop the batch and require a refresh, never an automatic retry. This does
+not freeze server state or provide transaction/undo guarantees. Queue polling is
+every 15 seconds while visible and idle; the API still returns the full queue.
+
+Beliefs uses inline reason/confirmation forms for close, exclude and include.
+Successful receipts are checked against the submitted ID; errors do not imply
+that no write occurred. Refresh is required after an unconfirmed outcome.
+Closing is not deletion or undo; including does not reopen historical beliefs.
+Rust's HTTP server supports close but not exclude/include. Native consoles and
+CLIs retain their own independently tested workflows.
+
+- `src/main.tsx`, `src/App.tsx`: React entry, shared shell, authentication and routes.
+- `src/memory/`: typed Memory page components, coordinated with Fable.
+- `src/playground/`: scoped graph, record search, source inspection and recall.
+- `src/conversations/`: capability-checked text session controls, saved
+  transcripts, request polling and source evidence. Uses the optional Python
+  conversation API; provider configuration is server-owned. No voice/video or
+  browser token-stream support is claimed.
+- `src/api.ts`, `src/types.ts`: authenticated API client and evidence wire types.
+- `src/local-session.ts`: explicit local development bootstrap.
+- `src/components/DevReload.tsx`: opt-in ETag reload for native development previews.
+- `src/workspace.css`, `src/identity.css`: layout and original Scone identity.
+- `src/assets/`: runtime images; `assets/`: original mark and generation record.
+- `/memory`, `/playground` and `/conversations/:sid?` are React routes in one application; `/` redirects
+  to `/memory`. Development proxies only API traffic and local auth bootstrap.
+- The Python server serves both routes directly (the local preview uses port
+  7437). Rust packages the same Playground app; its existing native root console
+  remains until Memory-page capability parity is independently verified.
+
+Conversation deep links require the web host to serve the React application for
+`/conversations` and its session paths, with `/v1/conversations` routed to the
+optional conversation service. Vite provides that SPA routing in development.
+The existing native servers have not yet gained conversation-page deep-link
+serving; adding the React route does not itself configure or launch a provider.
+
+For isolated conversation UI checks, build with Vite, package with `--output`
+as above, and pass that path as `SCONE_CONVERSATIONS_HTML` to
+`node --test scripts/test-conversations.cjs` from the repository root. Install
+Playwright or set `SCONE_PLAYWRIGHT_MODULE` to an installed module; optionally set
+`SCONE_BROWSER_PATH` and `SCONE_SCREENSHOT_DIR`. Fixtures use temporary localhost
+services, never the live memory store. No screenshots are written by default.
+
+The graph renders stored relationships only. Depth is a spatial layout, not a
+3D simulation or confidence value. API connectivity, observed agent events and
+verified host capture are distinct. Current snapshots are bounded; lossless
+event replay and current Codex App capture have not been verified.
