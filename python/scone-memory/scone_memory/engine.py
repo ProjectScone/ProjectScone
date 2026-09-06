@@ -54,6 +54,11 @@ MAX_LIMIT = 50
 LANE_DEPTH = 4
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
+#: Event kinds an outside process may append (long-running jobs
+#: reporting progress). Engine kinds cannot be forged through this path.
+EXTERNAL_EVENT_KINDS = ("job",)
+JOB_STATUSES = ("running", "completed", "failed")
+MAX_EXTERNAL_PAYLOAD = 4096
 
 
 @dataclass
@@ -463,6 +468,37 @@ class MemoryEngine:
         if event is not None:
             result.event_id = event.event_id
         return result
+
+    async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
+        """Append an event from outside the engine: a job reporting its
+        status. Validated so the evidence log cannot be polluted with
+        forged engine events or unbounded payloads."""
+        check_space(space)
+        if self.events is None:
+            raise InvalidInput("no event log is attached, so nothing can be recorded")
+        if kind not in EXTERNAL_EVENT_KINDS:
+            raise InvalidInput(f"kind must be one of {EXTERNAL_EVENT_KINDS}, got {kind!r}")
+        import json
+
+        if len(json.dumps(dict(payload))) > MAX_EXTERNAL_PAYLOAD:
+            raise InvalidInput(f"payload exceeds {MAX_EXTERNAL_PAYLOAD} bytes")
+        job_id, name, status = payload.get("job_id"), payload.get("name"), payload.get("status")
+        if not isinstance(job_id, str) or not 1 <= len(job_id) <= 64:
+            raise InvalidInput("job_id must be a string of 1..=64 chars")
+        if not isinstance(name, str) or not 1 <= len(name) <= 120:
+            raise InvalidInput("name must be a string of 1..=120 chars")
+        if status not in JOB_STATUSES:
+            raise InvalidInput(f"status must be one of {JOB_STATUSES}, got {status!r}")
+        progress = payload.get("progress")
+        if progress is not None:
+            done, total = (progress.get("done"), progress.get("total")) if isinstance(progress, Mapping) else (None, None)
+            if not (isinstance(done, int) and isinstance(total, int) and 0 <= done <= total):
+                raise InvalidInput("progress must be {done, total} with 0 <= done <= total")
+        for field_name in ("detail", "error"):
+            value = payload.get(field_name)
+            if value is not None and (not isinstance(value, str) or len(value) > 500):
+                raise InvalidInput(f"{field_name} must be a string of at most 500 chars")
+        return await self._emit(space, kind, dict(payload))  # type: ignore[return-value]
 
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None

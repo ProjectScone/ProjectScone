@@ -174,3 +174,36 @@ def test_events_and_feedback_over_http():
         assert [e["payload"]["query"] for e in only] == ["harbour crane"]
         bad = c.post("/v1/feedback", json={"recall_event_id": recall["event_id"], "chunk_id": 9999, "useful": True}, headers=h)
         assert bad.status_code == 422
+
+
+async def test_outside_processes_can_report_jobs_but_not_forge_engine_events():
+    engine = await fresh_engine()
+    first = await engine.record("default", "job", {"job_id": "e31", "name": "vector baseline", "status": "running",
+                                                   "progress": {"done": 1, "total": 4}, "adapter": "qdrant-local"})
+    done = await engine.record("default", "job", {"job_id": "e31", "name": "vector baseline", "status": "completed",
+                                                  "progress": {"done": 4, "total": 4}})
+    assert first.kind == "job" and done.event_id > first.event_id
+    for bad in (
+        ("recall", {"job_id": "x", "name": "n", "status": "running"}),  # forged engine kind
+        ("job", {"job_id": "x", "name": "n", "status": "done"}),  # unknown status
+        ("job", {"job_id": "x", "name": "n", "status": "running", "progress": {"done": 5, "total": 4}}),
+        ("job", {"job_id": "", "name": "n", "status": "running"}),
+        ("job", {"job_id": "x", "name": "n", "status": "failed", "error": "e" * 501}),
+        ("job", {"job_id": "x", "name": "n", "status": "running", "detail": "d" * 5000}),
+    ):
+        with pytest.raises(InvalidInput):
+            await engine.record("default", *bad)
+    assert [e.kind for e in await engine.events.query("default")] == ["job", "job"]
+
+
+def test_job_events_over_http():
+    import asyncio
+
+    engine = asyncio.run(fresh_engine())
+    with TestClient(create_app(engine, {"k": "default"})) as c:
+        h = {"authorization": "Bearer k"}
+        ok = c.post("/v1/events", json={"kind": "job", "payload": {"job_id": "j1", "name": "smoke", "status": "running"}}, headers=h)
+        assert ok.status_code == 200 and "recorded" in ok.json()
+        forged = c.post("/v1/events", json={"kind": "recall", "payload": {"job_id": "j1", "name": "x", "status": "running"}}, headers=h)
+        assert forged.status_code == 422
+        assert [e["kind"] for e in c.get("/v1/events", headers=h).json()["events"]] == ["job"]

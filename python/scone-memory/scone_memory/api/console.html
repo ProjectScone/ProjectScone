@@ -75,6 +75,26 @@
   .kv .scope { justify-self: start; }
   .kv .bar { margin: 0; width: 100%; }
   .keyform { max-width: 420px; margin: 60px auto; }
+  .pill { border-radius: 5px; padding: 1px 7px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.bad { color: var(--warn); border-color: var(--warn); }
+  .pill.run { color: var(--lane-v); border-color: var(--lane-v); }
+  table.live { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.live td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.live td:first-child { white-space: nowrap; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  .panel h3 { margin: 0 0 8px; font-size: 13.5px; font-weight: 600; }
+  .panel h3 span { color: var(--muted); font-weight: 400; }
+  .fig { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .fig:last-child { border-bottom: 0; }
+  .fig .l { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fig .v { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .fig .n { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+  .none { color: var(--muted); font-style: italic; }
+  .spark { display: flex; gap: 2px; align-items: flex-end; height: 40px; margin-top: 6px; }
+  .spark i { display: block; flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
+  .thumbs button { font: inherit; font-size: 12px; background: none; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; cursor: pointer; color: var(--muted); }
+  .thumbs button.set { color: var(--accent); border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -84,6 +104,8 @@
     <button data-view="search" aria-current="true">Memory</button>
     <button data-view="ledger">Ledger</button>
     <button data-view="scopes">Scopes</button>
+    <button data-view="live">Live</button>
+    <button data-view="analytics">Analytics</button>
     <button data-view="status">Status</button>
   </nav>
 </header>
@@ -175,7 +197,129 @@ async function search() {
         </div>
         <div class="bar"><i style="width:${Math.round((i.score || 0) * 100)}%"></i></div>
         <div class="body">${esc(i.text)}</div>
+        ${r.event_id != null ? `<div class="meta thumbs" style="margin-top:8px">
+          <span>Useful?</span>
+          <button data-fb="1" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">yes</button>
+          <button data-fb="0" data-ev="${r.event_id}" data-chunk="${i.chunk_id}">no</button></div>` : ""}
       </div>`).join(""));
+  } catch (e) { fail(e); }
+}
+
+const summarise = (e) => {
+  const p = e.payload || {};
+  switch (e.kind) {
+    case "recall": {
+      const top = (p.items || [])[0];
+      const lanes = top && top.lanes ? Object.keys(top.lanes).join("+") : "none";
+      const q = p.query_hashed ? `hash ${esc(p.query)}` : esc(p.query);
+      return `${q} · ${(p.items || []).length} item(s) · top via ${lanes}` +
+        (p.latency_ms && p.latency_ms.total != null ? ` · ${p.latency_ms.total.toFixed(1)} ms` : "") +
+        (p.degraded && p.degraded.length ? ` · degraded: ${esc(p.degraded.join("; "))}` : "");
+    }
+    case "remember": return `${p.fresh ?? "?"} fresh, ${p.deduplicated ?? 0} known, ${p.chunks ?? 0} chunks, ${p.bytes ?? 0} B` +
+      (p.latency_ms != null ? ` · ${Number(p.latency_ms).toFixed(1)} ms` : "");
+    case "fact_assert": return `${esc(p.subject)} ${esc(p.predicate)} → ${esc(p.outcome)}` +
+      (p.superseded && p.superseded.length ? `, superseded #${p.superseded.join(", #")}` : "");
+    case "fact_close": return `fact #${p.fact_id} closed (${esc(p.reason_kind)})`;
+    case "forget": return `episode #${p.episode_id}, ${p.chunks_removed ?? 0} chunk(s) removed`;
+    case "feedback": return `recall #${p.recall_event_id} chunk #${p.chunk_id}: ${p.useful ? "useful" : "not useful"}`;
+    case "job": return `${esc(p.name)} [${esc(p.job_id)}]` +
+      (p.progress ? ` · ${p.progress.done}/${p.progress.total}` : "") + (p.adapter ? ` · ${esc(p.adapter)}` : "") +
+      (p.detail ? ` · ${esc(p.detail)}` : "");
+    default: return esc(JSON.stringify(p)).slice(0, 160);
+  }
+};
+const stateOf = (e) => {
+  const p = e.payload || {};
+  if (e.kind === "job") return p.status === "running" ? ["run", "running"] : p.status === "failed" ? ["bad", "failed"] : ["ok", "completed"];
+  return p.error ? ["bad", "failed"] : ["ok", "completed"];
+};
+
+let liveTimer = null, livePaused = false, liveKind = "", liveLast = null, liveErr = null;
+async function livePoll() {
+  if (view !== "live" || livePaused) return;
+  try {
+    const params = new URLSearchParams({ limit: "60" });
+    if (liveKind) params.set("kind", liveKind);
+    const r = await api("/v1/events?" + params.toString());
+    liveLast = new Date(); liveErr = null;
+    renderLive(r);
+  } catch (e) { liveErr = e.message; renderLive(null); }
+}
+function renderLive(r) {
+  const head = `<div class="row" style="align-items:center">
+    <span class="pill ${liveErr ? "bad" : "ok"}">${liveErr ? "disconnected: " + esc(liveErr) : "connected"}</span>
+    <span class="muted">polling every 3 s${liveLast ? ", updated " + Math.round((Date.now() - liveLast) / 1000) + " s ago" : ""}</span>
+    <button class="quiet" id="pause">${livePaused ? "resume" : "pause"}</button>
+    <select id="kind"><option value="">all kinds</option>${["recall","remember","fact_assert","fact_close","forget","feedback","job"]
+      .map((k) => `<option ${k === liveKind ? "selected" : ""}>${k}</option>`).join("")}</select>
+    ${r ? `<span class="muted">evidence: ${esc(r.evidence)}, queries ${esc(r.queries_recorded)}, newest 60 shown</span>` : ""}
+  </div>`;
+  if (!r) { show(head + '<p class="empty">No data until the connection returns.</p>'); return wire(); }
+  const events = r.events || [];
+  if (!events.length) { show(head + '<p class="empty">No events recorded yet. Recall or store something and they appear here.</p>'); return wire(); }
+  const seen = new Set(), rows = [];
+  for (const e of events) {
+    if (e.kind === "job") { const id = e.payload.job_id; if (seen.has(id)) continue; seen.add(id); }
+    const [cls, label] = stateOf(e);
+    rows.push(`<tr><td>${esc(e.ts.slice(11, 19))}<br><small>${esc(e.ts.slice(0, 10))}</small></td>
+      <td><span class="pill">${esc(e.kind)}</span></td><td><span class="pill ${cls}">${label}</span></td>
+      <td>${summarise(e)}${e.payload.error ? `<div class="err">${esc(e.payload.error)}</div>` : ""}</td></tr>`);
+  }
+  show(head + `<table class="live">${rows.join("")}</table>`);
+  wire();
+  function wire() {
+    const b = document.getElementById("pause"); if (b) b.onclick = () => { livePaused = !livePaused; if (!livePaused) livePoll(); else renderLive(r); };
+    const k = document.getElementById("kind"); if (k) k.onchange = () => { liveKind = k.value; livePoll(); };
+  }
+}
+async function live() {
+  if (liveTimer) clearInterval(liveTimer);
+  await livePoll();
+  liveTimer = setInterval(livePoll, 3000);
+}
+
+const fmt = (m) => {
+  if (m.value == null) return '<span class="none">no evidence yet</span>';
+  if (typeof m.value === "number") return m.unit === "share" || m.unit === "share of bytes" ? (m.value * 100).toFixed(1) + "%" :
+    m.unit === "ms" ? m.value.toFixed(1) + " ms" : String(m.value);
+  if (typeof m.value === "object") return esc(Object.entries(m.value).map(([k, v]) =>
+    `${k} ${typeof v === "number" ? v.toFixed(3) : typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "));
+  return esc(m.value);
+};
+const label = (name) => name.split(".").slice(1).join(" ").replace(/_/g, " ")
+  .replace("latency ms ", "latency ").replace("top item ", "top item via ").replace(" share", "")
+  .replace("top similarity ", "top similarity, ");
+const fig = (m) => m ? `<div class="fig" title="${esc(m.definition)}${m.caveat ? "\n" + esc(m.caveat) : ""}">
+  <span class="l">${esc(label(m.name))}</span><span class="v">${fmt(m)}</span>
+  <span class="n">n = ${m.n} ${esc(m.denominator)}</span></div>` : "";
+
+async function analytics() {
+  try {
+    const r = await api("/v1/metrics");
+    if (!r.coverage) return show(none("evidence log attached, so no metrics can be computed"));
+    const by = Object.fromEntries((r.metrics || []).map((m) => [m.name, m]));
+    const cov = r.coverage;
+    const panel = (title, names, extra = "") => `<div class="card panel"><h3>${title}</h3>${names.map((n) => fig(by[n])).join("")}${extra}</div>`;
+    const days = Object.entries(r.daily || {});
+    const max = Math.max(1, ...days.map(([, kinds]) => Object.values(kinds).reduce((a, b) => a + b, 0)));
+    const spark = days.length ? `<div class="spark">${days.map(([d, kinds]) => { const t = Object.values(kinds).reduce((a, b) => a + b, 0);
+      return `<i style="height:${Math.round((t / max) * 100)}%" title="${d}: ${t} event(s)"></i>`; }).join("")}</div>
+      <div class="legend"><span>${esc(days[0][0])}</span><span>${esc(days[days.length - 1][0])}</span></div>` : "";
+    show(`<p class="muted">Every figure is computed from the ${cov.events_considered} retained event(s)${cov.earliest_retained ? " since " + esc(cov.earliest_retained.slice(0, 19)) : ""}${cov.truncated ? '; <span class="err">the read was truncated, coverage is partial</span>' : ""}. n and denominator are shown next to each value; hover for the definition. Operational figures are not answer quality.</p>
+      <div class="grid">
+      ${panel("Recall <span>evidence of use and timing</span>", ["recall.count", "recall.latency_ms.p50", "recall.latency_ms.p95", "recall.latency_ms.embed.p50", "recall.latency_ms.vector.p50", "recall.latency_ms.text.p50", "recall.degraded_count", "recall.byte_context_reduction.median"])}
+      ${panel("Lanes <span>agreement, not relevance</span>", ["recall.top_item.both_lanes_share", "recall.top_item.vector_only_share", "recall.top_item.text_only_share", ...Object.keys(by).filter((k) => k.startsWith("recall.top_similarity."))])}
+      ${panel("Ingest", ["ingest.calls", "ingest.fresh_episodes", "ingest.deduplicated", "ingest.dedup_fraction", "ingest.stored_bytes", "ingest.chunks"])}
+      ${panel("Ledger <span>events, not accuracy</span>", ["ledger.asserted", "ledger.asserted_already_closed", "ledger.restated", "ledger.superseded", "ledger.manual_closures"])}
+      ${panel("Feedback <span>what people judged</span>", ["feedback.judged_items", "feedback.useful_share", "feedback.coverage"])}
+      ${panel("Coverage", [], `<div class="fig"><span>events considered</span><span class="v">${cov.events_considered}</span></div>
+        <div class="fig"><span>failures</span><span class="v">${esc(Object.entries(r.failures || {}).map(([k, v]) => k + " " + v).join(", ") || "none")}</span></div>
+        <div class="fig"><span>embedders seen</span><span class="v">${esc((r.embedders || []).join(", ") || "none")}</span></div>
+        <div class="fig"><span>schema versions</span><span class="v">${esc((cov.schema_versions || []).join(", ") || "none")}</span></div>
+        <div class="fig"><span>scope filters used</span><span class="v">${fmt(by["recall.where_values.top5"] || { value: null })}</span></div>
+        ${spark}`)}
+      </div>`);
   } catch (e) { fail(e); }
 }
 
@@ -252,10 +396,11 @@ async function status() {
   } catch (e) { fail(e); }
 }
 
-const views = { search, ledger, scopes, status };
+const views = { search, ledger, scopes, live, analytics, status };
 
 function activate(name) {
   if (!views[name]) return;
+  if (liveTimer && name !== "live") { clearInterval(liveTimer); liveTimer = null; }
   view = name;
   document.querySelectorAll("nav button").forEach((o) => o.setAttribute("aria-current", String(o.dataset.view === name)));
   controls.style.display = name === "search" ? "block" : "none";
@@ -270,6 +415,15 @@ out.addEventListener("click", async (e) => {
   if (chip) {
     document.getElementById("where").value = chip.dataset.where;
     activate("search");
+    return;
+  }
+  const fb = e.target.closest("[data-fb]");
+  if (fb) {
+    try {
+      await api("/v1/feedback", { method: "POST", body: JSON.stringify({
+        recall_event_id: Number(fb.dataset.ev), chunk_id: Number(fb.dataset.chunk), useful: fb.dataset.fb === "1" }) });
+      fb.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("set", b === fb));
+    } catch (err) { fail(err); }
     return;
   }
   const btn = e.target.closest("[data-close]");

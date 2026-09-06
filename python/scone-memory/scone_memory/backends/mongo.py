@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence
 
+from ..errors import SconeError
 from ..lexical import tokenize
 from ..models import Chunk, Episode, Fact
 from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
@@ -20,7 +21,7 @@ from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
 SCHEMA_VERSION = 3
 
 
-class SchemaMismatch(Exception):
+class SchemaMismatch(SconeError):
     pass
 
 

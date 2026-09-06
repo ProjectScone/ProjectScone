@@ -55,6 +55,13 @@ class CloseBody(BaseModel):
     reason: str
 
 
+class ExternalEventBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    payload: dict
+
+
 class FeedbackBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -203,6 +210,11 @@ def create_app(
             "evidence": engine.events.name,
             "queries_recorded": "text" if engine.record_queries else "hash",
         }
+
+    @app.post("/v1/events")
+    async def post_event(body: ExternalEventBody, space: str = Depends(space_for)) -> dict:
+        event = await engine.record(space, body.kind, body.payload)
+        return {"recorded": event.event_id}
 
     @app.post("/v1/feedback")
     async def post_feedback(body: FeedbackBody, space: str = Depends(space_for)) -> dict:
