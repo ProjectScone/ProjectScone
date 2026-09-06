@@ -115,10 +115,10 @@ impl Engine {
         {
             return Err(invalid("text_truncated must be boolean"));
         }
-        if let Some(v) = payload.get("duration_ms").filter(|v| !v.is_null()) {
-            if v.as_f64().is_none_or(|n| !n.is_finite() || n < 0.) {
-                return Err(invalid("duration_ms must be nonnegative and finite"));
-            }
+        if let Some(v) = payload.get("duration_ms").filter(|v| !v.is_null())
+            && v.as_f64().is_none_or(|n| !n.is_finite() || n < 0.)
+        {
+            return Err(invalid("duration_ms must be nonnegative and finite"));
         }
         if let Some(id) = payload.get("episode_id").filter(|v| !v.is_null()) {
             let id = id
