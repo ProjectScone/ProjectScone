@@ -1,10 +1,10 @@
-"""Validated, immutable recall constraints shared by Pipecat boundaries."""
+"""Validated, immutable recall constraints for sessions and integrations."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ..engine import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
-from ..errors import InvalidInput
+from .engine import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
+from .errors import InvalidInput
 
 
 @dataclass(frozen=True)
@@ -41,3 +41,20 @@ class RecallScope:
         # change the fixed scope used by later turns.
         return {"where": dict(self.where), "kind": self.kind,
                 "source_prefix": self.source_prefix, "since": self.since, "until": self.until}
+
+    def as_dict(self):
+        """Canonical JSON shape, omitting constraints that do not narrow recall."""
+        # An empty source prefix still excludes episodes with no source.
+        return {key: value for key, value in self.kwargs().items()
+                if value is not None and value != {}}
+
+    @classmethod
+    def from_mapping(cls, value):
+        if value is None:
+            value = {}
+        if not isinstance(value, Mapping) or set(value) - {"where", "kind", "source_prefix", "since", "until"}:
+            raise InvalidInput("recall_scope must contain only where, kind, source_prefix, since and until")
+        try:
+            return cls.validated(**value)
+        except ValueError as exc:
+            raise InvalidInput(str(exc)) from exc

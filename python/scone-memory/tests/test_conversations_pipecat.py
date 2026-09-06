@@ -18,6 +18,64 @@ from scone_memory.api.conversations import create_conversation_app
 from scone_memory.integrations.pipecat_text import PipecatTextConversation
 
 
+@pytest.mark.parametrize("empty_scope", [False, True])
+async def test_session_scope_controls_real_pipecat_context_across_turns(tmp_path, empty_scope):
+    from test_pipecat_text import ScriptedModel
+    from test_conversations_api import client_for
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    allowed = await memory.remember("alpha", "Juniper calibration: allowed-manual uses Polaris.", kind="file",
+                                    source="docs/public/one", created_at="2026-09-02", metadata={"collection": "manuals"})
+    excluded = [
+        ("alpha", "wrong-kind", "note", "docs/public/note", "2026-09-02", "manuals"),
+        ("alpha", "wrong-source", "file", "private/one", "2026-09-02", "manuals"),
+        ("alpha", "too-old", "file", "docs/public/old", "2026-08-01", "manuals"),
+        ("alpha", "too-new", "file", "docs/public/new", "2026-10-01", "manuals"),
+        ("alpha", "wrong-metadata", "file", "docs/public/other", "2026-09-02", "other"),
+        ("beta", "wrong-space", "file", "docs/public/tenant", "2026-09-02", "manuals"),
+    ]
+    for space, label, kind, source, created, collection in excluded:
+        await memory.remember(space, f"Juniper calibration: {label} is not eligible.", kind=kind, source=source,
+                              created_at=created, metadata={"collection": collection})
+    models = []
+    def model_factory():
+        model = ScriptedModel("A scoped answer")
+        models.append(model)
+        return model
+    def scoped(space, sid, scope):
+        return PipecatTextConversation(memory, space, sid, model_factory, **scope.kwargs())
+    app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db", None,
+                                  scoped_runtime_factory=scoped)
+    scope = {"kind": "file", "where": {"collection": "missing" if empty_scope else "manuals"},
+             "source_prefix": "docs/public/", "since": "2026-09-01", "until": "2026-09-03"}
+    async with client_for(app) as client:
+        created = await client.post("/v1/conversations", json={"request_id": "scoped", "capture": True, "recall_scope": scope})
+        assert created.status_code == 200, created.text
+        session = created.json()
+        url = "/v1/conversations/" + session["session_id"]
+        for index in range(2):
+            route = url + "/turns/turn-" + str(index)
+            accepted = await client.post(url + "/turns", json={"request_id": f"turn-{index}",
+                                          "expected_revision": session["revision"], "text": "How is Juniper calibrated?"})
+            assert accepted.status_code == 202
+            async with asyncio.timeout(5):
+                while True:
+                    receipt = (await client.get(route)).json()
+                    if receipt["status"] != "pending":
+                        break
+                    await asyncio.sleep(0.01)
+            assert receipt["status"] == "completed", receipt
+            references = receipt["result"]["memory_context"]["references"]
+            assert {ref["episode_id"] for ref in references} == (set() if empty_scope else {allowed.episode_id})
+        assert len(models) == 2
+        for model in models:
+            request = repr(model.requests)
+            assert ("allowed-manual" in request) is not empty_scope
+            for _, label, *_ in excluded:
+                assert label not in request
+        assert len((await client.get(url + "/transcript")).json()["episodes"]) == 4
+
+
 async def test_cancelled_pipecat_turn_can_be_followed_by_a_completed_reply(tmp_path):
     from test_pipecat_text import ScriptedModel
     from test_conversations_api import client_for, create

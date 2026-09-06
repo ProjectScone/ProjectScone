@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..engine import check_space, normalise_time
 from ..errors import Conflict, InvalidInput, NotFound
 from ..session_journal import SessionJournal
+from ..recall_scope import RecallScope
 from .app import PLAYGROUND, create_app, episode_json
 
 
@@ -37,6 +38,7 @@ class Command(BaseModel):
 
 class Create(Command):
     capture: bool
+    recall_scope: dict[str, object] = Field(default_factory=dict)
 
 
 class Stop(Command):
@@ -57,7 +59,8 @@ class OwnedSession:
     cleanup_task: asyncio.Task | None = None
 
 
-def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_sessions=100, max_turns=100, console=False):
+def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
+                            max_sessions=100, max_turns=100, console=False):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -65,6 +68,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
     cancellation and cleanup use cooperative asyncio, not process termination.
     console=True serves the packaged React workspace and session deep links.
     Pages contain no injected keys; the user supplies a space key in the tab.
+    scoped_runtime_factory(space, sid, scope) explicitly opts into fixed recall
+    constraints. It receives an immutable RecallScope; pass scope.kwargs() to
+    the native runtime. When configured it takes precedence for every new session.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -76,6 +82,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
             raise ValueError("service admission limits must be integers in 1..100")
     if runtime_factory is not None and not callable(runtime_factory):
         raise ValueError("runtime_factory must be callable or None")
+    if scoped_runtime_factory is not None and not callable(scoped_runtime_factory):
+        raise ValueError("scoped_runtime_factory must be callable or None")
     owned: dict[tuple[str, str], OwnedSession] = {}
     creates: dict[tuple[str, str], str] = {}
     journal = None
@@ -215,7 +223,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
 
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
-        return {"schema_version": 1, "text_configured": runtime_factory is not None,
+        return {"schema_version": 1, "text_configured": runtime_factory is not None or scoped_runtime_factory is not None,
+                "recall_scope": scoped_runtime_factory is not None,
                 "voice": False, "video": False, "streaming": False,
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
                 "session_deletion": True,
@@ -231,21 +240,29 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
     async def create(body: Create, space=Depends(space_for)):
         if not body.capture:
             raise HTTPException(422, "this runtime requires explicit transcript capture consent")
-        if runtime_factory is None:
+        scope = RecallScope.from_mapping(body.recall_scope)
+        if runtime_factory is None and scoped_runtime_factory is None:
             raise HTTPException(503, "text conversation runtime is not configured")
+        if scope.as_dict() and scoped_runtime_factory is None:
+            raise HTTPException(422, "this runtime does not support session recall constraints")
         key = (space, body.request_id)
         if key in creates:
-            return inspect(space, creates[key])
+            # Deleted sessions keep a process-local retry tombstone. Check it
+            # before journal.create can insert a new row for the deleted key.
+            current = inspect(space, creates[key])
+            journal.create(space, body.request_id, recall_scope=scope.as_dict())
+            return current
         if len(creates) >= max_sessions:
             raise HTTPException(429, "conversation process capacity reached")
-        receipt = journal.create(space, body.request_id)
+        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict())
         sid = receipt["session_id"]
         creates[key] = sid
         current = journal.get(space, sid)
         if current["state"] != "created":
             return inspect(space, sid)
         try:
-            runtime = runtime_factory(space, sid)
+            runtime = (scoped_runtime_factory(space, sid, RecallScope.from_mapping(current["recall_scope"]))
+                       if scoped_runtime_factory is not None else runtime_factory(space, sid))
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:

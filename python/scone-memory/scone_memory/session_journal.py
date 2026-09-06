@@ -17,9 +17,10 @@ from uuid import uuid4
 
 from .engine import check_space
 from .errors import Conflict, InvalidInput, NotFound
+from .recall_scope import RecallScope
 
 _APPLICATION_ID = 0x53434A31
-_VERSION = 2
+_VERSION = 3
 _KEY = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _TRANSITIONS = {
     "created": {"start": "running", "stop": "ended", "fail": "failed", "interrupt": "interrupted"},
@@ -81,7 +82,7 @@ class SessionJournal:
                 ).fetchall()
                 tables = {row["name"] for row in objects if row["type"] == "table"}
                 if app_id == _APPLICATION_ID:
-                    if version > _VERSION:
+                    if not 1 <= version <= _VERSION:
                         raise InvalidInput("unsupported session journal schema version")
                     if version == 1:
                         # A journal written before turn receipts existed. Its
@@ -90,9 +91,11 @@ class SessionJournal:
                         if tables != {"sessions", "session_events"}:
                             raise InvalidInput("invalid session journal tables")
                         self._db.execute(_TURNS_TABLE)
-                        self._db.execute(f"PRAGMA user_version={_VERSION}")
                     elif tables != {"sessions", "session_events", "session_turns"}:
                         raise InvalidInput("invalid session journal tables")
+                    if version < 3:
+                        self._db.execute("ALTER TABLE sessions ADD COLUMN recall_scope TEXT NOT NULL DEFAULT '{}'")
+                        self._db.execute(f"PRAGMA user_version={_VERSION}")
                 elif app_id or version or objects:
                     raise InvalidInput("path is not a session journal; refusing to modify another database")
                 else:
@@ -101,6 +104,7 @@ class SessionJournal:
                         create_key TEXT NOT NULL, mode TEXT NOT NULL,
                         state TEXT NOT NULL, revision INTEGER NOT NULL,
                         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                        recall_scope TEXT NOT NULL DEFAULT '{}',
                         PRIMARY KEY(space, session_id), UNIQUE(space, create_key))""")
                     self._db.execute("""CREATE TABLE session_events (
                         space TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -158,19 +162,21 @@ class SessionJournal:
                          (space, sid, revision, request_id, signature, json.dumps(receipt)))
         return receipt
 
-    def create(self, space: str, request_id: str, mode: str = "text") -> dict:
+    def create(self, space: str, request_id: str, mode: str = "text", *, recall_scope=None) -> dict:
         check_space(space)
         _key(request_id)
         if mode not in ("text", "voice"):
             raise InvalidInput("session mode must be text or voice; runtime support is configured separately")
-        signature = json.dumps(["create", mode])
+        scope = RecallScope.from_mapping(recall_scope).as_dict()
+        # Preserve replay signatures from pre-scope journals for empty scopes.
+        signature = json.dumps(["create", mode, scope] if scope else ["create", mode], sort_keys=True)
         with self._transaction():
             found = self._db.execute("SELECT session_id FROM sessions WHERE space=? AND create_key=?", (space, request_id)).fetchone()
             if found is not None:
                 return self._event(space, found["session_id"], request_id, signature)
             sid, now = uuid4().hex, _now()
-            self._db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                             (space, sid, request_id, mode, "created", 1, now, now))
+            self._db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (space, sid, request_id, mode, "created", 1, now, now, json.dumps(scope, sort_keys=True)))
             return self._append(space, sid, 1, request_id, signature, "create", None, "created", now)
 
     def get(self, space: str, session_id: str) -> dict:
@@ -178,6 +184,7 @@ class SessionJournal:
         _key(session_id)
         found = dict(self._session(space, session_id))
         del found["create_key"]
+        found["recall_scope"] = json.loads(found["recall_scope"])
         return found
 
     def sessions(self, space: str, after: str = "", limit: int = 100) -> dict:
@@ -186,11 +193,13 @@ class SessionJournal:
             _key(after)
         _integer(limit, 1, 200)
         rows = self._db.execute(
-            "SELECT space, session_id, mode, state, revision, created_at, updated_at "
+            "SELECT space, session_id, mode, state, revision, created_at, updated_at, recall_scope "
             "FROM sessions WHERE space=? AND session_id>? ORDER BY session_id LIMIT ?",
             (space, after, limit + 1),
         ).fetchall()
         items = [dict(row) for row in rows[:limit]]
+        for item in items:
+            item["recall_scope"] = json.loads(item["recall_scope"])
         return {"items": items, "next_after": items[-1]["session_id"] if items else after,
                 "has_more": len(rows) > limit}
 

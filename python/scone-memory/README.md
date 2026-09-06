@@ -486,6 +486,40 @@ app = create_conversation_app(
 )
 ```
 
+To let an API caller narrow recall for each session, opt in explicitly:
+
+```python
+app = create_conversation_app(
+    memory, space_keys, "conversation-sessions.db", None,
+    scoped_runtime_factory=lambda space, sid, scope: PipecatTextConversation(
+        memory, space, sid, model_factory, **scope.kwargs()
+    ),
+    console=True,
+)
+```
+
+Then `POST /v1/conversations` may include, for example,
+`"recall_scope": {"kind": "file", "where": {"collection": "manuals"}, "source_prefix": "docs/"}`.
+The vocabulary is `where`, `kind`, `source_prefix`, `since`, `until`; it never
+selects another authorized space. Constraints are validated and normalized before
+creation, persisted for the session's life, and returned by inspect and list.
+Changing the scope with the same create request ID conflicts, including after a
+restart. Dates are inclusive; reversed ranges are rejected. An empty
+`source_prefix` still requires an episode to have a source; omit the field to
+include sourceless episodes. Empty results never
+cause the native Pipecat runtime to broaden its recall. Scope limits retrieved
+knowledge, not capture or the session's own conversation history.
+
+The scoped factory receives an immutable `scone_memory.recall_scope.RecallScope`.
+`scope.kwargs()` returns fresh native recall arguments. This factory takes
+precedence over the legacy factory, including for an empty scope. It is trusted
+server configuration: custom runtimes must actually enforce the constraints,
+and any additional server policy must remain enforced rather than be replaced
+by client filters. Two-argument factories remain supported but reject nonempty
+scope with HTTP 422. The additive `recall_scope: true` capability is advertised
+only for an explicitly configured scoped factory. Browser scope controls are
+not included in this API checkpoint.
+
 With `console=True`, the service serves `/memory`, `/playground`,
 `/conversations` and `/conversations/{session_id}` directly, including browser
 refreshes. `/` opens the same application. Pages contain no configured keys:
@@ -615,6 +649,14 @@ for a different command or acting on an old revision raises `Conflict`; its
 `revision` is the current **session** revision, not a memory-space revision.
 State and event insertion commit together. Replay returns `events`, `next_after`
 and `has_more`, with page limits of 1–200.
+
+`create(..., recall_scope={...})` records immutable session recall constraints.
+`get()` and `sessions()` expose the canonical `recall_scope` mapping. Journal
+schema 3 upgrades schema 1 and 2 transactionally, retaining existing sessions,
+events and turn receipts; older sessions receive an empty scope and retain their
+original create replay signature. Back up the journal before upgrading: older
+versions of Scone cannot open a newer schema. Runtime enforcement is separate
+from persistence and is supplied by the scoped factory described above.
 
 States are created, running, stopping, ended, failed and interrupted. Terminal
 sessions cannot restart. Reopening preserves recorded state; `running` does not

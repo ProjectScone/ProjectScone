@@ -32,7 +32,7 @@ except ImportError as exc:
 
 from ..engine import MemoryEngine, Record, check_space
 from .pipecat_context import SconeMemoryContextProcessor
-from ._pipecat_scope import RecallScope
+from ..recall_scope import RecallScope
 
 
 def _bytes(messages) -> int:

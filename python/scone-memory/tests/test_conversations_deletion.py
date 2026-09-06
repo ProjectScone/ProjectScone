@@ -69,6 +69,22 @@ async def test_deleting_one_session_leaves_the_others_alone(engine, tmp_path):
         await engine.episode("alpha", going["result"]["assistant_episode_id"])
 
 
+async def test_retrying_a_deleted_create_does_not_leave_an_orphan_session(engine, tmp_path):
+    app, runtimes = configured(engine, tmp_path / "sessions.db")
+    async with client_for(app) as client:
+        session = await create(client)
+        url = "/v1/conversations/" + session["session_id"]
+        stopped = await client.post(url + "/stop", json={"request_id": "stop",
+                                                        "expected_revision": session["revision"]})
+        assert stopped.status_code == 200
+        assert (await client.delete(url)).status_code == 204
+        for _ in range(2):
+            replay = await client.post("/v1/conversations", json={"request_id": "new", "capture": True})
+            assert replay.status_code == 404
+            assert (await client.get("/v1/conversations")).json()["items"] == []
+        assert len(runtimes) == 1
+
+
 async def test_a_running_conversation_is_not_deleted_out_from_under_itself(engine, tmp_path):
     """Stop it first. Deleting a session a process is still serving would
     leave that process answering from a transcript that no longer exists."""

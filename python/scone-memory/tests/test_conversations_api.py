@@ -62,6 +62,66 @@ async def create(client, request_id="new"):
     return response.json()
 
 
+async def test_scoped_factory_receives_immutable_validated_scope_and_retries_cannot_change_it(engine, tmp_path):
+    seen = []
+    def scoped(space, sid, scope):
+        seen.append((space, sid, scope))
+        return ControlledConversation(engine, space, sid)
+    path = tmp_path / "sessions.db"
+    app = create_conversation_app(engine, {"alpha-key": "alpha", "beta-key": "beta"}, path, None,
+                                  scoped_runtime_factory=scoped)
+    expected = {"kind": "file", "where": {"collection": "manuals"}, "since": "2026-09-01T00:00:00.000Z"}
+    body = {"request_id": "new", "capture": True, "recall_scope": {**expected, "since": "2026-09-01T01:00:00+01:00"}}
+    async with client_for(app) as client:
+        cap = (await client.get("/v1/conversations/capabilities")).json()
+        assert cap["text_configured"] is True and cap["recall_scope"] is True
+        response = await client.post("/v1/conversations", json=body)
+        assert response.status_code == 200, response.text
+        saved = response.json()
+        assert saved["recall_scope"] == expected
+        assert seen[0][0:2] == ("alpha", saved["session_id"])
+        # The runtime can obtain kwargs, but cannot mutate the frozen policy.
+        kwargs = seen[0][2].kwargs()
+        kwargs["where"]["collection"] = "private"
+        assert seen[0][2].as_dict() == expected
+        with pytest.raises(AttributeError):
+            seen[0][2].kind = "note"
+        assert (await client.post("/v1/conversations", json={**body, "recall_scope": expected})).json() == saved
+        assert (await client.post("/v1/conversations", json={**body, "recall_scope": {}})).status_code == 409
+        assert len(seen) == 1
+        assert (await client.get("/v1/conversations")).json()["items"][0]["recall_scope"] == expected
+    # Recreated service exposes the same constraints without starting a provider.
+    async with client_for(create_conversation_app(engine, {"alpha-key": "alpha"}, path, None)) as client:
+        assert (await client.get("/v1/conversations/" + saved["session_id"])).json()["recall_scope"] == expected
+        assert len(seen) == 1
+
+
+@pytest.mark.parametrize("scope", [{"kind": "file"}, {"source_prefix": ""}])
+async def test_legacy_factories_reject_narrowing_instead_of_silently_ignoring_it(engine, tmp_path, scope):
+    app, runtimes = configured(engine, tmp_path / "sessions.db")
+    async with client_for(app) as client:
+        assert (await client.get("/v1/conversations/capabilities")).json()["recall_scope"] is False
+        rejected = await client.post("/v1/conversations", json={"request_id": "new", "capture": True, "recall_scope": scope})
+        assert rejected.status_code == 422
+        assert runtimes == []
+        assert (await client.get("/v1/conversations")).json()["items"] == []
+        accepted = await client.post("/v1/conversations", json={"request_id": "new", "capture": True, "recall_scope": {}})
+        assert accepted.status_code == 200 and len(runtimes) == 1
+
+
+@pytest.mark.parametrize("scope", [{"space": "beta"}, {"where": {"team": 1}}, {"since": "tomorrow"},
+                                    {"since": "2026-09-02", "until": "2026-09-01"}, None, []])
+async def test_api_invalid_scopes_never_start_a_runtime(engine, tmp_path, scope):
+    started = []
+    app = create_conversation_app(engine, {"alpha-key": "alpha"}, tmp_path / "sessions.db", None,
+                                  scoped_runtime_factory=lambda *args: started.append(args))
+    async with client_for(app) as client:
+        result = await client.post("/v1/conversations", json={"request_id": "new", "capture": True, "recall_scope": scope})
+        assert result.status_code == 422
+        assert started == []
+        assert (await client.get("/v1/conversations")).json()["items"] == []
+
+
 async def test_auth_scope_strict_bodies_and_existing_memory_surface(engine, tmp_path):
     app, runtimes = configured(engine, tmp_path / "sessions.db")
     async with client_for(app) as client:
