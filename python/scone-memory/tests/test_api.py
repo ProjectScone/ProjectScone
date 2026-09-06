@@ -235,3 +235,16 @@ def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "CONSOLE", legacy)
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         assert '<script data-token="solo">' in c.get("/memory").text
+
+
+def test_history_is_opt_in_over_http(client):
+    h = auth()
+    client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Austin", "valid_from": "2019-08-01"}, headers=h)
+    lisbon = client.post("/v1/facts", json={"subject": "mark", "predicate": "lives_in", "object": "Lisbon", "valid_from": "2024-03-02"}, headers=h).json()
+    plain = client.get("/v1/recall", params={"q": "mark lives"}, headers=h).json()
+    assert [f["object"] for f in plain["facts"]] == ["Lisbon"] and plain["history"] == []
+    with_history = client.get("/v1/recall", params={"q": "mark lives", "history": "true"}, headers=h).json()
+    [austin] = with_history["history"]
+    assert (austin["object"], austin["status"], austin["superseded_by"]) == ("Austin", "closed", lisbon["fact_id"])
+    assert austin["valid_until"] == lisbon["valid_from"]
+    assert client.get("/v1/recall", params={"q": "mark lives", "history": "maybe"}, headers=h).status_code == 422

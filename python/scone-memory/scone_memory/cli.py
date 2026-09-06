@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--as-of")
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--where", action="append", default=[], help="key=value scope filter, repeatable")
+    p.add_argument("--history", action="store_true", help="also show the closed facts that preceded the matched ones")
 
     p = sub.add_parser("forget", help="delete an episode")
     p.add_argument("episode_id", type=int)
@@ -174,13 +175,17 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "recall":
         result = await engine.recall(
-            space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where")
+            space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
+            history=args.history,
         )
         if args.json:
             emit(result.model_dump() | {"context_reduction": result.context_reduction})
             return 0
         for f in result.facts:
             print(f"fact  {f.subject} {f.predicate} {f.object}  (since {f.valid_from[:10]})", file=out)
+        for f in result.history:
+            until = f.valid_until[:10] if f.valid_until else "?"
+            print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
         for item in result.items:
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)

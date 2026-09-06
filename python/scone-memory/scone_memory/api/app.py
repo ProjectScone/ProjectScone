@@ -247,16 +247,18 @@ def create_app(
         as_of: Optional[str] = None,
         tags: Optional[str] = None,
         where: Optional[str] = None,
+        history: bool = False,
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
         result = await engine.recall(
-            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where)
+            space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history
         )
         return {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
+            "history": [fact_json(f) for f in result.history],
             "degraded": result.degraded,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,

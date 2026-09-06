@@ -145,6 +145,9 @@ class RecallResult(BaseModel):
     event_id: Optional[int] = None
     items: list[RecallItem] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
+    #: With ``history``: the closed facts that preceded the matched ones for
+    #: the same subject and predicate, oldest first. Empty otherwise.
+    history: list[Fact] = Field(default_factory=list)
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)

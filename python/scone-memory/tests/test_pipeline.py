@@ -346,3 +346,23 @@ async def test_recall_events_record_the_embedding_mode():
     await on.recall("default", "note")
     [ev] = await on.events.query("default", kind="recall")
     assert ev.payload["contextual_embeddings"] is True
+
+
+def test_cli_recall_history_flag(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(), out=out)
+        return code, out.getvalue()
+
+    assert run("assert", "mark", "lives_in", "Austin", "--valid-from", "2019-08-01")[0] == 0
+    assert run("assert", "mark", "lives_in", "Lisbon", "--valid-from", "2024-03-02")[0] == 0
+    code, text = run("recall", "mark lives", "--json")
+    assert code == 0 and json.loads(text)["history"] == []
+    code, text = run("recall", "mark lives", "--history", "--json")
+    assert code == 0 and [f["object"] for f in json.loads(text)["history"]] == ["Austin"]
+    code, text = run("recall", "mark lives", "--history")
+    lines = text.splitlines()
+    assert any(l.startswith("fact  mark lives_in Lisbon") for l in lines)
+    assert any(l.startswith("was   mark lives_in Austin  (2019-08-01 to 2024-03-02; superseded by fact 2)") for l in lines), lines

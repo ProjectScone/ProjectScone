@@ -143,6 +143,38 @@ async def test_a_quoted_claim_is_checked_against_its_source(engine):
     assert moved.quote == "Ana moved to Lisbon in March 2024"
 
 
+async def test_history_returns_the_chain_behind_a_matched_claim(engine):
+    """Research experiment 3: a knowledge-update question needs what was
+    believed before as well as what holds now. History is opt-in, oldest
+    first, and made only of closed ledger facts on the same subject and
+    predicate: not proposals, not excluded facts, not another subject's
+    closed facts."""
+    await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2019-08-01")
+    await engine.assert_fact("default", "mark", "lives_in", "Berlin", valid_from="2022-01-01")
+    lisbon = await engine.assert_fact("default", "mark", "lives_in", "Lisbon", valid_from="2024-03-02")
+    await engine.assert_fact("default", "ana", "lives_in", "Rome", valid_from="2020-01-01")  # another subject's chain stays out
+    await engine.assert_fact("default", "ana", "lives_in", "Oslo", valid_from="2021-01-01")
+    hidden = await engine.assert_fact("default", "mark", "lives_in", "Nowhere", valid_from="2018-01-01")  # closed, then excluded
+    await engine.exclude("default", hidden.fact_id, "a joke")
+    await engine.assert_fact("default", "mark", "lives_in", "Porto", valid_from="2025-01-01", origin="extracted", proposed=True)
+
+    plain = await engine.recall("default", "where does mark live")
+    assert [f.object for f in plain.facts] == ["Lisbon"] and plain.history == []
+
+    with_history = await engine.recall("default", "where does mark live", history=True)
+    assert [f.object for f in with_history.facts] == ["Lisbon"]
+    chain = with_history.history
+    assert [f.object for f in chain] == ["Austin", "Berlin"], "oldest first; the excluded one and the proposal are not history"
+    assert all(f.status == "closed" for f in chain)
+    assert chain[0].valid_until == "2022-01-01T00:00:00.000Z" and chain[1].valid_until == lisbon.valid_from
+    assert chain[1].closed_reason == f"superseded by fact {lisbon.fact_id}"
+
+    await engine.assert_fact("default", "mark", "lives_in", "Madrid", valid_from="2025-06-01")  # closes Lisbon too
+    then = await engine.recall("default", "where does mark live", as_of="2023-01-01", history=True)
+    assert [f.object for f in then.facts] == ["Berlin"]
+    assert [f.object for f in then.history] == ["Austin"], "only what came before the boundary; Lisbon is closed too but began after it"
+
+
 __all__ = [
     "test_a_proposal_answers_nothing_until_a_person_approves_it",
     "test_a_proposal_is_not_touched_by_later_assertions",
@@ -151,4 +183,5 @@ __all__ = [
     "test_excluding_hides_a_fact_without_rewriting_its_history",
     "test_origin_survives_export_and_import",
     "test_a_quoted_claim_is_checked_against_its_source",
+    "test_history_returns_the_chain_behind_a_matched_claim",
 ]

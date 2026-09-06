@@ -394,7 +394,12 @@ class MemoryEngine:
         as_of: Optional[str] = None,
         tags: Sequence[str] = (),
         where: Mapping[str, str] | None = None,
+        history: bool = False,
     ) -> RecallResult:
+        """``history`` (research experiment 3) also returns, for every
+        subject and predicate among the matched facts, the closed facts that
+        held before: what changed, when, and why. Off by default; the
+        reader gets only what holds at ``as_of`` unless asked for the chain."""
         check_space(space)
         query = query.strip()
         if not query or len(query) > MAX_QUERY:
@@ -488,10 +493,12 @@ class MemoryEngine:
                 )
             )
         facts = await self._facts_for_query(space, query, boundary or now)
+        previous = await self._history_for(space, facts, boundary or now) if history else []
         counts = await self.documents.counts(space)
         result = RecallResult(
             items=result_items,
             facts=facts,
+            history=previous,
             degraded=degraded,
             returned_bytes=sum(len(i.text.encode()) for i in result_items),
             space_bytes=counts.bytes,
@@ -720,6 +727,24 @@ class MemoryEngine:
                 scored.append((-overlap, -fact.confidence, fact.fact_id, fact))
         scored.sort(key=lambda t: t[:3])
         return [t[3] for t in scored[:limit]]
+
+    async def _history_for(self, space: str, facts: Sequence[Fact], when: str, limit: int = 20) -> list[Fact]:
+        """The closed ledger facts sharing a subject and predicate with any of
+        ``facts`` and begun by ``when``, oldest first: the chain of what was
+        believed before. Nothing that started after the reader's boundary
+        leaks through; excluded facts stay out, as everywhere; proposals and
+        declined candidates never held, so they are not history."""
+        if not facts:
+            return []
+        keys = {(f.subject, f.predicate) for f in facts}
+        shown = {f.fact_id for f in facts}
+        chain = [
+            f for f in await self.documents.list_facts(space, include_closed=True)
+            if (f.subject, f.predicate) in keys and f.fact_id not in shown
+            and f.status == "closed" and not f.excluded and f.valid_from <= when
+        ]
+        chain.sort(key=lambda f: (f.valid_from, f.fact_id))
+        return chain[:limit]
 
     # -- facts ------------------------------------------------------------
 
