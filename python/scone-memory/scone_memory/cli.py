@@ -218,7 +218,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int
         raw = read_source(args.file, stdin)
         summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()])
         emit(summary.__dict__) if args.json else print(
-            f"imported {summary.episodes} episode(s), {summary.facts} fact(s), {summary.deduplicated} already known", file=out
+            f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
+            f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)", file=out
         )
         return 0
 

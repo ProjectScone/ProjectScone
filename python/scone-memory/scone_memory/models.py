@@ -41,9 +41,10 @@ class Episode(BaseModel):
 
 
 class Chunk(BaseModel):
-    """A span of an episode. ``text`` is exactly ``content[start:end]``
-    of the parent, so any chunk can be re-derived and any recall result
-    can be shown in place. (Invariant I1: nothing stored is rewritten.)
+    """A span of an episode. ``start`` and ``end`` are UTF-8 byte offsets,
+    half-open, so ``content.encode()[start:end].decode()`` is exactly
+    ``text`` and the span means the same thing in the Rust product.
+    (Invariant I1: nothing stored is rewritten.)
     """
 
     model_config = ConfigDict(frozen=True)

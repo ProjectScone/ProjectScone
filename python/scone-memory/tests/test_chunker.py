@@ -38,3 +38,17 @@ def test_tiny_tail_joins_its_predecessor():
     last = text[spans[-1].start : spans[-1].end]
     assert len(last.strip()) >= MIN_CHUNK
     assert last.endswith("Tail.")
+
+
+def test_stored_spans_are_utf8_byte_offsets():
+    """Spec rule 1.2: a span must mean the same thing to the Rust product."""
+    from scone_memory.chunker import byte_spans
+
+    content = "café ☕ Rua Augusta, 3º andar. " * 12 + "\n\nFin."
+    spans = chunk_spans(content, target=150)
+    stored = byte_spans(content, spans)
+    raw = content.encode()
+    assert len(stored) == len(spans) > 1
+    for cp, b in zip(spans, stored):
+        assert raw[b.start : b.end].decode() == content[cp.start : cp.end]
+    assert stored[-1].end == len(raw) > len(content)

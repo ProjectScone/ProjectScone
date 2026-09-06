@@ -107,7 +107,7 @@ def test_cli_round_trip_through_sqlite(tmp_path):
     env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "second.db")}
     out = io.StringIO()
     assert cli.main(["import", "--json"], env=env2, stdin=io.StringIO(dump), out=out) == 0
-    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1}
+    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0}
     out = io.StringIO()
     cli.main(["status", "--json"], env=env2, stdin=io.StringIO(), out=out)
     assert json.loads(out.getvalue())["episodes"] == 1
@@ -187,3 +187,39 @@ def test_serve_uses_the_same_store_defaults_as_the_other_commands(monkeypatch, t
     assert captured["settings"] is not None
     assert (captured["settings"].documents, captured["settings"].vectors) == ("sqlite", "sqlite")
     assert captured["settings"].sqlite_path == str(tmp_path / "s.db")
+
+
+async def test_chunks_store_byte_offsets_into_the_episode():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=120).open()
+    content = "São Tomé ☕ " * 30
+    added = await engine.remember("default", content)
+    assert added.chunks > 1
+    raw = content.encode()
+    result = await engine.recall("default", "São Tomé", limit=10)
+    seen = 0
+    for item in result.items:
+        [chunk] = await engine.documents.get_chunks("default", [item.chunk_id])
+        assert raw[chunk.start : chunk.end].decode() == chunk.text
+        seen += 1
+    assert seen == min(added.chunks, 2)
+
+
+async def test_import_into_a_populated_store_remaps_provenance_and_does_not_double_facts():
+    source = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    src_ep = await source.remember("default", "ana moved to porto for the harbour job", created_at="2024-05-01")
+    await source.assert_fact("default", "ana", "lives_in", "Porto", valid_from="2024-05-01", source_episode_id=src_ep.episode_id)
+    dump = [r async for r in source.export("default")]
+    assert dump[-1]["source_episode_id"] == 1
+
+    target = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    unrelated = await target.remember("default", "an unrelated note that happens to be episode one")
+    assert unrelated.episode_id == 1
+    first = await target.import_records("default", dump)
+    assert (first.episodes, first.facts) == (1, 1)
+    [fact] = await target.facts("default")
+    moved = await target.recall("default", "porto harbour job", limit=1)
+    assert fact.source_episode_id == moved.items[0].episode_id != unrelated.episode_id
+
+    again = await target.import_records("default", dump)
+    assert (again.episodes, again.facts, again.deduplicated, again.facts_skipped) == (0, 0, 1, 1)
+    assert len(await target.facts("default", include_closed=True)) == 1

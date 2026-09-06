@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import fusion
-from .chunker import DEFAULT_TARGET, chunk_spans
+from .chunker import DEFAULT_TARGET, byte_spans, chunk_spans
 from .errors import InvalidInput, NotFound
 from .lexical import tokenize
 from .models import (
@@ -80,14 +80,21 @@ class Record:
 @dataclass
 class ImportSummary:
     episodes: int = 0
+    #: Episodes already present in the target.
     deduplicated: int = 0
     facts: int = 0
+    #: Facts already present in the target (same subject, predicate,
+    #: object, interval and status).
+    facts_skipped: int = 0
 
 
 @dataclass(frozen=True)
 class _Pending:
     slot: int
     new: NewEpisode
+    #: Chunk texts, sliced in code points.
+    texts: list[str]
+    #: The same spans as UTF-8 byte offsets (spec rule 1.2).
     spans: list[tuple[int, int]]
 
 
@@ -180,6 +187,7 @@ class MemoryEngine:
             fresh.append(
                 _Pending(
                     slot=len(results) - 1,
+                    texts=[content[sp.start : sp.end] for sp in spans],
                     new=NewEpisode(
                         space=space,
                         kind=record.kind,
@@ -191,12 +199,12 @@ class MemoryEngine:
                         tags=clean_tags,
                         metadata=clean_meta,
                     ),
-                    spans=[(sp.start, sp.end) for sp in spans],
+                    spans=[(sp.start, sp.end) for sp in byte_spans(content, spans)],
                 )
             )
 
         if fresh:
-            texts = [p.new.content[a:b] for p in fresh for a, b in p.spans]
+            texts = [t for p in fresh for t in p.texts]
             vectors: list[list[float]] = []
             for i in range(0, len(texts), EMBED_BATCH):
                 vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
@@ -229,10 +237,10 @@ class MemoryEngine:
                             ordinal=i,
                             start=a,
                             end=b,
-                            text=episode.content[a:b],
+                            text=text,
                             created_at=episode.created_at,
                         )
-                        for i, (a, b) in enumerate(pending.spans)
+                        for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
                     ]
                 )
                 await self.vectors.upsert(
@@ -553,40 +561,59 @@ class MemoryEngine:
         check_space(space)
         summary = ImportSummary()
         episodes: list[Record] = []
+        source_ids: list[Optional[int]] = []
         facts: list[Mapping] = []
         for record in records:
             kind = record.get("type", "episode")
             if kind == "episode":
                 episodes.append(Record.from_dict(record))
+                source_ids.append(record.get("episode_id"))
             elif kind == "fact":
                 facts.append(record)
             else:
                 raise InvalidInput(f"unknown record type {kind!r}")
-        for added in await self.remember_many(space, episodes):
+        # Ids are store-local (spec 3.1). Provenance in the dump names the
+        # source store's episodes, so it is remapped through the ids this
+        # import produced; a reference to an episode not in the dump is
+        # dropped rather than pointed at an unrelated record.
+        id_map: dict[int, int] = {}
+        for old_id, added in zip(source_ids, await self.remember_many(space, episodes)):
             summary.episodes += 0 if added.deduplicated else 1
             summary.deduplicated += 1 if added.deduplicated else 0
+            if old_id is not None:
+                id_map[int(old_id)] = added.episode_id
+        existing = {_fact_identity(f) for f in await self.documents.list_facts(space, include_closed=True)}
         for f in facts:
-            await self.documents.insert_fact(
-                NewFact(
-                    space=space,
-                    subject=normalise_term(str(f["subject"]), "subject"),
-                    predicate=normalise_term(str(f["predicate"]), "predicate"),
-                    object=str(f["object"]),
-                    valid_from=normalise_time(str(f["valid_from"])),
-                    confidence=float(f.get("confidence", 1.0)),
-                    valid_until=normalise_time(str(f["valid_until"])) if f.get("valid_until") else None,
-                    status=str(f.get("status", "active")),
-                    closed_reason=f.get("closed_reason"),
-                    source_episode_id=f.get("source_episode_id"),
-                )
+            source = f.get("source_episode_id")
+            new = NewFact(
+                space=space,
+                subject=normalise_term(str(f["subject"]), "subject"),
+                predicate=normalise_term(str(f["predicate"]), "predicate"),
+                object=str(f["object"]),
+                valid_from=normalise_time(str(f["valid_from"])),
+                confidence=float(f.get("confidence", 1.0)),
+                valid_until=normalise_time(str(f["valid_until"])) if f.get("valid_until") else None,
+                status=str(f.get("status", "active")),
+                closed_reason=f.get("closed_reason"),
+                source_episode_id=id_map.get(int(source)) if source is not None else None,
             )
+            identity = (new.subject, new.predicate, new.object, new.valid_from, new.valid_until, new.status)
+            if identity in existing:
+                summary.facts_skipped += 1
+                continue
+            existing.add(identity)
+            await self.documents.insert_fact(new)
             summary.facts += 1
-        if facts:
+        if summary.facts:
             await self.documents.bump_revision(space)
         return summary
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _fact_identity(fact: Fact) -> tuple:
+    return (fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until, fact.status)
 
 
 def _covers(fact: Fact, instant) -> bool:

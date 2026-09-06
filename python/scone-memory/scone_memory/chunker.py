@@ -1,10 +1,12 @@
 """Split an episode into spans without rewriting a byte of it.
 
-Each chunk is ``(start, end)`` into the original string, so
-``content[start:end]`` reproduces it exactly. Cuts prefer paragraph
-breaks, then sentence ends, then whitespace, and only fall back to a
-hard cut inside a word when a single token is longer than the target.
-Short episodes are one chunk; a chunk is never empty.
+``chunk_spans`` works in code points, which is what Python slices. The
+shared specification (rule 1.2) defines stored offsets as UTF-8 byte
+offsets, half-open, so that a span means the same thing to the Rust
+product; ``byte_spans`` converts. Cuts prefer paragraph breaks, then
+sentence ends, then whitespace, and only fall back to a hard cut inside
+a word when a single token is longer than the target. Short episodes
+are one chunk; a chunk is never empty.
 """
 
 from __future__ import annotations
@@ -45,6 +47,17 @@ def chunk_spans(content: str, target: int = DEFAULT_TARGET) -> list[Span]:
         spans.append(Span(start, cut))
         start = cut
     return _merge_tail(spans, text)
+
+
+def byte_spans(content: str, spans: list[Span]) -> list[Span]:
+    """Code-point spans to UTF-8 byte spans over the same content, so
+    that ``content.encode()[start:end].decode()`` equals the chunk text."""
+    if content.isascii():
+        return spans
+    offsets = [0]
+    for ch in content:
+        offsets.append(offsets[-1] + len(ch.encode()))
+    return [Span(offsets[s.start], offsets[s.end]) for s in spans]
 
 
 def _best_cut(text: str, start: int, limit: int) -> int:
