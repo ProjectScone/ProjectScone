@@ -27,7 +27,7 @@ def main(settings: Optional[Settings] = None) -> None:
     # without a prompt. Several keys: the console asks which.
     only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
     worker = build_worker(engine, settings, settings.keys.values())
-    app = create_app(engine, settings.keys, console_key=only_key, worker=worker)
+    app = create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages)
     print(
         f"scone-memory on http://{settings.host}:{settings.port} "
         f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "

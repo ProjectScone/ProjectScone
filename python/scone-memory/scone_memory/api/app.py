@@ -80,13 +80,20 @@ PLAYGROUND = Path(__file__).with_name("playground.html")
 
 
 def create_app(
-    engine: MemoryEngine, keys: Mapping[str, str], console: bool = True, console_key: Optional[str] = None, worker=None
+    engine: MemoryEngine,
+    keys: Mapping[str, str],
+    console: bool = True,
+    console_key: Optional[str] = None,
+    worker=None,
+    reload_pages: bool = False,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
     no baked key the page asks for one and keeps it in the tab.
     ``worker`` is a ConsolidationWorker started with the app and stopped
-    with it; None means no distiller runs on this server."""
+    with it; None means no distiller runs on this server. ``reload_pages``
+    re-reads the console and playground files on every request, for
+    editing them with the server running; off in normal use."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -134,26 +141,31 @@ def create_app(
         return {"ok": True}
 
     if console:
-        page = CONSOLE.read_text(encoding="utf-8")
-        if console_key:
-            page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
+        def render_console() -> str:
+            page = CONSOLE.read_text(encoding="utf-8")
+            if console_key:
+                page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
+            return page
+
+        def render_playground() -> str:
+            # Shared asset owned in ui/playground.html and copied here by
+            # scripts/sync-playground.cjs; same key placeholder as the console.
+            page = PLAYGROUND.read_text(encoding="utf-8")
+            return page.replace("__SCONE_TOKEN__", console_key) if console_key else page
+
+        console_html = None if reload_pages else render_console()
+        playground_html = None if (reload_pages or not PLAYGROUND.exists()) else render_playground()
 
         @app.get("/", response_class=HTMLResponse)
         async def console_page() -> str:
-            return page
+            return console_html if console_html is not None else render_console()
 
         if PLAYGROUND.exists():
-            # Shared asset owned in ui/playground.html and copied here by
-            # scripts/sync-playground.cjs; same key placeholder as the console.
-            playground = PLAYGROUND.read_text(encoding="utf-8")
-            if console_key:
-                playground = playground.replace("__SCONE_TOKEN__", console_key)
-
             # GET and HEAD: the console probes with HEAD to decide whether
             # to show its Playground link.
             @app.api_route("/playground", methods=["GET", "HEAD"], response_class=HTMLResponse)
             async def playground_page() -> str:
-                return playground
+                return playground_html if playground_html is not None else render_playground()
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:

@@ -176,3 +176,19 @@ def test_playground_is_served_with_the_same_key_handling():
     with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
         assert "__SCONE_TOKEN__" in c.get("/playground").text  # several keys: the page asks
         assert c.head("/playground").status_code == 200, "the console probes with HEAD"
+
+
+def test_reload_pages_serves_edits_without_a_restart(tmp_path, monkeypatch):
+    import scone_memory.api.app as app_module
+
+    fake = tmp_path / "playground.html"
+    fake.write_text("<html>v1 __SCONE_TOKEN__</html>", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PLAYGROUND", fake)
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo", reload_pages=True)) as c:
+        assert c.get("/playground").text == "<html>v1 solo</html>"
+        fake.write_text("<html>v2 __SCONE_TOKEN__</html>", encoding="utf-8")
+        assert c.get("/playground").text == "<html>v2 solo</html>", "development mode re-reads the file"
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        fake.write_text("<html>v3 __SCONE_TOKEN__</html>", encoding="utf-8")
+        assert c.get("/playground").text == "<html>v2 solo</html>", "normal mode reads once at startup"
