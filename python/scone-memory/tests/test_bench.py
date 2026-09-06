@@ -130,7 +130,7 @@ class Stub:
     async def remember_many(self, space, records):
         return []
 
-    async def recall(self, space, question, limit):
+    async def recall(self, space, question, limit, history=False):
         from scone_memory.models import RecallResult
 
         top = self.tops[question]
@@ -178,7 +178,7 @@ async def test_the_sweep_is_absent_when_no_abstention_item_ran(tmp_path):
 
 async def test_a_degraded_vector_lane_is_outside_the_sweep(tmp_path):
     class Degraded(Stub):
-        async def recall(self, space, question, limit):
+        async def recall(self, space, question, limit, history=False):
             r = await super().recall(space, question, limit)
             if question == "c?":
                 r.degraded = ["vectors: RuntimeError: offline"]
@@ -191,3 +191,32 @@ async def test_a_degraded_vector_lane_is_outside_the_sweep(tmp_path):
     sweep = report.abstention
     assert sweep["no_evidence_n"] == 1, "c saw no similarity because its lane failed, not because the evidence was weak"
     assert sweep["abstain_rate"][0.3] == 1.0
+
+
+async def test_history_is_passed_through_and_counted_honestly(tmp_path):
+    """Experiment 3 needs the runner to ask for history; the report must
+    say when there were no facts to show rather than report a zero as a
+    result."""
+    seen: list[bool] = []
+
+    class Recording(Stub):
+        async def recall(self, space, question, limit, history=False):
+            seen.append(history)
+            r = await super().recall(space, question, limit)
+            if history and question == "a?":
+                from scone_memory.models import Fact
+
+                f = Fact(fact_id=1, space=space, subject="s", predicate="p", object="o", confidence=1.0, valid_from="2020-01-01T00:00:00.000Z", status="active")
+                r.facts = [f]
+                r.history = [f.model_copy(update={"fact_id": 2, "status": "closed"})]
+            return r
+
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(sweep_items()[:2]))
+    plain = await run(lambda: Recording({"a?": 0.8, "b?": 0.4}), load_items(path), ks=(1,))
+    assert seen == [False, False] and not plain.history and (plain.items_with_facts, plain.items_with_history) == (0, 0)
+    asked = await run(lambda: Recording({"a?": 0.8, "b?": 0.4}), load_items(path), ks=(1,), history=True)
+    assert seen[2:] == [True, True] and asked.history
+    assert (asked.items_with_facts, asked.items_with_history) == (1, 1)
+    by_id = {r.question_id: r for r in asked.results}
+    assert (by_id["a"].facts, by_id["a"].history_facts, by_id["b"].facts) == (1, 1, 0)

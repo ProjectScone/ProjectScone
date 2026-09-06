@@ -77,6 +77,11 @@ class ItemResult:
     #: verdict when it had a floor (None when it had none or could not judge).
     top_similarity: Optional[float] = None
     low_confidence: Optional[bool] = None
+    #: Experiment 3: facts that held at the question date, and the closed
+    #: chain behind them when the run asked for history. Both are zero
+    #: unless something distilled facts into the item's space first.
+    facts: int = 0
+    history_facts: int = 0
 
     def any_at(self, k: int) -> bool:
         seen = set(self.retrieved_sessions[:k])
@@ -145,6 +150,10 @@ class RunReport:
     #: The floor the engines ran with, if any, and how many items each verdict got.
     similarity_floor: Optional[float] = None
     low_confidence_counts: dict[str, int] = field(default_factory=dict)
+    #: Experiment 3: whether history was asked for, and how many items got any facts / any history back.
+    history: bool = False
+    items_with_facts: int = 0
+    items_with_history: int = 0
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -169,10 +178,13 @@ async def run(
     include_abstention: bool = False,
     dataset: str = "",
     progress: Optional[Callable[[int, int], None]] = None,
+    history: bool = False,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
-    recall limit and defaults to max(ks)."""
+    recall limit and defaults to max(ks). ``history`` passes
+    ``history=True`` to every recall (experiment 3) and counts what came
+    back; it changes nothing unless facts exist in the item's space."""
     import asyncio
     from datetime import datetime, timezone
 
@@ -204,13 +216,15 @@ async def run(
                 ))
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
-            pack = await engine.recall(space, item.question, limit=k_max)
+            pack = await engine.recall(space, item.question, limit=k_max, history=history)
             result.recall_ms = round((time.perf_counter() - t0) * 1000, 3)
             result.retrieved_sessions = [i.source or "" for i in pack.items]
             result.returned_bytes = pack.returned_bytes
             result.degraded = list(pack.degraded)
             result.top_similarity = pack.top_similarity
             result.low_confidence = pack.low_confidence
+            result.facts = len(pack.facts)
+            result.history_facts = len(pack.history)
         except Exception as e:  # noqa: BLE001 - one bad item must not lose the run; it is counted
             result.error = f"{type(e).__name__}: {e}"
         results.append(result)
@@ -246,5 +260,6 @@ async def run(
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         results=results, abstention=abstention_sweep(results), similarity_floor=floor, low_confidence_counts=verdicts,
+        history=history, items_with_facts=sum(1 for r in results if r.facts), items_with_history=sum(1 for r in results if r.history_facts),
         **engine_meta,
     )

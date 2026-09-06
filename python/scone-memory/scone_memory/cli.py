@@ -123,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--first", type=int, help="only the first N items")
     p.add_argument("--stratified", type=int, help="N items per question type, in file order")
     p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
+    p.add_argument("--history", action="store_true", help="ask every recall for the closed chain behind matched facts (experiment 3)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -330,7 +331,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
         report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
-                                 dataset=str(args.dataset), progress=progress)
+                                 dataset=str(args.dataset), progress=progress, history=args.history)
         if not args.json:
             print("", file=sys.stderr)
         if args.out:
@@ -346,6 +347,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                   f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
             for qt, row in report.by_type.items():
                 print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+            if report.history:
+                print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
+                      + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
             if report.similarity_floor is not None:
                 print(f"  similarity floor {report.similarity_floor}: " + ", ".join(f"{k} {v}" for k, v in sorted(report.low_confidence_counts.items())), file=out)
             sweep = report.abstention
