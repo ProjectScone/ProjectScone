@@ -371,3 +371,73 @@ async fn recalled_memory_carries_its_date() {
     );
     client.cancel().await.unwrap();
 }
+
+/// Date arithmetic reaches the agent through memory_recall (E28 adoption,
+/// second surface). The planner grounds events by similarity, so this
+/// needs the real embedder, as the temporal operator tests do; with the
+/// hash embedder every candidate sits below the anchor floor and the
+/// planner would decline for the wrong reason.
+#[tokio::test]
+async fn recall_computes_date_arithmetic_and_shows_its_working() {
+    use scone_core::embed::OnnxEmbedder;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".scone");
+    let mut e = Engine::open(dir.path(), Box::new(OnnxEmbedder::new(&cache).unwrap())).unwrap();
+    let space = auth::resolve(&mut e, "agent", true).unwrap();
+    e.import_episode(
+        &space,
+        "note",
+        "attended the Maundy Thursday service at St Mark's this evening",
+        None,
+        Some("2024-03-28T19:00:00.000Z"),
+    )
+    .unwrap();
+    e.import_episode(
+        &space,
+        "note",
+        "the staging db password rotates monthly",
+        None,
+        Some("2024-03-30T09:00:00.000Z"),
+    )
+    .unwrap();
+    let client = client_for(SconeMcp::new(e, "agent")).await;
+    let recalled = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_recall");
+            p.arguments = serde_json::json!({
+                "query": "How many days ago did I attend the Maundy Thursday service?",
+                "as_of": "2024-04-04T12:00:00.000Z",
+                "include_profile": false
+            })
+            .as_object()
+            .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    let text = text_of(&recalled);
+    assert!(
+        text.starts_with("computed: 7 days\nderived from: "),
+        "{text}"
+    );
+    assert!(
+        text.contains("2024-03-28"),
+        "the derivation names the anchor date: {text}"
+    );
+    assert!(text.contains("memory ["), "the pack still follows: {text}");
+
+    // A question the planner cannot read falls through to the plain pack.
+    let plain = client
+        .call_tool({
+            let mut p = CallToolRequestParams::new("memory_recall");
+            p.arguments =
+                serde_json::json!({"query": "staging db password", "include_profile": false})
+                    .as_object()
+                    .cloned();
+            p
+        })
+        .await
+        .unwrap();
+    assert!(!text_of(&plain).contains("computed:"), "{plain:?}");
+    client.cancel().await.unwrap();
+}

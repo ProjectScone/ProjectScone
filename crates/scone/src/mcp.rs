@@ -206,6 +206,17 @@ impl SconeMcp {
         let limit = p.limit.unwrap_or(5).clamp(1, MAX_LIMIT);
         let include_profile = p.include_profile.unwrap_or(true);
         let result = self.with_space(&p.space, |engine, space| {
+            // Date arithmetic is computed, not generated, on this surface
+            // too: measured on 40 temporal questions at temperature 0 the
+            // reader scored 47.5% with computed answers against 37.5%
+            // without, and where the planner answers at all it gained
+            // three items in seventeen (E28). The planner declines anything
+            // it cannot read confidently, so most queries never see it.
+            let now = p
+                .as_of
+                .clone()
+                .unwrap_or_else(scone_core::temporal::now_rfc3339);
+            let computed = engine.answer_temporally(space, &p.query, Some(&now))?;
             let profile = if include_profile {
                 Some(engine.profile(space, 5)?)
             } else {
@@ -223,11 +234,17 @@ impl SconeMcp {
                     tags: p.tags.clone().unwrap_or_default(),
                 },
             )?;
-            Ok((profile, pack))
+            Ok((computed, profile, pack))
         });
         Ok(match result {
-            Ok((profile, pack)) => {
+            Ok((computed, profile, pack)) => {
                 let mut out = String::new();
+                if let Some(answer) = computed {
+                    out.push_str(&format!(
+                        "computed: {}\nderived from: {}\n",
+                        answer.value, answer.derivation
+                    ));
+                }
                 if let Some(profile) = profile {
                     if !profile.static_facts.is_empty() {
                         out.push_str(
