@@ -477,9 +477,10 @@ rejected; cancel or close from the caller instead. Observer failure or interrupt
 observation closes the conversation, without retrying uncertain consumer effects.
 Already displayed text cannot be retracted by the runtime.
 
-This native callback does not enable streaming in the HTTP service or browser;
-those still advertise `streaming: false`. Voice, video and delivery/replay receipts
-require their own transports and contracts.
+The native callback alone does not enable streaming in a custom HTTP service.
+The explicit service opt-in below connects it to SSE; browser rendering remains
+separate work. Voice, video and durable chunk delivery/replay receipts require
+their own transports and contracts.
 
 Both `PipecatTextConversation` and `SconeMemoryContextProcessor` accept `where`,
 `kind`, `source_prefix`, `since`, and `until`. They validate and copy these filters
@@ -588,8 +589,9 @@ and the same host/port environment settings as `serve`. Stop the other server or
 choose a different `SCONE_PORT` before launching. This command does not start a
 consolidation worker. It builds and serves native memory on one event loop and
 closes owned backends after shutdown. Journal locking requires Linux/macOS and a
-local filesystem. Voice, video, streaming replies and live-provider certification
-remain separate work; the existing `serve` command is unchanged.
+local filesystem. The configured Pipecat launcher enables public-text SSE;
+history-only mode does not. Voice, video, browser stream rendering and live-provider
+certification remain separate work; the existing `serve` command is unchanged.
 
 ```python
 from scone_memory.api.conversations import create_conversation_app
@@ -601,8 +603,63 @@ app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
     lambda space, sid: PipecatTextConversation(memory, space, sid, model_factory),
     console=True,  # optional same-origin packaged React workspace; no keys embedded
+    public_text_streaming=True,  # known-compatible native runtime; default is False
 )
 ```
+
+#### Public-text stream (optional)
+
+`public_text_streaming=True` opts every configured runtime into
+`reply(text, on_text=async_callback)`. Custom factories default to off and must
+explicitly implement that public-text contract. The Pipecat CLI launcher enables
+it for its known runtime. Capabilities advertise `streaming: true` and
+`text_stream: {transport: "sse", replay: "active_window", max_bytes: 65536,
+max_chunks: 256}`. `reply_transport: "poll"` still describes final receipts.
+
+After the ordinary idempotent turn POST, open
+`GET /v1/conversations/{sid}/turns/{request_id}/stream` with the **Authorization
+bearer header**. Use authenticated fetch or an HTTP client; do not put a key in
+the URL. The response is `text/event-stream`, `Cache-Control: no-store`, with
+proxy buffering disabled. JSON `data` frames preserve literal text safely:
+
+| Event | Data | Meaning |
+| --- | --- | --- |
+| `text` | `{sequence, text, provisional: true}` | Public chunk, with matching SSE `id`; not a token or saved-reply receipt. |
+| `gap` | `{after, next_sequence}` | Earlier chunks left the bounded window. Do not synthesize the missing text. |
+| `terminal` | `{request_id, status, read_receipt: true}` | Fetch the existing turn receipt for final status and available saved text. |
+| `end` | `{request_id, reason, read_receipt: true}` | Window unavailable, service shutting down, or session deleted; not proof of completion. |
+
+Reconnect with `after=<last-sequence>` or `Last-Event-ID`; both must agree if
+provided. The cursor is a nonnegative signed64-bit integer scoped to this turn.
+Invalid, unknown or duplicate query fields return 422; a cursor ahead of an active
+window returns 409. Missing or cross-space records return 404, missing auth 401,
+and a disabled stream 501. Reads never start or retry the model. A disconnected
+reader does not cancel the turn; use the existing cancel/stop commands.
+
+Only the most recent 256 chunks and 65,536 UTF-8 bytes of an **active** turn are held.
+Oversized single chunks fail the turn instead of being silently truncated.
+Invalid observation is latched even if a custom runtime catches the callback
+error. Custom runtime side effects are not rolled back; configure capture so
+it does not persist unfinished replies as complete.
+Readers have no private chunk queue. A 10-second comment heartbeat keeps idle
+connections observable. Terminal/cancel/stop clears provisional text; reconnects
+after completion or restart yield receipt information, not reconstructed chunks.
+Final text is read from the retained episode, so forgetting it cannot expose a
+stale streaming copy. Text already sent to clients cannot be revoked.
+
+This window is not a durable event journal or delivery acknowledgement. It does
+not bound upstream Pipecat/provider queues; connection counts, rates and slow
+client limits belong in the serving ASGI/proxy configuration. The React consumer
+is separate work; enabling the API does not change the deployed browser bundle.
+
+The owned CLI server calls `app.state.begin_conversation_shutdown()` **before**
+draining HTTP tasks, so idle streams receive `end: service_shutdown` and close.
+It also sets a 5-second graceful HTTP-drain limit for stalled sends. Custom hosts
+must call that hook on the service event loop before waiting for open responses,
+and configure their own bounded drain policy. Lifespan cleanup alone runs too
+late on servers that wait for SSE connections first. The hook closes stream
+windows and new-command admission; lifespan still owns runtime cleanup. This is
+cooperative cleanup, not a guarantee that an external provider has stopped.
 
 To let an API caller narrow recall for each session, opt in explicitly:
 

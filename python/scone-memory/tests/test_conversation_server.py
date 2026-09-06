@@ -198,6 +198,7 @@ def test_history_only_launch_has_real_memory_and_opt_in_pages(launched):
     with closing(client):
         cap = client.get("/v1/conversations/capabilities").json()
         assert cap["text_configured"] is False and cap["voice"] is False
+        assert cap["streaming"] is False
         assert client.get("/conversations").status_code == 404
         assert client.post("/v1/conversations", json={"request_id": "no-model", "capture": True}).status_code == 503
         added = client.post("/v1/episodes", json={"content": "Launcher retained source"})
@@ -212,6 +213,7 @@ def test_configured_launcher_runs_native_pipecat_and_serves_keyless_pages(launch
         page = client.get("/conversations")
         assert page.status_code == 200 and "launcher-alpha" not in page.text
         assert client.get("/v1/conversations/capabilities").json()["recall_scope"] is True
+        assert client.get("/v1/conversations/capabilities").json()["streaming"] is True
         session = client.post("/v1/conversations", json={"request_id": "new", "capture": True, "recall_scope": {"kind": "file"}}).json()
         route = "/v1/conversations/" + session["session_id"]
         assert client.post(route + "/turns", json={"request_id": "turn", "text": "Hello", "expected_revision": session["revision"]}).status_code == 202

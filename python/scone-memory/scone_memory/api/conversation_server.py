@@ -60,6 +60,20 @@ async def close_engine(engine):
         raise RuntimeError("conversation server backend cleanup failed")
 
 
+def create_server(app, *, host: str, port: int):
+    """Notify stream readers before Uvicorn waits for open HTTP responses."""
+    import uvicorn
+
+    class ConversationServer(uvicorn.Server):
+        async def shutdown(self, sockets=None):
+            app.state.begin_conversation_shutdown()
+            await super().shutdown(sockets=sockets)
+
+    return ConversationServer(uvicorn.Config(app, host=host, port=port,
+                                            log_level="warning", access_log=False,
+                                            timeout_graceful_shutdown=5))
+
+
 def main(settings: Settings, *, journal: str, model_factory: str | None = None,
          console: bool = False) -> int:
     if not settings.keys or any(not isinstance(key, str) or not key.strip() for key in settings.keys):
@@ -103,9 +117,9 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None,
                 def scoped(space, sid, scope):
                     return runtime_type(engine, space, sid, factory, **scope.kwargs())
             app = create_conversation_app(engine, settings.keys, path, None,
-                                          scoped_runtime_factory=scoped, console=console)
-            server = uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port,
-                                                   log_level="warning", access_log=False))
+                                          scoped_runtime_factory=scoped, console=console,
+                                          public_text_streaming=scoped is not None)
+            server = create_server(app, host=settings.host, port=settings.port)
             await server.serve()
             if not server.started:
                 raise RuntimeError("conversation server did not start")

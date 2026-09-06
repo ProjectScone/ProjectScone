@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..engine import check_space, normalise_time
@@ -29,6 +29,7 @@ from ..errors import Conflict, InvalidInput, NotFound
 from ..session_journal import SessionJournal
 from ..recall_scope import RecallScope
 from .app import PLAYGROUND, create_app, episode_json
+from .text_stream import MAX_BYTES, MAX_CHUNKS, TextWindow, sse
 
 
 class Command(BaseModel):
@@ -60,7 +61,7 @@ class OwnedSession:
 
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
-                            max_sessions=100, max_turns=100, console=False):
+                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -71,6 +72,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     scoped_runtime_factory(space, sid, scope) explicitly opts into fixed recall
     constraints. It receives an immutable RecallScope; pass scope.kwargs() to
     the native runtime. When configured it takes precedence for every new session.
+    public_text_streaming=True requires every runtime to accept an async on_text
+    reply keyword delivering public chunks. Defaults off for custom runtimes.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -84,9 +87,26 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("runtime_factory must be callable or None")
     if scoped_runtime_factory is not None and not callable(scoped_runtime_factory):
         raise ValueError("scoped_runtime_factory must be callable or None")
+    if type(public_text_streaming) is not bool or (public_text_streaming and runtime_factory is None and scoped_runtime_factory is None):
+        raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
     creates: dict[tuple[str, str], str] = {}
     journal = None
+    shutting_down = False
+
+    def text_window(entry, request_id):
+        return entry.turns.get(request_id, {}).get("stream") if entry else None
+
+    def end_text(entry):
+        window = text_window(entry, entry.active_id)
+        if window is not None:
+            window.finish()
+
+    def begin_shutdown():
+        nonlocal shutting_down
+        shutting_down = True
+        for entry in owned.values():
+            end_text(entry)
 
     async def close_owned(entry):
         if entry.active is not None and not entry.active.done():
@@ -96,7 +116,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     @asynccontextmanager
     async def lifespan(_app):
-        nonlocal journal
+        nonlocal journal, shutting_down
+        shutting_down = False
         try:
             import fcntl
         except ImportError as exc:
@@ -136,6 +157,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                     after = page["next_after"]
             yield
         finally:
+            begin_shutdown()
             cleanup_errors = []
             try:
                 if journal is not None:
@@ -168,12 +190,17 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 raise RuntimeError("conversation service cleanup failed") from None
 
     app = FastAPI(title="scone-conversations", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # Hosts must notify before draining HTTP tasks, not only at lifespan end:
+    # an idle SSE response is itself one of the tasks they would wait for.
+    app.state.begin_conversation_shutdown = begin_shutdown
 
     def space_for(request: Request):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
             for key, space in keys.items():
                 if hmac.compare_digest(token.encode(), key.encode()):
+                    if shutting_down and request.method == "POST":
+                        raise HTTPException(503, "conversation service is shutting down")
                     return space
         raise HTTPException(401, "valid bearer key required")
 
@@ -225,7 +252,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1, "text_configured": runtime_factory is not None or scoped_runtime_factory is not None,
                 "recall_scope": scoped_runtime_factory is not None,
-                "voice": False, "video": False, "streaming": False,
+                "voice": False, "video": False, "streaming": public_text_streaming,
+                "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
+                                  "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
                 "session_deletion": True,
                 "turn_cancellation": True,
@@ -238,6 +267,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     @app.post("/v1/conversations")
     async def create(body: Create, space=Depends(space_for)):
+        if shutting_down:
+            raise HTTPException(503, "conversation service is shutting down")
         if not body.capture:
             raise HTTPException(422, "this runtime requires explicit transcript capture consent")
         scope = RecallScope.from_mapping(body.recall_scope)
@@ -366,12 +397,21 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     async def run_turn(space, sid, entry, request_id, text):
         receipt = entry.turns[request_id]["receipt"]
+        window = text_window(entry, request_id)
+
+        async def observe(chunk):
+            if shutting_down or receipt["status"] != "pending" or journal.get(space, sid)["state"] != "running":
+                raise RuntimeError("text observation is closed")
+            window.append(chunk)
+
         try:
-            result = await entry.runtime.reply(text)
+            result = await entry.runtime.reply(text, on_text=observe) if window is not None else await entry.runtime.reply(text)
             if receipt.get("status") == "cancelled":
                 after_cancel(space, sid, entry)
                 return  # a late result must not overwrite the terminal decision
-            if journal.get(space, sid)["state"] != "running":
+            if window is not None and window.failed:
+                raise RuntimeError("public text observation failed")
+            if shutting_down or journal.get(space, sid)["state"] != "running":
                 receipt["status"] = "interrupted"
                 settle(space, sid, request_id, "interrupted")
             else:
@@ -396,6 +436,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if receipt.get("status") == "cancelled":
                 after_cancel(space, sid, entry, failed=True)
                 return
+            if shutting_down:
+                receipt["status"] = "interrupted"
+                settle(space, sid, request_id, "interrupted")
+                return
             receipt.update(status="failed", error="conversation turn failed; do not automatically retry")
             settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)
@@ -403,10 +447,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 journal.transition(space, sid, "failure:" + uuid4().hex, "fail", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
         finally:
+            if window is not None:
+                window.finish()
             entry.active_id = None
 
     @app.post("/v1/conversations/{sid}/turns", status_code=202)
     async def turn(sid: str, body: Turn, space=Depends(space_for)):
+        if shutting_down:
+            raise HTTPException(503, "conversation service is shutting down")
         current = journal.get(space, sid)
         entry = owned.get((space, sid))
         signature = body.model_dump()
@@ -429,7 +477,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         # Durable half: recorded before the provider is asked anything, so a
         # process that dies mid-turn leaves a receipt rather than a gap.
         journal.start_turn(space, sid, body.request_id, signature)
-        entry.turns[body.request_id] = {"signature": signature, "receipt": receipt}
+        entry.turns[body.request_id] = {"signature": signature, "receipt": receipt,
+                                      "stream": TextWindow() if public_text_streaming else None}
         entry.active_id = body.request_id
         entry.active = asyncio.create_task(run_turn(space, sid, entry, body.request_id, body.text))
         return await resolved(space, journal.turn(space, sid, body.request_id), entry)
@@ -450,6 +499,62 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         # The journal answers when this process does not hold the turn, so
         # a 404 means only what it should: nobody sent that request.
         return await resolved(space, journal.turn(space, sid, request_id), entry)
+
+    @app.get("/v1/conversations/{sid}/turns/{request_id}/stream")
+    async def stream(sid: str, request_id: str, request: Request, space=Depends(space_for)):
+        journal.get(space, sid)
+        journal.turn(space, sid, request_id)
+        if not public_text_streaming:
+            raise HTTPException(501, "public text streaming is not configured")
+        values = request.query_params.getlist("after")
+        previous = request.headers.get("last-event-id")
+        raw = values[0] if values else (previous if previous is not None else "0")
+        if (set(request.query_params) - {"after"} or len(values) > 1
+                or not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or int(raw) > 2**63 - 1
+                or (values and previous is not None and previous != raw)):
+            raise HTTPException(422, "invalid stream cursor")
+        cursor = int(raw)
+        entry = owned.get((space, sid))
+        window = text_window(entry, request_id)
+        if window is not None and not window.closed and cursor > window.last_sequence:
+            raise HTTPException(409, "stream cursor is ahead of observed text")
+
+        async def output():
+            after = cursor
+            while True:
+                if shutting_down or journal is None:
+                    yield sse("end", {"request_id": request_id, "reason": "service_shutdown", "read_receipt": True})
+                    return
+                try:
+                    current = journal.get(space, sid)
+                    kept = journal.turn(space, sid, request_id)
+                except NotFound:
+                    yield sse("end", {"request_id": request_id, "reason": "deleted", "read_receipt": True})
+                    return
+                live = entry.turns.get(request_id, {}).get("receipt") if entry else None
+                status = live["status"] if live else ("pending" if kept["status"] == "accepted" else kept["status"])
+                if status != "pending":
+                    yield sse("terminal", {"request_id": request_id, "status": status, "read_receipt": True})
+                    return
+                if current["state"] != "running" or window is None or window.closed:
+                    yield sse("end", {"request_id": request_id, "reason": "window_unavailable", "read_receipt": True})
+                    return
+                gap, chunk = window.next_after(after)
+                if gap is not None:
+                    yield sse("gap", {"after": after, "next_sequence": gap})
+                    after = gap - 1
+                elif chunk is not None:
+                    after, text = chunk
+                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
+                else:
+                    try:
+                        await asyncio.wait_for(window.wait_after(after), 10)
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+
+        return StreamingResponse(output(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
+        })
 
     @app.delete("/v1/conversations/{sid}", status_code=204)
     async def delete(sid: str, space=Depends(space_for)):
@@ -477,7 +582,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         # A receipt names an episode the metadata may not: identical replies
         # deduplicate, so one episode can be two conversations' transcript.
         for episode_id in sorted(held - journal.episodes_held_elsewhere(space, sid, held)):
-            await engine.forget(space, episode_id)
+            try:
+                await engine.forget(space, episode_id)
+            except NotFound:
+                pass  # an independently forgotten reply is already removed
         journal.delete_session(space, sid)
         return Response(status_code=204)
 
@@ -502,6 +610,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         entry = owned.get((space, sid))
         if entry is not None and request_id in entry.turns:
             entry.turns[request_id]["receipt"]["status"] = "cancelled"
+            window = text_window(entry, request_id)
+            if window is not None:
+                window.finish()
         if entry is not None and entry.active_id == request_id and entry.active is not None:
             entry.active.cancel()
             await asyncio.gather(entry.active, return_exceptions=True)
@@ -524,6 +635,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             raise Conflict("runtime not owned by this process", current["revision"])
         entry.stops[body.request_id] = signature
         stopping = journal.transition(space, sid, "stop:" + uuid4().hex, "stop", current["revision"])
+        end_text(entry)
         # The service owns termination, not the HTTP request that initiated it.
         # Keep a strong reference so disconnects and matching retries cannot
         # abandon cleanup or start a second close operation.
