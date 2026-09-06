@@ -254,6 +254,43 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return {"episodes": [episode_json(episode) for episode in episodes[:200]],
                 "has_more": len(episodes) > 200}
 
+    async def resolved(space, kept, entry):
+        """One receipt shape, live or rehydrated, with the reply's text
+        read from the episode that holds it every time.
+
+        The text is never served from a remembered copy: a process still
+        holding one must stop serving it the moment the episode is
+        forgotten, or "no stale transcript copies" would hold only across
+        a restart, which is the easy half. A completed turn whose episode
+        is gone is terminal, not failed, and must not invite a resend; an
+        episode that merely could not be read says so, because calling a
+        storage failure "forgotten" would be a deletion nobody performed.
+        """
+        live = entry.turns.get(kept["request_id"], {}).get("receipt") if entry else None
+        status = "pending" if kept["status"] == "accepted" else kept["status"]
+        receipt = {"request_id": kept["request_id"], "status": status,
+                   "result": None, "result_state": None, "error": kept["error"]}
+        if live is not None:
+            receipt = {**live, "result_state": None, "error": live.get("error", kept["error"])}
+            receipt.setdefault("result", None)
+            status = receipt["status"]
+        if status == "pending":
+            return receipt
+        episode_id = kept["episode_id"]
+        if episode_id is None and isinstance(receipt.get("result"), dict):
+            episode_id = receipt["result"].get("assistant_episode_id")
+        if status != "completed" or episode_id is None:
+            return {**receipt, "result": None, "result_state": "unavailable"}
+        try:
+            episode = await engine.episode(space, episode_id)
+        except NotFound:
+            return {**receipt, "result": None, "result_state": "forgotten"}
+        except Exception:
+            return {**receipt, "result": None, "result_state": "unreadable"}
+        result = dict(receipt.get("result") or {})
+        result.update(text=episode.content, assistant_episode_id=episode_id)
+        return {**receipt, "result": result, "result_state": "available"}
+
     def settle(space, sid, request_id, status, episode_id=None, error=None):
         """Record a turn's outcome durably, and never let that recording
         be the thing that breaks a turn: the in-process receipt is still
@@ -303,7 +340,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
             previous = entry.turns[body.request_id]
             if previous["signature"] != signature:
                 raise Conflict("turn request changed", current["revision"])
-            return previous["receipt"]
+            # One receipt shape everywhere: a retry answers exactly what a
+            # read of the same turn answers.
+            return await resolved(space, journal.turn(space, sid, body.request_id), entry)
         if current["state"] != "running" or entry is None:
             raise Conflict("conversation is not running in this process", current["revision"])
         if body.expected_revision != current["revision"] or entry.active_id is not None:
@@ -319,15 +358,24 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         entry.turns[body.request_id] = {"signature": signature, "receipt": receipt}
         entry.active_id = body.request_id
         entry.active = asyncio.create_task(run_turn(space, sid, entry, body.request_id, body.text))
-        return receipt
+        return await resolved(space, journal.turn(space, sid, body.request_id), entry)
+
+    @app.get("/v1/conversations/{sid}/turns")
+    async def turn_list(sid: str, after: str = "", limit: int = 100, space=Depends(space_for)):
+        """Which turns this session has, so a reloaded page can find its
+        receipts without knowing their request ids. Bounded and scoped
+        like every other read here."""
+        page = journal.turns(space, sid, after=after, limit=limit)
+        entry = owned.get((space, sid))
+        return {**page, "turns": [await resolved(space, kept, entry) for kept in page["turns"]]}
 
     @app.get("/v1/conversations/{sid}/turns/{request_id}")
     async def result(sid: str, request_id: str, space=Depends(space_for)):
         journal.get(space, sid)
         entry = owned.get((space, sid))
-        if entry is None or request_id not in entry.turns:
-            raise NotFound("turn receipt unavailable in this process")
-        return entry.turns[request_id]["receipt"]
+        # The journal answers when this process does not hold the turn, so
+        # a 404 means only what it should: nobody sent that request.
+        return await resolved(space, journal.turn(space, sid, request_id), entry)
 
     @app.post("/v1/conversations/{sid}/stop")
     async def stop(sid: str, body: Stop, space=Depends(space_for)):

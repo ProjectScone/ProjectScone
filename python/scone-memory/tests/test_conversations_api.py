@@ -156,7 +156,13 @@ async def test_busy_stop_and_restart_never_resubmit_model_work(engine, tmp_path)
     async with client_for(restarted) as client:
         assert (await client.get(url)).json()["state"] == "ended"
         assert (await client.post(url + "/turns", json=body)).status_code == 409
-        assert (await client.get(url + "/turns/turn")).status_code == 404
+        # Agreed with Opus in memory/COORDINATION-FABLE.md (14:40, accepted
+        # 14:24): a turn this process never ran is answered from the journal
+        # rather than 404'd, because 404 conflated "nobody sent that" with
+        # "the process that ran it is gone". 404 still means the first one.
+        recovered = (await client.get(url + "/turns/turn")).json()
+        assert recovered["status"] == "interrupted" and recovered["result"] is None
+        assert (await client.get(url + "/turns/never-sent")).status_code == 404
         assert not new_runtimes
 
 
