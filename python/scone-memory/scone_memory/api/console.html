@@ -254,21 +254,22 @@ async function status() {
 
 const views = { search, ledger, scopes, status };
 
-document.querySelectorAll("nav button").forEach((b) => {
-  b.onclick = () => {
-    view = b.dataset.view;
-    document.querySelectorAll("nav button").forEach((o) => o.setAttribute("aria-current", String(o === b)));
-    controls.style.display = view === "search" ? "block" : "none";
-    show('<p class="empty">Loading…</p>');
-    views[view]();
-  };
-});
+function activate(name) {
+  if (!views[name]) return;
+  view = name;
+  document.querySelectorAll("nav button").forEach((o) => o.setAttribute("aria-current", String(o.dataset.view === name)));
+  controls.style.display = name === "search" ? "block" : "none";
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  show('<p class="empty">Loading…</p>');
+  views[name]();
+}
+document.querySelectorAll("nav button").forEach((b) => { b.onclick = () => activate(b.dataset.view); });
 
 out.addEventListener("click", async (e) => {
   const chip = e.target.closest(".scope");
   if (chip) {
     document.getElementById("where").value = chip.dataset.where;
-    document.querySelector('nav button[data-view="search"]').click();
+    activate("search");
     return;
   }
   const btn = e.target.closest("[data-close]");
@@ -284,7 +285,10 @@ out.addEventListener("click", async (e) => {
 
 document.getElementById("run").onclick = search;
 q.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
-if (!TOKEN) askKey(); else search();
+const params = new URLSearchParams(location.search);
+if (params.get("q")) q.value = params.get("q");
+if (params.get("where")) document.getElementById("where").value = params.get("where");
+if (!TOKEN) askKey(); else activate(location.hash.slice(1) || "search");
 </script>
 </body>
 </html>
