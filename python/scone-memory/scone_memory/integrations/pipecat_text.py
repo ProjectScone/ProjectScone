@@ -1,8 +1,9 @@
 """Owned, bounded text turns through a supplied Pipecat model processor.
 
 No default provider, authentication, HTTP routes or restart recovery. Results
-are aggregated public text with a response-end frame, not a browser token stream
-or proof of provider completion or model use of retrieved sources. The caller
+are aggregated public text with a response-end frame. An optional async observer
+receives public text chunks, not tokens, completion or persistence receipts.
+Neither surface proves provider completion or use of retrieved sources. The caller
 authorizes the fixed memory space and capture.
 """
 
@@ -13,7 +14,7 @@ import copy
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from uuid import uuid4
 
 try:
@@ -40,13 +41,31 @@ def _bytes(messages) -> int:
 
 
 class _PublicReply(FrameProcessor):
-    def __init__(self, done: asyncio.Future, max_bytes: int):
+    def __init__(self, done: asyncio.Future, max_bytes: int, on_text: Callable[[str], Awaitable[None]] | None):
         super().__init__()
         self.done, self.max_bytes = done, max_bytes
         self.started = False
         self.parts: list[str] = []
         self.size = 0
         self.unsupported = False
+        self.on_text = on_text
+        self.observer_failed = False
+
+    async def _observe(self, text: str) -> None:
+        if self.on_text is None or not text:
+            return
+        try:
+            # Serial delivery: no detached callbacks or additional chunk queue.
+            # The enclosing turn deadline includes cooperative consumer work.
+            await self.on_text(text)
+        except (Exception, asyncio.CancelledError) as exc:
+            self.observer_failed = True
+            if not self.done.done():
+                self.done.set_exception(RuntimeError("public text observer failed"))
+            # A consumer-raised CancelledError is a failed observation; actual
+            # processor cancellation must still unwind the Pipecat task.
+            if isinstance(exc, asyncio.CancelledError) and asyncio.current_task().cancelling():
+                raise
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -68,6 +87,7 @@ class _PublicReply(FrameProcessor):
                     self.done.set_exception(RuntimeError("model reply exceeded the byte limit"))
                 else:
                     self.parts.append(frame.text)
+                    await self._observe(frame.text)
             elif isinstance(frame, LLMFullResponseEndFrame):
                 text = "".join(self.parts)
                 if not self.started or not text.strip():
@@ -101,7 +121,8 @@ class PipecatTextConversation:
     server-side. Failures and interrupted capture close the instance. Cancellation
     during model execution can continue only after successful owned cleanup;
     callers must not silently retry uncertain provider or store writes.
-    This boundary supports neither tools nor media nor live output streaming.
+    This boundary supports neither tools nor media. Native public text chunk
+    observation is opt-in per reply; HTTP/browser streaming is a separate contract.
     """
 
     def __init__(
@@ -134,6 +155,7 @@ class PipecatTextConversation:
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task | None = None
+        self._observer_task: asyncio.Task | None = None
         self._closed = False
         self._cancel_reusable = False
 
@@ -142,17 +164,26 @@ class PipecatTextConversation:
         """Whether lifecycle owners must refuse further turns."""
         return self._closed
 
-    async def reply(self, text: str) -> dict:
+    async def reply(self, text: str, *, on_text: Callable[[str], Awaitable[None]] | None = None) -> dict:
+        """Return the saved aggregate, optionally observing provisional chunks.
+
+        ``on_text`` must return an awaitable, yield cooperatively, and finish
+        within the turn deadline. Delivery is serial and excludes thought frames.
+        Observed text may precede a failed/cancelled turn or failed persistence;
+        only the returned result acknowledges the aggregate's capture.
+        """
         if self._closed:
             raise RuntimeError("conversation is closed")
         if self._active is not None:
             raise RuntimeError("a conversation turn is already active")
+        if on_text is not None and not callable(on_text):
+            raise ValueError("on_text must be an async callable")
         if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 32000:
             raise ValueError("message must contain 1..32000 UTF-8 bytes of nonempty text")
         messages = [*self._history, {"role": "user", "content": text}]
         if _bytes(messages) > self._max_history:
             raise ValueError("conversation history byte limit reached; start a new conversation")
-        self._active = asyncio.create_task(self._reply(messages))
+        self._active = asyncio.create_task(self._reply(messages, on_text))
         try:
             return await self._active
         except asyncio.CancelledError:
@@ -165,6 +196,8 @@ class PipecatTextConversation:
             self._active = None
 
     async def close(self) -> None:
+        if asyncio.current_task() is self._observer_task:
+            raise RuntimeError("close must be called outside the public text observer")
         self._closed = True
         active = self._active
         if active is not None:
@@ -187,11 +220,11 @@ class PipecatTextConversation:
         )])
         return added.episode_id
 
-    async def _reply(self, messages: list[dict]) -> dict:
+    async def _reply(self, messages: list[dict], on_text: Callable[[str], Awaitable[None]] | None) -> dict:
         turn_id = uuid4().hex
         async with asyncio.timeout(self._timeout):
             user_id = await self._record(turn_id, "user", messages[-1]["content"])
-            text, receipt = await self._execute(messages)
+            text, receipt = await self._execute(messages, on_text)
             complete = [*messages, {"role": "assistant", "content": text}]
             if _bytes(complete) > self._max_history:
                 raise RuntimeError("model reply exceeded the conversation history byte limit")
@@ -202,7 +235,7 @@ class PipecatTextConversation:
             return {"turn_id": turn_id, "text": text, "provider_completion": "unverified", "user_episode_id": user_id,
                     "assistant_episode_id": assistant_id, "memory_context": receipt}
 
-    async def _execute(self, messages: list[dict]) -> tuple[str, dict | None]:
+    async def _execute(self, messages: list[dict], on_text: Callable[[str], Awaitable[None]] | None) -> tuple[str, dict | None]:
         done = asyncio.get_running_loop().create_future()
         started = asyncio.Event()
         pipeline_failed = False
@@ -210,7 +243,14 @@ class PipecatTextConversation:
         model = self._factory()
         if not isinstance(model, FrameProcessor):
             raise TypeError("model_factory must return a Pipecat FrameProcessor")
-        collector = _PublicReply(done, self._max_reply)
+        async def observe(text: str) -> None:
+            self._observer_task = asyncio.current_task()
+            try:
+                await on_text(text)
+            finally:
+                self._observer_task = None
+
+        collector = _PublicReply(done, self._max_reply, observe if on_text is not None else None)
         pipeline = _OwnedPipeline([recall, model, collector])
         worker = PipelineWorker(pipeline,
                                 enable_rtvi=False, cancel_on_idle_timeout=False,
@@ -251,7 +291,7 @@ class PipecatTextConversation:
             # WorkerRunner handles its own CancelledError during teardown. Do
             # not let that consume the enclosing turn deadline/cancellation.
             await asyncio.shield(running)
-            if pipeline_failed or collector.unsupported or not pipeline.cleanup_complete:
+            if pipeline_failed or collector.unsupported or collector.observer_failed or not pipeline.cleanup_complete:
                 raise RuntimeError("model pipeline failed during finalization")
             return text, recall.last_receipt.as_metadata() if recall.last_receipt else None
         finally:
@@ -263,7 +303,7 @@ class PipecatTextConversation:
             self._cancel_reusable = (
                 running is not None and running.done() and not running.cancelled()
                 and running.exception() is None and pipeline.cleanup_complete
-                and not pipeline_failed and not collector.unsupported
+                and not pipeline_failed and not collector.unsupported and not collector.observer_failed
             )
 
 

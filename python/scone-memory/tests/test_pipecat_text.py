@@ -266,3 +266,188 @@ async def test_model_context_mutation_cannot_rewrite_saved_conversation_history(
         {"role": "user", "content": "original user"},
     ]
     await conversation.close()
+
+
+class ChunkedModel(FrameProcessor):
+    """Actual Pipecat queues; only the external model is scripted."""
+
+    def __init__(self, chunks=("Hello ", "🌍"), *, release_end=None):
+        super().__init__()
+        self.chunks, self.release_end = chunks, release_end
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if not isinstance(frame, LLMContextFrame):
+            await self.push_frame(frame, direction)
+            return
+        await self.push_frame(LLMTextFrame("outside response"))
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(LLMThoughtTextFrame("private reasoning"))
+        for chunk in self.chunks:
+            await self.push_frame(LLMTextFrame(chunk))
+        if self.release_end:
+            await self.release_end.wait()
+        await self.push_frame(LLMFullResponseEndFrame())
+        await self.push_frame(LLMTextFrame("after response"))
+
+
+async def test_public_chunks_arrive_before_response_end_and_only_final_text_is_saved(memory):
+    received, release_end, first_chunk = [], asyncio.Event(), asyncio.Event()
+
+    async def observe(text):
+        received.append(text)
+        first_chunk.set()
+
+    conversation = PipecatTextConversation(memory, "alpha", "stream", lambda: ChunkedModel(release_end=release_end))
+    pending = asyncio.create_task(conversation.reply("greet me", on_text=observe))
+    try:
+        await asyncio.wait_for(first_chunk.wait(), 3)
+        assert not pending.done()
+        assert received[0] == "Hello "
+        assert [e.content for e in await memory.episodes("alpha", {"session_id": "stream"})] == ["greet me"]
+        release_end.set()
+        result = await asyncio.wait_for(pending, 3)
+        assert received == ["Hello ", "🌍"]
+        assert result["text"] == "Hello 🌍"
+        assert result["provider_completion"] == "unverified"
+        episodes = await memory.episodes("alpha", {"session_id": "stream"})
+        assert [e.content for e in episodes] == ["greet me", "Hello 🌍"]
+        assert episodes[1].metadata["representation"] == "aggregated_text"
+    finally:
+        release_end.set()
+        await conversation.close()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_public_observer_is_serial_and_completion_waits_for_it(memory):
+    received, entered, release = [], asyncio.Event(), asyncio.Event()
+
+    async def observe(text):
+        received.append(text)
+        if text == "Hello ":
+            entered.set()
+            await release.wait()
+
+    conversation = PipecatTextConversation(memory, "alpha", "slow-observer", ChunkedModel)
+    pending = asyncio.create_task(conversation.reply("greet me", on_text=observe))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert received == ["Hello "]
+        assert not pending.done()
+        release.set()
+        assert (await asyncio.wait_for(pending, 3))["text"] == "Hello 🌍"
+        assert received == ["Hello ", "🌍"]
+    finally:
+        release.set()
+        await conversation.close()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure", [ValueError("private observer error"), asyncio.CancelledError()])
+async def test_observer_failure_closes_turn_without_completed_capture(memory, failure):
+    received = []
+
+    async def observe(text):
+        received.append(text)
+        raise failure
+
+    conversation = PipecatTextConversation(memory, "alpha", "observer-error", ChunkedModel)
+    with pytest.raises(RuntimeError, match="observer") as error:
+        await asyncio.wait_for(conversation.reply("question", on_text=observe), 3)
+    assert "private observer error" not in str(error.value)
+    assert received == ["Hello "]
+    assert conversation.closed
+    assert [e.metadata["role"] for e in await memory.episodes("alpha", {"session_id": "observer-error"})] == ["user"]
+
+
+async def test_chunk_budget_is_checked_before_observer_delivery(memory):
+    received = []
+
+    async def observe(text):
+        received.append(text)
+
+    conversation = PipecatTextConversation(memory, "alpha", "stream-limit", lambda: ChunkedModel(("a" * 510, "🌍")), max_reply_bytes=512)
+    with pytest.raises(RuntimeError, match="byte limit"):
+        await conversation.reply("question", on_text=observe)
+    assert received == ["a" * 510]
+    assert [e.metadata["role"] for e in await memory.episodes("alpha", {"session_id": "stream-limit"})] == ["user"]
+
+
+@pytest.mark.parametrize("observer", [False, "not a callback"])
+async def test_invalid_observer_rejected_before_capture(memory, observer):
+    conversation = PipecatTextConversation(memory, "alpha", "invalid-observer", ChunkedModel)
+    with pytest.raises(ValueError, match="on_text"):
+        await conversation.reply("question", on_text=observer)
+    assert not conversation.closed
+    assert await memory.episodes("alpha", {"session_id": "invalid-observer"}) == []
+    await conversation.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["deadline", "caller-cancel"])
+async def test_pending_observer_is_cancelled_without_capturing_partial_reply(memory, cancel):
+    entered, exited = asyncio.Event(), asyncio.Event()
+
+    async def observe(text):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+
+    conversation = PipecatTextConversation(memory, "alpha", "observer-cancel", ChunkedModel, turn_timeout=0.5 if not cancel else 5)
+    pending = asyncio.create_task(conversation.reply("question", on_text=observe))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        if cancel:
+            pending.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+            await asyncio.wait_for(pending, 3)
+        assert exited.is_set()
+        assert conversation.closed  # cancelled observer effects are uncertain
+        assert [e.metadata["role"] for e in await memory.episodes("alpha", {"session_id": "observer-cancel"})] == ["user"]
+    finally:
+        await conversation.close()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_observer_cannot_close_its_own_pipeline_and_deadlock(memory):
+    conversation = PipecatTextConversation(memory, "alpha", "observer-reentrant", ChunkedModel)
+    received_errors = []
+
+    async def observe(text):
+        try:
+            await conversation.close()
+        except RuntimeError as exc:
+            received_errors.append(str(exc))
+
+    try:
+        result = await asyncio.wait_for(conversation.reply("question", on_text=observe), 3)
+        assert len(received_errors) == 2
+        assert result["text"] == "Hello 🌍"
+        assert not conversation.closed
+    finally:
+        await conversation.close()
+
+
+async def test_observer_does_not_leak_into_following_turn(memory):
+    received = []
+
+    async def observe(text):
+        received.append(text)
+
+    conversation = PipecatTextConversation(memory, "alpha", "observer-one-turn", lambda: ChunkedModel(("", "first", "")))
+    try:
+        await conversation.reply("one", on_text=observe)
+        await conversation.reply("two")
+        assert received == ["first"]
+        assert [e.content for e in await memory.episodes("alpha", {"session_id": "observer-one-turn"})] == ["one", "first", "two", "first"]
+    finally:
+        await conversation.close()
+
+
+async def test_non_awaitable_observer_fails_without_completed_capture(memory):
+    conversation = PipecatTextConversation(memory, "alpha", "sync-observer", ChunkedModel)
+    with pytest.raises(RuntimeError, match="observer"):
+        await conversation.reply("question", on_text=lambda text: None)
+    assert conversation.closed
+    assert [e.metadata["role"] for e in await memory.episodes("alpha", {"session_id": "sync-observer"})] == ["user"]

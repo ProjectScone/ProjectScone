@@ -444,6 +444,43 @@ finally:
     await conversation.close()
 ```
 
+For live **native Python** output, pass an async `on_text` observer to a reply:
+
+```python
+async def show_chunk(text: str) -> None:
+    # Send to your own cooperative async consumer; do not save it as completed.
+    await output.send(text)
+
+conversation = PipecatTextConversation(memory, "default", "conversation-2", model_factory)
+try:
+    result = await conversation.reply("Explain the next step.", on_text=show_chunk)
+    # Only a successful result acknowledges the saved aggregate and episode IDs.
+finally:
+    await conversation.close()
+```
+
+The callback receives nonempty downstream public `LLMTextFrame` chunks between
+response-start and response-end frames, in order and without splitting or
+reconstructing them. Chunks are **not necessarily tokens**. Thought frames, tool
+payloads, context and text outside the response are not delivered. The observer
+applies only to that reply; omitting it retains the aggregate-only interface.
+
+Observation is provisional: all text can be displayed before finalization or
+storage fails. No partial assistant episode or chunk journal is created. The
+callback is awaited serially before the next chunk is delivered, and the reply
+byte limit is checked first. This adds no detached callback queue; it does not
+bound Pipecat/provider queues or guarantee upstream network backpressure. A slow
+observer consumes the same turn deadline as the model. Callbacks must cooperate
+with cancellation, avoid blocking the event loop, and not await lifecycle
+operations on their own conversation. Direct `close()` inside the observer is
+rejected; cancel or close from the caller instead. Observer failure or interrupted
+observation closes the conversation, without retrying uncertain consumer effects.
+Already displayed text cannot be retracted by the runtime.
+
+This native callback does not enable streaming in the HTTP service or browser;
+those still advertise `streaming: false`. Voice, video and delivery/replay receipts
+require their own transports and contracts.
+
 Both `PipecatTextConversation` and `SconeMemoryContextProcessor` accept `where`,
 `kind`, `source_prefix`, `since`, and `until`. They validate and copy these filters
 at construction; later caller mutations cannot change the session's recall scope.
@@ -479,7 +516,7 @@ a timed-out store write may have committed and is not automatically retried.
 Deadlines rely on cooperative providers/stores, not hard process termination.
 
 History is in-process, not automatically restored after restart. This module has
-no session authentication, browser routes, durable request-id replay, live output
+no session authentication, browser routes, durable request-id replay, network
 stream or audio/video transport. Tests use real Pipecat scheduling with an
 explicitly scripted processor—not live inference. Provider-specific completion,
 retry policy and client cleanup, the authenticated service, React controls and
