@@ -81,6 +81,10 @@ class Fact(BaseModel):
     closed_reason: Optional[str] = None
     source_episode_id: Optional[int] = None
     origin: FactOrigin = "stated"
+    #: The exact substring of the source episode this claim rests on, when
+    #: it came from one. Checked against the episode at assertion; a claim
+    #: with a source but no quote is ungrounded and surfaces say so.
+    quote: Optional[str] = None
     #: The fact that truncated or bounded this one, as an id, so the
     #: relation is data and not a sentence to be parsed.
     superseded_by: Optional[int] = None
@@ -92,6 +96,14 @@ class Fact(BaseModel):
     @property
     def excluded(self) -> bool:
         return self.excluded_reason is not None
+
+    @property
+    def grounded(self) -> Optional[bool]:
+        """True when a source quote is stored, False when there is a source
+        but no quote, None when the claim was stated with no source."""
+        if self.source_episode_id is None:
+            return None
+        return self.quote is not None
 
     @property
     def in_ledger(self) -> bool:

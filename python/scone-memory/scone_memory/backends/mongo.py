@@ -18,7 +18,7 @@ from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
-SCHEMA_VERSION = 5  # 5: facts carry superseded_by
+SCHEMA_VERSION = 6  # 6: facts carry quote
 
 
 class SchemaMismatch(SconeError):
@@ -69,6 +69,7 @@ def _fact(doc: Mapping) -> Fact:
         origin=doc.get("origin", "stated"),
         excluded_reason=doc.get("excluded_reason"),
         superseded_by=doc.get("superseded_by"),
+        quote=doc.get("quote"),
     )
 
 

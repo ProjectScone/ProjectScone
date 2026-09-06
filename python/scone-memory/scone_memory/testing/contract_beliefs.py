@@ -112,6 +112,37 @@ async def test_origin_survives_export_and_import(engine):
         await engine.assert_fact("default", "a", "b", "c", origin="rumour")
 
 
+async def test_a_quoted_claim_is_checked_against_its_source(engine):
+    """A quote is the exact text the claim rests on. It must be in the
+    source episode; a claim with a source but no quote is stored and reads
+    as ungrounded; a quote with no source has nothing to be checked against."""
+    ep = await engine.remember("default", "Ana moved to Lisbon in March 2024 for the harbour job.", created_at="2024-03-02")
+    grounded = await engine.assert_fact("default", "ana", "lives_in", "Lisbon", valid_from="2024-03-02", origin="extracted",
+                                        proposed=True, source_episode_id=ep.episode_id, quote="Ana moved to Lisbon in March 2024")
+    assert grounded.quote == "Ana moved to Lisbon in March 2024" and grounded.grounded is True
+    with pytest.raises(InvalidInput, match="not a substring"):
+        await engine.assert_fact("default", "ana", "works_at", "the harbour", origin="extracted", proposed=True,
+                                 source_episode_id=ep.episode_id, quote="Ana works at the harbour")
+    with pytest.raises(InvalidInput, match="empty"):
+        await engine.assert_fact("default", "ana", "works_at", "x", source_episode_id=ep.episode_id, quote="   ")
+    with pytest.raises(InvalidInput, match="source_episode_id"):
+        await engine.assert_fact("default", "ana", "works_at", "x", quote="Ana moved")
+    with pytest.raises(NotFound):
+        await engine.assert_fact("default", "ana", "works_at", "x", source_episode_id=999, quote="Ana moved")
+    ungrounded = await engine.assert_fact("default", "ana", "prefers", "mornings", origin="extracted", proposed=True, source_episode_id=ep.episode_id)
+    assert ungrounded.quote is None and ungrounded.grounded is False, "legacy or quote-less extractions read as ungrounded"
+    stated = await engine.assert_fact("default", "ana", "name", "Ana")
+    assert stated.grounded is None, "a stated claim with no source is neither grounded nor ungrounded"
+    assert [f.fact_id for f in await engine.facts("default", status="proposed")] == [grounded.fact_id, ungrounded.fact_id]
+    # the quote survives approval and export
+    await engine.approve("default", grounded.fact_id)
+    dump = [r async for r in engine.export("default")]
+    assert next(r for r in dump if r.get("type") == "fact" and r["object"] == "Lisbon")["quote"] == "Ana moved to Lisbon in March 2024"
+    await engine.import_records("other", dump)
+    moved = next(f for f in await engine.facts("other") if f.object == "Lisbon")
+    assert moved.quote == "Ana moved to Lisbon in March 2024"
+
+
 __all__ = [
     "test_a_proposal_answers_nothing_until_a_person_approves_it",
     "test_a_proposal_is_not_touched_by_later_assertions",
@@ -119,4 +150,5 @@ __all__ = [
     "test_approving_a_duplicate_proposal_returns_the_held_fact",
     "test_excluding_hides_a_fact_without_rewriting_its_history",
     "test_origin_survives_export_and_import",
+    "test_a_quoted_claim_is_checked_against_its_source",
 ]

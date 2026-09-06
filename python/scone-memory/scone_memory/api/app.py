@@ -51,6 +51,7 @@ class FactBody(BaseModel):
     source_episode_id: Optional[int] = None
     origin: str = "stated"
     proposed: bool = False
+    quote: Optional[str] = None
 
 
 class CloseBody(BaseModel):
@@ -285,6 +286,7 @@ def create_app(
             source_episode_id=body.source_episode_id,
             origin=body.origin,
             proposed=body.proposed,
+            quote=body.quote,
         )
         return fact_json(fact)
 
@@ -456,4 +458,6 @@ def fact_json(fact: Fact) -> dict:
         "origin": fact.origin,
         "excluded_reason": fact.excluded_reason,
         "superseded_by": fact.superseded_by,
+        "quote": fact.quote,
+        "grounded": fact.grounded,
     }

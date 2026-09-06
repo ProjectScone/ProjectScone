@@ -723,8 +723,17 @@ class MemoryEngine:
         source_episode_id: Optional[int] = None,
         origin: str = "stated",
         proposed: bool = False,
+        quote: Optional[str] = None,
     ) -> Fact:
         """Record that ``subject predicate object`` holds from ``valid_from``.
+
+        ``quote`` is the exact substring of the source episode the claim
+        rests on. When both a source and a quote are given, the quote must
+        be non-empty and must occur in that episode's content, else the
+        assertion is refused as ungrounded rather than stored. A source with
+        no quote is stored and reads as ungrounded (``Fact.grounded`` is
+        False); a quote with no source is refused, since there is nothing
+        to check it against.
 
         ``origin`` says who is speaking: a person or trusted program
         (stated), a model reading an episode (extracted), or a derivation
@@ -753,6 +762,18 @@ class MemoryEngine:
             raise InvalidInput("confidence must be within 0..=1")
         if origin not in ORIGINS:
             raise InvalidInput(f"origin must be one of {ORIGINS}, got {origin!r}")
+        if quote is not None:
+            if not quote.strip():
+                raise InvalidInput("quote must not be empty when given")
+            if len(quote) > 2000:
+                raise InvalidInput("quote must be at most 2000 characters")
+            if source_episode_id is None:
+                raise InvalidInput("a quote needs a source_episode_id to be checked against")
+            episode = await self.documents.get_episode(space, source_episode_id)
+            if episode is None:
+                raise NotFound(f"source episode {source_episode_id} not found in {space!r}")
+            if quote not in episode.content:
+                raise InvalidInput(f"quote is not a substring of episode {source_episode_id}; the claim is ungrounded and was not stored")
         start = normalise_time(valid_from) if valid_from else self.clock()
         started = time.perf_counter()
 
@@ -760,14 +781,14 @@ class MemoryEngine:
             fact = await self.documents.insert_fact(
                 NewFact(
                     space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
-                    confidence=confidence, status="proposed", source_episode_id=source_episode_id, origin=origin,
+                    confidence=confidence, status="proposed", source_episode_id=source_episode_id, origin=origin, quote=quote,
                 )
             )
             await self.documents.bump_revision(space)
             await self._emit(space, "fact_assert", {
                 "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
                 "outcome": "proposed", "superseded": [], "source_episode_id": source_episode_id,
-                "latency_ms": _ms(started),
+                "grounded": fact.grounded, "latency_ms": _ms(started),
             })
             return fact
 
@@ -784,7 +805,7 @@ class MemoryEngine:
                 valid_until=placement.bound, confidence=confidence,
                 status="closed" if placement.bound else "active",
                 closed_reason=placement.bound_reason, superseded_by=placement.bound_by,
-                source_episode_id=source_episode_id, origin=origin,
+                source_episode_id=source_episode_id, origin=origin, quote=quote,
             )
         )
         await self._truncate(placement.covering, start, fact.fact_id)
@@ -1078,6 +1099,7 @@ class MemoryEngine:
                 origin=str(f.get("origin", "stated")),
                 excluded_reason=f.get("excluded_reason"),
                 superseded_by=None,  # ids are store-local; the reason text keeps the history
+                quote=f.get("quote"),
             )
             if new.status not in STATUSES or new.origin not in ORIGINS:
                 raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")

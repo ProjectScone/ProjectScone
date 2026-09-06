@@ -55,6 +55,7 @@ class NewFact:
     origin: str = "stated"
     superseded_by: Optional[int] = None
     excluded_reason: Optional[str] = None
+    quote: Optional[str] = None
 
 
 @dataclass(frozen=True)
