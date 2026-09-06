@@ -18,13 +18,13 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..engine import check_space
 from ..errors import Conflict, InvalidInput, NotFound
 from ..session_journal import SessionJournal
-from .app import create_app, episode_json
+from .app import PLAYGROUND, create_app, episode_json
 
 
 class Command(BaseModel):
@@ -54,12 +54,14 @@ class OwnedSession:
     cleanup_task: asyncio.Task | None = None
 
 
-def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_sessions=100, max_turns=100):
+def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_sessions=100, max_turns=100, console=False):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
     advertises unavailable text. Do not use non-cooperative/untrusted runtimes:
     cancellation and cleanup use cooperative asyncio, not process termination.
+    console=True serves the packaged React workspace and session deep links.
+    Pages contain no injected keys; the user supplies a space key in the tab.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -252,22 +254,39 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         return {"episodes": [episode_json(episode) for episode in episodes[:200]],
                 "has_more": len(episodes) > 200}
 
+    def settle(space, sid, request_id, status, episode_id=None, error=None):
+        """Record a turn's outcome durably, and never let that recording
+        be the thing that breaks a turn: the in-process receipt is still
+        correct if the journal write fails, and the next recover() call
+        settles what this missed."""
+        try:
+            journal.finish_turn(space, sid, request_id, status, episode_id=episode_id, error=error)
+        except (Conflict, NotFound, InvalidInput):
+            pass
+
     async def run_turn(space, sid, entry, request_id, text):
         receipt = entry.turns[request_id]["receipt"]
         try:
             result = await entry.runtime.reply(text)
             if journal.get(space, sid)["state"] != "running":
                 receipt["status"] = "interrupted"
+                settle(space, sid, request_id, "interrupted")
             else:
                 receipt.update(status="completed", result=result)
+                # The episode holding the reply's text, not the text: one
+                # copy, so forgetting the episode removes it everywhere.
+                settle(space, sid, request_id, "completed",
+                       episode_id=result.get("assistant_episode_id") if isinstance(result, dict) else None)
         except asyncio.CancelledError:
             receipt["status"] = "interrupted"
+            settle(space, sid, request_id, "interrupted")
             current = journal.get(space, sid)
             if current["state"] == "running":
                 journal.transition(space, sid, "interrupted:" + uuid4().hex, "interrupt", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
         except Exception:
             receipt.update(status="failed", error="conversation turn failed; do not automatically retry")
+            settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)
             if current["state"] == "running":
                 journal.transition(space, sid, "failure:" + uuid4().hex, "fail", current["revision"])
@@ -294,6 +313,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
         if len(entry.turns) >= max_turns:
             raise HTTPException(429, "conversation turn capacity reached")
         receipt = {"request_id": body.request_id, "status": "pending"}
+        # Durable half: recorded before the provider is asked anything, so a
+        # process that dies mid-turn leaves a receipt rather than a gap.
+        journal.start_turn(space, sid, body.request_id, signature)
         entry.turns[body.request_id] = {"signature": signature, "receipt": receipt}
         entry.active_id = body.request_id
         entry.active = asyncio.create_task(run_turn(space, sid, entry, body.request_id, body.text))
@@ -345,6 +367,19 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, max_
             return False
         journal.transition(space, sid, "end:" + uuid4().hex, "end", revision)
         return True
+
+    if console:
+        # A single packaged application owns these routes. Never inject space or
+        # provider credentials into its public shell, even for a single-key host.
+        workspace_html = PLAYGROUND.read_text(encoding="utf-8")
+
+        async def workspace_page():
+            return HTMLResponse(workspace_html, headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            })
+
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
+            app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
     app.mount("/", create_app(engine, keys, console=False))
     return app
