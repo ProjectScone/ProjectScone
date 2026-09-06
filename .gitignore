@@ -15,7 +15,7 @@ target/
 memory/raw/
 
 # Private: the knowledge base and design docs are the proprietary part.
-memory/
+/memory/
 docs/
 bench-data/
 bench-runs/

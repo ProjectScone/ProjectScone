@@ -28,7 +28,7 @@ async function chooseLayout(page,mode) {
   await page.getByRole('button',{name:'Graph layout',exact:true}).click();
   await page.getByRole('menuitemradio',{name:({constellation:'Constellation',radial:'Radial clusters',flow:'Evidence flow',growth:'Growth spiral'})[mode],exact:true}).click();
 }
-async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,capabilityMode='ok',rustCapabilities=false}={}) {
+async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,claimBacklog=false,capabilityMode='ok',rustCapabilities=false}={}) {
   let graphCalls=0, unauthorized=false, revision=1, pageLoads=0;
   let pendingFacts=[{fact_id:41,subject:'Ada',predicate:'prefers',object:'local storage',confidence:1,valid_from:'2026-09-06T03:00:00Z',valid_until:null,status:'proposed',source_episode_id:7,origin:'extracted',quote:null,grounded:false}];
   if(backlog) pendingFacts=[
@@ -39,6 +39,10 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
   if(chronological) pendingFacts=pendingFacts.map(f=>({...f,valid_from:f.fact_id===42?'2020-01-01T00:00:00Z':'2030-01-01T00:00:00Z'}));
   if(paged) pendingFacts=Array.from({length:26},(_,i)=>({...pendingFacts[0],fact_id:41+i}));
   let ledger=[{...pendingFacts[0],status:'active',excluded_reason:null,closed_reason:null}];
+  if(claimBacklog)ledger=[...ledger,
+    {...ledger[0],fact_id:40,object:'cloud storage',status:'closed',valid_from:'2019-01-01T00:00:00Z',valid_until:'2020-01-01T00:00:00Z'},
+    ...Array.from({length:26},(_,i)=>({...ledger[0],fact_id:100+i,subject:`Topic ${String(i).padStart(2,'0')}`,valid_from:'2020-01-01T00:00:00Z',quote:i?'local storage':null,grounded:i?true:false,excluded_reason:i===25?'wrong source':null})),
+  ];
   let sourceCalls=0;
   const decisions=[];
   let capabilityCalls=0; const requested=[];
@@ -65,7 +69,7 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
       let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
         const data=body?JSON.parse(body):null; decisions.push({path:req.url,body:data});
         const action=req.url.split('/').at(-1);
-        ledger=ledger.map(f=>action==='close'?{...f,status:'closed',closed_reason:data.reason,valid_until:'2026-09-07T00:00:00Z'}:{...f,excluded_reason:action==='exclude'?data.reason:null});
+        ledger=ledger.map(f=>action==='close'?{...f,status:'closed',closed_reason:data.reason,valid_until:new Date().toISOString()}:{...f,excluded_reason:action==='exclude'?data.reason:null});
         res.end(JSON.stringify(action==='close'?{closed:41,reason:data.reason}:ledger[0]));
       });return;
     }
@@ -146,6 +150,29 @@ test('belief evidence can be inspected without changing the ledger',async t=>{
   assert.equal(await page.locator('.timeline').count(),0,'a duration bar should not present active claims as truth');
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'belief-purpose-desktop.png'),fullPage:true});
 });
+test('claim histories are searchable and paged without changing recall or treating missing quotes as false',async t=>{
+  const {page,decisions}=await fixture(t,{beliefs:true,claimBacklog:true});
+  await page.getByRole('searchbox',{name:'Search claim histories',exact:true}).waitFor({timeout:2000});
+  assert.equal(await page.locator('.belief').count(),25);
+  await page.getByRole('navigation',{name:'Claim pages'}).getByRole('button',{name:'Next',exact:true}).click();
+  assert.equal(await page.locator('.belief').count(),2);
+  await page.getByRole('searchbox',{name:'Search claim histories',exact:true}).fill('cloud');
+  await page.getByRole('heading',{name:'Ada prefers cloud storage',exact:true}).waitFor();
+  assert.equal(await page.locator('.belief').count(),1);
+  assert.match(await page.locator('.claim-heading').innerText(),/Historical version/);
+  assert.match(await page.locator('.claim-source').first().innerText(),/No stored quotation/);
+  assert.doesNotMatch(await page.innerText('body'),/ungrounded|proven false/i);
+  await page.getByRole('button',{name:'Current records',exact:true}).click();
+  await page.getByText('No claim histories match these filters.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Clear claim filters',exact:true}).click();
+  await page.getByRole('button',{name:'Excluded records',exact:true}).click();
+  await page.getByRole('heading',{name:'Topic 25 prefers local storage',exact:true}).waitFor();
+  assert.equal(await page.locator('.belief').count(),1);
+  await page.setViewportSize({width:390,height:844});
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  assert.equal(decisions.length,0);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'claims-filter-mobile.png'),fullPage:true});
+});
 test('belief close uses an inline reason and cancellation does not write',async t=>{
   const {page,decisions}=await fixture(t,{beliefs:true,mobile:true});
   await page.locator('details.actions summary').click();
@@ -163,7 +190,7 @@ test('belief close uses an inline reason and cancellation does not write',async 
   await page.getByRole('button',{name:'Confirm close',exact:true}).click();
   await page.getByRole('status').filter({hasText:'Belief #41 closed'}).waitFor();
   assert.deepEqual(decisions,[{path:'/v1/facts/41/close',body:{reason:'We switched storage.'}}]);
-  await page.getByText(/No current claim/).waitFor();
+  await page.getByText(/Historical version · not current/).waitFor();
 });
 test('belief failures block repeat decisions until ledger refresh',async t=>{
   const {page,decisions}=await fixture(t,{beliefs:true});
