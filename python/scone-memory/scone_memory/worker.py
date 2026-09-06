@@ -31,6 +31,11 @@ class PassReport:
     closed: int = 0
     skipped: int = 0
     parked: int = 0
+    #: Candidates the extraction gate withheld before they reached the
+    #: store, and why, as counts per reason: the model's output that did
+    #: not become a proposal is evidence too.
+    rejected: int = 0
+    rejected_reasons: dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
     latency_ms: float = 0.0
 
@@ -81,6 +86,10 @@ class ConsolidationWorker:
             report.episodes += 1
             report.closed += o.closed
             report.skipped += o.skipped
+            for r in getattr(o, "rejected", ()) or ():
+                report.rejected += 1
+                key = str(getattr(r, "reason", "unspecified"))[:80]
+                report.rejected_reasons[key] = report.rejected_reasons.get(key, 0) + 1
             for fact in o.added:
                 if fact.status == "proposed":
                     report.proposed += 1
