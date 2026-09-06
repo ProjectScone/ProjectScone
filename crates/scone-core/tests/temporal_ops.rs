@@ -135,3 +135,48 @@ fn ordering_a_category_puts_the_members_in_time_order() {
         answer.value
     );
 }
+
+/// Grounding must pick the closest match, not the best-ranked result.
+/// Ranking folds in recency; grounding asks which episode a phrase
+/// describes, and the answer does not become truer for being recent.
+/// This is the two-episode store where the defect first showed: the
+/// MoMA phrase ranked the later Met episode first, both anchors landed
+/// on it, and the interval was declined. Grounding by similarity puts
+/// each phrase on its own episode and the interval computes.
+#[test]
+fn anchors_ground_to_the_closest_episode_not_the_most_recent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut e, space) = store(
+        dir.path(),
+        &[
+            (
+                "2026-08-20",
+                "I visited the Museum of Modern Art with Sarah today",
+            ),
+            (
+                "2026-08-27",
+                "went to the Ancient Civilizations exhibit at the Met this afternoon",
+            ),
+        ],
+    );
+    let answer = e
+        .answer_temporally(
+            &space,
+            "How many days passed between my visit to the Museum of Modern Art \
+             and the Ancient Civilizations exhibit?",
+            Some("2026-09-01T00:00:00Z"),
+        )
+        .unwrap()
+        .expect("two distinct anchors must ground to two distinct episodes");
+    assert_eq!(answer.value, "7 days", "{}", answer.derivation);
+    assert!(
+        answer.derivation.contains("episode 1"),
+        "{}",
+        answer.derivation
+    );
+    assert!(
+        answer.derivation.contains("episode 2"),
+        "{}",
+        answer.derivation
+    );
+}

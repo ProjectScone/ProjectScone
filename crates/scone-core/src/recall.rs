@@ -91,6 +91,19 @@ pub fn decompose(query: &str) -> Vec<String> {
     out
 }
 
+/// Best score first; ties break by chunk id, never by whatever order the
+/// index happened to return. Scores tie often: a store holding many
+/// similar notes puts them within a rounding error of each other, and
+/// without a stable tie-break the ranking turns on recency measured in
+/// microseconds, so the same question answers differently between runs.
+pub fn order_items(items: &mut [RecallItem]) {
+    items.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.chunk_id.cmp(&b.chunk_id))
+    });
+}
+
 const RRF_K: f32 = 60.0;
 const W_FUSED: f32 = 0.8;
 const W_RECENCY: f32 = 0.2;
@@ -392,17 +405,7 @@ impl Engine {
             }
         }
 
-        // Ties break by chunk id, never by whatever order the index
-        // happened to return. Scores tie often: a store holding many
-        // similar notes puts them within a rounding error of each
-        // other, and without a stable tie-break the ranking then turns
-        // on recency measured in microseconds, so two builds of the
-        // same corpus answer the same question differently.
-        items.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then(a.chunk_id.cmp(&b.chunk_id))
-        });
+        order_items(&mut items);
 
         // Episode diversity: one strong episode must not hog the top slots
         // with many of its chunks; multi-evidence questions need distinct

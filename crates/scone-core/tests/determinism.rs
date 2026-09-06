@@ -113,35 +113,34 @@ fn identical_input_retrieves_identically() {
     }
 }
 
-/// Recalling twice from one store must also agree. If this fails the
-/// problem is in query time rather than in index construction.
+/// Ties must break on identity, not on arrival order.
+///
+/// Tested at the unit that decides it, with hand-built ties, because
+/// ties cannot be constructed end to end: identical text deduplicates
+/// to one episode at ingest, and different text does not score
+/// identically. An earlier version recalled repeatedly and hoped to
+/// catch a reorder; it passed with the tie-break removed.
 #[test]
-fn repeated_recall_on_one_store_is_stable() {
-    let notes: Vec<String> = (0..80)
-        .map(|i| format!("entry {i} about migrations and backups on day {i}"))
-        .collect();
-    let dir = tempfile::tempdir().unwrap();
-    let mut e = build(dir.path(), &notes);
-    let space = auth::resolve(&mut e, "default", true).unwrap();
-    let opts = RecallOpts {
-        limit: 10,
-        ..Default::default()
+fn tied_scores_order_by_identity() {
+    use scone_core::{RecallItem, order_items};
+    let item = |chunk_id: i64, score: f32| RecallItem {
+        chunk_id,
+        episode_id: chunk_id,
+        text: String::new(),
+        score,
+        similarity: None,
+        source: None,
+        created_at: String::new(),
     };
-    let first: Vec<i64> = e
-        .recall(&space, "migrations and backups", &opts)
-        .unwrap()
-        .items
-        .iter()
-        .map(|i| i.episode_id)
-        .collect();
-    for _ in 0..5 {
-        let again: Vec<i64> = e
-            .recall(&space, "migrations and backups", &opts)
-            .unwrap()
-            .items
-            .iter()
-            .map(|i| i.episode_id)
-            .collect();
-        assert_eq!(first, again, "the same query answered differently");
-    }
+    // Arrive in scrambled order with several exact ties.
+    let mut items = vec![
+        item(7, 0.5),
+        item(3, 0.9),
+        item(9, 0.5),
+        item(1, 0.9),
+        item(4, 0.5),
+    ];
+    order_items(&mut items);
+    let ids: Vec<i64> = items.iter().map(|i| i.chunk_id).collect();
+    assert_eq!(ids, vec![1, 3, 4, 7, 9], "best score first, ties by id");
 }

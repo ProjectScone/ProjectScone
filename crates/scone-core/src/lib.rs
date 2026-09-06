@@ -29,7 +29,7 @@ pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome, ScanReport};
 pub use portability::ImportReport;
 pub use profile::Profile;
-pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts, decompose};
+pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts, decompose, order_items};
 
 #[derive(Debug)]
 pub struct DoctorReport {
