@@ -800,3 +800,125 @@ async fn a_fact_names_the_episodes_it_came_from() {
     );
     assert_eq!(first["sources"][0].as_i64(), Some(episode_id));
 }
+
+/// Review over HTTP. The core has taken proposals and settled them since
+/// the fact gate landed, the CLI can do it, and the HTTP surface could
+/// not: a page built against this server could show a proposal and had
+/// no way to accept or reject it.
+#[tokio::test]
+async fn a_proposal_can_be_listed_and_settled_over_http() {
+    use scone_core::llm::ExtractedFact;
+    use scone_core::{IngestInput, IngestOutcome, auth};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    engine.set_propose_below(Some(1.0)).unwrap();
+    let space = auth::resolve(&mut engine, "alice", true).unwrap();
+    let IngestOutcome::Ingested { episode_id, .. } = engine
+        .ingest(
+            &space,
+            IngestInput::Note {
+                text: "Ana moved to Lisbon in March.".into(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("the seed episode must land")
+    };
+    engine
+        .apply_facts(
+            &space,
+            episode_id,
+            &[
+                ExtractedFact {
+                    subject: "Ana".into(),
+                    predicate: "moved_to".into(),
+                    object: "Lisbon".into(),
+                    confidence: 0.8,
+                },
+                ExtractedFact {
+                    subject: "Ana".into(),
+                    predicate: "works_at".into(),
+                    object: "Farfetch".into(),
+                    confidence: 0.8,
+                },
+            ],
+        )
+        .unwrap();
+
+    let app = router(
+        engine,
+        ServeConfig {
+            keys: vec![SpaceKey {
+                key: "sk-alice".into(),
+                space: "alice".into(),
+            }],
+        },
+    );
+
+    let (status, pending) = call(
+        &app,
+        "GET",
+        "/v1/facts?status=proposed",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    let waiting = pending["facts"].as_array().expect("a list of proposals");
+    assert_eq!(
+        waiting.len(),
+        2,
+        "both proposals wait for a person: {pending}"
+    );
+    let accept = waiting[0]["fact_id"].as_i64().unwrap();
+    let reject = waiting[1]["fact_id"].as_i64().unwrap();
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/v1/facts/{accept}/approve"),
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/v1/facts/{reject}/decline"),
+        Some("sk-alice"),
+        Some(serde_json::json!({"reason": "the source does not say this"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The accepted one holds; the rejected one is gone from the ledger
+    // and nothing is left waiting.
+    let (_, ledger) = call(&app, "GET", "/v1/facts", Some("sk-alice"), None).await;
+    let held = ledger["facts"].as_array().unwrap();
+    assert_eq!(held.len(), 1, "only the approved claim holds: {ledger}");
+    assert_eq!(held[0]["fact_id"].as_i64(), Some(accept));
+
+    let (_, left) = call(
+        &app,
+        "GET",
+        "/v1/facts?status=proposed",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(left["facts"].as_array().map(|f| f.len()), Some(0));
+
+    // A proposal that no longer exists is a client's mistake, not ours.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/approve",
+        Some("sk-alice"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

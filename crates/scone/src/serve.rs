@@ -80,6 +80,8 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         .route("/v1/sources", get(get_sources))
         .route("/v1/recall", get(get_recall))
         .route("/v1/facts", get(get_facts))
+        .route("/v1/facts/{id}/approve", post(post_fact_approve))
+        .route("/v1/facts/{id}/decline", post(post_fact_decline))
         .route("/v1/facts/{id}/close", post(post_fact_close))
         .route("/v1/profile", get(get_profile))
         .route("/v1/status", get(get_status))
@@ -430,6 +432,9 @@ async fn get_sources(
 struct FactsQuery {
     #[serde(default)]
     all: bool,
+    /// One status instead of the ledger: "proposed" lists what awaits a
+    /// person. Unset keeps the previous meaning of this route exactly.
+    status: Option<String>,
 }
 
 async fn get_facts(
@@ -441,7 +446,15 @@ async fn get_facts(
     // that freezes what it renders needs to know what it froze, and two
     // calls can straddle a write.
     match with_engine(&state, &headers, |engine, space| {
-        let facts = engine.facts_list(space, query.all)?;
+        let facts = match query.status.as_deref() {
+            Some("proposed") => engine.facts_pending(space)?,
+            Some(other) => {
+                return Err(scone_core::SconeError::InvalidInput(format!(
+                    "status must be proposed, got {other:?}"
+                )));
+            }
+            None => engine.facts_list(space, query.all)?,
+        };
         let revision = engine.space_revision(space)?;
         // Provenance per fact, so a reader can open what a claim came
         // from rather than take it on the server's word.
@@ -461,6 +474,45 @@ async fn get_facts(
             "revision": revision,
         }))
         .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Accept a proposal into the ledger. The engine places it exactly as an
+/// extracted fact above the gate would have been placed, so what it
+/// supersedes and what supersedes it are the engine's decision, not the
+/// caller's.
+async fn post_fact_approve(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        engine.facts_approve(space, id)
+    }) {
+        Ok(closed) => Json(serde_json::json!({"approved": id, "closed": closed})).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Reject a proposal with a reason. It never held, and the reason is kept
+/// so a later reader can see why rather than only that it is gone.
+async fn post_fact_decline(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(body): Json<CloseBody>,
+) -> Response {
+    if body.reason.is_empty() || body.reason.len() > 500 {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reason must be 1..=500 chars",
+        );
+    }
+    match with_engine(&state, &headers, |engine, space| {
+        engine.facts_decline(space, id, &body.reason)
+    }) {
+        Ok(()) => Json(serde_json::json!({"declined": id, "reason": body.reason})).into_response(),
         Err(response) => response,
     }
 }
