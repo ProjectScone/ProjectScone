@@ -274,6 +274,8 @@ async def test_backfill_truncates_manual_interval_without_rewriting_reason(engin
 
 __all__ = [
     "test_forgetting_returns_a_receipt_and_leaves_claims_standing",
+    "test_a_keyed_record_can_be_replaced_and_says_when_it_was_not",
+    "test_a_forgotten_episode_id_is_never_given_to_another_episode",
     "test_backfilled_fact_splits_a_previously_closed_interval",
     "test_backfill_preserves_a_manual_closure_and_gap",
     "test_backfill_truncates_manual_interval_without_rewriting_reason",
@@ -342,3 +344,53 @@ async def test_forgetting_returns_a_receipt_and_leaves_claims_standing(engine):
     assert kept.source_episode_id == first.episode_id
     with pytest.raises(NotFound):
         await engine.impact("default", first.episode_id)
+
+
+async def test_a_keyed_record_can_be_replaced_and_says_when_it_was_not(engine):
+    """A dedup_key names a record across writes. Re-sending it with changed
+    content is an update: the old episode is forgotten (receipt and all),
+    the new one stored, and every answer says which happened. A plain
+    keyed write of changed content is not silently dropped any more: it is
+    reported as a duplicate, so the caller knows its update did not land."""
+    from ..core.errors import InvalidInput, NotFound
+    from .. import Record
+
+    with pytest.raises(InvalidInput):
+        await engine.replace("default", Record("no key here"))
+    first = await engine.replace("default", Record("The office is in Lisbon.", dedup_key="doc:office"))
+    assert first.outcome == "accepted" and first.replaced is None
+    same = await engine.replace("default", Record("The office is in Lisbon.", dedup_key="doc:office"))
+    assert same.outcome == "duplicate" and same.added.episode_id == first.added.episode_id and same.replaced is None
+    cited = await engine.assert_fact("default", "office", "located_in", "lisbon", source_episode_id=first.added.episode_id, quote="in Lisbon")
+
+    [dropped] = await engine.remember_many("default", [Record("The office moved to Porto.", dedup_key="doc:office")])
+    assert dropped.outcome == "duplicate" and dropped.episode_id == first.added.episode_id, "a keyed write without replace says the update did not land"
+    assert (await engine.episode("default", first.added.episode_id)).content == "The office is in Lisbon."
+
+    updated = await engine.replace("default", Record("The office moved to Porto.", dedup_key="doc:office"))
+    assert updated.outcome == "updated" and updated.added.episode_id != first.added.episode_id
+    assert updated.replaced is not None and updated.replaced.episode_id == first.added.episode_id and updated.replaced.chunks >= 1
+    assert updated.replaced.facts_citing == [cited.fact_id]
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.added.episode_id)
+    assert (await engine.episode("default", updated.added.episode_id)).content == "The office moved to Porto."
+    found = await engine.recall("default", "office Porto", limit=5)
+    assert [i.episode_id for i in found.items] == [updated.added.episode_id]
+    standing = await engine.fact("default", cited.fact_id)
+    assert standing.status == "active" and standing.source_episode_id == first.added.episode_id
+    [again] = await engine.remember_many("default", [Record("The office moved to Porto.", dedup_key="doc:office")])
+    assert again.outcome == "duplicate" and again.episode_id == updated.added.episode_id, "the key now names the new record"
+
+
+async def test_a_forgotten_episode_id_is_never_given_to_another_episode(engine):
+    """A claim keeps the id of the source it rested on after that source
+    is forgotten. If the store handed that id to the next episode, the
+    claim would silently rest on text it never came from."""
+    from ..core.errors import NotFound
+
+    first = await engine.remember("default", "the first note, soon forgotten")
+    await engine.forget("default", first.episode_id)
+    second = await engine.remember("default", "the note that comes after")
+    assert second.episode_id != first.episode_id, "an id is used once"
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.episode_id)

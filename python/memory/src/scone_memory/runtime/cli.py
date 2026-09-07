@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--created-at", help="when it happened, RFC 3339 or YYYY-MM-DD")
     p.add_argument("--meta", action="append", default=[], help="key=value scope, repeatable")
+    p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
+    p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
@@ -382,6 +384,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
+                    dedup_key=args.dedup_key, replace=args.replace,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -395,9 +398,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             for a in added:
                 emit(a.model_dump() | ({"attachments": [attachment.model_dump()]} if attachment else {}))
         else:
-            fresh = sum(1 for a in added if not a.deduplicated)
-            dup = len(added) - fresh
-            print(f"remembered {fresh} episode(s)" + (f", {dup} already known" if dup else ""), file=out)
+            fresh = sum(1 for a in added if a.outcome == "accepted")
+            updated = sum(1 for a in added if a.outcome == "updated")
+            dup = len(added) - fresh - updated
+            print(f"remembered {fresh} episode(s)" + (f", {updated} replaced" if updated else "")
+                  + (f", {dup} already known" if dup else ""), file=out)
             if attachment:
                 print(f"original image linked: {attachment.attachment_id} ({attachment.bytes} bytes)", file=out)
         return 0

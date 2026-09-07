@@ -414,3 +414,18 @@ def test_forgetting_over_http_previews_then_reports_its_impact(client):
     assert {k: v for k, v in gone.json().items() if k != "forgotten"} == preview.json()
     assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 404
     assert client.get(f"/v1/facts/{fact['fact_id']}", headers=h).json()["fact"]["status"] == "active", "the claim stands"
+
+
+def test_a_keyed_episode_reports_duplicate_or_updated_over_http(client):
+    h = auth()
+    first = client.post("/v1/episodes", json={"content": "The office is in Lisbon.", "dedup_key": "doc:office"}, headers=h).json()
+    assert first["outcome"] == "accepted" and first["replaced"] is None
+    dropped = client.post("/v1/episodes", json={"content": "The office moved to Porto.", "dedup_key": "doc:office"}, headers=h).json()
+    assert dropped["outcome"] == "duplicate" and dropped["episode_id"] == first["episode_id"], "the client learns its update did not land"
+    updated = client.post("/v1/episodes", json={"content": "The office moved to Porto.", "dedup_key": "doc:office", "replace": True}, headers=h).json()
+    assert updated["outcome"] == "updated" and updated["episode_id"] != first["episode_id"]
+    assert updated["replaced"]["episode_id"] == first["episode_id"] and updated["replaced"]["chunks"] >= 1
+    assert client.get(f"/v1/episodes/{first['episode_id']}", headers=h).status_code == 404
+    plain = client.post("/v1/episodes", json={"content": "no key, no replace"}, headers=h).json()
+    assert plain["outcome"] == "accepted"
+    assert client.post("/v1/episodes", json={"content": "x", "replace": True}, headers=h).status_code == 422, "replace needs a key"

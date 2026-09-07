@@ -150,6 +150,16 @@ class Record:
 
 
 @dataclass
+class Replaced:
+    """What ``replace`` did: the record as stored (or found), the outcome,
+    and the receipt for the episode that went, if one did."""
+
+    added: Added
+    outcome: str
+    replaced: Optional[ForgetReceipt] = None
+
+
+@dataclass
 class RecoveryReport:
     """What recover() found: episodes brought to a complete state, of
     which how many needed their chunks rebuilt, and marks with no
@@ -370,14 +380,52 @@ class MemoryEngine:
         created_at: Optional[str] = None,
         metadata: Mapping[str, str] | None = None,
         attachment_ids: Sequence[str] = (),
+        dedup_key: Optional[str] = None,
+        replace: bool = False,
     ) -> Added:
-        [added] = await self.remember_many(
-            space,
-            [Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}))],
-        )
+        """One record. ``dedup_key`` names it across writes; ``replace``
+        makes a changed record under a known key an update (see
+        ``replace``) instead of a duplicate."""
+        record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
+        if replace:
+            added = (await self.replace(space, record)).added
+        else:
+            [added] = await self.remember_many(space, [record])
         for attachment_id in dict.fromkeys(attachment_ids):
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
+
+    async def replace(self, space: str, record: Record) -> "Replaced":
+        """Store a keyed record as the current one under its key. A key
+        nobody holds is accepted; the same content again is a duplicate
+        and changes nothing; changed content is an update: the episode
+        the key named is forgotten (its receipt returned; the claims that
+        cited it stand) and the new one stored. The forget lands before
+        the store, so a failure between them leaves the key empty rather
+        than pointing at stale text; the error says so."""
+        check_space(space)
+        if not record.dedup_key:
+            raise InvalidInput("replace needs a dedup_key: it is the key that names what is being replaced")
+        digest = content_hash(space, record.content, record.dedup_key)
+        existing = await self.documents.episode_by_hash(space, digest)
+        if existing is not None and existing.content == record.content:
+            added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+            return Replaced(added=added, outcome="duplicate", replaced=None)
+        receipt = None
+        if existing is not None:
+            receipt = await self.forget(space, existing.episode_id)
+        try:
+            [added] = await self.remember_many(space, [record])
+        except Exception as error:
+            if receipt is not None:
+                raise InvalidInput(
+                    f"replace forgot episode {receipt.episode_id} and the new record then failed to land "
+                    f"({type(error).__name__}); the key {record.dedup_key!r} names nothing now, so send it again"
+                ) from error
+            raise
+        outcome = "updated" if receipt is not None else added.outcome
+        added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
+        return Replaced(added=added, outcome=outcome, replaced=receipt)
 
     # -- attachments ------------------------------------------------------
 
@@ -466,7 +514,7 @@ class MemoryEngine:
             existing = await self.documents.episode_by_hash(space, digest)
             if existing is not None:
                 seen[digest] = len(results)
-                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0))
+                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
                 continue
             seen[digest] = len(results)
             results.append(None)
@@ -502,7 +550,7 @@ class MemoryEngine:
         for r in results:
             if isinstance(r, _DupOf):
                 target = results[r.slot]
-                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0))  # type: ignore[union-attr]
+                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))  # type: ignore[union-attr]
             else:
                 resolved.append(r)  # type: ignore[arg-type]
         return resolved

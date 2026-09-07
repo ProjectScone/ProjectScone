@@ -457,3 +457,23 @@ def test_cli_forget_previews_with_dry_run_and_reports_a_receipt(tmp_path):
     assert code == 0 and json.loads(text)["forgotten"] == 1 and json.loads(text)["chunks"] >= 1
     code, text = run("forget", "1", "--dry-run")
     assert code == 2
+
+
+def test_cli_remember_takes_a_key_and_replaces_on_request(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    code, text = run("remember", "--key", "doc:office", "--json", stdin="The office is in Lisbon.")
+    assert code == 0 and json.loads(text)["outcome"] == "accepted"
+    code, text = run("remember", "--key", "doc:office", "--json", stdin="The office moved to Porto.")
+    assert code == 0 and json.loads(text)["outcome"] == "duplicate"
+    code, text = run("remember", "--key", "doc:office", "--replace", "--json", stdin="The office moved to Porto.")
+    payload = json.loads(text)
+    assert code == 0 and payload["outcome"] == "updated" and payload["replaced"]["episode_id"] == 1
+    assert run("recall", "Porto", "--json")[1].count('"episode_id"') >= 1
+    code, text = run("remember", "--replace", stdin="no key")
+    assert code == 2

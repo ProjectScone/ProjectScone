@@ -136,7 +136,10 @@ def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> 
     step; refuse a version with no step from it."""
     version = schema_version(conn)
     if version == SCHEMA_VERSION:
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        # Stamp a fresh file once. A stamped file is left alone: rewriting
+        # the row on every open would make a read-only command a write and
+        # move the row behind newer meta rows in the file's order.
+        conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
         conn.commit()
         return
     if version > SCHEMA_VERSION or version not in STEPS:
@@ -277,16 +280,30 @@ class SqliteDocumentStore:
         self.conn.close()
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
-        cur = self.conn.execute(
-            "INSERT INTO episodes (space, kind, content, content_hash, source, tags, metadata, created_at, ingested_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                new.space, new.kind, new.content, new.content_hash, new.source,
-                json.dumps(list(new.tags)), json.dumps(dict(new.metadata)), new.created_at, new.ingested_at,
-            ),
-        )
-        self.conn.commit()
-        return Episode(episode_id=cur.lastrowid, **new.__dict__)
+        # SQLite hands a deleted row's id to the next insert when it was the
+        # highest, and a claim that cited the forgotten episode would then
+        # rest on text it never came from. Ids come from a counter that only
+        # goes up, kept in meta and never below what the table already holds.
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute("SELECT value FROM meta WHERE key = 'next_episode_id'").fetchone()
+            highest = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM episodes").fetchone()[0]
+            episode_id = max(int(row["value"]) if row else 1, highest + 1)
+            self.conn.execute(
+                "INSERT INTO episodes (id, space, kind, content, content_hash, source, tags, metadata, created_at, ingested_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    episode_id, new.space, new.kind, new.content, new.content_hash, new.source,
+                    json.dumps(list(new.tags)), json.dumps(dict(new.metadata)), new.created_at, new.ingested_at,
+                ),
+            )
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_episode_id', ?)", (str(episode_id + 1),))
+            self.conn.execute("COMMIT")
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+            raise
+        return Episode(episode_id=episode_id, **new.__dict__)
 
     async def episode_by_hash(self, space: str, content_hash: str) -> Optional[Episode]:
         row = self.conn.execute(

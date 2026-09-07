@@ -61,6 +61,10 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: Identity across writes; with replace, changed content under a known
+    #: key is an update instead of a reported duplicate.
+    dedup_key: Optional[str] = None
+    replace: bool = False
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -358,6 +362,8 @@ def create_app(
             created_at=body.created_at,
             metadata=body.metadata,
             attachment_ids=body.attachment_ids,
+            dedup_key=body.dedup_key,
+            replace=body.replace,
         )
         return added.model_dump()
 

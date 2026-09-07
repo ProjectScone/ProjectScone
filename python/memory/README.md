@@ -81,7 +81,7 @@ outside the space it was issued for.
 
 | Route | What |
 |---|---|
-| `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
+| `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?, dedup_key?, replace?}`; unknown fields are refused. The answer's `outcome` is `accepted`, `duplicate` (a record with this identity was already there and nothing changed, even if the text differed) or `updated` (`replace` with a known `dedup_key` and changed content: the old episode is forgotten, its receipt is in `replaced`, and the claims that cited it stand) |
 | `DELETE /v1/episodes/{id}` · `GET /v1/episodes/{id}/impact` | forget, with a receipt of what went and what stayed: chunks and vectors go, an attachment is released only when no other episode of the space carries it, and the claims and links that cited the episode stand with their source ids intact; `impact` shows the same receipt and removes nothing (`scone-memory forget --dry-run`) |
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |

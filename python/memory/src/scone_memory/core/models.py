@@ -223,9 +223,17 @@ class RecallResult(BaseModel):
 
 
 class Added(BaseModel):
+    """What one remembered record became. ``outcome`` says it plainly:
+    accepted (stored), duplicate (a record with this identity was already
+    there and the write changed nothing, whether or not its text differed),
+    or updated (a keyed record was replaced; ``replaced`` is the receipt
+    for the episode that went)."""
+
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
+    outcome: Literal["accepted", "duplicate", "updated"] = "accepted"
+    replaced: Optional[ForgetReceipt] = None
 
 
 class Status(BaseModel):
