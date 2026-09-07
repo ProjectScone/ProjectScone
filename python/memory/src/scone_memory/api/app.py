@@ -9,6 +9,8 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import asyncio
 
 import re
@@ -587,7 +589,6 @@ def create_app(
         which is a question for a person, and the repair is exclude with a
         reason through the decision routes."""
         from collections import Counter
-        from dataclasses import asdict
 
         from ..observability.audit import audit_grounding
 
@@ -655,7 +656,8 @@ def create_app(
     @app.get("/v1/profile")
     async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
         profile = await engine.profile(space, limit)
-        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic}
+        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
+                "recent": [asdict(r) for r in profile.recent]}
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:

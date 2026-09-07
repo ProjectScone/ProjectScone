@@ -119,10 +119,21 @@ AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result"
 MAX_AGENT_TEXT = 65_536
 
 
+@dataclass(frozen=True)
+class RecentActivity:
+    """One ``dynamic`` excerpt with the episode it was cut from."""
+
+    episode_id: int
+    excerpt: str
+    created_at: str
+
+
 @dataclass
 class Profile:
     static_facts: list[Fact] = field(default_factory=list)
     dynamic: list[str] = field(default_factory=list)
+    #: ``dynamic`` with its evidence: same order, same excerpts, newest first.
+    recent: list[RecentActivity] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1674,10 +1685,12 @@ class MemoryEngine:
         limit = max(1, min(limit, 50))
         active = [f for f in await self.documents.list_facts(space, include_closed=False) if f.status == "active" and not f.excluded]
         active.sort(key=lambda f: (-f.confidence, f.fact_id))
-        recent = await self.documents.recent_episodes(space, limit)
+        recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
+                  for e in await self.documents.recent_episodes(space, limit)]
         return Profile(
             static_facts=active[:limit],
-            dynamic=[e.content[:200] for e in recent],
+            dynamic=[r.excerpt for r in recent],
+            recent=recent,
         )
 
     async def tags(self, space: str) -> dict[str, int]:

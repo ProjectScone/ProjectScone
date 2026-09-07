@@ -221,6 +221,11 @@ async def test_profile_is_identity_plus_recent_activity(engine):
     profile = await engine.profile("default")
     assert [f.object for f in profile.static_facts] == ["ProjectScone contributors"]
     assert profile.dynamic == ["newer note", "older note"]
+    assert [r.excerpt for r in profile.recent] == profile.dynamic, "recent is dynamic with its evidence"
+    newest, oldest = profile.recent
+    assert newest.episode_id > oldest.episode_id
+    assert [r.created_at[:10] for r in profile.recent] == ["2024-02-01", "2024-01-01"], "each carries its episode's timestamp"
+    assert (await engine.documents.get_episode("default", newest.episode_id)).content == "newer note"
 
 
 @pytest.mark.parametrize("arrival", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)])

@@ -15,6 +15,8 @@ into a data pipeline step.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import argparse
 import hashlib
 import pathlib
@@ -531,7 +533,6 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "audit-grounding":
-        from dataclasses import asdict
 
         from ..observability.audit import audit_grounding
 
@@ -604,7 +605,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "profile":
         profile = await engine.profile(space)
         if args.json:
-            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic})
+            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic,
+                  "recent": [asdict(r) for r in profile.recent]})
         else:
             for f in profile.static_facts:
                 print(fact_line(f), file=out)

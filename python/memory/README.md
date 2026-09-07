@@ -94,7 +94,7 @@ the same rule, including the audio socket's hello.
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `GET /v1/facts/{id}` · `POST /v1/facts/{id}/links` | one fact with its typed relations (`extends`, `derived_from`, `contradicts`, `supports`) and the ids of the episodes it rests on; `POST /v1/facts` takes `extends` and `derived_from` so a claim is linked as it is asserted |
-| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
+| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews; the profile's `recent` is `dynamic` with its evidence, one `{episode_id, excerpt, created_at}` per entry, newest first, the same shape the Rust engine serves |
 | `GET /v1/doctor` | what references what across the stores, read only: chunks without an episode, vectors without a chunk, claims citing a forgotten or an unknown episode, links with a missing end, attachments no episode carries, and the tombstone count; a store that cannot be walked is named in `not_inspected` rather than reported clean; `scone-memory doctor` prints the same |
 
 Errors are `{"error": "..."}` with 401, 404 or 422. Writes that embed (`POST
