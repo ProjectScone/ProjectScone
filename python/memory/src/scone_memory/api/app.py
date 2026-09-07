@@ -252,6 +252,13 @@ def create_app(
         async def console_page() -> Response:
             return page_response(console_html if console_html is not None else render_console(), CONSOLE)
 
+        # The packaged workspace also owns the conversation addresses, so a
+        # refresh or a shared link lands on the page even on a host with no
+        # conversation service mounted; the page reads
+        # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
+        for path in ("/conversations", "/conversations/{sid}"):
+            app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
+
         if PLAYGROUND.exists():
             # GET and HEAD: the console probes with HEAD to decide whether to
             # show its Playground link; in development the page polls HEAD

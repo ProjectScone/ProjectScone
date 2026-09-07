@@ -231,6 +231,32 @@ def test_memory_is_the_canonical_console_address_and_root_still_works():
         assert "__SCONE_MARK__" not in a.text, "the mark placeholder is always substituted"
 
 
+def test_memory_only_server_serves_workspace_deep_links_without_advertising_conversations():
+    """A refresh on /conversations must not 404 on a memory-only host: the
+    packaged workspace owns that address and shows its own readiness state.
+    Catches the missing deep link, HTML leaking into a /v1 miss, and the
+    capability list claiming a service that is not mounted."""
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        canonical = c.get("/memory")
+        for path in ("/conversations", "/conversations/session-one"):
+            page = c.get(path)
+            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
+            assert page.text == canonical.text, path
+            head = c.head(path)
+            assert head.status_code == 200 and head.content == b""
+            assert head.headers["content-length"] == page.headers["content-length"]
+        assert c.get("/conversations/session-one/not-a-route").status_code == 404
+        assert c.post("/conversations").status_code in {404, 405}
+        miss = c.get("/v1/conversations/capabilities", headers={"Authorization": "Bearer solo"})
+        assert miss.status_code == 404 and miss.headers["content-type"].startswith("application/json")
+        features = c.get("/v1/capabilities", headers={"Authorization": "Bearer solo"}).json()["features"]
+        assert not [name for name in features if name.startswith("conversations")], features
+    with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
+        for path in ("/conversations", "/conversations/session-one"):
+            assert c.get(path).status_code == 404, path
+
+
 def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
     import scone_memory.api.app as app_module
 
