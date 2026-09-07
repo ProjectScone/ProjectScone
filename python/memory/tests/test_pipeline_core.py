@@ -458,3 +458,34 @@ async def test_a_stage_whose_own_work_fails_says_so_like_any_other_fault():
     with pytest.raises(OSError, match="socket went away"):
         await asyncio.wait_for(pipeline.wait(), 1)
     await pipeline.stop()
+
+
+async def test_a_stage_can_tell_that_the_turn_it_is_working_on_is_over():
+    """Work already doomed should stop rather than finish into a drop. A
+    long answer holds a buffered stage's only task, and the turn that
+    replaced it waits behind work nobody will ever hear."""
+    spoken: list[str] = []
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    class Long:
+        buffered = True
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            for part in frame.text:
+                if emit.cut_off:
+                    return
+                spoken.append(part)
+                started.set()
+                await gate.wait()
+
+    pipeline = Pipeline([Long()])
+    await pipeline.start()
+    await pipeline.push(Word("abc"))
+    await asyncio.wait_for(started.wait(), 1)
+    await pipeline.interrupt()
+    gate.set()
+    await pipeline.drain()
+    assert spoken == ["a"], "it stopped when the turn ended instead of finishing into a drop"
+    await pipeline.stop()

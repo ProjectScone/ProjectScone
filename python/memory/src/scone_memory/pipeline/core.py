@@ -114,6 +114,13 @@ class Send:
         started talking again, so it has to be able to say so itself."""
         return await self._pipeline.interrupt()
 
+    @property
+    def cut_off(self) -> bool:
+        """True once the turn this handle belongs to has been cut off, so
+        long work can stop instead of finishing into a drop and holding a
+        buffered stage's only task against the turn that replaced it."""
+        return self.turn != self._pipeline.turn
+
     async def fail(self, error: Exception) -> None:
         """Say that this stage's own work has failed, outside any frame.
         A stage with a task of its own can die where raising reaches
