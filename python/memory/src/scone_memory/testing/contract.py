@@ -30,9 +30,14 @@ async def test_same_content_is_deduplicated(engine):
 
 
 async def test_spaces_do_not_leak(engine):
-    await engine.remember("alpha", "the password hint is bluebird")
+    await engine.remember("alpha", "the password hint is bluebird", tags=["secret"], metadata={"user_id": "alice"})
     result = await engine.recall("beta", "password hint bluebird")
     assert result.items == []
+    # Metadata grants no access: a filter that matches only in another
+    # space finds nothing there, whichever way it narrows.
+    assert (await engine.recall("beta", "password hint bluebird", where={"user_id": "alice"})).items == []
+    assert (await engine.recall("beta", "password hint bluebird", tags=["secret"])).items == []
+    assert (await engine.recall("alpha", "password hint bluebird", where={"user_id": "alice"})).items != [], "and the same filter works at home"
 
 
 async def test_as_of_hides_what_happened_later(engine):
