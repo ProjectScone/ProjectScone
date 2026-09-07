@@ -340,7 +340,7 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
-            "jobs.read": callable(getattr(engine.documents, "create_job", None)),
+            "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest

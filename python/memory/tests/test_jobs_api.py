@@ -135,3 +135,22 @@ def test_older_batches_can_be_paged_rather_than_silently_left_out(client):
 
     assert client.get("/v1/jobs?limit=500", headers=bearer("writer")).status_code == 422, "the page is bounded"
     assert client.get("/v1/jobs?before=no-such-job", headers=bearer("writer")).status_code == 404
+
+
+def test_a_store_that_can_only_write_jobs_does_not_advertise_reading_them(client, monkeypatch):
+    """Codex's review found the flag checking the write method while the
+    read routes need the read ones: a store with half the support would
+    advertise reading and then fail. The flag now follows what reading
+    actually calls, and a store without it refuses plainly."""
+    engine = client.app.state.engine
+    monkeypatch.setattr(engine.documents, "list_jobs", None)
+
+    features = client.get("/v1/capabilities", headers=bearer("writer")).json()["features"]
+    assert features["jobs.read"] is False, "half a store is not read support"
+
+    listed = client.get("/v1/jobs", headers=bearer("writer"))
+    assert listed.status_code == 422 and "read" in listed.json()["error"], "refused, not a server error"
+    one = client.get("/v1/jobs/anything", headers=bearer("writer"))
+    assert one.status_code == 422 and "read" in one.json()["error"]
+    assert client.post("/v1/episodes/batch", json={"records": [{"content": "still writable"}]},
+                       headers=bearer("writer")).status_code == 200, "writing a batch still works"

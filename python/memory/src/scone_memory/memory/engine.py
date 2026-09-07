@@ -796,11 +796,25 @@ class MemoryEngine:
 
     # -- ingest jobs ---------------------------------------------------------
 
+    def _able(self, *methods: str) -> bool:
+        return all(callable(getattr(self.documents, name, None)) for name in methods)
+
+    #: What a store must implement to record a batch, and to read one back.
+    #: They are separate because a store may do one and not the other, and
+    #: advertising the wrong one turns a refusal into a server error.
+    RECORDS_JOBS = ("create_job", "update_job")
+    READS_JOBS = ("get_job", "list_jobs")
+
     def _keeps_jobs(self) -> None:
         """Recording jobs is a store's choice: one that cannot keep them
         says so rather than pretending a batch was never tracked."""
-        if not callable(getattr(self.documents, "create_job", None)):
+        if not self._able(*self.RECORDS_JOBS):
             raise InvalidInput("this document store does not record ingest jobs")
+
+    def _reads_jobs(self) -> None:
+        """Reading a job back is a separate choice from recording one."""
+        if not self._able(*self.READS_JOBS):
+            raise InvalidInput("this document store does not read ingest jobs")
 
     async def ingest_batch(self, space: str, records: Iterable[Record], *,
                            request_id: Optional[str] = None) -> "IngestJob":
@@ -844,13 +858,14 @@ class MemoryEngine:
     async def job_for_request(self, space: str, request_id: str) -> Optional["IngestJob"]:
         """The job this request already made, if it made one."""
         check_space(space)
-        self._keeps_jobs()
+        if not self._able("job_by_request"):
+            return None
         return await self.documents.job_by_request(space, request_id)
 
     async def job(self, space: str, job_id: str) -> "IngestJob":
         """One batch's receipt."""
         check_space(space)
-        self._keeps_jobs()
+        self._reads_jobs()
         found = await self.documents.get_job(space, job_id)
         if found is None:
             raise NotFound(f"job {job_id!r} in {space!r}")
@@ -864,7 +879,7 @@ class MemoryEngine:
         job of a previous page; a cursor naming no job is refused rather
         than quietly returning the newest page again."""
         check_space(space)
-        self._keeps_jobs()
+        self._reads_jobs()
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.MAX_JOBS_PAGE:
             raise InvalidInput(f"limit must be an integer from 1 through {self.MAX_JOBS_PAGE}")
         if before is not None and await self.documents.get_job(space, before) is None:
