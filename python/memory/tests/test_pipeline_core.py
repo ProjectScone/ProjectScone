@@ -428,3 +428,33 @@ async def test_a_stage_can_cut_off_the_turn_it_is_in_the_middle_of():
         "what it sends for the turn it has just cut off does not arrive"
     assert any(isinstance(f, Interrupted) for f in tail.seen)
     await pipeline.stop()
+
+
+async def test_a_stage_whose_own_work_fails_says_so_like_any_other_fault():
+    """A stage with a task of its own can die between deliveries, where
+    raising reaches nobody. It says so on the handle it sends on, and the
+    run treats that exactly as if it had raised on a frame."""
+    tail = Collect()
+
+    class Reader:
+        essential = True
+
+        def __init__(self):
+            self.feed = None
+
+        async def attach(self, feed):
+            self.feed = feed
+
+        async def handle(self, frame, emit):
+            pass
+
+    reader = Reader()
+    pipeline = Pipeline([reader, tail])
+    await pipeline.start()
+    await reader.feed.fail(OSError("the socket went away"))
+    assert pipeline.failures == 1
+    assert any(isinstance(f, Failed) and "socket went away" in f.error for f in tail.seen), \
+        "the other stages hear it, as they would any fault"
+    with pytest.raises(OSError, match="socket went away"):
+        await asyncio.wait_for(pipeline.wait(), 1)
+    await pipeline.stop()

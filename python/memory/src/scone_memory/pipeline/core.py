@@ -65,6 +65,8 @@ class Delivery:
     trace, a latency figure or a dropped-work count is made of."""
 
     stage: str
+    #: What was being handled, or None when the stage's own work failed
+    #: rather than its handling of any frame.
     frame: object
     direction: str
     turn: int
@@ -111,6 +113,12 @@ class Send:
         The stage nearest the person is the one that knows the person has
         started talking again, so it has to be able to say so itself."""
         return await self._pipeline.interrupt()
+
+    async def fail(self, error: Exception) -> None:
+        """Say that this stage's own work has failed, outside any frame.
+        A stage with a task of its own can die where raising reaches
+        nobody; this gives that the same consequences as raising."""
+        await self._pipeline.report(self._index, error)
 
 
 class Emit(Send):
@@ -300,25 +308,36 @@ class Pipeline:
                 stage=stage, frame=frame, direction=direction, turn=turn,
                 session=self.session, outcome=outcome, elapsed_ms=elapsed_ms))
 
-    async def _run(self, index: int, stage: Stage, frame: object, turn: int, direction: str) -> None:
+    async def report(self, index: int, error: Exception) -> None:
+        """A stage's own work failed, outside any delivery: the same
+        consequences as raising while handling a frame."""
+        await self._fault(index, self.stages[index], None, DOWN, self.turn, error, 0.0)
+
+    async def _fault(self, index: int, stage: Stage, frame: object, direction: str,
+                     turn: int, error: Exception, elapsed_ms: float) -> None:
         name = type(stage).__name__
+        self.failures += 1
+        await self._saw(name, frame, direction, turn, FAILED, elapsed_ms)
+        # Telling a stage about a failure must not be able to start
+        # another round of it, and the stage that raised already knows.
+        if not isinstance(frame, Failed):
+            await self._announce(
+                Failed(stage=name, error=f"{type(error).__name__}: {error}"), skip=index)
+        if getattr(stage, "essential", False):
+            self._end(error)
+
+    async def _run(self, index: int, stage: Stage, frame: object, turn: int, direction: str) -> None:
         began = time.perf_counter()
         try:
             await stage.handle(frame, Emit(self, index, turn))
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a stage's fault is reported, not raised at the sender
-            self.failures += 1
-            await self._saw(name, frame, direction, turn, FAILED, (time.perf_counter() - began) * 1000)
-            # Telling a stage about a failure must not be able to start
-            # another round of it, and the stage that raised already knows.
-            if not isinstance(frame, Failed):
-                await self._announce(
-                    Failed(stage=name, error=f"{type(error).__name__}: {error}"), skip=index)
-            if getattr(stage, "essential", False):
-                self._end(error)
+            await self._fault(index, stage, frame, direction, turn, error,
+                              (time.perf_counter() - began) * 1000)
         else:
-            await self._saw(name, frame, direction, turn, HANDLED, (time.perf_counter() - began) * 1000)
+            await self._saw(type(stage).__name__, frame, direction, turn, HANDLED,
+                            (time.perf_counter() - began) * 1000)
 
     async def _work(self, index: int, stage: Stage, queue: asyncio.Queue) -> None:
         while True:
