@@ -40,6 +40,20 @@ def build_app(settings: Settings, engine):
                                    worker=worker, reload_pages=settings.reload_pages)
 
 
+def build_server(settings: Settings, app):
+    """The uvicorn server for ``app``. A composed host must tell the
+    conversation service to end its open streams before uvicorn waits for
+    open responses, or a reader holding a stream holds shutdown; the
+    memory-only app has no streams to end."""
+    import uvicorn
+
+    if settings.conversations_journal:
+        from .conversation_server import create_server
+
+        return create_server(app, host=settings.host, port=settings.port)
+    return uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, log_level="warning"))
+
+
 def main(settings: Optional[Settings] = None) -> None:
     settings = settings or Settings.from_env()
     if not settings.keys:
@@ -72,7 +86,7 @@ def main(settings: Optional[Settings] = None) -> None:
             + (f" conversations={settings.conversations_journal}" if settings.conversations_journal else ""),
             file=sys.stderr,
         )
-        await uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, log_level="warning")).serve()
+        await build_server(settings, app).serve()
 
     asyncio.run(run())
 

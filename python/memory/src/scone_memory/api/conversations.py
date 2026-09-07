@@ -684,5 +684,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
-    app.mount("/", create_app(engine, keys, console=False, conversations=True))
+    # The mounted app answers /v1/status, so it must know the worker; its own
+    # lifespan never runs under a mount, so ownership stays with this one.
+    app.mount("/", create_app(engine, keys, console=False, conversations=True, worker=worker))
     return app
