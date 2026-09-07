@@ -82,3 +82,27 @@ async def test_what_was_filtered_on_is_on_the_record(engine):
 
     events = await engine.events.query("alpha", kind="recall", limit=5)
     assert events and events[-1].payload["narrow"]["conditions"] == {"field": "status", "is": "published"}
+
+
+async def test_a_filter_narrows_within_a_space_and_never_across_one(engine):
+    """G13: metadata narrows, it does not grant. A condition is a way of
+    asking for less, so it must never become a way of reaching something
+    the caller could not already read. The space is the boundary; a
+    filter that matched across it would turn a search term into a key.
+
+    This one is a guard on the outcome and not a proof of any single
+    line, and that is worth saying rather than leaving to be discovered.
+    Isolation here is defended in three independent places on the SQLite
+    path: the lexical query, fetching the chunks, and fetching the
+    episode. Disabling any one of them on its own still leaves this
+    passing, which is the point of having three. So a mutation cannot
+    turn this test red, and it earns its place by catching the day a
+    change removes the last of them rather than the first."""
+    await engine.remember("alpha", "the quarterly plan", metadata={"status": "published"})
+    theirs = await engine.remember("beta", "the quarterly plan", metadata={"status": "published"})
+
+    found = await engine.recall("alpha", "the quarterly plan", limit=10,
+                                conditions={"field": "status", "is": "published"})
+
+    assert theirs.episode_id not in {item.episode_id for item in found.items}
+    assert len(found.items) == 1
