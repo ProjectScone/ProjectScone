@@ -110,6 +110,7 @@ def test_a_journal_written_before_turns_existed_opens_and_keeps_its_rows(tmp_pat
     db.execute("DROP TABLE session_turns")
     db.execute("ALTER TABLE sessions DROP COLUMN recall_scope")
     db.execute("ALTER TABLE sessions DROP COLUMN persona")
+    db.execute("ALTER TABLE sessions DROP COLUMN persona_fingerprint")
     db.execute("PRAGMA user_version=1")
     db.commit()
     db.close()

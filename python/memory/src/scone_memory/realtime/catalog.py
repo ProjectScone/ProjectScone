@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -43,13 +44,35 @@ def load_personas(path) -> list[Persona]:
     return personas
 
 
+def _digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def fingerprint_of(persona: Persona) -> str:
+    """Identity of a persona's configuration: its id, name and the four
+    choices. Readiness and the registry behind the choices are not part of
+    it, so a client can tell "the same choice" from "changed underneath"."""
+    return _digest({"id": persona.id, "name": persona.name, "reply": persona.reply.model_dump(),
+                    "transcription": persona.transcription.model_dump(), "speech": persona.speech.model_dump(),
+                    "activity": persona.activity.model_dump() if persona.activity is not None else None})
+
+
 @dataclass(frozen=True)
 class PersonaCatalog:
     personas: tuple[Persona, ...]
     bound: Mapping[str, BoundPersona]
 
+    @property
+    def revision(self) -> str:
+        """Identity of the whole catalog, in order; changes when any entry does."""
+        return _digest([fingerprint_of(persona) for persona in self.personas])
+
     def get(self, persona_id: str) -> BoundPersona | None:
         return self.bound.get(persona_id)
+
+    def fingerprint(self, persona_id: str) -> str | None:
+        found = self.bound.get(persona_id)
+        return fingerprint_of(found.persona) if found is not None else None
 
     def name(self, persona_id: str) -> str | None:
         found = self.bound.get(persona_id)
@@ -65,6 +88,7 @@ class PersonaCatalog:
             "reply": persona.reply.model_dump(), "transcription": persona.transcription.model_dump(),
             "speech": persona.speech.model_dump(),
             "activity": persona.activity.model_dump() if persona.activity is not None else None,
+            "fingerprint": fingerprint_of(persona),
             "text_ready": True, "voice_ready": False,
         } for persona in self.personas]
 

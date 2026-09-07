@@ -9,7 +9,7 @@ import sqlite3
 import pytest
 
 from scone_memory.core.errors import Conflict
-from scone_memory.realtime.catalog import bind_catalog, load_personas
+from scone_memory.realtime.catalog import bind_catalog, fingerprint_of, load_personas
 from scone_memory.realtime.persona import Persona
 from scone_memory.realtime.providers import ProviderRegistry
 from scone_memory.realtime.session_journal import SessionJournal
@@ -65,7 +65,7 @@ def test_binding_refuses_an_unregistered_choice_naming_persona_and_stage():
         "reply": {"provider": "stub", "model": "echo"},
         "transcription": {"provider": "stub", "model": "ears"},
         "speech": {"provider": "stub", "model": "mouth", "voice": "alto"},
-        "activity": None, "text_ready": True, "voice_ready": False,
+        "activity": None, "fingerprint": fingerprint_of(helper), "text_ready": True, "voice_ready": False,
     }]
     assert "instructions" not in json.dumps(catalog.public())
 
@@ -89,6 +89,7 @@ def test_the_journal_records_a_session_persona_and_migrates_older_files(tmp_path
         sid = journal.create("alpha", "one")["session_id"]
     db = sqlite3.connect(older)
     db.execute("ALTER TABLE sessions DROP COLUMN persona")
+    db.execute("ALTER TABLE sessions DROP COLUMN persona_fingerprint")
     db.execute("PRAGMA user_version=3")
     db.commit()
     db.close()
@@ -96,3 +97,32 @@ def test_the_journal_records_a_session_persona_and_migrates_older_files(tmp_path
         assert journal.get("alpha", sid)["persona"] is None, "rows from before the column read as unbound"
         assert journal.create("alpha", "two", persona="helper")["session_id"]
     assert sqlite3.connect(older).execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_fingerprints_follow_configuration_not_readiness_and_the_revision_follows_the_catalog():
+    helper = Persona.model_validate(persona("helper"))
+    same = Persona.model_validate(persona("helper"))
+    louder = Persona.model_validate(persona("helper", speech={"provider": "stub", "model": "mouth", "voice": "tenor"}))
+    assert fingerprint_of(helper) == fingerprint_of(same) and len(fingerprint_of(helper)) == 16
+    assert fingerprint_of(helper) != fingerprint_of(louder), "a changed voice is a different configuration"
+    registry_with_tenor = ProviderRegistry(reply={("stub", "echo"): lambda: None},
+                                           transcription={("stub", "ears"): lambda: None},
+                                           speech={("stub", "mouth", "alto"): lambda: None, ("stub", "mouth", "tenor"): lambda: None})
+    one = bind_catalog([helper], registry_with_tenor)
+    other = bind_catalog([louder], registry_with_tenor)
+    assert one.revision != other.revision and len(one.revision) == 16
+    assert one.public()[0]["fingerprint"] == fingerprint_of(helper)
+    assert one.fingerprint("helper") == fingerprint_of(helper) and one.fingerprint("nobody") is None
+    assert bind_catalog([helper], registry()).revision == one.revision, "readiness and registry contents do not change identity"
+
+
+def test_the_journal_keeps_the_fingerprint_recorded_at_creation(tmp_path):
+    with SessionJournal(tmp_path / "sessions.db") as journal:
+        sid = journal.create("alpha", "one", persona="helper", persona_fingerprint="0123456789abcdef")["session_id"]
+        assert journal.get("alpha", sid)["persona_fingerprint"] == "0123456789abcdef"
+        assert journal.get("alpha", journal.create("alpha", "two")["session_id"])["persona_fingerprint"] is None
+        # The fingerprint is not part of the command's identity: a retry that
+        # names the same persona replays whatever was recorded first.
+        assert journal.create("alpha", "one", persona="helper", persona_fingerprint="fedcba9876543210")["session_id"] == sid
+        assert journal.get("alpha", sid)["persona_fingerprint"] == "0123456789abcdef"
+        assert {s["session_id"]: s["persona_fingerprint"] for s in journal.sessions("alpha")["items"]}[sid] == "0123456789abcdef"

@@ -29,6 +29,10 @@ from ..core.errors import Conflict, InvalidInput, NotFound
 from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
 from .app import PLAYGROUND, create_app, episode_json
+from ..realtime.catalog import PersonaCatalog
+
+# What a host without a catalog reports: the revision of an empty one.
+_EMPTY_REVISION = PersonaCatalog((), {}).revision
 from .text_stream import MAX_BYTES, MAX_CHUNKS, TextWindow, sse
 
 
@@ -42,6 +46,8 @@ class Create(Command):
     recall_scope: dict[str, object] = Field(default_factory=dict)
     # A catalog id; fixed for the session's life and echoed in its receipts.
     persona: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    # The configuration the client displayed; a mismatch refuses the session.
+    persona_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
 
 
 class Stop(Command):
@@ -263,10 +269,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         return JSONResponse({"error": "conversation revision or command conflict", "revision": error.revision}, status_code=409)
 
     def describe(session):
-        """A session receipt names its persona from this process's catalog; an
-        id the catalog no longer has keeps its id and gets no name."""
+        """A session receipt names its persona from this process's catalog and
+        keeps the configuration recorded at creation: an id the catalog no
+        longer has gets no name, and a changed configuration is not current."""
         chosen = session.get("persona")
-        session["persona"] = ({"id": chosen, "name": catalog.name(chosen) if catalog is not None else None}
+        recorded = session.pop("persona_fingerprint", None)
+        now = catalog.fingerprint(chosen) if catalog is not None and chosen else None
+        session["persona"] = ({"id": chosen, "name": catalog.name(chosen) if catalog is not None else None,
+                               "fingerprint": recorded, "current": recorded is not None and recorded == now}
                               if chosen else None)
         return session
 
@@ -296,7 +306,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def personas(space=Depends(space_for)):
         """The choices this host can run, for a client to pick from. Never the
         instructions, and nothing the registry closed over."""
-        return {"schema_version": 1, "personas": catalog.public() if catalog is not None else []}
+        return {"schema_version": 1, "revision": catalog.revision if catalog is not None else _EMPTY_REVISION,
+                "personas": catalog.public() if catalog is not None else []}
 
     @app.get("/v1/conversations")
     async def sessions(after: str = "", limit: int = 100, space=Depends(space_for)):
@@ -317,6 +328,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             chosen = catalog.get(body.persona) if catalog is not None else None
             if chosen is None:
                 raise HTTPException(422, f"persona is not in this host's catalog: {body.persona}")
+            if body.persona_fingerprint is not None and body.persona_fingerprint != catalog.fingerprint(body.persona):
+                raise HTTPException(409, f"persona selection is stale: {body.persona} "
+                                         f"(current fingerprint {catalog.fingerprint(body.persona)})")
         elif runtime_factory is None and scoped_runtime_factory is None:
             if catalog is not None and catalog.personas:
                 raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
@@ -328,11 +342,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             # Deleted sessions keep a process-local retry tombstone. Check it
             # before journal.create can insert a new row for the deleted key.
             current = inspect(space, creates[key])
-            journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona)
+            journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona,
+                           persona_fingerprint=catalog.fingerprint(body.persona) if chosen is not None else None)
             return current
         if len(creates) >= max_sessions:
             raise HTTPException(429, "conversation process capacity reached")
-        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona)
+        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona,
+                                 persona_fingerprint=catalog.fingerprint(body.persona) if chosen is not None else None)
         sid = receipt["session_id"]
         creates[key] = sid
         current = journal.get(space, sid)

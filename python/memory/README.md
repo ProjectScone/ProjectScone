@@ -632,7 +632,10 @@ at startup, so a choice the registry does not register stops `serve` with exit 2
 naming the persona and the stage. Clients read `GET /v1/conversations/personas`
 (ids, names, provider/model labels, `text_ready`, `voice_ready`; never the
 instructions), pick one with `persona` on `POST /v1/conversations`, and see
-`{"id", "name"}` in every session receipt. With a catalog and no bare model
+`{"id", "name", "fingerprint", "current"}` in every session receipt. The listing
+carries a `revision` and each persona a `fingerprint` of its configuration; send
+`persona_fingerprint` with the create to be refused (409) if the operator changed
+that persona since the client displayed it. With a catalog and no bare model
 factory, a session must name a persona; nothing is chosen for it. `voice_ready`
 is false for every persona until a browser audio transport exists.
 

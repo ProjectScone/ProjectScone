@@ -98,7 +98,8 @@ async def test_the_catalog_is_readable_and_counted_but_never_shows_instructions(
     async with client_for(bare) as client:
         ready = (await client.get("/v1/conversations/capabilities")).json()
         assert ready["personas"] == 0 and ready["text_configured"] is False
-        assert (await client.get("/v1/conversations/personas")).json() == {"schema_version": 1, "personas": []}
+        empty = (await client.get("/v1/conversations/personas")).json()
+        assert empty["personas"] == [] and len(empty["revision"]) == 16
 
 
 async def test_a_persona_is_fixed_at_creation_echoed_in_receipts_and_drives_the_reply(tmp_path):
@@ -111,10 +112,11 @@ async def test_a_persona_is_fixed_at_creation_echoed_in_receipts_and_drives_the_
         unchosen = await client.post("/v1/conversations", json={"request_id": "b", "capture": True})
         assert unchosen.status_code == 422 and "helper" in unchosen.text, "nothing is chosen implicitly"
         created = await client.post("/v1/conversations", json={"request_id": "c", "capture": True, "persona": "helper"})
-        assert created.status_code == 200 and created.json()["persona"] == {"id": "helper", "name": "Helper"}
+        identity = {"id": "helper", "name": "Helper", "fingerprint": created.json()["persona"]["fingerprint"], "current": True}
+        assert created.status_code == 200 and created.json()["persona"] == identity
         sid = created.json()["session_id"]
-        assert (await client.get(f"/v1/conversations/{sid}")).json()["persona"] == {"id": "helper", "name": "Helper"}
-        assert [s["persona"] for s in (await client.get("/v1/conversations")).json()["items"]] == [{"id": "helper", "name": "Helper"}]
+        assert (await client.get(f"/v1/conversations/{sid}")).json()["persona"] == identity
+        assert [s["persona"] for s in (await client.get("/v1/conversations")).json()["items"]] == [identity]
         retry = await client.post("/v1/conversations", json={"request_id": "c", "capture": True, "persona": "helper"})
         assert retry.json()["session_id"] == sid and retry.json()["persona"]["id"] == "helper"
         body = {"request_id": "t", "text": "Hello", "expected_revision": created.json()["revision"]}
@@ -125,7 +127,8 @@ async def test_a_persona_is_fixed_at_creation_echoed_in_receipts_and_drives_the_
     # persona still reports the id, with no name to give it.
     again = create_conversation_app(engine, KEYS, tmp_path / "j.db", None)
     async with client_for(again) as client:
-        assert (await client.get(f"/v1/conversations/{sid}")).json()["persona"] == {"id": "helper", "name": None}
+        gone = (await client.get(f"/v1/conversations/{sid}")).json()["persona"]
+        assert gone == {"id": "helper", "name": None, "fingerprint": identity["fingerprint"], "current": False}
 
 
 async def test_a_bare_runtime_still_serves_sessions_created_without_a_persona(tmp_path):
@@ -170,3 +173,34 @@ def test_serve_binds_the_catalog_at_startup_or_refuses(tmp_path, monkeypatch, ca
     err = capsys.readouterr().err
     assert stop.value.code == 2 and "singer" in err and "speech" in err and "Answer briefly" not in err
     assert not (tmp_path / "never-opened.db").exists(), "refused before anything was served"
+
+
+async def test_a_stale_persona_selection_is_refused_and_receipts_keep_the_recorded_identity(tmp_path):
+    engine = await engine_for()
+    app = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=catalog(HELPER), public_text_streaming=True)
+    async with client_for(app) as client:
+        listing = (await client.get("/v1/conversations/personas")).json()
+        current = listing["personas"][0]["fingerprint"]
+        assert len(listing["revision"]) == 16 and len(current) == 16
+        stale = await client.post("/v1/conversations", json={"request_id": "a", "capture": True, "persona": "helper",
+                                                              "persona_fingerprint": "0000000000000000"})
+        assert stale.status_code == 409 and "helper" in stale.text and current in stale.text
+        assert (await client.get("/v1/conversations")).json()["items"] == [], "a stale selection creates nothing"
+        created = await client.post("/v1/conversations", json={"request_id": "b", "capture": True, "persona": "helper",
+                                                                "persona_fingerprint": current})
+        assert created.status_code == 200
+        assert created.json()["persona"] == {"id": "helper", "name": "Helper", "fingerprint": current, "current": True}
+        sid = created.json()["session_id"]
+        legacy = await client.post("/v1/conversations", json={"request_id": "c", "capture": True, "persona": "helper"})
+        assert legacy.status_code == 200 and legacy.json()["persona"]["fingerprint"] == current, "omitting the fingerprint skips the check, not the record"
+    # The operator changes the voice and restarts: the receipt keeps what was
+    # chosen and says it is no longer the current configuration.
+    louder = {**HELPER, "speech": {"provider": "stub", "model": "mouth", "voice": "tenor"}}
+    changed = bind_catalog([Persona.model_validate(louder)], ProviderRegistry(
+        reply={("stub", "echo"): ScriptedModel}, transcription={("stub", "ears"): lambda: None},
+        speech={("stub", "mouth", "tenor"): lambda: None}))
+    again = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=changed, public_text_streaming=True)
+    async with client_for(again) as client:
+        receipt = (await client.get(f"/v1/conversations/{sid}")).json()["persona"]
+        assert receipt == {"id": "helper", "name": "Helper", "fingerprint": current, "current": False}
+        assert (await client.get("/v1/conversations/personas")).json()["personas"][0]["fingerprint"] != current
