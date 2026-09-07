@@ -639,6 +639,22 @@ that persona since the client displayed it. With a catalog and no bare model
 factory, a session must name a persona; nothing is chosen for it. `voice_ready`
 is false for every persona until a browser audio transport exists.
 
+A registry's reply choice can be the same OpenAI-compatible endpoint the distiller
+uses: `scone_memory.providers.llm.OpenAICompatibleTextModel(base_url, model,
+api_key=..., think=...)` is a native `TextModel` that streams the reply as public
+deltas and ends with an explicit completion (a stream that ends without one, or an
+error status, fails the turn rather than completing on half a reply). One instance
+serves one turn, so register it as a factory:
+
+```python
+from scone_memory.providers.llm import OpenAICompatibleTextModel
+from scone_memory.realtime.providers import ProviderRegistry
+
+def registry():
+    reply = lambda: OpenAICompatibleTextModel("http://127.0.0.1:11434/v1", "llama3.1", think=False)
+    return ProviderRegistry(reply={("ollama", "llama3.1"): reply}, transcription={...}, speech={...})
+```
+
 Voice rides the same service. `POST /v1/conversations` with `"mode": "voice"` and
 a `persona` creates a session that waits (`created`) for its audio socket,
 `WebSocket /v1/conversations/{sid}/audio`. The first text frame is
