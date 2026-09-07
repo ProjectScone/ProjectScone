@@ -59,3 +59,37 @@ def test_the_cli_deletes_a_space_only_with_its_name_confirmed(tmp_path):
     receipt = json.loads(out.getvalue())
     assert receipt["deleted"] == "alpha" and receipt["episodes"] == 1 and receipt["deleted_at"]
     assert main(["--space", "alpha", "--json", "remember"], env=env, stdin=io.StringIO("again"), out=io.StringIO()) != 0, "a deleted space takes no writes"
+
+
+async def test_the_conversation_service_answers_404_for_a_deleted_space(tmp_path):
+    import httpx
+    from scone_memory.api.conversations import create_conversation_app
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    app = create_conversation_app(engine, {"k": "alpha", "other": "beta"}, tmp_path / "j.db", None)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://scone.test") as client:
+            assert (await client.get("/v1/conversations", headers=bearer("k"))).status_code == 200
+            await engine.delete_space("alpha")
+            assert (await client.get("/v1/conversations", headers=bearer("k"))).status_code == 404
+            started = await client.post("/v1/conversations", json={"request_id": "a", "capture": True}, headers=bearer("k"))
+            assert started.status_code == 404, started.text
+            assert (await client.post("/v1/episodes", json={"content": "x"}, headers=bearer("k"))).status_code == 404
+            assert (await client.get("/v1/conversations", headers=bearer("other"))).status_code == 200, "the neighbour is untouched"
+
+
+def test_the_audio_socket_refuses_a_deleted_space_at_hello(tmp_path):
+    from scone_memory.api.conversations import create_conversation_app
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    asyncio.run(engine.delete_space("alpha"))
+    app = create_conversation_app(engine, {"k": "alpha", "other": "beta"}, tmp_path / "j.db", None)
+
+    def hello(client, key):
+        with client.websocket_connect("/v1/conversations/none/audio") as socket:
+            socket.send_text(json.dumps({"type": "hello", "key": key, "sample_rate": 16000, "channels": 1}))
+            return json.loads(socket.receive_text())["reason"]
+
+    with TestClient(app) as client:
+        assert "deleted" in hello(client, "k"), "a deleted space's key is refused before any session is looked up"
+        assert hello(client, "other") == "unknown session"

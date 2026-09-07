@@ -229,7 +229,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     roles = dict(roles or {})
 
-    def space_for(request: Request):
+    async def space_for(request: Request):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
             for key, space in keys.items():
@@ -238,6 +238,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                         raise HTTPException(503, "conversation service is shutting down")
                     if not permitted(roles.get(key, "full"), request.method, request.url.path):
                         raise HTTPException(403, f"key role {roles.get(key)} cannot write")
+                    # A deleted space's key answers 404 here as on the memory routes.
+                    if await engine.space_deleted(space) is not None:
+                        raise HTTPException(404, f"space {space!r} was deleted")
                     return space
         raise HTTPException(401, "valid bearer key required")
 
@@ -777,6 +780,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return
         if not permitted(roles.get(key, "full"), "POST", "/v1/conversations"):
             await refuse(f"key role {roles.get(key)} cannot start a session")
+            return
+        if await engine.space_deleted(space) is not None:
+            await refuse(f"space {space!r} was deleted")
             return
         if shutting_down:
             await refuse("conversation service is shutting down")
