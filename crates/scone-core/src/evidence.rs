@@ -443,28 +443,119 @@ impl Engine {
                 edges.push(json!({"source":nid,"target":chunk,"kind":"chunked_into"}));
             }
         }
+        let mut sources = Vec::<i64>::new();
         for f in self.facts_list(space, true)?.into_iter().take(limit) {
             let id = format!("claim:{}", f.fact_id);
             nodes.insert(id.clone(),json!({"id":id,"kind":"claim","label":format!("{} {} {}",f.subject,f.predicate,f.object),"ts":f.valid_from,"data":{"status":f.status,"valid_from":f.valid_from,"valid_until":f.valid_until,"confidence":f.confidence,"origin":null,"coverage":"origin unavailable on Rust fact record"}}));
             let mut stmt=self.conn.prepare("SELECT fp.episode_id FROM fact_provenance fp JOIN episodes e ON e.id=fp.episode_id WHERE fp.fact_id=?1 AND e.space_id=?2")?;
             for eid in stmt.query_map(params![f.fact_id, space.id()], |r| r.get::<_, i64>(0))? {
+                let eid = eid?;
                 edges.push(
-                    json!({"source":format!("episode:{}",eid?),"target":id,"kind":"source_of"}),
+                    json!({"source":format!("episode:{eid}"),"target":id,"kind":"source_of"}),
+                );
+                sources.push(eid);
+            }
+        }
+        // The sample above is the newest episodes, which is about recent
+        // activity. A claim's source may be older than that and must still
+        // be drawn, or the claim reads as unsupported rather than as having
+        // a source outside the view. An episode that is gone stays gone.
+        for eid in sources {
+            let nid = format!("episode:{eid}");
+            if nodes.contains_key(&nid) {
+                continue;
+            }
+            if let Ok(ep) = self.evidence_episode(space, eid) {
+                let label = ep["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                nodes.insert(
+                    nid.clone(),
+                    json!({"id":nid,"kind":"episode","label":label,"ts":ep["created_at"],"data":ep}),
                 );
             }
         }
-        // Bound the rendered projection; missing endpoints are explicit coverage,
-        // never synthesized. Underlying events/episodes remain independently readable.
+        // Bound the rendered projection; missing endpoints are explicit
+        // coverage, never synthesized. Taking whatever sorted first by key
+        // meant dropping by node id, which is not a decision anyone made:
+        // every kind now gets a share, so a snapshot cannot lose all its
+        // episodes and keep only passages.
+        const KINDS: [&str; 7] = [
+            "episode",
+            "claim",
+            "recall",
+            "session",
+            "turn",
+            "tool_call",
+            "chunk",
+        ];
         if nodes.len() > limit {
             truncated = true;
-            nodes = nodes.into_iter().take(limit).collect();
+            // Two tiers decide what survives. An end of any edge beats a
+            // node nothing points at, because dropping it turns a drawn
+            // relationship into a missing one. And an end of a source_of
+            // edge beats every other end, because that is the provenance
+            // of a claim: a claim drawn without its source reads as
+            // unsupported, which is exactly the failure being fixed.
+            let ends = |kind: Option<&str>| -> std::collections::HashSet<String> {
+                edges
+                    .iter()
+                    .filter(|e| kind.is_none_or(|k| e["kind"] == k))
+                    .flat_map(|e| {
+                        [e["source"].as_str(), e["target"].as_str()]
+                            .into_iter()
+                            .flatten()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            let anchored = ends(None);
+            let provenance = ends(Some("source_of"));
+            let mut buckets: Vec<Vec<(String, Value)>> = KINDS
+                .iter()
+                .map(|kind| {
+                    let mut of_kind: Vec<(String, Value)> = nodes
+                        .iter()
+                        .filter(|(_, node)| node["kind"] == *kind)
+                        .map(|(id, node)| (id.clone(), node.clone()))
+                        .collect();
+                    of_kind.sort_by_key(|(id, _)| (provenance.contains(id), anchored.contains(id)));
+                    of_kind
+                })
+                .collect();
+            let mut kept = BTreeMap::<String, Value>::new();
+            'fill: loop {
+                let mut progressed = false;
+                for bucket in buckets.iter_mut() {
+                    if let Some((id, node)) = bucket.pop() {
+                        kept.insert(id, node);
+                        progressed = true;
+                        if kept.len() >= limit {
+                            break 'fill;
+                        }
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            nodes = kept;
         }
+        let drawn = edges.len();
         edges.retain(|e| {
             nodes.contains_key(e["source"].as_str().unwrap_or(""))
                 && nodes.contains_key(e["target"].as_str().unwrap_or(""))
         });
+        // What the bound cost, said plainly: an edge without both ends is
+        // not drawable, and a reader should know how much is out of view
+        // rather than reading absence as evidence of absence.
+        let provenance_omitted = drawn - edges.len();
         Ok(
-            json!({"nodes":nodes.into_values().collect::<Vec<_>>(),"edges":edges,"truncated":truncated,"evidence":"sqlite","coverage":"bounded retained snapshot; HTTP recall recorded; no inferred edges"}),
+            json!({"nodes":nodes.into_values().collect::<Vec<_>>(),"edges":edges,"truncated":truncated,"provenance_omitted":provenance_omitted,"evidence":"sqlite","coverage":"bounded retained snapshot; HTTP recall recorded; no inferred edges"}),
         )
     }
 }
