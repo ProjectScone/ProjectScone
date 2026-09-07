@@ -11,7 +11,7 @@ protocol and passes the contract tests; nothing in the engine changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
@@ -87,6 +87,12 @@ class TextFilter:
     tags: tuple[str, ...] = ()
     #: Every key must match the episode's metadata exactly.
     where: Mapping[str, str] = field(default_factory=dict)
+    #: A parsed metadata filter, or None. Duck-typed rather than imported
+    #: so this layer keeps depending on nothing above it: it answers
+    #: ``matches(metadata)`` and renders itself with ``to_sql(column)``.
+    #: A store that ignores it still answers correctly, because the
+    #: engine checks every candidate again; it just looks at more of them.
+    conditions: Optional[Any] = None
 
 
 @dataclass(frozen=True)

@@ -190,7 +190,7 @@ class InMemoryDocumentStore:
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
         allowed = None
-        if filter.as_of or filter.tags or filter.where:
+        if filter.as_of or filter.tags or filter.where or filter.conditions:
             allowed = [
                 c.chunk_id
                 for c in self._chunks.values()
@@ -201,13 +201,15 @@ class InMemoryDocumentStore:
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):
             return False
-        if filter.tags or filter.where:
+        if filter.tags or filter.where or filter.conditions:
             episode = self._episodes.get(chunk.episode_id)
             if episode is None:
                 return False
             if filter.tags and not set(filter.tags) <= set(episode.tags):
                 return False
             if any(episode.metadata.get(k) != v for k, v in filter.where.items()):
+                return False
+            if filter.conditions is not None and not filter.conditions.matches(episode.metadata):
                 return False
         return True
 

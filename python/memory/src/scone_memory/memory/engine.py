@@ -1005,6 +1005,7 @@ class MemoryEngine:
         source_prefix: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
+        conditions: Mapping[str, object] | None = None,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1033,7 +1034,14 @@ class MemoryEngine:
             raise InvalidInput(f"source_prefix must be at most {MAX_SOURCE} chars")
         since_at = normalise_time(since) if since else None
         until_at = normalise_time(until) if until else None
-        narrowing = kind is not None or source_prefix is not None or since_at is not None or until_at is not None
+        # Refused before any lane runs: a filter that cannot mean anything
+        # must not come back as an answer drawn from everything. Imported
+        # here because filters read this module's rule for a metadata key.
+        from ..retrieval.filters import parse_filter
+
+        narrow_by = parse_filter(conditions) if conditions is not None else None
+        narrowing = (kind is not None or source_prefix is not None or since_at is not None
+                     or until_at is not None or narrow_by is not None)
         depth = limit * LANE_DEPTH
         degraded: list[str] = []
         started = time.perf_counter()
@@ -1047,7 +1055,8 @@ class MemoryEngine:
             "embedder": self.embedder.id,
             "contextual_embeddings": self.contextual_embeddings,
             "similarity_floor": self.similarity_floor,
-            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at},
+            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
+                       "conditions": dict(conditions) if conditions is not None else None},
         }
 
         vector_lane: list[tuple[int, float]] = []
@@ -1065,7 +1074,8 @@ class MemoryEngine:
         try:
             t0 = time.perf_counter()
             text_lane = await self.documents.search_text(
-                space, query, depth, TextFilter(as_of=boundary, tags=clean_tags, where=clean_where)
+                space, query, depth,
+                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by),
             )
             latency["text"] = _ms(t0)
         except Exception as e:  # noqa: BLE001
@@ -1116,7 +1126,7 @@ class MemoryEngine:
             items = [
                 item for item in items
                 if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
-                and _fits(episode, kind, source_prefix, since_at, until_at)
+                and _fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
             ]
         items = items[:limit]
         if self.demote_restated:
@@ -2262,10 +2272,19 @@ def normalise_time(value: str) -> str:
         raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
 
 
-def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str], until: Optional[str]) -> bool:
+def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str],
+          until: Optional[str], conditions=None) -> bool:
     """The narrowing rule, shared with the Rust engine: kind equal, source
     starting with the prefix as literal text (an episode without a source
-    matches no prefix), created_at inside the inclusive bounds."""
+    matches no prefix), created_at inside the inclusive bounds.
+
+    Metadata conditions are checked here as well as pushed into the store,
+    and that is not redundant. The push-down keeps the store from spending
+    its window on memories the caller excluded; this is what makes the
+    answer exact whatever store it came from, including one whose filter
+    language cannot express the question."""
+    if conditions is not None and not conditions.matches(episode.metadata):
+        return False
     if kind is not None and episode.kind != kind:
         return False
     if source_prefix is not None and (episode.source is None or not episode.source.startswith(source_prefix)):

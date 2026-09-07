@@ -406,9 +406,19 @@ class SqliteDocumentStore:
         for key, value in filter.where.items():
             sql += " AND EXISTS (SELECT 1 FROM json_each(e.metadata) AS meta WHERE meta.key = ? AND meta.value = ?)"
             params.extend((key, value))
+        if filter.conditions is not None:
+            clause, values = filter.conditions.to_sql("e.metadata")
+            sql += f" AND {clause}"
+            params.extend(values)
         sql += " ORDER BY rank, c.id LIMIT ?"
         params.append(limit)
-        return [(row["id"], -row["rank"]) for row in self.conn.execute(sql, params)]
+        rows = self.conn.execute(sql, params).fetchall()
+        if filter.conditions is not None:
+            # The clause narrows generously, because SQLite cannot make
+            # every test exactly; this settles the rest before the rows
+            # are counted against the limit above them.
+            rows = [r for r in rows if filter.conditions.matches(json.loads(r["metadata"] or "{}"))]
+        return [(row["id"], -row["rank"]) for row in rows]
 
     async def recent_episodes(self, space: str, limit: int) -> list[Episode]:
         rows = self.conn.execute(
