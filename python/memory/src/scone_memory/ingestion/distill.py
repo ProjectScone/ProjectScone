@@ -293,6 +293,7 @@ class Distiller:
             attempts = self._failures.get((space, episode.episode_id))
             if attempts is not None and attempts.count >= self.max_attempts:
                 outcomes.append(DistillOutcome(episode.episode_id, error=f"parked: {attempts.last_error}"))
+                await self.engine.note_failed(space, episode.episode_id, f"parked: {attempts.last_error}")
                 continue
             if processed >= limit:
                 break
@@ -329,6 +330,7 @@ class Distiller:
             attempts = self._failures.setdefault(key, _Attempts())
             attempts.count += 1
             attempts.last_error = f"{type(e).__name__}: {e}"
+            await self.engine.note_failed(episode.space, episode.episode_id, attempts.last_error)
             return DistillOutcome(episode.episode_id, error=attempts.last_error)
         self._failures.pop(key, None)
         self._done.add(key)

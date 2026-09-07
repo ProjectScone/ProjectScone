@@ -879,6 +879,15 @@ class MemoryEngine:
         await self._emit(space, "ingest_job", {"job_id": job_id, "cancelled": len(stopped.items)})
         return stopped
 
+    async def note_failed(self, space: str, episode_id: int, error: str) -> int:
+        """Record that reading this record failed, against the record it
+        failed on rather than against the batch. The attempt is counted,
+        so a retry that works still shows it took two goes."""
+        check_space(space)
+        if not callable(getattr(self.documents, "mark_failed", None)):
+            return 0
+        return await self.documents.mark_failed(space, episode_id, error[:500], self.clock())
+
     async def note_consolidated(self, space: str, episode_ids: Sequence[int]) -> int:
         """Record that these episodes have been read into claims. Marking
         the same episode twice moves nothing, so a re-run of the extractor

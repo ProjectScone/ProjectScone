@@ -108,6 +108,22 @@ class InMemoryDocumentStore:
     async def update_job(self, job: IngestJob) -> None:
         self._jobs[(job.space, job.job_id)] = job
 
+    async def mark_failed(self, space: str, episode_id: int, error: str, when: str) -> int:
+        moved = 0
+        for key, job in list(self._jobs.items()):
+            if key[0] != space:
+                continue
+            items = []
+            for item in job.items:
+                if item.episode_id == episode_id and item.consolidated_at is None:
+                    items.append(item.model_copy(update={
+                        "state": "failed", "error": error, "attempts": item.attempts + 1}))
+                    moved += 1
+                else:
+                    items.append(item)
+            self._jobs[key] = job.model_copy(update={"items": items})
+        return moved
+
     async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
         wanted, moved = set(episode_ids), 0
         for key, job in list(self._jobs.items()):
@@ -116,7 +132,10 @@ class InMemoryDocumentStore:
             items = []
             for item in job.items:
                 if item.episode_id in wanted and item.consolidated_at is None:
-                    items.append(item.model_copy(update={"consolidated_at": when, "state": "consolidated"}))
+                    # A retry that works clears the error; the attempt count
+                    # stays, because having had to retry is part of the story.
+                    items.append(item.model_copy(update={
+                        "consolidated_at": when, "state": "consolidated", "error": None}))
                     moved += 1
                 else:
                     items.append(item)

@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
 CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ingest_jobs (space TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL, request_id TEXT, cancelled_at TEXT, PRIMARY KEY (space, job_id), UNIQUE (space, request_id));
-CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, PRIMARY KEY (space, job_id, idx));
+CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (space, job_id, idx));
 CREATE INDEX IF NOT EXISTS ingest_items_episode ON ingest_items(space, episode_id);
 """
 
@@ -97,7 +97,7 @@ STEPS: dict[int, tuple[str, ...]] = {
     ),
     9: ("CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL)",),
     10: tuple(statement.strip() for statement in """CREATE TABLE IF NOT EXISTS ingest_jobs (space TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL, request_id TEXT, cancelled_at TEXT, PRIMARY KEY (space, job_id), UNIQUE (space, request_id));
-CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, PRIMARY KEY (space, job_id, idx));
+CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (space, job_id, idx));
 CREATE INDEX IF NOT EXISTS ingest_items_episode ON ingest_items(space, episode_id);""".split(";\n") if statement.strip()),
 }
 
@@ -532,13 +532,14 @@ class SqliteDocumentStore:
 
     def _job(self, space: str, row) -> IngestJob:
         items = self.conn.execute(
-            "SELECT idx, episode_id, outcome, state, searchable_at, consolidated_at, error"
+            "SELECT idx, episode_id, outcome, state, searchable_at, consolidated_at, error, attempts"
             " FROM ingest_items WHERE space = ? AND job_id = ? ORDER BY idx", (space, row["job_id"]))
         return IngestJob(
             job_id=row["job_id"], space=space, created_at=row["created_at"],
             request_id=row["request_id"], cancelled_at=row["cancelled_at"],
             items=[JobItem(index=i["idx"], episode_id=i["episode_id"], outcome=i["outcome"], state=i["state"],
-                           searchable_at=i["searchable_at"], consolidated_at=i["consolidated_at"], error=i["error"])
+                           searchable_at=i["searchable_at"], consolidated_at=i["consolidated_at"],
+                           error=i["error"], attempts=i["attempts"])
                    for i in items],
         )
 
@@ -549,9 +550,9 @@ class SqliteDocumentStore:
                 (new.space, new.job_id, new.created_at, new.request_id))
             self.conn.executemany(
                 "INSERT INTO ingest_items (space, job_id, idx, episode_id, outcome, state, searchable_at,"
-                " consolidated_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " consolidated_at, error, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(new.space, new.job_id, i.index, i.episode_id, i.outcome, i.state,
-                  i.searchable_at, i.consolidated_at, i.error) for i in new.items])
+                  i.searchable_at, i.consolidated_at, i.error, i.attempts) for i in new.items])
         return IngestJob(job_id=new.job_id, space=new.space, created_at=new.created_at,
                          request_id=new.request_id, items=list(new.items))
 
@@ -575,10 +576,19 @@ class SqliteDocumentStore:
             self.conn.execute("UPDATE ingest_jobs SET cancelled_at = ? WHERE space = ? AND job_id = ?",
                               (job.cancelled_at, job.space, job.job_id))
             self.conn.executemany(
-                "UPDATE ingest_items SET outcome = ?, state = ?, searchable_at = ?, consolidated_at = ?, error = ?"
-                " WHERE space = ? AND job_id = ? AND idx = ?",
-                [(i.outcome, i.state, i.searchable_at, i.consolidated_at, i.error, job.space, job.job_id, i.index)
+                "UPDATE ingest_items SET outcome = ?, state = ?, searchable_at = ?, consolidated_at = ?,"
+                " error = ?, attempts = ? WHERE space = ? AND job_id = ? AND idx = ?",
+                [(i.outcome, i.state, i.searchable_at, i.consolidated_at, i.error, i.attempts,
+                  job.space, job.job_id, i.index)
                  for i in job.items])
+
+    async def mark_failed(self, space: str, episode_id: int, error: str, when: str) -> int:
+        with self.conn:
+            changed = self.conn.execute(
+                "UPDATE ingest_items SET state = 'failed', error = ?, attempts = attempts + 1"
+                " WHERE space = ? AND episode_id = ? AND consolidated_at IS NULL",
+                (error, space, episode_id)).rowcount
+        return int(changed)
 
     async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
         if not episode_ids:
@@ -586,7 +596,7 @@ class SqliteDocumentStore:
         marks = ",".join("?" * len(episode_ids))
         with self.conn:
             changed = self.conn.execute(
-                f"UPDATE ingest_items SET consolidated_at = ?, state = 'consolidated'"
+                f"UPDATE ingest_items SET consolidated_at = ?, state = 'consolidated', error = NULL"
                 f" WHERE space = ? AND consolidated_at IS NULL AND episode_id IN ({marks})",
                 (when, space, *episode_ids)).rowcount
         return int(changed)

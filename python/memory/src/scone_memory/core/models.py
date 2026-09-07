@@ -188,11 +188,15 @@ class JobItem(BaseModel):
     episode_id: int
     #: accepted, duplicate or updated, as the write reported it.
     outcome: str = "accepted"
-    #: searchable, consolidated, cancelled or failed.
+    #: searchable, consolidated, failed or cancelled.
     state: str = "searchable"
     searchable_at: Optional[str] = None
     consolidated_at: Optional[str] = None
+    #: What went wrong the last time something tried to read this record.
+    #: Cleared when a retry succeeds; the attempt count is not.
     error: Optional[str] = None
+    #: How many times reading this record has been tried and failed.
+    attempts: int = 0
 
 
 class IngestJob(BaseModel):
@@ -222,6 +226,8 @@ class IngestJob(BaseModel):
         record has been read, else searchable."""
         if self.cancelled_at:
             return "cancelled"
+        if any(item.state == "failed" for item in self.items):
+            return "failed"
         if self.items and self.consolidated == len(self.items):
             return "consolidated"
         return "searchable"

@@ -237,6 +237,10 @@ class DocumentStore(Protocol):
         """Newest first."""
         ...
     async def update_job(self, job: IngestJob) -> None: ...
+    async def mark_failed(self, space: str, episode_id: int, error: str, when: str) -> int:
+        """Record that reading this record failed, counting the attempt.
+        A record already read is left alone."""
+        ...
     async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
         """Record that these episodes have been read; returns how many
         items moved, so marking the same episode twice is not two moves."""

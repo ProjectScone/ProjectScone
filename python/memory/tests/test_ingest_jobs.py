@@ -127,3 +127,67 @@ async def test_a_store_that_cannot_keep_jobs_says_so(engine, monkeypatch):
     monkeypatch.setattr(engine.documents, "create_job", None)
     with pytest.raises(InvalidInput, match="does not record ingest jobs"):
         await engine.ingest_batch("alpha", records("nowhere to put the receipt"))
+
+
+async def test_a_failing_extractor_is_recorded_against_the_record_it_failed_on(engine):
+    """G07 wants per-stage errors and retries, not one flag for the batch:
+    which record could not be read, what went wrong, and how many attempts
+    it has had."""
+    job = await engine.ingest_batch("alpha", records("a line the model chokes on", "a fine line"))
+    first, second = job.items[0].episode_id, job.items[1].episode_id
+
+    await engine.note_failed("alpha", first, "ChatError: upstream said 503")
+    marked = await engine.job("alpha", job.job_id)
+    assert marked.items[0].state == "failed" and marked.items[0].attempts == 1
+    assert "503" in marked.items[0].error and marked.items[0].searchable_at, "it is still findable, just not read"
+    assert marked.items[1].state == "searchable" and marked.items[1].error is None
+    assert marked.state == "failed", "a batch with a record nobody could read is not simply searchable"
+
+    await engine.note_failed("alpha", first, "ChatError: upstream said 503 again")
+    assert (await engine.job("alpha", job.job_id)).items[0].attempts == 2, "attempts count the tries, not the errors seen"
+
+
+async def test_a_retry_that_works_clears_the_failure_and_keeps_the_count(engine):
+    job = await engine.ingest_batch("alpha", records("the awkward one"))
+    episode = job.items[0].episode_id
+    await engine.note_failed("alpha", episode, "ChatError: timed out")
+    await engine.note_consolidated("alpha", [episode])
+
+    healed = (await engine.job("alpha", job.job_id)).items[0]
+    assert healed.state == "consolidated" and healed.consolidated_at and healed.error is None
+    assert healed.attempts == 1, "the record of having had to retry stays"
+    assert (await engine.job("alpha", job.job_id)).state == "consolidated"
+
+
+async def test_a_failure_outlives_the_process(tmp_path):
+    path = tmp_path / "memory.db"
+    first = await MemoryEngine(SqliteDocumentStore(path), InMemoryVectorIndex(), HashEmbedder()).open()
+    job = await first.ingest_batch("alpha", records("one that will fail"))
+    await first.note_failed("alpha", job.items[0].episode_id, "ChatError: no model configured")
+    await first.documents.close()
+
+    second = await MemoryEngine(SqliteDocumentStore(path), InMemoryVectorIndex(), HashEmbedder()).open()
+    same = (await second.job("alpha", job.job_id)).items[0]
+    assert same.state == "failed" and same.attempts == 1 and "no model" in same.error
+
+    # A retry in the new process clears the error and keeps the count.
+    await second.note_consolidated("alpha", [same.episode_id])
+    healed = (await second.job("alpha", job.job_id)).items[0]
+    assert healed.state == "consolidated" and healed.error is None and healed.attempts == 1
+    await second.documents.close()
+
+
+async def test_the_extractor_records_its_own_failure(engine):
+    """Nothing has to remember to call it: a pass that could not read a
+    record leaves that on the record's own receipt."""
+    from scone_memory import FakeChat
+    from scone_memory.ingestion.distill import DistillError, Distiller
+
+    job = await engine.ingest_batch("alpha", records("something to read"))
+    with pytest.raises(DistillError):
+        # The pass tells its caller by raising; the receipt is written either way.
+        await Distiller(engine, FakeChat(["not json at all"]), max_attempts=1).distill_pending("alpha")
+
+    item = (await engine.job("alpha", job.job_id)).items[0]
+    assert item.state == "failed" and item.attempts >= 1 and item.error
+    assert item.searchable_at and item.consolidated_at is None
