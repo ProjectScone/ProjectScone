@@ -639,6 +639,22 @@ that persona since the client displayed it. With a catalog and no bare model
 factory, a session must name a persona; nothing is chosen for it. `voice_ready`
 is false for every persona until a browser audio transport exists.
 
+Voice rides the same service. `POST /v1/conversations` with `"mode": "voice"` and
+a `persona` creates a session that waits (`created`) for its audio socket,
+`WebSocket /v1/conversations/{sid}/audio`. The first text frame is
+`{"type": "hello", "key": "<bearer>", "sample_rate": 16000, "channels": 1}` (a
+browser cannot set a bearer header on a WebSocket; the key is never in a URL);
+a bad key, session, mode, state or format gets `{"type": "error", "reason"}` and
+close 1008, and an accepted hello gets `{"type": "ready"}` while the session runs.
+Then binary frames are PCM s16le in that format both ways; outgoing frames carry a
+header (turn id length, turn id, uint32 sample rate, uint8 channels) so a
+`{"type": "clear", "turn_id"}` control can drop a turn's buffered playback on
+interruption; `{"type": "end"}` or closing the socket ends the input and the
+session (`ended`), a provider or format failure fails it, and `POST /stop` works
+while it runs. Both sides are captured to memory and read back through the
+transcript route. `GET /v1/conversations/capabilities` reports `"voice": true`
+and the catalog reports `voice_ready` on such a host.
+
 On a composed host the pages carry no baked key even with a single configured
 key (the tab asks for one), `GET /v1/capabilities` reports
 `features.conversations: true`, and `GET /v1/conversations/capabilities` says

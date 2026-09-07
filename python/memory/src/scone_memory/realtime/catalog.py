@@ -78,18 +78,18 @@ class PersonaCatalog:
         found = self.bound.get(persona_id)
         return found.persona.name if found is not None else None
 
-    def public(self) -> list[dict]:
+    def public(self, *, voice: bool = False) -> list[dict]:
         """What a client may see: the choices and their readiness. Never the
         instructions, and nothing the registry closed over. Every persona
-        here is text-ready because binding admitted it; voice stays false
-        until a browser transport and its adapters exist."""
+        here is text-ready because binding admitted it; the host says
+        whether it can carry voice (it has an audio transport route)."""
         return [{
             "id": persona.id, "name": persona.name,
             "reply": persona.reply.model_dump(), "transcription": persona.transcription.model_dump(),
             "speech": persona.speech.model_dump(),
             "activity": persona.activity.model_dump() if persona.activity is not None else None,
             "fingerprint": fingerprint_of(persona),
-            "text_ready": True, "voice_ready": False,
+            "text_ready": True, "voice_ready": voice,
         } for persona in self.personas]
 
 

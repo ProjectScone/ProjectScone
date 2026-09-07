@@ -91,7 +91,7 @@ async def test_the_catalog_is_readable_and_counted_but_never_shows_instructions(
         listing = (await client.get("/v1/conversations/personas")).json()
         assert listing["schema_version"] == 1 and [p["id"] for p in listing["personas"]] == ["helper"]
         assert listing["personas"][0]["speech"] == {"provider": "stub", "model": "mouth", "voice": "alto"}
-        assert listing["personas"][0]["voice_ready"] is False
+        assert listing["personas"][0]["voice_ready"] is True, "this host carries audio; the registry admitted the choices"
         assert "Answer briefly" not in json.dumps(listing)
         assert (await client.get("/v1/conversations/personas", headers={"Authorization": ""})).status_code == 401
     bare = create_conversation_app(await engine_for(), KEYS, tmp_path / "k.db", None)
