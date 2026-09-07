@@ -5,7 +5,7 @@
     "features": {
       "recall": true,
       "facts.read": true,
-      "facts.review": false,
+      "facts.review": true,
       "facts.close": true,
       "facts.exclude": false,
       "facts.include": false,

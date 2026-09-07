@@ -974,3 +974,49 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
         "the Rust server's routes changed; see the decision above before widening it"
     );
 }
+
+/// Discovery has to describe this server, not a memory of it.
+///
+/// `facts.review` said false for a day after approve and decline were
+/// mounted, which tells a client the workflow is unavailable while the
+/// routes sit there answering. A capability contract that drifts from
+/// the router is worse than none: a client trusts it and stops probing.
+///
+/// This ties each claim to the route that backs it by reading the
+/// router's own source, so the two cannot part company again.
+#[test]
+fn every_capability_claim_matches_a_mounted_route() {
+    let source = include_str!("../src/serve.rs");
+    let mounted = |path: &str| source.contains(&format!(".route(\"{path}\""));
+    let claims = |feature: &str| {
+        let at = source
+            .find(&format!("\"{feature}\": "))
+            .unwrap_or_else(|| panic!("{feature} must appear in the capability block"));
+        source[at + feature.len() + 4..].starts_with("true")
+    };
+
+    for (feature, path) in [
+        ("recall", "/v1/recall"),
+        ("facts.read", "/v1/facts"),
+        ("facts.review", "/v1/facts/{id}/approve"),
+        ("facts.close", "/v1/facts/{id}/close"),
+        ("events.read", "/v1/events"),
+        ("status.read", "/v1/status"),
+        ("episodes.list", "/v1/episodes"),
+    ] {
+        assert_eq!(
+            claims(feature),
+            mounted(path),
+            "capability {feature} and route {path} disagree"
+        );
+    }
+
+    // Review needs both halves before it may be claimed: a client told
+    // it can review, that can accept and not reject, is worse off than
+    // one told it cannot.
+    assert_eq!(
+        claims("facts.review"),
+        mounted("/v1/facts/{id}/approve") && mounted("/v1/facts/{id}/decline"),
+        "facts.review must mean both approve and decline"
+    );
+}

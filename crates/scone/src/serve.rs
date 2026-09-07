@@ -102,7 +102,7 @@ async fn get_capabilities(
         "schema_version": 1,
         "implementation": "rust",
         "features": {
-            "recall": true, "facts.read": true, "facts.review": false,
+            "recall": true, "facts.read": true, "facts.review": true,
             "facts.close": true, "facts.exclude": false, "facts.include": false,
             "events.read": true, "metrics.read": false, "scopes.read": false,
             "status.read": true, "episodes.list": true
