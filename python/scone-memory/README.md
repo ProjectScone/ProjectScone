@@ -413,6 +413,7 @@ The native provider interfaces live in `scone_memory.realtime.audio`:
 | `SpeechRecognizer` | `transcribe(audio)` yielding speech-start and transcript events, `aclose()` |
 | `VoiceModel` | `respond(messages)` yielding public text deltas and explicit completion, `aclose()` |
 | `SpeechSynthesizer` | `synthesize(text)` yielding PCM chunks, `aclose()` |
+| `SpeechActivityDetector` | optional `detect(chunk)` returning a strict boolean, `aclose()` |
 
 Stream methods return async iterators supporting `aclose()` (async generators
 work). Transport audio uses Scone's frozen `AudioChunk(pcm, sample_rate, channels)`:
@@ -454,6 +455,63 @@ writes or model calls. Scone cancels and drains the old response, asks transport
 to clear its output by turn ID, and rejects late output from the old generation.
 That clear request is not proof previously played audio was unheard. Input EOF
 must be consumed by the recognizer and drains the final reply.
+
+An optional `activity_factory` supplies a local speech detector independently of
+the recognizer. A false→true speech transition queues an interruption before the
+same PCM chunk reaches transcription. Activity and recognizer events share a
+serialized controller, including duplex recognizers that consume PCM in another
+task. Input remains bounded; no
+samples are removed or resampled. The detector is closed with the other session
+resources, including on failure or cancellation. Without it, the recognizer's
+speech-start events continue to own early interruption.
+
+#### Personas and independent provider selection
+
+`realtime.persona.Persona` is a frozen, versioned configuration containing a name,
+instructions and independent reply, transcription, speech and optional activity
+choices. It chooses an existing model/voice; it does not train or clone a voice.
+Serialize with `model_dump_json()` and load with `model_validate_json()`. Unknown
+fields, unsupported schema versions and blank instructions are rejected. Changing
+the speech selection does not change instructions, other models or memory scope.
+
+```python
+from scone_memory.realtime.persona import Persona
+from scone_memory.realtime.providers import ProviderRegistry
+
+# These are operator-defined IDs, not installed provider defaults.
+persona = Persona.model_validate({
+    "schema_version": 1, "id": "juniper", "name": "Juniper",
+    "instructions": "Be concise. Explain the source behind each answer.",
+    "reply": {"provider": "local", "model": "reply-v1"},
+    "transcription": {"provider": "transcriber", "model": "speech-v1"},
+    "speech": {"provider": "voice-a", "model": "tts-v1", "voice": "alto"},
+    "activity": None,
+})
+
+# Host-created factories close over credentials. Nothing in a persona imports
+# Python code, selects network endpoints, or grants a memory space/recall scope.
+registry = ProviderRegistry(
+    reply={("local", "reply-v1"): language_model_factory},
+    transcription={("transcriber", "speech-v1"): speech_recognizer_factory},
+    speech={("voice-a", "tts-v1", "alto"): speech_synthesizer_factory},
+)
+bound = registry.resolve(persona)  # checks EVERY choice; creates no resources
+session = bound.voice(memory, "authorized-space", "persona-session-1",
+                      transport_factory=audio_transport_factory, capture=True,
+                      where={"collection": "manuals"})
+# Or bound.text(memory, "authorized-space", "text-session-1", where=...).
+```
+
+The registry admits exact `(provider, model)` pairs and, for speech, exact
+`(provider, model, voice)` triples. There is no fallback to another provider.
+Each host should expose only the choices that user may use. A bound text session
+constructs no audio resources and obtains a fresh selected model per turn.
+Credentials and PCM compatibility remain adapter responsibilities; successful
+binding is not a remote availability or compatibility check.
+
+Direct Deepgram, OpenAI, Cartesia, ElevenLabs and Silero adapters, an HTTP persona
+catalog and browser voice selection are separate pending integrations. This
+native composition API does not advertise browser voice as available.
 
 Only public `TextDelta` and `ReplyCompleted` events are accepted from the model.
 Scone groups text into speech segments; synthesis and output are awaited before

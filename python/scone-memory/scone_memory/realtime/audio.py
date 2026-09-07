@@ -62,3 +62,14 @@ class SpeechRecognizer(Protocol):
 class SpeechSynthesizer(Protocol):
     def synthesize(self, text: str) -> AsyncIterator[AudioChunk]: ...
     async def aclose(self) -> None: ...
+
+
+class SpeechActivityDetector(Protocol):
+    """Stateful per-session detector; True means speech in this PCM chunk.
+
+    The adapter owns sample windows and its model's supported PCM formats.
+    It must reject unsupported formats, never silently reinterpret samples.
+    """
+
+    async def detect(self, audio: AudioChunk) -> bool: ...
+    async def aclose(self) -> None: ...

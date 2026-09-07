@@ -21,7 +21,7 @@ from .context import MemoryContext
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .audio import (
     AudioChunk, AudioTransport, SpeechRecognizer, VoiceModel, SpeechSynthesizer,
-    SpeechStarted, Transcript, TextDelta, ReplyCompleted,
+    SpeechStarted, Transcript, TextDelta, ReplyCompleted, SpeechActivityDetector,
 )
 
 _OWNER: ContextVar[object | None] = ContextVar("scone_voice_owner", default=None)
@@ -54,6 +54,7 @@ class VoiceSession:
         stt_factory: Callable[[], SpeechRecognizer],
         model_factory: Callable[[], VoiceModel],
         tts_factory: Callable[[], SpeechSynthesizer],
+        activity_factory: Callable[[], SpeechActivityDetector] | None = None,
         capture: bool, system_prompt: str = "You are a helpful voice assistant.",
         where: Mapping[str, str] | None = None, kind: str | None = None,
         source_prefix: str | None = None, since: str | None = None, until: str | None = None,
@@ -67,6 +68,8 @@ class VoiceSession:
         if capture is not True:
             raise ValueError("capture=True is required for public transcript retention")
         factories = (transport_factory, stt_factory, model_factory, tts_factory)
+        if activity_factory is not None:
+            factories += (activity_factory,)
         if any(not callable(factory) for factory in factories):
             raise ValueError("factories must supply fresh transport/provider resources")
         for timeout in (session_timeout, turn_timeout):
@@ -147,6 +150,8 @@ class VoiceSession:
             if self._stop.is_set():
                 raise asyncio.CancelledError()
             requirements = (("receive", "send", "clear"), ("transcribe",), ("respond",), ("synthesize",))
+            if len(self._factories) == 5:
+                requirements += (("detect",),)
             for factory, methods in zip(self._factories, requirements):
                 resource = factory()
                 if any(resource is existing for existing in resources):
@@ -156,8 +161,9 @@ class VoiceSession:
                 resources.append(resource)
                 if any(not callable(getattr(resource, name, None)) for name in methods):
                     raise TypeError("voice resource does not implement its Scone protocol")
-            transport, stt, model, tts = resources
-            work = asyncio.create_task(self._conversation(transport, stt, model, tts))
+            transport, stt, model, tts = resources[:4]
+            activity = resources[4] if len(resources) == 5 else None
+            work = asyncio.create_task(self._conversation(transport, stt, model, tts, activity))
             stop = asyncio.create_task(self._stop.wait())
             tasks = [work, stop]
             self._state = "running"
@@ -187,48 +193,65 @@ class VoiceSession:
         if not isinstance(chunk, AudioChunk) or len(chunk.pcm) > self._max_audio:
             raise ValueError("invalid or oversized audio chunk")
 
-    async def _conversation(self, transport, stt, model, tts):
+    async def _conversation(self, transport, stt, model, tts, activity=None):
         queue = asyncio.Queue(self._queue_size)
+        control = asyncio.Lock()
         input_drained = False
 
         async def feed():
+            speaking = False
             async with aclosing(transport.receive()) as incoming:
                 async for chunk in incoming:
                     self._check_audio(chunk)
+                    if activity is not None:
+                        detected = await activity.detect(chunk)
+                        if type(detected) is not bool:
+                            raise ValueError("speech activity detector must return bool")
+                        if detected and not speaking:
+                            await queue.put(SpeechStarted())
+                        speaking = detected
                     await queue.put(chunk)
             await queue.put(_EOF)
 
         async def audio():
             nonlocal input_drained
             while (chunk := await queue.get()) is not _EOF:
+                if isinstance(chunk, SpeechStarted):
+                    # Duplex recognizers may consume PCM in a separate task.
+                    # A shared controller keeps old cleanup from clearing the
+                    # output of a newer transcript while either task awaits.
+                    async with control:
+                        await self._interrupt(transport)
+                    continue
                 yield chunk
             input_drained = True
 
         async def listen():
             async with aclosing(audio()) as chunks, aclosing(stt.transcribe(chunks)) as events:
                 async for event in events:
-                    if isinstance(event, SpeechStarted):
-                        await self._interrupt(transport)
-                    elif isinstance(event, Transcript):
-                        if type(event.final) is not bool or not isinstance(event.text, str):
-                            raise ValueError("invalid transcript event")
-                        if len(event.text.encode("utf-8")) > 32000:
-                            raise ValueError("transcript exceeds byte limit")
-                        if not event.final or not event.text.strip():
-                            continue
-                        if not isinstance(event.speaker, str) or not 1 <= len(event.speaker) <= 128:
-                            raise ValueError("invalid transcript speaker")
-                        await self._interrupt(transport)
-                        messages = [*self._history, {"role": "user", "content": event.text}]
-                        if _bytes(messages) > self._max_history:
-                            raise RuntimeError("voice history byte limit reached")
-                        turn_id = uuid4().hex
-                        await self._record(turn_id, "user", event.text, speaker=event.speaker)
-                        self._history = messages
-                        self._output_turn = turn_id
-                        self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation))
-                    else:
-                        raise ValueError("unsupported speech event")
+                    async with control:
+                        if isinstance(event, SpeechStarted):
+                            await self._interrupt(transport)
+                        elif isinstance(event, Transcript):
+                            if type(event.final) is not bool or not isinstance(event.text, str):
+                                raise ValueError("invalid transcript event")
+                            if len(event.text.encode("utf-8")) > 32000:
+                                raise ValueError("transcript exceeds byte limit")
+                            if not event.final or not event.text.strip():
+                                continue
+                            if not isinstance(event.speaker, str) or not 1 <= len(event.speaker) <= 128:
+                                raise ValueError("invalid transcript speaker")
+                            await self._interrupt(transport)
+                            messages = [*self._history, {"role": "user", "content": event.text}]
+                            if _bytes(messages) > self._max_history:
+                                raise RuntimeError("voice history byte limit reached")
+                            turn_id = uuid4().hex
+                            await self._record(turn_id, "user", event.text, speaker=event.speaker)
+                            self._history = messages
+                            self._output_turn = turn_id
+                            self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation))
+                        else:
+                            raise ValueError("unsupported speech event")
 
         feeder, listener = asyncio.create_task(feed()), asyncio.create_task(listen())
         try:

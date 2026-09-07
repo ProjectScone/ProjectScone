@@ -108,6 +108,155 @@ class Rig:
         await self.transport.input.put(types.AudioChunk(b"\x02\x00" * 320, 16000))
 
 
+async def test_local_activity_interrupts_output_before_a_new_transcript(memory):
+    types, _ = api()
+
+    class Detector(Resource):
+        def __init__(self):
+            super().__init__()
+            self.frames = []
+
+        async def detect(self, chunk):
+            self.frames.append(chunk)
+            return len(self.frames) > 1
+
+    class FirstTranscriptOnly(Recognizer):
+        async def transcribe(self, audio):
+            async for chunk in audio:
+                self.received.append(chunk)
+                if len(self.received) == 1:
+                    yield types.Transcript("Speak until I interrupt")
+
+    detector, stt = Detector(), FirstTranscriptOnly()
+    rig = Rig(memory, activity_factory=lambda: detector, stt_factory=lambda: stt)
+    rig.model.finish.clear()
+    running = asyncio.create_task(rig.session.run())
+    try:
+        await asyncio.wait_for(rig.session.started.wait(), 2)
+        await rig.audio()
+        await asyncio.wait_for(rig.transport.delivered.wait(), 2)
+        await rig.audio()
+        async with asyncio.timeout(2):
+            while not rig.transport.cleared:
+                await asyncio.sleep(.005)
+        assert len(await memory.episodes("voice-test", {"session_id": "native-voice"})) == 1
+        assert len(detector.frames) == len(stt.received) == 2
+        assert detector.frames == stt.received  # same PCM, no implied resampling
+    finally:
+        await rig.session.close()
+        await asyncio.gather(running, return_exceptions=True)
+    assert detector.closes == 1
+
+
+@pytest.mark.parametrize("result", [1, None, "speech"])
+async def test_activity_detector_must_return_boolean_and_is_closed_on_failure(memory, result):
+    class Detector(Resource):
+        async def detect(self, chunk):
+            return result
+
+    detector = Detector()
+    rig = Rig(memory, activity_factory=lambda: detector)
+    await rig.audio()
+    with pytest.raises(ValueError, match="activity"):
+        await rig.session.run()
+    assert detector.closes == 1
+    assert all(resource.closes == 1 for resource in rig.resources)
+    assert await memory.episodes("voice-test", {"session_id": "native-voice"}) == []
+
+
+async def test_activity_factory_failure_closes_already_admitted_voice_resources(memory):
+    def failed_detector():
+        raise RuntimeError("activity unavailable")
+    rig = Rig(memory, activity_factory=failed_detector)
+    with pytest.raises(RuntimeError, match="activity unavailable"):
+        await rig.session.run()
+    assert all(resource.closes == 1 for resource in rig.resources)
+    assert rig.session.state == "failed"
+
+
+async def test_closing_voice_cancels_pending_activity_detection(memory):
+    entered = asyncio.Event()
+    class Detector(Resource):
+        async def detect(self, audio):
+            entered.set()
+            await asyncio.Future()
+    detector = Detector()
+    rig = Rig(memory, activity_factory=lambda: detector)
+    await rig.audio()
+    running = asyncio.create_task(rig.session.run())
+    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(rig.session.close(), 2)
+    await asyncio.gather(running, return_exceptions=True)
+    assert detector.closes == 1
+    assert all(resource.closes == 1 for resource in rig.resources)
+    assert await memory.episodes("voice-test", {"session_id": "native-voice"}) == []
+
+
+async def test_duplex_recognizer_cannot_start_new_reply_during_detector_cleanup(memory):
+    types, _ = api()
+    consumed, cleaning, release, offered = (asyncio.Event() for _ in range(4))
+
+    class Detector(Resource):
+        def __init__(self): super().__init__(); self.count = 0
+        async def detect(self, audio):
+            self.count += 1
+            return self.count > 1
+
+    class Duplex(Recognizer):
+        async def transcribe(self, audio):
+            async def send_audio():
+                async for chunk in audio:
+                    consumed.set()
+            sender = asyncio.create_task(send_audio())
+            try:
+                await consumed.wait()
+                yield types.Transcript("First question")
+                await cleaning.wait()
+                offered.set()
+                yield types.Transcript("Second question")
+                await sender
+            finally:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+
+    class SlowCleanup(Model):
+        async def respond(self, messages):
+            self.contexts.append(messages)
+            if len(self.contexts) == 1:
+                try:
+                    yield types.TextDelta("First answer.")
+                    await asyncio.Future()
+                finally:
+                    cleaning.set()
+                    await release.wait()
+            else:
+                yield types.TextDelta("Second answer.")
+                yield types.ReplyCompleted()
+
+    model = SlowCleanup()
+    rig = Rig(memory, activity_factory=Detector, stt_factory=Duplex, model_factory=lambda: model)
+    running = asyncio.create_task(rig.session.run())
+    try:
+        await asyncio.wait_for(rig.session.started.wait(), 2)
+        await rig.audio()
+        await asyncio.wait_for(rig.transport.delivered.wait(), 2)
+        await rig.audio()
+        await asyncio.wait_for(offered.wait(), 2)
+        await asyncio.sleep(.03)  # allow the competing transcript handler to run
+        saved = await memory.episodes("voice-test", {"session_id":"native-voice"})
+        assert [episode.content for episode in saved] == ["First question"]
+        release.set()
+        await records(memory, 3)
+        await rig.transport.input.put(None)
+        await asyncio.wait_for(running, 2)
+        assert len(rig.transport.cleared) == 1
+        assert rig.transport.cleared[0] != rig.transport.sent[-1][1]
+    finally:
+        release.set()
+        await rig.session.close()
+        await asyncio.gather(running, return_exceptions=True)
+
+
 async def records(memory, count):
     async with asyncio.timeout(2):
         while True:
