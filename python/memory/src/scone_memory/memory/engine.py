@@ -933,6 +933,14 @@ class MemoryEngine:
                 "valid_until": f.valid_until, "closed_reason": f.closed_reason, "excluded_reason": f.excluded_reason,
                 "source_episode_id": f.source_episode_id, "superseded_by": f.superseded_by,
             }))
+        # The typed relations among the claims drawn, each once.
+        drawn = set()
+        for f in wanted:
+            for link in await self.documents.fact_links(space, f.fact_id):
+                ends = (f"claim:{link.from_fact}", f"claim:{link.to_fact}")
+                if link.link_id not in drawn and ends[0] in g.nodes and ends[1] in g.nodes:
+                    drawn.add(link.link_id)
+                    g.link(ends[0], ends[1], link.kind, source_episode_id=link.source_episode_id)
         for e in agent_events:
             G.add_agent_event(g, e)
         for e in recall_events:
@@ -1093,6 +1101,14 @@ class MemoryEngine:
         await self._emit(space, "fact_link", {"link_id": link.link_id, "from_fact": from_fact, "to_fact": to_fact,
                                               "kind": kind, "source_episode_id": source_episode_id})
         return link
+
+    async def fact(self, space: str, fact_id: int) -> Fact:
+        """One fact of the space, whatever its status."""
+        check_space(space)
+        found = await self.documents.get_fact(space, fact_id)
+        if found is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        return found
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         """Every link naming the fact at either end, oldest first."""

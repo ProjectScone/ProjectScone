@@ -85,9 +85,28 @@ outside the space it was issued for.
 | `DELETE /v1/episodes/{id}` | forget |
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
+| `GET /v1/facts/{id}` · `POST /v1/facts/{id}/links` | one fact with its typed relations (`extends`, `derived_from`, `contradicts`, `supports`) and the ids of the episodes it rests on; `POST /v1/facts` takes `extends` and `derived_from` so a claim is linked as it is asserted |
 | `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
 
 Errors are `{"error": "..."}` with 401, 404 or 422.
+
+## Relations between facts
+
+Supersession is written into the superseded fact. Every other relation is a
+link: `POST /v1/facts` with `extends` keeps both facts and records that the new
+one adds detail (an extension with the extended fact's own subject and predicate
+is refused, because that is an update and updates supersede); with
+`derived_from` the claim is stored as `inferred` and each premise is linked, and
+a premise that is only proposed or declined is refused, since it is not truth
+yet. `POST /v1/facts/{id}/links` adds `contradicts` and `supports` (and the other
+two) explicitly, with an optional `source_episode_id` and `quote` that must sit in
+that episode. A fact cannot link to itself, the same link twice is one link, and
+a dependency that would close a cycle is refused. A link keeps its source id
+after the episode is forgotten; nothing closes a fact because its evidence is
+gone. `GET /v1/facts/{id}` returns the fact, its links from either end, and
+source *ids*, never the sources themselves; `GET /v1/graph` draws the links
+between the claims it shows. A derived claim asserted as `proposed` is linked
+from the start but answers nothing until a person approves it.
 
 ## What recall returns
 

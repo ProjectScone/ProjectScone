@@ -84,6 +84,18 @@ class FactBody(BaseModel):
     origin: str = "stated"
     proposed: bool = False
     quote: Optional[str] = None
+    # A fact this one adds detail to, and the ledger facts it was inferred from.
+    extends: Optional[int] = None
+    derived_from: list[int] = Field(default_factory=list)
+
+
+class LinkBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to_fact: int
+    kind: str
+    source_episode_id: Optional[int] = None
+    quote: Optional[str] = None
 
 
 class CloseBody(BaseModel):
@@ -208,7 +220,7 @@ def create_app(
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
             "recall": True, "facts.read": True, "facts.review": True,
-            "facts.close": True, "facts.exclude": True, "facts.include": True,
+            "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -421,8 +433,28 @@ def create_app(
             origin=body.origin,
             proposed=body.proposed,
             quote=body.quote,
+            extends=body.extends,
+            derived_from=body.derived_from,
         )
         return fact_json(fact)
+
+    @app.get("/v1/facts/{fact_id}")
+    async def get_fact(fact_id: int, space: str = Depends(space_for)) -> dict:
+        """One fact with the relations it takes part in and the ids of the
+        episodes it rests on. Ids, not the episodes themselves: a source
+        may have been forgotten since, and GET /v1/episodes says so."""
+        fact = await engine.fact(space, fact_id)
+        return {
+            "fact": fact_json(fact),
+            "links": [link_json(link) for link in await engine.fact_links(space, fact_id)],
+            "sources": [fact.source_episode_id] if fact.source_episode_id is not None else [],
+        }
+
+    @app.post("/v1/facts/{fact_id}/links")
+    async def post_link(fact_id: int, body: LinkBody, space: str = Depends(space_for)) -> dict:
+        link = await engine.link_facts(space, fact_id, body.to_fact, body.kind,
+                                       source_episode_id=body.source_episode_id, quote=body.quote)
+        return link_json(link)
 
     @app.get("/v1/facts/audit")
     async def get_facts_audit(status: str = "active", flagged: bool = False,
@@ -663,6 +695,13 @@ def event_json(event) -> dict:
         "kind": event.kind,
         "schema_version": event.schema_version,
         "payload": dict(event.payload),
+    }
+
+
+def link_json(link) -> dict:
+    return {
+        "link_id": link.link_id, "from_fact": link.from_fact, "to_fact": link.to_fact, "kind": link.kind,
+        "created_at": link.created_at, "source_episode_id": link.source_episode_id, "quote": link.quote,
     }
 
 

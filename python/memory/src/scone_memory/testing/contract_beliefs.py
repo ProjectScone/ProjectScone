@@ -188,6 +188,7 @@ __all__ = [
     "test_a_derivation_names_its_premises_and_is_labeled_inferred",
     "test_links_refuse_self_reference_unknown_kinds_and_dependency_cycles",
     "test_a_link_carries_its_evidence_and_outlives_a_forgotten_source",
+    "test_a_proposed_derivation_is_linked_but_answers_nothing_until_approved",
 ]
 
 
@@ -268,3 +269,24 @@ async def test_a_link_carries_its_evidence_and_outlives_a_forgotten_source(engin
     await engine.forget("default", source.episode_id)
     [kept] = await engine.fact_links("default", a.fact_id)
     assert kept.source_episode_id == source.episode_id, "the link records what supported it; its source being gone is the audit's business"
+
+
+async def test_a_proposed_derivation_is_linked_but_answers_nothing_until_approved(engine):
+    """Inference is not approved truth. A derived claim parked for review
+    keeps its premises on record from the start, holds nothing while
+    proposed, and never held if declined; approval is what admits it."""
+    works = await engine.assert_fact("default", "mark", "works_at", "Acme")
+    based = await engine.assert_fact("default", "Acme", "based_in", "Lisbon")
+    guess = await engine.assert_fact("default", "mark", "works_in", "Lisbon", derived_from=[works.fact_id, based.fact_id], proposed=True)
+    assert guess.status == "proposed" and guess.origin == "inferred"
+    assert [l.kind for l in await engine.fact_links("default", guess.fact_id)] == ["derived_from", "derived_from"]
+    assert guess.fact_id not in {f.fact_id for f in await engine.facts("default")}
+    assert not guess.holds_at("2030-01-01T00:00:00Z"), "premises being held proves nothing about the inference"
+    declined = await engine.decline("default", guess.fact_id, "does not follow")
+    assert declined.status == "declined" and len(await engine.fact_links("default", guess.fact_id)) == 2, "the record of the attempt stays"
+    with pytest.raises(InvalidInput):
+        await engine.assert_fact("default", "mark", "commutes_to", "Lisbon", derived_from=[guess.fact_id])
+    second = await engine.assert_fact("default", "mark", "lives_near", "Acme", derived_from=[works.fact_id], proposed=True)
+    approved = await engine.approve("default", second.fact_id)
+    assert approved.status == "active" and approved.fact_id in {f.fact_id for f in await engine.facts("default")}
+    assert [l.to_fact for l in await engine.fact_links("default", approved.fact_id)] == [works.fact_id]
