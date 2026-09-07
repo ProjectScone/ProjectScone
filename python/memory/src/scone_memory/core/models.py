@@ -139,6 +139,27 @@ class Fact(BaseModel):
         return self.valid_until is None or parse_rfc3339(self.valid_until) > t
 
 
+LinkKind = Literal["extends", "derived_from", "contradicts", "supports"]
+LINK_KINDS: tuple[str, ...] = ("extends", "derived_from", "contradicts", "supports")
+#: The kinds that make one fact depend on another; a cycle among them is refused.
+DEPENDENCY_KINDS: tuple[str, ...] = ("extends", "derived_from")
+
+
+class FactLink(BaseModel):
+    """A typed relation between two facts of one space, and the evidence it
+    rests on. ``from_fact`` is the one making the claim about ``to_fact``:
+    an extension extends, a derivation is derived from, and so on."""
+
+    link_id: int
+    space: str
+    from_fact: int
+    to_fact: int
+    kind: LinkKind
+    created_at: str
+    source_episode_id: Optional[int] = None
+    quote: Optional[str] = None
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Chunk, Episode, Fact
+from .models import Chunk, Episode, Fact, FactLink
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,17 @@ class NewFact:
     origin: str = "stated"
     superseded_by: Optional[int] = None
     excluded_reason: Optional[str] = None
+    quote: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NewFactLink:
+    space: str
+    from_fact: int
+    to_fact: int
+    kind: str
+    created_at: str
+    source_episode_id: Optional[int] = None
     quote: Optional[str] = None
 
 
@@ -154,6 +165,13 @@ class DocumentStore(Protocol):
     async def update_fact(self, fact: Fact) -> None: ...
     async def get_fact(self, space: str, fact_id: int) -> Optional[Fact]: ...
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]: ...
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        """Store a link; the same (space, from, to, kind) stored again returns
+        the stored link unchanged, so linking is idempotent everywhere."""
+        ...
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        """Every link naming the fact at either end, oldest first."""
+        ...
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         """Every fact, any status, with this subject and predicate."""
         ...

@@ -15,8 +15,8 @@ from itertools import count
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink
+from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 
@@ -28,9 +28,11 @@ class InMemoryDocumentStore:
         self._episodes: dict[int, Episode] = {}
         self._chunks: dict[int, Chunk] = {}
         self._facts: dict[int, Fact] = {}
+        self._links: dict[int, FactLink] = {}
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
         self._fact_ids = count(1)
+        self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         self._inflight: set[tuple[str, str]] = set()
@@ -166,6 +168,17 @@ class InMemoryDocumentStore:
             for f in self._facts.values()
             if f.space == space and f.subject == subject and f.predicate == predicate
         ]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        for link in self._links.values():
+            if (link.space, link.from_fact, link.to_fact, link.kind) == (new.space, new.from_fact, new.to_fact, new.kind):
+                return link
+        link = FactLink(link_id=next(self._link_ids), **new.__dict__)
+        self._links[link.link_id] = link
+        return link
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        return [l for l in self._links.values() if l.space == space and fact_id in (l.from_fact, l.to_fact)]
 
     async def bump_revision(self, space: str) -> int:
         self._revision[space] += 1

@@ -24,8 +24,8 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink
+from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -95,6 +95,11 @@ def _chunk(row: Mapping) -> Chunk:
     )
 
 
+def _fact_link(row: Mapping) -> FactLink:
+    return FactLink(link_id=int(row["id"]), space=row["space"], from_fact=int(row["from_fact"]), to_fact=int(row["to_fact"]),
+                    kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
+
+
 def _fact(row: Mapping) -> Fact:
     return Fact(
         fact_id=row["id"], space=row["space"], subject=row["subject"], predicate=row["predicate"], object=row["object"],
@@ -146,6 +151,10 @@ class PostgresDocumentStore:
         closed_reason TEXT, source_episode_id BIGINT, origin TEXT NOT NULL DEFAULT 'stated', superseded_by BIGINT,
         excluded_reason TEXT, quote TEXT);
     CREATE INDEX IF NOT EXISTS facts_key ON {s}.facts (space, subject, predicate);
+    CREATE TABLE IF NOT EXISTS {s}.fact_links (
+        id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
+        created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
+    CREATE INDEX IF NOT EXISTS fact_links_to ON {s}.fact_links (space, to_fact);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
     """
@@ -366,6 +375,26 @@ class PostgresDocumentStore:
             f"SELECT * FROM {self.schema}.facts WHERE space = %s AND subject = %s AND predicate = %s ORDER BY id", (space, subject, predicate)
         )
         return [_fact(r) for r in rows]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        row = await self._row(
+            f"INSERT INTO {self.schema}.fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (space, from_fact, to_fact, kind) DO NOTHING RETURNING *",
+            (new.space, new.from_fact, new.to_fact, new.kind, new.created_at, new.source_episode_id, new.quote),
+        )
+        if row is None:
+            row = await self._row(
+                f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = %s AND to_fact = %s AND kind = %s",
+                (new.space, new.from_fact, new.to_fact, new.kind),
+            )
+        return _fact_link(row)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        rows = await self._rows(
+            f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND (from_fact = %s OR to_fact = %s) ORDER BY id",
+            (space, fact_id, fact_id),
+        )
+        return [_fact_link(r) for r in rows]
 
     async def bump_revision(self, space: str) -> int:
         row = await self._row(

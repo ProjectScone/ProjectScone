@@ -20,8 +20,8 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink
+from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """
@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS facts (
     status TEXT NOT NULL, closed_reason TEXT, source_episode_id INTEGER,
     origin TEXT NOT NULL DEFAULT 'stated', excluded_reason TEXT, superseded_by INTEGER, quote TEXT);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(space, subject, predicate);
+CREATE TABLE IF NOT EXISTS fact_links (
+    id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL, to_fact INTEGER NOT NULL,
+    kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,
+    UNIQUE(space, from_fact, to_fact, kind));
 CREATE TABLE IF NOT EXISTS revisions (space TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vectors (
     chunk_id INTEGER PRIMARY KEY, space TEXT NOT NULL, episode_id INTEGER NOT NULL,
@@ -64,7 +68,7 @@ CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
+SCHEMA_VERSION = 8  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -75,6 +79,11 @@ SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
 STEPS: dict[int, tuple[str, ...]] = {
     5: ("ALTER TABLE facts ADD COLUMN quote TEXT",),
     6: ("CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash))",),
+    7: (
+        "CREATE TABLE IF NOT EXISTS fact_links (id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL,"
+        " to_fact INTEGER NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,"
+        " UNIQUE(space, from_fact, to_fact, kind))",
+    ),
 }
 
 
@@ -230,6 +239,11 @@ def _chunk(row: sqlite3.Row) -> Chunk:
         text=row["text"],
         created_at=row["created_at"],
     )
+
+
+def _fact_link(row: sqlite3.Row) -> FactLink:
+    return FactLink(link_id=row["id"], space=row["space"], from_fact=row["from_fact"], to_fact=row["to_fact"],
+                    kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
 
 
 def _fact(row: sqlite3.Row) -> Fact:
@@ -430,6 +444,25 @@ class SqliteDocumentStore:
             (space, subject, predicate),
         )
         return [_fact(r) for r in rows]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new.space, new.from_fact, new.to_fact, new.kind, new.created_at, new.source_episode_id, new.quote),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM fact_links WHERE space = ? AND from_fact = ? AND to_fact = ? AND kind = ?",
+            (new.space, new.from_fact, new.to_fact, new.kind),
+        ).fetchone()
+        return _fact_link(row)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        rows = self.conn.execute(
+            "SELECT * FROM fact_links WHERE space = ? AND (from_fact = ? OR to_fact = ?) ORDER BY id", (space, fact_id, fact_id)
+        )
+        return [_fact_link(r) for r in rows]
 
     async def bump_revision(self, space: str) -> int:
         self.conn.execute(

@@ -27,8 +27,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink
+from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -105,6 +105,11 @@ def _chunk(doc: Mapping) -> Chunk:
     )
 
 
+def _fact_link(doc: Mapping) -> FactLink:
+    return FactLink(link_id=int(doc["link_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
+                    kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
+
+
 def _fact(doc: Mapping) -> Fact:
     return Fact(
         fact_id=doc["fact_id"], space=doc["space"], subject=doc["subject"], predicate=doc["predicate"], object=doc["object"],
@@ -152,6 +157,10 @@ FACT_MAPPINGS = {"properties": {
     "source_episode_id": LONG, "origin": KEYWORD, "superseded_by": LONG, "excluded_reason": {"type": "text", "index": False},
     "quote": {"type": "text", "index": False},
 }}
+FACT_LINK_MAPPINGS = {"properties": {
+    "link_id": LONG, "space": KEYWORD, "from_fact": LONG, "to_fact": LONG, "kind": KEYWORD, "created_at": KEYWORD,
+    "source_episode_id": LONG, "quote": {"type": "text", "index": False},
+}}
 EVENT_MAPPINGS = {"properties": {
     "event_id": LONG, "ts": KEYWORD, "space": KEYWORD, "kind": KEYWORD, "schema_version": LONG,
     "payload": {"type": "text", "index": False}, "dedup_key": KEYWORD,
@@ -185,6 +194,7 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("episodes", EPISODE_MAPPINGS)
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
+        await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
         await self.check_schema()
@@ -209,7 +219,7 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "meta", "counters", "vectors", "events", "inflight")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "meta", "counters", "vectors", "events", "inflight")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -412,6 +422,30 @@ class ElasticsearchDocumentStore:
         filters = [{"term": {"space": space}}, {"term": {"subject": subject}}, {"term": {"predicate": predicate}}]
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        from elasticsearch import ConflictError
+
+        # One document id per (space, from, to, kind): a second store of the
+        # same link is a conflict, and the stored one is returned unchanged.
+        doc_id = f"{new.space}|{new.from_fact}|{new.to_fact}|{new.kind}"
+        existing = await self._doc("fact_links", doc_id)
+        if existing is None:
+            doc = {"link_id": await self.shared.next_id("fact_links"), **new.__dict__}
+            try:
+                await self.client.index(index=self._idx("fact_links"), id=doc_id, document=doc, op_type="create",
+                                        refresh=self.shared.refresh)
+                return _fact_link(doc)
+            except ConflictError:
+                existing = await self._doc("fact_links", doc_id)
+        return _fact_link(existing)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        query = {"bool": {"filter": [{"term": {"space": space}}],
+                          "should": [{"term": {"from_fact": fact_id}}, {"term": {"to_fact": fact_id}}],
+                          "minimum_should_match": 1}}
+        hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
+        return [_fact_link(h) for h in hits]
 
     async def bump_revision(self, space: str) -> int:
         return await self.shared.next_id(f"revision:{space}")
