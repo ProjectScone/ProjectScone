@@ -90,6 +90,7 @@ class SourceQuery(BaseModel):
     before: Optional[int] = Field(default=None, ge=1, le=2**63-1)
     limit: int = Field(default=25, ge=1, le=100)
     kind: Optional[str] = None
+    conditions: Optional[str] = None
 
 
 class FactBody(BaseModel):
@@ -553,7 +554,8 @@ def create_app(
     async def get_sources(query: SourceQuery = Query(), space: str = Depends(space_for)):
         if not callable(getattr(engine.documents, "page_episodes", None)):
             return JSONResponse({"error": "this document store does not implement source inventory"}, status_code=501)
-        page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind)
+        page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind,
+                                        conditions=read_conditions(query.conditions))
         # Where consolidation left each source, in the words the API means:
         # cited (a claim rests on it), parked (the distiller gave up on it in
         # this process), pending (no claim cites it yet; a pass, the worker's

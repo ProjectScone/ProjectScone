@@ -78,3 +78,20 @@ def test_the_manifest_says_a_search_can_be_narrowed_this_way(client):
     """A caller must not have to probe for it, or infer it from a failure."""
     features = client.get("/v1/capabilities", headers=auth()).json()["features"]
     assert features["recall.conditions"] is True
+
+
+def test_browsing_sources_can_be_narrowed_the_same_way(client):
+    """The same question asked of the same memories must not depend on
+    which screen it was asked from."""
+    answer = client.get("/v1/sources", params={
+        "limit": 25, "conditions": json.dumps({"field": "status", "is": "published"})},
+        headers=auth())
+    assert answer.status_code == 200
+    items = answer.json()["items"]
+    assert [i["preview"] for i in items] == ["quarterly planning note, the one that shipped"]
+
+
+def test_an_unreadable_filter_stops_a_browse_too(client):
+    answer = client.get("/v1/sources", params={"conditions": "{not json"}, headers=auth())
+    assert answer.status_code == 422
+    assert "conditions must be" in answer.json()["error"]

@@ -81,6 +81,11 @@ LANE_DEPTH = 4
 #: itself. Bounded: post-filtering cannot be made exact by widening, so
 #: this buys a reasonable corpus rather than pretending to buy every one.
 UNFILTERED_DEPTH = 25
+#: Rows read at a time when walking the inventory for matches, and how
+#: many such reads one page may cost. A filter matching nothing would
+#: otherwise read a whole space to prove a negative.
+SOURCE_WALK_PAGE = 200
+SOURCE_WALK_READS = 25
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
 
@@ -1973,11 +1978,20 @@ class MemoryEngine:
                 if f.source_episode_id is not None}
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
-                          limit: int = 25, kind: Optional[str] = None) -> SourcePage:
+                          limit: int = 25, kind: Optional[str] = None,
+                          conditions: Mapping[str, object] | None = None) -> SourcePage:
         """Browse retained sources by descending ID, not relevance or source date.
 
         Newer inserts are found by restarting the walk. Deleting the boundary
         record does not invalidate the next page. This is not a frozen snapshot.
+
+        With ``conditions``, the walk keeps reading until the page is full,
+        rather than filtering one page and handing back what survives. The
+        latter turns a page of twenty-five into a page of one and makes the
+        page size mean nothing. The walk is bounded, because a filter that
+        matches nothing would otherwise read a whole space to prove it, and
+        reaching that bound is reported as more to come rather than as the
+        end.
         """
         check_space(space)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -1989,9 +2003,37 @@ class MemoryEngine:
         page = getattr(self.documents, "page_episodes", None)
         if not callable(page):
             raise InvalidInput("this document store does not implement source inventory")
-        rows = await page(space, before, limit + 1, kind)
-        more = len(rows) > limit
-        return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        if conditions is None:
+            rows = await page(space, before, limit + 1, kind)
+            more = len(rows) > limit
+            return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+
+        from ..retrieval.filters import parse_filter
+
+        narrow = parse_filter(conditions)
+        kept: list[Episode] = []
+        cursor, reads, ended = before, 0, False
+        while len(kept) < limit and reads < SOURCE_WALK_READS:
+            batch = await page(space, cursor, SOURCE_WALK_PAGE, kind)
+            reads += 1
+            filled = False
+            for episode in batch:
+                cursor = episode.episode_id
+                if narrow.matches(episode.metadata):
+                    kept.append(episode)
+                    if len(kept) == limit:
+                        filled = True
+                        break
+            if filled:
+                # Stopped on a full page, not on the end of the store: the
+                # rest of this batch has not been looked at yet.
+                break
+            if len(batch) < SOURCE_WALK_PAGE:
+                # The store had nothing more to give, so this is the end of
+                # the space rather than the end of what was read.
+                ended = True
+                break
+        return SourcePage(kept, not ended, None if ended else cursor)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest
