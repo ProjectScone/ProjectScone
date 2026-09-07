@@ -75,7 +75,7 @@ class OwnedSession:
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
-                            worker=None, reload_pages=False, catalog=None):
+                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -852,5 +852,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     # The mounted app answers /v1/status, so it must know the worker; its own
     # lifespan never runs under a mount, so ownership stays with this one.
-    app.mount("/", create_app(engine, keys, console=False, conversations=True, worker=worker))
+    memory_app = create_app(engine, keys, console=False, conversations=True, worker=worker,
+                            ingest_concurrency=ingest_concurrency)
+    app.state.ingest_lane_width = memory_app.state.ingest_lane_width
+    app.mount("/", memory_app)
     return app

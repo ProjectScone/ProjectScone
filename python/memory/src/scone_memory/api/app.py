@@ -9,6 +9,8 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+import asyncio
+
 import re
 
 from pathlib import Path
@@ -159,6 +161,7 @@ def create_app(
     worker=None,
     reload_pages: bool = False,
     conversations: bool = False,
+    ingest_concurrency: int = 4,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
@@ -168,7 +171,9 @@ def create_app(
     re-reads the console and playground files on every request, for
     editing them with the server running; off in normal use. ``conversations``
     says this app is mounted under a conversation service on the same
-    origin, so the capability manifest may advertise it."""
+    origin, so the capability manifest may advertise it. ``ingest_concurrency``
+    is how many writes may be embedding at once; one more is answered 429
+    with Retry-After instead of queued without limit. Reads are not gated."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -179,7 +184,27 @@ def create_app(
             await worker.stop()
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+    if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
+        raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
+    app.state.ingest_lane_width = ingest_concurrency
+    ingest_lane = asyncio.Semaphore(ingest_concurrency)
+
+    class IngestBusy(Exception):
+        pass
+
+    @asynccontextmanager
+    async def ingest_slot(records: int):
+        # Backpressure, not a queue: a write that finds every slot taken is
+        # told to come back, with the number it is waiting behind.
+        if ingest_lane.locked():
+            raise IngestBusy(f"ingest is busy: {ingest_concurrency} record(s) are being embedded; try again shortly")
+        async with ingest_lane:
+            yield
+
+    @app.exception_handler(IngestBusy)
+    async def _busy(_: Request, e: IngestBusy) -> JSONResponse:
+        return JSONResponse({"error": str(e), "code": "ingest_busy"}, status_code=429, headers={"Retry-After": "1"})
     app.state.keys = dict(keys)
     app.state.worker = worker
 
@@ -363,6 +388,10 @@ def create_app(
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
+        async with ingest_slot(1):
+            return await _post_episode(body, space)
+
+    async def _post_episode(body: EpisodeBody, space: str) -> dict:
         added = await engine.remember(
             space,
             body.content,
@@ -388,7 +417,8 @@ def create_app(
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
             for r in body.records
         ]
-        added = await engine.remember_many(space, records)
+        async with ingest_slot(len(records)):
+            added = await engine.remember_many(space, records)
         for record, item in zip(body.records, added):
             for attachment_id in dict.fromkeys(record.attachment_ids):
                 await engine.blobs.link(space, attachment_id, item.episode_id)

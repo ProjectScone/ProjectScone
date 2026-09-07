@@ -89,7 +89,10 @@ outside the space it was issued for.
 | `GET /v1/facts/{id}` · `POST /v1/facts/{id}/links` | one fact with its typed relations (`extends`, `derived_from`, `contradicts`, `supports`) and the ids of the episodes it rests on; `POST /v1/facts` takes `extends` and `derived_from` so a claim is linked as it is asserted |
 | `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
 
-Errors are `{"error": "..."}` with 401, 404 or 422.
+Errors are `{"error": "..."}` with 401, 404 or 422. Writes that embed (`POST
+/v1/episodes`, `/batch`) run at most `SCONE_INGEST_CONCURRENCY` (default 4) at
+once; one more is answered 429 `{"error", "code": "ingest_busy"}` with
+`Retry-After: 1` rather than queued without limit, and reads are never gated.
 
 ## Relations between facts
 

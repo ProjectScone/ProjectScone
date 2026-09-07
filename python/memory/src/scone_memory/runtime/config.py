@@ -107,6 +107,8 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 7437
     reload_pages: bool = False
+    #: Writes embedding at once over HTTP; one more is told to come back.
+    ingest_concurrency: int = 4
     # Naming a journal composes the conversation service onto the memory
     # origin under `serve`; the factory is the same trusted module:callable
     # as `serve-conversations --model-factory`, absent meaning history-only.
@@ -167,6 +169,7 @@ class Settings:
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
+            ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,

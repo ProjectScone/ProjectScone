@@ -22,7 +22,8 @@ def build_app(settings: Settings, engine):
         # One configured key means one space; bake it so the console opens
         # without a prompt. Several keys: the console asks which.
         only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
-        return create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages)
+        return create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages,
+                          ingest_concurrency=settings.ingest_concurrency)
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
 
@@ -50,7 +51,8 @@ def build_app(settings: Settings, engine):
     # The composed shell never carries a key: the tab asks for one.
     return create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    console=True, public_text_streaming=scoped is not None or catalog is not None,
-                                   worker=worker, reload_pages=settings.reload_pages, catalog=catalog)
+                                   worker=worker, reload_pages=settings.reload_pages, catalog=catalog,
+                                   ingest_concurrency=settings.ingest_concurrency)
 
 
 def build_server(settings: Settings, app):
