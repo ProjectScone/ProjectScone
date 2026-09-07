@@ -438,3 +438,22 @@ def test_cli_links_facts_and_reads_them_back(tmp_path, capsys):
     assert code == 2 and "itself" in capsys.readouterr().err
     code, text = run("links", str(based_id), "--json")
     assert code == 0 and sorted(l["kind"] for l in json.loads(text)) == ["derived_from", "extends", "supports"]
+
+
+def test_cli_forget_previews_with_dry_run_and_reports_a_receipt(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", stdin="Acme is headquartered in Lisbon.")
+    _, text = run("assert", "acme", "based_in", "lisbon", "--json")
+    code, text = run("forget", "1", "--dry-run", "--json")
+    assert code == 0 and json.loads(text)["chunks"] >= 1 and json.loads(text)["facts_citing"] == []
+    assert run("recall", "lisbon", "--json")[1].count("episode_id") >= 1, "a dry run removes nothing"
+    code, text = run("forget", "1", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == 1 and json.loads(text)["chunks"] >= 1
+    code, text = run("forget", "1", "--dry-run")
+    assert code == 2

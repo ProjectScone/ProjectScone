@@ -160,6 +160,21 @@ class FactLink(BaseModel):
     quote: Optional[str] = None
 
 
+class ForgetReceipt(BaseModel):
+    """What forgetting an episode takes with it and what it leaves. The
+    same shape answers the preview and the deed: chunks (and their
+    vectors) go; an attachment is released only when no other episode of
+    the space still carries it; the claims and links that cited the
+    episode stand, with their source ids intact."""
+
+    episode_id: int
+    chunks: int
+    attachments_released: list[str] = Field(default_factory=list)
+    attachments_kept: list[str] = Field(default_factory=list)
+    facts_citing: list[int] = Field(default_factory=list)
+    links_citing: list[int] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int

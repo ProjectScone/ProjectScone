@@ -82,7 +82,7 @@ outside the space it was issued for.
 | Route | What |
 |---|---|
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
-| `DELETE /v1/episodes/{id}` | forget |
+| `DELETE /v1/episodes/{id}` · `GET /v1/episodes/{id}/impact` | forget, with a receipt of what went and what stayed: chunks and vectors go, an attachment is released only when no other episode of the space carries it, and the claims and links that cited the episode stand with their source ids intact; `impact` shows the same receipt and removes nothing (`scone-memory forget --dry-run`) |
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `GET /v1/facts/{id}` · `POST /v1/facts/{id}/links` | one fact with its typed relations (`extends`, `derived_from`, `contradicts`, `supports`) and the ids of the episodes it rests on; `POST /v1/facts` takes `extends` and `derived_from` so a claim is linked as it is asserted |

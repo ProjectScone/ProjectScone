@@ -273,6 +273,7 @@ async def test_backfill_truncates_manual_interval_without_rewriting_reason(engin
 
 
 __all__ = [
+    "test_forgetting_returns_a_receipt_and_leaves_claims_standing",
     "test_backfilled_fact_splits_a_previously_closed_interval",
     "test_backfill_preserves_a_manual_closure_and_gap",
     "test_backfill_truncates_manual_interval_without_rewriting_reason",
@@ -298,3 +299,46 @@ __all__ = [
     "test_recall_returns_facts_that_hold_at_the_time_asked",
     "test_profile_is_identity_plus_recent_activity",
 ]
+
+
+async def test_forgetting_returns_a_receipt_and_leaves_claims_standing(engine):
+    """Forgetting an episode says what went with it and what stayed: its
+    chunks and vectors go; an attachment goes only when no other episode
+    still carries it; the claims and links that cited it stand, with their
+    source ids intact, because a source being gone is a fact about the
+    evidence, not about the claim. The impact preview says the same
+    without removing anything."""
+    from ..core.errors import NotFound
+
+    shared = await engine.attach("default", b"shared bytes", "text/plain")
+    alone = await engine.attach("default", b"alone bytes", "text/plain")
+    first = await engine.remember("default", "Acme is headquartered in Lisbon, near the river.",
+                                  attachment_ids=[shared.attachment_id, alone.attachment_id])
+    second = await engine.remember("default", "Another note that also carries the shared file.",
+                                   attachment_ids=[shared.attachment_id])
+    cited = await engine.assert_fact("default", "acme", "based_in", "lisbon", source_episode_id=first.episode_id, quote="headquartered in Lisbon")
+    other = await engine.assert_fact("default", "mark", "works_at", "acme")
+    link = await engine.link_facts("default", other.fact_id, cited.fact_id, "supports",
+                                   source_episode_id=first.episode_id, quote="near the river")
+
+    preview = await engine.impact("default", first.episode_id)
+    assert preview.episode_id == first.episode_id and preview.chunks == first.chunks
+    assert (preview.attachments_released, preview.attachments_kept) == ([alone.attachment_id], [shared.attachment_id])
+    assert (preview.facts_citing, preview.links_citing) == ([cited.fact_id], [link.link_id])
+    assert (await engine.episode("default", first.episode_id)).episode_id == first.episode_id, "a preview removes nothing"
+    assert (await engine.attachment("default", alone.attachment_id))[0].attachment_id == alone.attachment_id
+
+    receipt = await engine.forget("default", first.episode_id)
+    assert receipt == preview, "the receipt is the preview, done"
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.episode_id)
+    with pytest.raises(NotFound):
+        await engine.attachment("default", alone.attachment_id)
+    assert (await engine.attachment("default", shared.attachment_id))[1] == b"shared bytes"
+    assert [a.attachment_id for a in (await engine.episode("default", second.episode_id)).attachments] == [shared.attachment_id]
+    standing = await engine.fact("default", cited.fact_id)
+    assert standing.status == "active" and standing.source_episode_id == first.episode_id, "the claim stands; its source id says what it rested on"
+    [kept] = await engine.fact_links("default", other.fact_id)
+    assert kept.source_episode_id == first.episode_id
+    with pytest.raises(NotFound):
+        await engine.impact("default", first.episode_id)

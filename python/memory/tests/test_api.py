@@ -398,3 +398,19 @@ def test_a_batch_episode_read_is_bounded(client):
     too_many = ",".join(str(n) for n in range(1, 102))
     assert client.get("/v1/episodes", params={"ids": too_many}, headers=h).status_code == 422
     assert client.get("/v1/episodes", params={"ids": ""}, headers=h).status_code == 422
+
+
+def test_forgetting_over_http_previews_then_reports_its_impact(client):
+    h = auth()
+    episode = client.post("/v1/episodes", json={"content": "Acme is headquartered in Lisbon, near the river."}, headers=h).json()
+    fact = client.post("/v1/facts", json={"subject": "acme", "predicate": "based_in", "object": "lisbon",
+                                          "source_episode_id": episode["episode_id"], "quote": "headquartered in Lisbon"}, headers=h).json()
+    preview = client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h)
+    assert preview.status_code == 200
+    assert preview.json()["facts_citing"] == [fact["fact_id"]] and preview.json()["chunks"] >= 1
+    assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 200, "a preview removes nothing"
+    gone = client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h)
+    assert gone.status_code == 200 and gone.json()["forgotten"] == episode["episode_id"]
+    assert {k: v for k, v in gone.json().items() if k != "forgotten"} == preview.json()
+    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 404
+    assert client.get(f"/v1/facts/{fact['fact_id']}", headers=h).json()["fact"]["status"] == "active", "the claim stands"

@@ -83,8 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
 
-    p = sub.add_parser("forget", help="delete an episode")
+    p = sub.add_parser("forget", help="delete an episode; the receipt says what went and what stayed")
     p.add_argument("episode_id", type=int)
+    p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -187,6 +188,11 @@ def read_source(path: str, stdin) -> str:
         return stdin.read()
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def receipt_line(r) -> str:
+    return (f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, "
+            f"{len(r.facts_citing)} claim(s) and {len(r.links_citing)} link(s) cite it and stand")
 
 
 def link_line(link) -> str:
@@ -439,8 +445,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "forget":
-        await engine.forget(space, args.episode_id)
-        emit({"forgotten": args.episode_id}) if args.json else print(f"forgot episode {args.episode_id}", file=out)
+        if args.dry_run:
+            receipt = await engine.impact(space, args.episode_id)
+            emit(receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(receipt)}", file=out)
+            return 0
+        receipt = await engine.forget(space, args.episode_id)
+        emit({"forgotten": args.episode_id, **receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(receipt)}", file=out)
         return 0
 
     if args.command == "facts":

@@ -390,10 +390,15 @@ def create_app(
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         return episode_json(await engine.episode(space, episode_id))
 
+    @app.get("/v1/episodes/{episode_id}/impact")
+    async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """What forgetting would take and leave; removes nothing."""
+        return (await engine.impact(space, episode_id)).model_dump()
+
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
-        await engine.forget(space, episode_id)
-        return {"forgotten": episode_id}
+        receipt = await engine.forget(space, episode_id)
+        return {"forgotten": episode_id, **receipt.model_dump()}
 
     @app.get("/v1/recall")
     async def get_recall(

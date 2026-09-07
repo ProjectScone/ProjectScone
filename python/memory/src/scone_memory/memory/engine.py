@@ -32,6 +32,7 @@ from ..core.models import (
     EpisodeKind,
     Fact,
     FactLink,
+    ForgetReceipt,
     DEPENDENCY_KINDS,
     LINK_KINDS,
     RecallItem,
@@ -565,16 +566,52 @@ class MemoryEngine:
                 await self.documents.clear_inflight(space, pending.new.content_hash)
             raise
 
-    async def forget(self, space: str, episode_id: int) -> None:
+    async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
+        """What forgetting the episode would take with it and leave, with
+        nothing removed. The claims and links that cite it are reported,
+        not closed: a source being gone is a fact about the evidence."""
+        check_space(space)
+        if await self.documents.get_episode(space, episode_id) is None:
+            raise NotFound(f"episode {episode_id} not found in {space!r}")
+        carried = [a.attachment_id for a in await self.blobs.for_episode(space, episode_id)]
+        released = await self.blobs.released_by(space, episode_id)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        citing_links: dict[int, int] = {}
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.source_episode_id == episode_id:
+                    citing_links[link.link_id] = link.link_id
+        return ForgetReceipt(
+            episode_id=episode_id,
+            chunks=len(await self.documents.chunks_of(space, episode_id)),
+            attachments_released=released,
+            attachments_kept=[a for a in carried if a not in released],
+            facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
+            links_citing=sorted(citing_links),
+        )
+
+    async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
+        """Remove the episode, its chunks and vectors, and release the
+        attachments nothing else carries; return the receipt that
+        ``impact`` would have shown. Claims and links stand."""
         check_space(space)
         started = time.perf_counter()
-        removed = await self.documents.delete_episode(space, episode_id)
-        if not removed and await self.documents.get_episode(space, episode_id) is None:
+        try:
+            receipt = await self.impact(space, episode_id)
+        except NotFound:
             await self._emit(space, "forget", {"episode_id": episode_id, "error": "NotFound", "latency_ms": _ms(started)})
-            raise NotFound(f"episode {episode_id} not found in {space!r}")
+            raise
+        removed = await self.documents.delete_episode(space, episode_id)
         await self.vectors.delete(removed)
+        await self.blobs.unlink(space, episode_id)
         await self.documents.bump_revision(space)
-        await self._emit(space, "forget", {"episode_id": episode_id, "chunks_removed": len(removed), "latency_ms": _ms(started)})
+        await self._emit(space, "forget", {
+            "episode_id": episode_id, "chunks_removed": len(removed),
+            "attachments_released": len(receipt.attachments_released),
+            "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
+            "latency_ms": _ms(started),
+        })
+        return receipt
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
