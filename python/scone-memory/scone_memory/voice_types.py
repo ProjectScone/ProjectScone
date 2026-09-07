@@ -1,0 +1,76 @@
+"""Scone-owned audio events and structural provider interfaces.
+
+No scheduler, device, provider SDK or third-party conversation framework is
+imported here. Adapters translate their native data into these public events.
+"""
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """Signed 16-bit little-endian interleaved PCM; no implicit resampling."""
+
+    pcm: bytes
+    sample_rate: int
+    channels: int = 1
+
+    def __post_init__(self):
+        if not isinstance(self.pcm, bytes) or not self.pcm:
+            raise ValueError("PCM must be nonempty bytes")
+        if type(self.sample_rate) is not int or not 8000 <= self.sample_rate <= 192000:
+            raise ValueError("sample_rate must be an integer in 8000..192000")
+        if type(self.channels) is not int or self.channels not in (1, 2):
+            raise ValueError("channels must be 1 or 2")
+        if len(self.pcm) % (2 * self.channels):
+            raise ValueError("PCM must contain complete signed 16-bit sample frames")
+
+
+@dataclass(frozen=True)
+class SpeechStarted:
+    """Recognizer/turn detector observed new speech; interrupt current output."""
+
+
+@dataclass(frozen=True)
+class Transcript:
+    text: str
+    final: bool = True
+    speaker: str = "user"
+
+
+@dataclass(frozen=True)
+class TextDelta:
+    """Public response text only. Adapters must not map reasoning into this."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ReplyCompleted:
+    """Adapter's explicit successful response end, not a playback receipt."""
+
+
+class AudioTransport(Protocol):
+    def receive(self) -> AsyncIterator[AudioChunk]: ...
+    async def send(self, audio: AudioChunk, turn_id: str) -> None: ...
+    async def clear(self, turn_id: str) -> None:
+        """Discard queued output for this turn; failure must raise."""
+        ...
+    async def aclose(self) -> None: ...
+
+
+class SpeechRecognizer(Protocol):
+    def transcribe(self, audio: AsyncIterator[AudioChunk]) -> AsyncIterator[SpeechStarted | Transcript]: ...
+    async def aclose(self) -> None: ...
+
+
+class VoiceModel(Protocol):
+    def respond(self, messages: list[dict[str, str]]) -> AsyncIterator[TextDelta | ReplyCompleted]: ...
+    async def aclose(self) -> None: ...
+
+
+class SpeechSynthesizer(Protocol):
+    def synthesize(self, text: str) -> AsyncIterator[AudioChunk]: ...
+    async def aclose(self) -> None: ...

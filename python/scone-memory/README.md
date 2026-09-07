@@ -523,6 +523,117 @@ explicitly scripted processor—not live inference. Provider-specific completion
 retry policy and client cleanup, the authenticated service, React controls and
 Rust HTTP interoperability remain release gates.
 
+### Scone Voice (native sessions)
+
+Scone owns the audio runtime in `scone_memory.voice.VoiceSession`: its event types,
+bounded input queue, turn lifecycle, interruption, response/speech sequencing and
+memory capture. It uses standard Python `asyncio` and the native Scone engine.
+**No Pipecat installation, import, probe environment or framework scheduler is
+required.** Python 3.11+ is needed for this runtime's structured deadlines; the
+base package and independent Rust/Python CLIs retain their existing requirements.
+
+The native provider interfaces live in `scone_memory.voice_types`:
+
+| Interface | Host adapter implements |
+| --- | --- |
+| `AudioTransport` | `receive()` audio stream, `send(chunk, turn_id)`, `clear(turn_id)`, `aclose()` |
+| `SpeechRecognizer` | `transcribe(audio)` yielding speech-start and transcript events, `aclose()` |
+| `VoiceModel` | `respond(messages)` yielding public text deltas and explicit completion, `aclose()` |
+| `SpeechSynthesizer` | `synthesize(text)` yielding PCM chunks, `aclose()` |
+
+Stream methods return async iterators supporting `aclose()` (async generators
+work). Transport audio uses Scone's frozen `AudioChunk(pcm, sample_rate, channels)`:
+signed 16-bit little-endian interleaved PCM, explicit 8–192 kHz sample rate, mono
+or stereo. Adapters handle required format conversion; Scone does not silently
+resample. Methods and factories must cooperate asynchronously and never block
+the event loop. Resources must be fresh and distinct per session.
+
+```python
+from scone_memory.voice import VoiceSession
+
+# These factories are configured by your trusted host, not supplied as code or
+# credentials by a browser. They implement the Scone interfaces above.
+session = VoiceSession(
+    memory, "authorized-space", "voice-session-1",
+    transport_factory=audio_transport_factory,
+    stt_factory=speech_recognizer_factory,
+    model_factory=language_model_factory,
+    tts_factory=speech_synthesizer_factory,
+    capture=True,
+    where={"collection": "manuals"},
+    session_timeout=1800,
+    turn_timeout=30,
+)
+try:
+    await session.run()
+finally:
+    await session.close()
+```
+
+The host obtains participant consent and authenticates the connection before
+starting. `capture=True` authorizes public transcript writes; the flag alone does
+not prove consent. No microphone, provider, credential, model download or endpoint
+is selected implicitly. This is a native session—not a browser signaling server.
+
+`SpeechStarted()` interrupts current output. A new final `Transcript` also
+supersedes any active reply. Interim/empty transcripts do not trigger memory
+writes or model calls. Scone cancels and drains the old response, asks transport
+to clear its output by turn ID, and rejects late output from the old generation.
+That clear request is not proof previously played audio was unheard. Input EOF
+must be consumed by the recognizer and drains the final reply.
+
+Only public `TextDelta` and `ReplyCompleted` events are accepted from the model.
+Scone groups text into speech segments; synthesis and output are awaited before
+requesting further model output, providing backpressure at those interfaces.
+Reply-end and audio-end are different: a reply is retained only after explicit
+completion, stream closure, successful synthesis and output acceptance. A missing
+completion or empty synthesis fails the turn. `send()` acceptance is **not** proof
+a person heard the audio. Tool and hidden-reasoning events have no accepted type;
+adapters must never relabel private reasoning as public text.
+
+Final user text is saved before response generation. Successful assistant text
+becomes a `conversation` episode with capture/session/turn IDs, speaker/role and
+`representation=aggregated_text`. Assistant metadata identifies
+`completion_evidence=adapter_end_and_output_accepted` and `playback=unverified`.
+Interrupted partial replies are not retained as completed. A cancelled or timed-out
+write is unconfirmed and stops the session; inspect storage before retrying.
+There is no automatic uncertain-write replay.
+
+Recall scope (`where`, `kind`, `source_prefix`, `since`, `until`) is validated
+and frozen before factories run. Recalled text is source-referenced, marked
+untrusted, bounded and inserted only into a copy of the current request—not
+shared history or transcript memory. `last_memory_receipt` reports prepared,
+empty or failed lookup, not provider use. Lookup failure can continue without
+recalled material; capture/output/provider failures cannot report success.
+Raw audio and source blocks are not retained by this integration.
+
+The session is single-use. `state` is `new`, `starting`, `running`, `ended`,
+`interrupted` or `failed`. Observe the `run()` task alongside the `started`
+event because startup can fail. `stored_count` counts acknowledged writes.
+Call `close()` from a host task, not from a provider callback. Repeated Close
+or caller cancellation joins the same owned cleanup. The deadline requests
+shutdown; noncooperative resource cleanup can delay return. No hard process
+termination is claimed.
+
+Defaults: 8 queued input packets, 64,000 bytes per PCM packet, 32,000 bytes per
+transcript, 64,000 reply bytes, 128,000 JSON-encoded history bytes, bounded recall,
+30 seconds per response and 30 minutes per session. The input producer may hold
+one additional packet while the queue is full. These bounds do not control
+provider-internal queues, network buffers or physical playback.
+
+Run the native regressions in the ordinary project environment:
+
+```sh
+python/scone-memory/.venv/bin/python -m pytest python/scone-memory/tests/test_voice.py -q
+```
+
+Tests use scripted protocol adapters and real isolated Scone memory, not live
+recognition/model calls. Concrete provider adapters, authenticated browser audio
+transport, React voice controls and video remain release gates. HTTP capabilities
+still advertise `voice: false` until that entire path works. Existing optional
+Pipecat text integrations below are legacy migration work, not the foundation
+of Scone Voice.
+
 ### Browsing retained sources
 
 `GET /v1/sources?limit=25&kind=file&before=123` enumerates retained episodes in
