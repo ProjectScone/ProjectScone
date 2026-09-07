@@ -61,7 +61,7 @@ def test_codex_events_normalise_best_effort():
 
 def test_project_allowlist_uses_canonical_names_not_paths():
     projects = {"scone": "/Users/me/ProjectScone", "examples": "/Users/me/zdeceptron/examples"}
-    assert project_for("/Users/me/ProjectScone/python/scone-memory", projects) == "scone"
+    assert project_for("/Users/me/ProjectScone/python/memory", projects) == "scone"
     assert project_for("/Users/me/zdeceptron/examples", projects) == "examples"
     assert project_for("/Users/me/zdeceptron", projects) is None
     assert project_for("/Users/me/ProjectSconeX", projects) is None

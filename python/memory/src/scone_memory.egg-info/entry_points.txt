@@ -1,0 +1,3 @@
+[console_scripts]
+scone-memory = scone_memory.cli:main
+scone-memory-mcp = scone_memory.mcp:main

@@ -53,10 +53,11 @@ scone-memory-mcp = "scone_memory.mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/DrDrewCain/ProjectScone"
-Source = "https://github.com/DrDrewCain/ProjectScone/tree/main/python/scone-memory"
+Source = "https://github.com/DrDrewCain/ProjectScone/tree/main/python/memory"
 Issues = "https://github.com/DrDrewCain/ProjectScone/issues"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["scone_memory*"]
 
 [tool.setuptools.package-data]

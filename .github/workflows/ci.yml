@@ -39,9 +39,9 @@ jobs:
           cargo test --locked -p scone-core --no-default-features --test shared_contract
           cargo build --locked -p scone-core --no-default-features --example episode_roundtrip
       - name: Install Python conformance dependencies
-        run: python -m pip install -e './python/scone-memory[test]'
+        run: python -m pip install -e './python/memory[test]'
       - name: Exchange real exports in both directions
-        working-directory: python/scone-memory
+        working-directory: python/memory
         env:
           SCONE_TEST_RUST_ROUNDTRIP: ${{ github.workspace }}/target/debug/examples/episode_roundtrip
         run: python -m pytest -q tests/test_cross_language.py -k 'memory or sqlite or probe'
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/scone-memory
+        working-directory: python/memory
     services:
       postgres:
         image: pgvector/pgvector:pg16

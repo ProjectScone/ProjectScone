@@ -1,3 +1,72 @@
+Metadata-Version: 2.4
+Name: scone-memory
+Version: 0.1.0
+Summary: Memory infrastructure for LLMs, RAG and agents: verbatim episodes, a dated fact ledger, hybrid recall and an evidence log over pluggable stores (SQLite, MongoDB, PostgreSQL, Qdrant, Redis, Chroma, LanceDB), served by FastAPI and MCP
+Author: ProjectScone contributors
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/DrDrewCain/ProjectScone
+Project-URL: Source, https://github.com/DrDrewCain/ProjectScone/tree/main/python/memory
+Project-URL: Issues, https://github.com/DrDrewCain/ProjectScone/issues
+Keywords: memory,agents,retrieval,rag,temporal,knowledge,qdrant,mongodb,postgres,pgvector,redis,chroma,lancedb,fastapi,mcp,langchain,llamaindex
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Database
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Typing :: Typed
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pydantic>=2.5
+Provides-Extra: mongo
+Requires-Dist: pymongo>=4.13; extra == "mongo"
+Provides-Extra: qdrant
+Requires-Dist: qdrant-client>=1.12; extra == "qdrant"
+Provides-Extra: api
+Requires-Dist: fastapi>=0.115; extra == "api"
+Requires-Dist: uvicorn[standard]>=0.30; extra == "api"
+Provides-Extra: mcp
+Requires-Dist: mcp<3,>=2; extra == "mcp"
+Provides-Extra: remote-embed
+Requires-Dist: httpx>=0.27; extra == "remote-embed"
+Provides-Extra: local-embed
+Requires-Dist: fastembed>=0.4; extra == "local-embed"
+Provides-Extra: postgres
+Requires-Dist: psycopg[binary,pool]>=3.2; extra == "postgres"
+Requires-Dist: pgvector>=0.3; extra == "postgres"
+Provides-Extra: redis
+Requires-Dist: redis>=5; extra == "redis"
+Provides-Extra: elasticsearch
+Requires-Dist: elasticsearch<9,>=8; extra == "elasticsearch"
+Provides-Extra: milvus
+Requires-Dist: pymilvus>=2.5; extra == "milvus"
+Provides-Extra: milvus-lite
+Requires-Dist: pymilvus[milvus_lite]>=2.5; extra == "milvus-lite"
+Provides-Extra: chroma
+Requires-Dist: chromadb>=1.0; extra == "chroma"
+Provides-Extra: lancedb
+Requires-Dist: lancedb>=0.20; extra == "lancedb"
+Provides-Extra: langchain
+Requires-Dist: langchain-core>=0.3; extra == "langchain"
+Provides-Extra: llamaindex
+Requires-Dist: llama-index-core>=0.12; extra == "llamaindex"
+Provides-Extra: openai-agents
+Requires-Dist: openai-agents>=0.2; extra == "openai-agents"
+Provides-Extra: all
+Requires-Dist: scone-memory[api,chroma,elasticsearch,lancedb,local-embed,mcp,milvus,mongo,postgres,qdrant,redis,remote-embed]; extra == "all"
+Provides-Extra: test
+Requires-Dist: pytest>=8; extra == "test"
+Requires-Dist: pytest-asyncio>=0.24; extra == "test"
+Requires-Dist: httpx>=0.27; extra == "test"
+Requires-Dist: fastapi>=0.115; extra == "test"
+Requires-Dist: mcp<3,>=2; extra == "test"
+Dynamic: license-file
+
 # scone-memory
 
 The memory layer for LLM applications, RAG pipelines and agents, in Python.
@@ -555,7 +624,7 @@ provider-internal queues, network buffers or physical playback.
 Run the native regressions in the ordinary project environment:
 
 ```sh
-python/scone-memory/.venv/bin/python -m pytest python/scone-memory/tests/test_voice.py -q
+python/memory/.venv/bin/python -m pytest python/memory/tests/test_voice.py -q
 ```
 
 Tests use scripted protocol adapters and real isolated Scone memory, not live
