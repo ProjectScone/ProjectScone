@@ -112,6 +112,19 @@ source *ids*, never the sources themselves; `GET /v1/graph` draws the links
 between the claims it shows. A derived claim asserted as `proposed` is linked
 from the start but answers nothing until a person approves it.
 
+## Retention
+
+Nothing expires unless you say so. `SCONE_RETAIN="conversation=30,note=365"`
+keeps each named episode kind for that many days (by the episode's own time)
+and lets the consolidation worker forget older ones on its interval, oldest
+first, at most `SCONE_DISTILL_BATCH` per pass, each with a receipt and a
+tombstone; a wrong kind or a non-positive number stops the server. A model is
+not needed for this: with `SCONE_RETAIN` and no `SCONE_CHAT_*`, the worker
+runs retention alone and `/v1/status` says `semantic_lane: manual` with the
+policy under `retention`. Facts never expire; the claims that cited a forgotten
+episode stand, as with any forget. `MemoryEngine.expire(space, policy,
+limit=, dry_run=)` is the same pass by hand.
+
 ## What recall returns
 
 Items carry `score` (rank within this query; the top item is always 1.0)

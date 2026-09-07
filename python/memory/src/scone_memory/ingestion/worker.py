@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from .distill import DistillError, Distiller
 from ..memory.engine import MemoryEngine
@@ -36,6 +36,8 @@ class PassReport:
     #: not become a proposal is evidence too.
     rejected: int = 0
     rejected_reasons: dict[str, int] = field(default_factory=dict)
+    #: Episodes the retention policy forgot in this pass.
+    expired: int = 0
     error: Optional[str] = None
     latency_ms: float = 0.0
 
@@ -47,14 +49,20 @@ class ConsolidationWorker:
     def __init__(
         self,
         engine: MemoryEngine,
-        distiller: Distiller,
+        distiller: Optional[Distiller],
         spaces: Sequence[str],
         interval_s: float = 30.0,
         batch: int = 20,
         clock: Callable[[], float] = time.perf_counter,
+        retention: Optional[Mapping[str, float]] = None,
     ) -> None:
+        """``distiller`` None means no model: the worker then only applies
+        ``retention`` (episode kind -> days kept), which needs no model."""
+        if distiller is None and not retention:
+            raise ValueError("a worker needs a distiller, a retention policy, or both")
         self.engine = engine
         self.distiller = distiller
+        self.retention = dict(retention or {})
         self.spaces = list(spaces)
         self.interval_s = interval_s
         self.batch = batch
@@ -69,7 +77,7 @@ class ConsolidationWorker:
         started = self.clock()
         report = PassReport(space)
         try:
-            outcomes = await self.distiller.distill_pending(space, limit=self.batch)
+            outcomes = await self.distiller.distill_pending(space, limit=self.batch) if self.distiller is not None else []
         except DistillError as e:
             outcomes = e.outcomes
             report.error = f"DistillError: {e.failed} episode(s) failed"
@@ -95,6 +103,11 @@ class ConsolidationWorker:
                     report.proposed += 1
                 else:
                     report.accepted += 1
+        if self.retention and report.error is None:
+            try:
+                report.expired = len((await self.engine.expire(space, self.retention, limit=self.batch)).forgotten)
+            except SconeError as e:
+                report.error = f"{type(e).__name__}: {e}"
         report.latency_ms = round((self.clock() - started) * 1000, 3)
         self.last[space] = report
         self.passes += 1

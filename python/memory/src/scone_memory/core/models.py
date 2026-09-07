@@ -190,6 +190,19 @@ class ForgetReceipt(BaseModel):
     forgotten_at: Optional[str] = None
 
 
+class ExpiryReport(BaseModel):
+    """What one retention pass did in a space: the policy it applied, the
+    episodes it forgot (oldest first, up to the pass's limit) with their
+    receipts, and how many eligible episodes it left for the next pass."""
+
+    space: str
+    policy: dict[str, float]
+    forgotten: list[int] = Field(default_factory=list)
+    receipts: list[ForgetReceipt] = Field(default_factory=list)
+    remaining: int = 0
+    dry_run: bool = False
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int

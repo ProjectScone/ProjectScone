@@ -692,8 +692,10 @@ def create_app(
     async def get_status(space: str = Depends(space_for)) -> dict:
         status = await engine.status(space)
         pending = await engine.pending_distillation(space)
-        if worker is None:
-            lane = "manual"  # claims arrive through POST /v1/facts, MCP, or the CLI
+        # The lane is the model's work; a worker that only applies retention
+        # has no lane, and claims arrive through POST /v1/facts, MCP or the CLI.
+        if worker is None or getattr(worker, "distiller", None) is None:
+            lane = "manual"
         elif worker.running:
             lane = "active"
         else:
@@ -704,6 +706,7 @@ def create_app(
             "semantic_lane": lane,
             "pending_distill": pending,
             "last_distill": last.as_payload() if last else None,
+            "retention": dict(getattr(worker, "retention", None) or {}) if worker is not None else {},
         }
 
     return app

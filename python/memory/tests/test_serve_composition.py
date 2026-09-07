@@ -18,11 +18,14 @@ AUTH = {"Authorization": "Bearer solo"}
 
 
 class Worker:
-    """Stands in for a ConsolidationWorker: counts ownership, reports running."""
+    """Stands in for a ConsolidationWorker with a model: counts ownership,
+    reports running, and has a distiller, which is what makes a lane."""
 
     def __init__(self):
         self.starts = self.stops = 0
         self.last = {}
+        self.distiller = object()
+        self.retention = {}
 
     @property
     def running(self):

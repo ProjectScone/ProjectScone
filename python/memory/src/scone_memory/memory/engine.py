@@ -32,6 +32,7 @@ from ..core.models import (
     EpisodeKind,
     Fact,
     FactLink,
+    ExpiryReport,
     ForgetReceipt,
     Tombstone,
     DEPENDENCY_KINDS,
@@ -633,6 +634,36 @@ class MemoryEngine:
         """The record that an episode was forgotten, or None."""
         check_space(space)
         return await self.documents.tombstone(space, episode_id)
+
+    async def expire(self, space: str, policy: Mapping[str, float], *, limit: int = 100,
+                     dry_run: bool = False) -> ExpiryReport:
+        """Forget the episodes a retention policy no longer keeps: for each
+        kind in ``policy``, those whose own time is more than that many
+        days before this engine's clock, oldest first, at most ``limit``
+        in one pass. Facts never expire; the claims that cited a forgotten
+        episode stand. ``dry_run`` reports and forgets nothing."""
+        check_space(space)
+        clean = retention_policy(policy)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise InvalidInput("limit must be an integer in 1..10000")
+        now = parse_rfc3339(self.clock())
+        counts = await self.documents.counts(space)
+        due = []
+        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
+            days = clean.get(episode.kind)
+            if days is not None and (now - parse_rfc3339(episode.created_at)).total_seconds() > days * 86400:
+                due.append(episode)
+        due.sort(key=lambda e: (e.created_at, e.episode_id))
+        report = ExpiryReport(space=space, policy=dict(clean), remaining=len(due), dry_run=dry_run)
+        if dry_run:
+            return report
+        for episode in due[:limit]:
+            report.receipts.append(await self.forget(space, episode.episode_id))
+            report.forgotten.append(episode.episode_id)
+        report.remaining = len(due) - len(report.forgotten)
+        await self._emit(space, "expire", {"policy": dict(clean), "forgotten": len(report.forgotten),
+                                           "remaining": report.remaining, "limit": limit})
+        return report
 
     async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
         """What forgetting the episode would take with it and leave, with
@@ -1836,6 +1867,19 @@ class MemoryEngine:
 # -- validation helpers -----------------------------------------------------
 
 
+
+
+def retention_policy(policy: Mapping[str, float]) -> dict[str, float]:
+    """A retention policy: episode kinds to the days they are kept. Only
+    episodes have retention; facts, links and tombstones are not kinds."""
+    clean: dict[str, float] = {}
+    for kind, days in dict(policy or {}).items():
+        if kind not in KINDS:
+            raise InvalidInput(f"retention kind must be one of {KINDS}, got {kind!r}")
+        if isinstance(days, bool) or not isinstance(days, (int, float)) or not math.isfinite(days) or days <= 0:
+            raise InvalidInput(f"retention days for {kind} must be a positive number, got {days!r}")
+        clean[kind] = float(days)
+    return clean
 
 
 def _reason(reason: str) -> str:

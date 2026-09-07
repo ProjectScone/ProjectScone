@@ -109,6 +109,8 @@ class Settings:
     reload_pages: bool = False
     #: Writes embedding at once over HTTP; one more is told to come back.
     ingest_concurrency: int = 4
+    #: Episode kinds to the days they are kept; empty means nothing expires.
+    retention: Mapping[str, float] = field(default_factory=dict)
     # Naming a journal composes the conversation service onto the memory
     # origin under `serve`; the factory is the same trusted module:callable
     # as `serve-conversations --model-factory`, absent meaning history-only.
@@ -170,6 +172,7 @@ class Settings:
             port=int(env.get("SCONE_PORT", "7437")),
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
             ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
+            retention=_retention(env.get("SCONE_RETAIN", "")),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
@@ -337,17 +340,40 @@ def build_chat(settings: Settings):
 
 
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):
-    """A ConsolidationWorker over the configured spaces, or None."""
+    """A ConsolidationWorker over the configured spaces, or None when there
+    is neither a model to distil with nor a retention policy to apply."""
     chat = build_chat(settings)
-    if chat is None:
+    if chat is None and not settings.retention:
         return None
-    from ..ingestion.distill import Distiller
     from ..ingestion.worker import ConsolidationWorker
 
-    if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
-        raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
-    distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
-    return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s, batch=settings.distill_batch)
+    distiller = None
+    if chat is not None:
+        from ..ingestion.distill import Distiller
+
+        if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
+            raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
+        distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
+    return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
+                               batch=settings.distill_batch, retention=settings.retention)
+
+
+def _retention(raw: str) -> dict[str, float]:
+    """SCONE_RETAIN: "kind=days,kind=days"; kinds and days are checked the
+    way the engine checks them, so a wrong policy stops the server."""
+    from ..memory.engine import retention_policy
+
+    policy: dict[str, float] = {}
+    for entry in raw.split(","):
+        if not entry.strip():
+            continue
+        kind, sep, days = entry.partition("=")
+        try:
+            value = float(days) if sep else float("nan")
+        except ValueError:
+            value = float("nan")
+        policy[kind.strip()] = value
+    return retention_policy(policy)
 
 
 def build_events(settings: Settings, documents=None):
