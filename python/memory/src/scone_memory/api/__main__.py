@@ -85,23 +85,30 @@ def main(settings: Optional[Settings] = None) -> None:
         # in different event loop" (seen in the compose smoke test).
         engine = await build_engine(settings)
         try:
-            app = build_app(settings, engine)
-        except (ValueError, OSError, ImportError, AttributeError, TypeError) as error:
+            try:
+                app = build_app(settings, engine)
+            except (ValueError, OSError, ImportError, AttributeError, TypeError) as error:
+                print(f"refusing to serve: {error}", file=sys.stderr)
+                sys.exit(2)
+            worker = app.state.worker
+            print(
+                f"scone-memory on http://{settings.host}:{settings.port} "
+                f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
+                f"spaces={sorted(set(settings.keys.values()))} "
+                + (f"consolidation={settings.chat_model} every {settings.distill_interval_s:g}s" if worker else "consolidation=off")
+                + (f" conversations={settings.conversations_journal}" if settings.conversations_journal else ""),
+                file=sys.stderr,
+            )
+            await build_server(settings, app).serve()
+        finally:
             await engine.close()
-            print(f"refusing to serve: {error}", file=sys.stderr)
-            sys.exit(2)
-        worker = app.state.worker
-        print(
-            f"scone-memory on http://{settings.host}:{settings.port} "
-            f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
-            f"spaces={sorted(set(settings.keys.values()))} "
-            + (f"consolidation={settings.chat_model} every {settings.distill_interval_s:g}s" if worker else "consolidation=off")
-            + (f" conversations={settings.conversations_journal}" if settings.conversations_journal else ""),
-            file=sys.stderr,
-        )
-        await build_server(settings, app).serve()
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        # uvicorn hands the interrupt back once it has stopped gracefully;
+        # that is a server's normal end, not a failure to print.
+        sys.exit(130)
 
 
 if __name__ == "__main__":

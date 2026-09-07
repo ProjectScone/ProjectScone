@@ -815,8 +815,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 latest = journal.get(space, sid) if journal is not None else None
                 if latest is not None and latest["state"] == "running":
                     # The session's own verdict: ended on its input's end,
-                    # interrupted when a host or this task cut it, failed otherwise.
-                    action = {"ended": "end", "interrupted": "interrupt"}.get(session.state, "fail")
+                    # interrupted when a host or this task cut it, failed
+                    # otherwise. A socket the server closed on its way down
+                    # ended the input, but the host did that, not the caller.
+                    verdict = "interrupted" if session.state == "ended" and shutting_down else session.state
+                    action = {"ended": "end", "interrupted": "interrupt"}.get(verdict, "fail")
                     journal.transition(space, sid, f"{action}:" + uuid4().hex, action, latest["revision"])
                     owned.pop((space, sid), None)
             except Exception:
