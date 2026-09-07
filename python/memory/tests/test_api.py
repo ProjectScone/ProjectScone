@@ -239,7 +239,12 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         canonical = c.get("/memory")
-        for path in ("/conversations", "/conversations/session-one", "/learn", "/learn/how-it-works", "/learn/graph-memory"):
+        for path in ("/learn", "/learn/how-it-works", "/learn/graph-memory"):
+            page = c.get(path)
+            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
+            assert "solo" not in page.text and 'id="root"' in page.text, "a public page carries no configured key"
+            assert c.head(path).status_code == 200
+        for path in ("/conversations", "/conversations/session-one"):
             page = c.get(path)
             assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
             assert page.text == canonical.text, path

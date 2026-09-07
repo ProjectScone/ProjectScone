@@ -274,14 +274,28 @@ def create_app(
         async def console_page() -> Response:
             return page_response(console_html if console_html is not None else render_console(), CONSOLE)
 
-        # The packaged workspace also owns the conversation addresses and the
-        # concept pages, so a refresh or a shared link lands on the page even
-        # on a host with no conversation service mounted; the page reads
+        # The packaged workspace also owns the conversation addresses, so a
+        # refresh or a shared link lands on the page even on a host with no
+        # conversation service mounted; the page reads
         # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
         # Each address is named: there is no catch-all that would turn a
         # mistyped /v1 path into HTML.
-        for path in ("/conversations", "/conversations/{sid}", *LEARN_PAGES):
+        for path in ("/conversations", "/conversations/{sid}"):
             app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
+
+        def render_guide() -> str:
+            # The concept pages are public: the same bundle, with no key put
+            # into it, so anyone may read them and nothing configured leaks.
+            source = PLAYGROUND if PLAYGROUND.exists() else CONSOLE
+            return source.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
+
+        guide_html = None if reload_pages else render_guide()
+
+        async def guide_page() -> Response:
+            return page_response(guide_html if guide_html is not None else render_guide(), PLAYGROUND if PLAYGROUND.exists() else CONSOLE)
+
+        for path in LEARN_PAGES:
+            app.add_api_route(path, guide_page, methods=["GET", "HEAD"], include_in_schema=False)
 
         if PLAYGROUND.exists():
             # GET and HEAD: the console probes with HEAD to decide whether to
