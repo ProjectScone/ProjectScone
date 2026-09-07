@@ -13,9 +13,9 @@ use axum::extract::{Path as AxPath, Query, Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use scone_core::{Engine, IngestOutcome, RecallOpts, auth};
+use scone_core::{Engine, IngestOutcome, RecallOpts, SpaceReceipt, auth};
 
 const MAX_CONTENT: usize = 100_000;
 const MAX_QUERY: usize = 1_000;
@@ -69,12 +69,19 @@ impl Role {
         if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || self == Role::Full {
             return true;
         }
+        if is_space_delete(method, path) {
+            return false; // a whole space goes only on the full role's word
+        }
         if is_decision(path) {
             self == Role::Review
         } else {
             self == Role::Write
         }
     }
+}
+
+fn is_space_delete(method: &Method, path: &str) -> bool {
+    *method == Method::DELETE && path.starts_with("/v1/spaces/")
 }
 
 /// The routes that decide a claim's fate, on either engine.
@@ -196,6 +203,8 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         .route("/v1/facts/{id}/close", post(post_fact_close))
         .route("/v1/profile", get(get_profile))
         .route("/v1/status", get(get_status))
+        .route("/v1/spaces/{name}/impact", get(get_space_impact))
+        .route("/v1/spaces/{name}", delete(delete_space))
         .route("/v1/tags", get(get_tags))
         .route_layer(middleware::from_fn_with_state(state.clone(), role_gate))
         .with_state(state)
@@ -206,10 +215,27 @@ async fn get_capabilities(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if let Err(response) = space_for(&headers, &state.config) {
-        return response;
+    let space_name = match space_for(&headers, &state.config) {
+        Ok(space) => space,
+        Err(response) => return response,
+    };
+    // Capability discovery must not open a space or emit a memory event;
+    // it only asks whether the key's space was deleted, since a deleted
+    // space answers 404 on every route.
+    let gone = match state.engine.lock() {
+        Ok(engine) => engine.space_deleted(&space_name),
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "engine lock poisoned"),
+    };
+    match gone {
+        Ok(Some(when)) => {
+            return err(
+                StatusCode::NOT_FOUND,
+                format!("space {space_name:?} was deleted at {when}"),
+            );
+        }
+        Ok(None) => {}
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
-    // Capability discovery must not open a space or emit a memory event.
     Json(serde_json::json!({
         "schema_version": 1,
         "implementation": "rust",
@@ -257,7 +283,13 @@ async fn role_gate(State(state): State<AppState>, request: Request, next: Next) 
     {
         let path = request.uri().path();
         if !key.role.permits(request.method(), path) {
-            let verb = if is_decision(path) { "decide" } else { "write" };
+            let verb = if is_space_delete(request.method(), path) {
+                "delete a space"
+            } else if is_decision(path) {
+                "decide"
+            } else {
+                "write"
+            };
             return err(
                 StatusCode::FORBIDDEN,
                 format!("key role {} cannot {verb}", key.role.name()),
@@ -277,8 +309,9 @@ fn with_engine<T>(
         .engine
         .lock()
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "engine lock poisoned"))?;
+    // A deleted space is not found; anything else here is the server's fault.
     let space = auth::resolve(&mut engine, &space_name, true)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| err(status_for(&e), e.to_string()))?;
     f(&mut engine, &space).map_err(|e| err(status_for(&e), e.to_string()))
 }
 
@@ -702,6 +735,73 @@ async fn get_profile(State(state): State<AppState>, headers: axum::http::HeaderM
             })).collect::<Vec<_>>(),
         }))
         .into_response(),
+        Err(response) => response,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ConfirmQuery {
+    confirm: Option<String>,
+}
+
+fn own_space(space: &auth::ScopedSpace, name: &str) -> scone_core::Result<()> {
+    if space.name() == name {
+        Ok(())
+    } else {
+        // Another name is as unknown as a space that never existed.
+        Err(scone_core::SconeError::NotFound(format!(
+            "space {name:?} is not this key's"
+        )))
+    }
+}
+
+fn receipt_json(receipt: &SpaceReceipt) -> serde_json::Value {
+    serde_json::json!({
+        "space": receipt.space, "episodes": receipt.episodes, "chunks": receipt.chunks,
+        "facts": receipt.facts, "links": receipt.links, "tombstones": receipt.tombstones,
+        "events": receipt.events, "attachments_released": receipt.attachments_released,
+        "attachments_kept": receipt.attachments_kept, "deleted_at": receipt.deleted_at,
+    })
+}
+
+/// What deleting the space would take with it; nothing is removed.
+async fn get_space_impact(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(name): AxPath<String>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        own_space(space, &name)?;
+        engine.space_impact(space)
+    }) {
+        Ok(receipt) => Json(receipt_json(&receipt)).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Remove everything the space holds. `confirm` must repeat the space
+/// name; afterwards this key answers 404 on every route.
+async fn delete_space(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    AxPath(name): AxPath<String>,
+    Query(query): Query<ConfirmQuery>,
+) -> Response {
+    match with_engine(&state, &headers, |engine, space| {
+        own_space(space, &name)?;
+        if query.confirm.as_deref() != Some(name.as_str()) {
+            return Err(scone_core::SconeError::InvalidInput(
+                "confirm must repeat the space name; a whole space is not deleted by accident"
+                    .into(),
+            ));
+        }
+        engine.delete_space(space)
+    }) {
+        Ok(receipt) => {
+            let mut body = receipt_json(&receipt);
+            body["deleted"] = serde_json::json!(name);
+            Json(body).into_response()
+        }
         Err(response) => response,
     }
 }

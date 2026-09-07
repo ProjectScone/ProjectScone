@@ -1076,3 +1076,42 @@ fn search_narrows_by_kind_source_and_date_window() {
         "{window}"
     );
 }
+
+#[test]
+fn delete_space_needs_the_name_repeated_and_leaves_the_neighbour() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["--space", "team", "add", "--note", "a note for team"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["--space", "other", "add", "--note", "a note for other"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("would delete space team"))
+        .stdout(predicates::str::contains("1 episodes"));
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--confirm", "other"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--confirm"));
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--confirm", "team"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deleted space team"));
+    scone(dir.path())
+        .args(["--space", "team", "add", "--note", "back?"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("deleted"));
+    scone(dir.path())
+        .args(["--space", "other", "profile"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("a note for other"));
+}

@@ -1114,6 +1114,8 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
         "/v1/profile",
         "/v1/recall",
         "/v1/sources",
+        "/v1/spaces/{name}",
+        "/v1/spaces/{name}/impact",
         "/v1/status",
         "/v1/tags",
     ];
@@ -1298,4 +1300,151 @@ fn roles_are_the_four_words_and_config_rows_carry_them() {
     assert!(twice.contains("twice"), "{twice}");
     let bare = keys_from_config(&rows("[[keys]]\nspace = \"alpha\"\n")).unwrap_err();
     assert!(bare.contains("key"), "{bare}");
+}
+
+fn spaces_app(dir: &std::path::Path) -> axum::Router {
+    let engine = Engine::open(dir, Box::new(HashEmbedder::new(64))).unwrap();
+    let key = |key: &str, space: &str, role: Role| SpaceKey {
+        key: key.into(),
+        space: space.into(),
+        role,
+    };
+    router(
+        engine,
+        ServeConfig {
+            keys: vec![
+                key("sk-full", "team", Role::Full),
+                key("sk-write", "team", Role::Write),
+                key("sk-other", "other", Role::Full),
+            ],
+        },
+    )
+}
+
+/// The same contract as the Python engine, down to the receipt keys the
+/// shared fixture records: a preview, a confirmed deed on the full role's
+/// word, then 404 on every route for the key that named the space.
+#[tokio::test]
+async fn a_space_is_deleted_by_its_own_full_key_after_a_preview_and_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = spaces_app(dir.path());
+    let note = |text: &str| Some(serde_json::json!({"content": text}));
+    for text in ["first note in team", "second note in team"] {
+        let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-full"), note(text)).await;
+        assert!(status.is_success());
+    }
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-other"),
+        note("other keeps this"),
+    )
+    .await;
+    assert!(status.is_success());
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/space-receipt.json")).unwrap();
+    let mut want: Vec<&str> = fixture["receipt"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    want.sort();
+    let (status, preview) =
+        call(&app, "GET", "/v1/spaces/team/impact", Some("sk-full"), None).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let mut have: Vec<&str> = preview
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    have.sort();
+    assert_eq!(have, want, "the shared receipt keys");
+    assert_eq!(preview["episodes"], 2);
+    assert!(preview["deleted_at"].is_null());
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/v1/spaces/other/impact",
+        Some("sk-full"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no cross-space preview");
+    let (status, _) = call(&app, "DELETE", "/v1/spaces/team", Some("sk-full"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "confirm is required"
+    );
+    let (status, _) = call(
+        &app,
+        "DELETE",
+        "/v1/spaces/team?confirm=other",
+        Some("sk-full"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, body) = call(
+        &app,
+        "DELETE",
+        "/v1/spaces/team?confirm=team",
+        Some("sk-write"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"].as_str().unwrap().contains("write"), "{body}");
+    let (status, _) = call(&app, "GET", "/v1/status", Some("sk-full"), None).await;
+    assert_eq!(status, StatusCode::OK, "nothing removed yet");
+    let (status, done) = call(
+        &app,
+        "DELETE",
+        "/v1/spaces/team?confirm=team",
+        Some("sk-full"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["deleted"], "team");
+    assert_eq!(done["episodes"], 2);
+    assert!(done["deleted_at"].is_string());
+    let mut have: Vec<&str> = done
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| *k != "deleted")
+        .map(String::as_str)
+        .collect();
+    have.sort();
+    assert_eq!(have, want, "the deed carries the same keys as the preview");
+    for path in [
+        "/v1/status",
+        "/v1/profile",
+        "/v1/spaces/team/impact",
+        "/v1/capabilities",
+    ] {
+        let (status, _) = call(&app, "GET", path, Some("sk-full"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} answers 404 for a deleted space"
+        );
+    }
+    let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-full"), note("back?")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &app,
+        "DELETE",
+        "/v1/spaces/team?confirm=team",
+        Some("sk-full"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, "GET", "/v1/status", Some("sk-other"), None).await;
+    assert_eq!(status, StatusCode::OK, "the neighbour is untouched");
 }

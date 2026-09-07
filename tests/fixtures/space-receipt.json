@@ -1,0 +1,4 @@
+{
+  "_": "Recorded for GET /v1/spaces/{space}/impact and DELETE /v1/spaces/{space}?confirm={space} on both engines. The preview and the deed carry exactly these keys; deleted_at is null on the preview and a timestamp on the deed, which also carries `deleted`, the space name. What an engine cannot hold is 0 or [] (Rust: tombstones, attachments).",
+  "receipt": ["space", "episodes", "chunks", "facts", "links", "tombstones", "events", "attachments_released", "attachments_kept", "deleted_at"]
+}

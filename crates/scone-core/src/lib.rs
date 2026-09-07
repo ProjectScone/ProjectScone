@@ -18,6 +18,7 @@ mod portability;
 pub mod profile;
 mod recall;
 pub mod rerank;
+pub mod spaces;
 mod tags;
 pub mod temporal;
 pub mod timeparse;
@@ -33,6 +34,7 @@ pub use links::{FactLinkItem, LINK_KINDS};
 pub use portability::ImportReport;
 pub use profile::{Profile, RecentActivity};
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts, decompose, order_items};
+pub use spaces::SpaceReceipt;
 
 #[derive(Debug)]
 pub struct DoctorReport {

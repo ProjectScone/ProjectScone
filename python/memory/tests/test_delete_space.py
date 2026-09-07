@@ -7,12 +7,15 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import create_app
 from scone_memory.runtime.cli import main
+
+FIXTURE = json.loads((Path(__file__).resolve().parents[3] / "tests/fixtures/space-receipt.json").read_text())
 
 KEYS = {"alpha-full": "alpha", "alpha-write": "alpha", "beta": "beta"}
 ROLES = {"alpha-full": "full", "alpha-write": "write", "beta": "full"}
@@ -38,6 +41,8 @@ def test_a_space_is_deleted_by_its_own_full_key_after_a_preview_and_confirmation
         assert c.get("/v1/status", headers=bearer("alpha-full")).json()["episodes"] == 2, "nothing removed yet"
         done = c.delete("/v1/spaces/alpha", params={"confirm": "alpha"}, headers=bearer("alpha-full"))
         assert done.status_code == 200, done.text
+        want = sorted(FIXTURE["receipt"])
+        assert sorted(preview.json()) == want and sorted(k for k in done.json() if k != "deleted") == want, "the shared receipt keys"
         assert done.json()["deleted"] == "alpha" and done.json()["episodes"] == 2 and done.json()["deleted_at"]
         for path in ("/v1/status", "/v1/profile", "/v1/spaces/alpha/impact"):
             assert c.get(path, headers=bearer("alpha-full")).status_code == 404, f"{path} answers 404 for a deleted space"

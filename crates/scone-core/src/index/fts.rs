@@ -129,6 +129,13 @@ impl FtsIndex {
         Ok(hits)
     }
 
+    /// Drop every document of the space; committed by the caller.
+    pub fn remove_space(&mut self, space_id: u64) -> Result<()> {
+        let term = Term::from_field_u64(self.f_space, space_id);
+        self.writer_mut()?.delete_term(term);
+        Ok(())
+    }
+
     pub fn wipe(&mut self) -> Result<()> {
         let writer = self.writer_mut()?;
         writer.delete_all_documents().map_err(ix)?;

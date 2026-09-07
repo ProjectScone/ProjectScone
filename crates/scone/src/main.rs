@@ -113,6 +113,15 @@ enum Cmd {
     },
     /// List tags in this space with usage counts
     Tags,
+    /// Delete everything this space holds; --dry-run previews the receipt
+    DeleteSpace {
+        /// Repeat the space name to do it
+        #[arg(long, value_name = "SPACE")]
+        confirm: Option<String>,
+        /// Show what would go, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the space's profile: identity facts and recent activity
     Profile {
         #[arg(long, default_value_t = 8)]
@@ -362,6 +371,13 @@ fn make_embedder(
             Err("this build lacks the local-embed feature; use --embedder hash".into())
         }
     }
+}
+
+fn space_line(receipt: &scone_core::SpaceReceipt) -> String {
+    format!(
+        "{} episodes, {} chunks, {} claims, {} links, {} events",
+        receipt.episodes, receipt.chunks, receipt.facts, receipt.links, receipt.events
+    )
 }
 
 fn main() {
@@ -629,6 +645,22 @@ fn run() -> Result<(), String> {
             }
             if profile.static_facts.is_empty() && profile.dynamic.is_empty() {
                 println!("empty profile: nothing stored in this space yet");
+            }
+        }
+        Cmd::DeleteSpace { confirm, dry_run } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            if *dry_run {
+                let receipt = engine.space_impact(&space).map_err(|e| e.to_string())?;
+                println!("would delete space {}: {}", cli.space, space_line(&receipt));
+            } else {
+                if confirm.as_deref() != Some(cli.space.as_str()) {
+                    return Err(format!(
+                        "refusing: --confirm must repeat the space name {:?}; nothing was deleted",
+                        cli.space
+                    ));
+                }
+                let receipt = engine.delete_space(&space).map_err(|e| e.to_string())?;
+                println!("deleted space {}: {}", cli.space, space_line(&receipt));
             }
         }
         Cmd::Status => {
