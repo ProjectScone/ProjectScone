@@ -363,3 +363,31 @@ async def test_a_run_that_ends_on_its_own_terms_has_nothing_to_raise():
     await pipeline.stop()
     await asyncio.wait_for(pipeline.wait(), 1)
     assert pipeline.error is None
+
+
+async def test_a_stage_with_its_own_frames_sends_them_on_the_turn_of_the_moment():
+    """A stage reading a socket or a microphone has frames to send when
+    nothing has been handed to it. It gets a way in at its own position,
+    and what it sends belongs to the turn current at the moment it sends,
+    not to whatever turn was running when the run began."""
+    tail = Collect()
+
+    class Ear:
+        def __init__(self):
+            self.feed = None
+
+        async def attach(self, feed):
+            self.feed = feed
+
+        async def handle(self, frame, emit):
+            pass
+
+    ear = Ear()
+    pipeline = Pipeline([ear, tail])
+    await pipeline.start()
+    await ear.feed(Word("one"))
+    pipeline.interrupt()
+    await ear.feed(Word("two"))
+    assert [f.text for f in tail.seen if isinstance(f, Word)] == ["one", "two"]
+    assert pipeline.dropped == 0, "nothing was late; the second frame belongs to the second turn"
+    await pipeline.stop()

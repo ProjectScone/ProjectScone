@@ -53,7 +53,8 @@ class Stage(Protocol):
     ``start`` and ``stop`` are optional. ``buffered = True`` asks for a
     queue and a task, for work that waits on something outside, and
     ``capacity`` says how much backlog that queue will hold.
-    ``essential = True`` says the run cannot continue without it."""
+    ``essential = True`` says the run cannot continue without it. A stage
+    with frames of its own takes ``attach`` and is given a ``Feed``."""
 
     async def handle(self, frame: object, emit: "Emit") -> None: ...
 
@@ -103,6 +104,30 @@ class Emit:
             await self._pipeline._deliver(index, frame, self.turn, UP)
 
 
+class Feed:
+    """A stage's way in when nothing has been handed to it: a source with
+    its own task, or a transducer that answers when the far end does.
+
+    Unlike ``Emit``, the turn is read at the moment of sending rather than
+    fixed, because a frame arriving from outside belongs to whatever turn
+    is running when it arrives."""
+
+    __slots__ = ("_pipeline", "_index")
+
+    def __init__(self, pipeline: "Pipeline", index: int) -> None:
+        self._pipeline = pipeline
+        self._index = index
+
+    async def __call__(self, frame: object) -> None:
+        """Send to the next stage."""
+        await self._pipeline._deliver(self._index + 1, frame, self._pipeline.turn, DOWN)
+
+    async def up(self, frame: object) -> None:
+        """Send back to every stage before this one, nearest first."""
+        for index in range(self._index - 1, -1, -1):
+            await self._pipeline._deliver(index, frame, self._pipeline.turn, UP)
+
+
 class Pipeline:
     """An ordered list of stages that frames flow through."""
 
@@ -146,6 +171,11 @@ class Pipeline:
                 self._queues[index] = queue
                 self._workers.append(asyncio.create_task(
                     self._work(index, stage, queue), name=f"{self.name}-stage-{index}"))
+            # A stage is given its way in before it starts, so a source
+            # has somewhere to send from its very first frame.
+            attach = getattr(stage, "attach", None)
+            if callable(attach):
+                await attach(Feed(self, index))
             begin = getattr(stage, "start", None)
             if callable(begin):
                 await begin()
