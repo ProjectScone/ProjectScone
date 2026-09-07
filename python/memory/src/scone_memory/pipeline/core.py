@@ -52,7 +52,8 @@ class Stage(Protocol):
 
     ``start`` and ``stop`` are optional. ``buffered = True`` asks for a
     queue and a task, for work that waits on something outside, and
-    ``capacity`` says how much backlog that queue will hold."""
+    ``capacity`` says how much backlog that queue will hold.
+    ``essential = True`` says the run cannot continue without it."""
 
     async def handle(self, frame: object, emit: "Emit") -> None: ...
 
@@ -120,6 +121,10 @@ class Pipeline:
         self.dropped = 0
         #: Stages that raised, counted whether or not they were announced.
         self.failures = 0
+        #: Set once the run is over, however it ended.
+        self.ended = asyncio.Event()
+        #: What ended it, when a stage the run needs raised.
+        self.error: Optional[Exception] = None
         self._queues: dict[int, asyncio.Queue] = {}
         self._workers: list[asyncio.Task] = []
         self._inflight = 0
@@ -150,6 +155,7 @@ class Pipeline:
         """Announce the end, stop every stage, and let the tasks go."""
         if not self._running:
             return
+        self._end(None)
         await self._announce(Stopped())
         for stage in reversed(self.stages):
             end = getattr(stage, "stop", None)
@@ -190,6 +196,22 @@ class Pipeline:
         """Wait until no buffered stage has work left."""
         await self._idle.wait()
 
+    async def wait(self) -> None:
+        """Wait for the run to end, and raise whatever ended it. A run
+        that finished on its own terms returns, so one place can wait for
+        either ending."""
+        await self.ended.wait()
+        if self.error is not None:
+            raise self.error
+
+    def _end(self, error: Optional[Exception]) -> None:
+        """The first ending is the one that counts; a fault while shutting
+        down does not rewrite why the run stopped."""
+        if self.ended.is_set():
+            return
+        self.error = error
+        self.ended.set()
+
     # -- delivery ---------------------------------------------------------
 
     async def _announce(self, frame: object, skip: Optional[int] = None) -> None:
@@ -200,7 +222,9 @@ class Pipeline:
     async def _deliver(self, index: int, frame: object, turn: int, direction: str) -> None:
         if not 0 <= index < len(self.stages):
             return
-        if turn != self.turn and not isinstance(frame, ANNOUNCEMENTS):
+        # Once the run is over only announcements move: a stage still has
+        # to be told the run ended, but no new work belongs to it.
+        if (turn != self.turn or self.ended.is_set()) and not isinstance(frame, ANNOUNCEMENTS):
             await self._drop(index, frame, turn, direction)
             return
         stage = self.stages[index]
@@ -234,15 +258,16 @@ class Pipeline:
             await stage.handle(frame, Emit(self, index, turn))
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # noqa: BLE001 - one stage's fault is not the run's end
+        except Exception as error:  # noqa: BLE001 - a stage's fault is reported, not raised at the sender
             self.failures += 1
+            await self._saw(name, frame, direction, turn, FAILED, (time.perf_counter() - began) * 1000)
             # Telling a stage about a failure must not be able to start
             # another round of it, and the stage that raised already knows.
-            await self._saw(name, frame, direction, turn, FAILED, (time.perf_counter() - began) * 1000)
-            if isinstance(frame, Failed):
-                return
-            await self._announce(
-                Failed(stage=name, error=f"{type(error).__name__}: {error}"), skip=index)
+            if not isinstance(frame, Failed):
+                await self._announce(
+                    Failed(stage=name, error=f"{type(error).__name__}: {error}"), skip=index)
+            if getattr(stage, "essential", False):
+                self._end(error)
         else:
             await self._saw(name, frame, direction, turn, HANDLED, (time.perf_counter() - began) * 1000)
 

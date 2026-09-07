@@ -325,3 +325,41 @@ async def test_a_backlog_size_that_is_not_a_count_of_frames_is_refused():
 
     with pytest.raises(ValueError, match="whole number of frames"):
         await Pipeline([Odd()]).start()
+
+
+async def test_a_stage_the_run_cannot_do_without_ends_it_when_it_raises():
+    """Most faults are worth reporting and carrying on from. A stage the
+    run is built around is not: when the ear in a call stops working the
+    call is over, and whoever started it has to hear why."""
+    tail = Collect()
+
+    class Ear:
+        essential = True
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            if frame.text == "bad":
+                raise RuntimeError("the recognizer went away")
+            await emit(frame)
+
+    pipeline = Pipeline([Ear(), tail])
+    await pipeline.start()
+    await pipeline.push(Word("good"))
+    await pipeline.push(Word("bad"))
+    with pytest.raises(RuntimeError, match="recognizer went away"):
+        await asyncio.wait_for(pipeline.wait(), 1)
+    assert any(isinstance(f, Failed) for f in tail.seen), "the stages after it still hear what happened"
+    await pipeline.push(Word("later"))
+    assert [f.text for f in tail.seen if isinstance(f, Word)] == ["good"], "nothing more flows once the run is over"
+    await pipeline.stop()
+
+
+async def test_a_run_that_ends_on_its_own_terms_has_nothing_to_raise():
+    """Waiting on a run that finished cleanly returns rather than
+    inventing a failure, so one place can wait for either ending."""
+    pipeline = Pipeline([Collect()])
+    await pipeline.start()
+    await pipeline.stop()
+    await asyncio.wait_for(pipeline.wait(), 1)
+    assert pipeline.error is None
