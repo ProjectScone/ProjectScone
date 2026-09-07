@@ -22,6 +22,7 @@ from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .audio import (
     AudioChunk, AudioTransport, SpeechRecognizer, VoiceModel, SpeechSynthesizer,
     SpeechStarted, Transcript, TextDelta, ReplyCompleted, SpeechActivityDetector,
+    sentences,
 )
 
 _OWNER: ContextVar[object | None] = ContextVar("scone_voice_owner", default=None)
@@ -352,13 +353,9 @@ class VoiceSession:
                             raise RuntimeError("voice reply byte limit reached")
                         parts.append(event.text)
                         pending += event.text
-                        while pending:
-                            sentence = re.search(r"[.!?](?:\s|$)", pending)
-                            end = sentence.end() if sentence else 240 if len(pending) >= 240 else 0
-                            if not end:
-                                break
-                            await speak(pending[:end])
-                            pending = pending[end:]
+                        finished, pending = sentences(pending)
+                        for sentence in finished:
+                            await speak(sentence)
                     elif isinstance(event, ReplyCompleted):
                         completed = True
                     else:
