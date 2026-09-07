@@ -447,6 +447,18 @@ impl Engine {
         }
     }
 
+    /// The episodes a fact was drawn from, oldest first. Kept in
+    /// fact_provenance since the first schema and never exposed, which
+    /// left every surface able to show a claim and not where it came
+    /// from.
+    pub fn fact_sources(&self, fact_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT episode_id FROM fact_provenance WHERE fact_id = ?1 ORDER BY episode_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fact_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<i64>, _>>()?)
+    }
+
     pub fn space_revision(&self, space: &auth::ScopedSpace) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT revision FROM spaces WHERE id = ?1",

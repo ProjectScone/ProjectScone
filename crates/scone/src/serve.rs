@@ -443,14 +443,20 @@ async fn get_facts(
     match with_engine(&state, &headers, |engine, space| {
         let facts = engine.facts_list(space, query.all)?;
         let revision = engine.space_revision(space)?;
-        Ok((facts, revision))
+        // Provenance per fact, so a reader can open what a claim came
+        // from rather than take it on the server's word.
+        let sources = facts
+            .iter()
+            .map(|f| engine.fact_sources(f.fact_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((facts, revision, sources))
     }) {
-        Ok((facts, revision)) => Json(serde_json::json!({
-            "facts": facts.iter().map(|f| serde_json::json!({
+        Ok((facts, revision, sources)) => Json(serde_json::json!({
+            "facts": facts.iter().zip(sources).map(|(f, sources)| serde_json::json!({
                 "fact_id": f.fact_id, "subject": f.subject, "predicate": f.predicate,
                 "object": f.object, "confidence": f.confidence,
                 "valid_from": f.valid_from, "valid_until": f.valid_until,
-                "status": f.status,
+                "status": f.status, "sources": sources,
             })).collect::<Vec<_>>(),
             "revision": revision,
         }))

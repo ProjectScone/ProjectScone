@@ -744,3 +744,59 @@ async fn the_facts_list_carries_the_space_revision() {
         after["revision"]
     );
 }
+
+/// A claim without its source is a claim nobody can check. The engine has
+/// kept provenance in fact_provenance since the first schema, and the
+/// HTTP surface has never handed it over, so a page built against this
+/// server can show what a claim says and never where it came from.
+#[tokio::test]
+async fn a_fact_names_the_episodes_it_came_from() {
+    use scone_core::llm::ExtractedFact;
+    use scone_core::{IngestInput, IngestOutcome, auth};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let space = auth::resolve(&mut engine, "alice", true).unwrap();
+    let IngestOutcome::Ingested { episode_id, .. } = engine
+        .ingest(
+            &space,
+            IngestInput::Note {
+                text: "Ana moved to Lisbon in March.".into(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("the seed episode must land")
+    };
+    engine
+        .apply_facts(
+            &space,
+            episode_id,
+            &[ExtractedFact {
+                subject: "Ana".into(),
+                predicate: "moved_to".into(),
+                object: "Lisbon".into(),
+                confidence: 0.8,
+            }],
+        )
+        .unwrap();
+
+    let app = router(
+        engine,
+        ServeConfig {
+            keys: vec![SpaceKey {
+                key: "sk-alice".into(),
+                space: "alice".into(),
+            }],
+        },
+    );
+
+    let (_, listed) = call(&app, "GET", "/v1/facts", Some("sk-alice"), None).await;
+    let first = &listed["facts"][0];
+    assert_eq!(
+        first["sources"].as_array().map(|s| s.len()),
+        Some(1),
+        "the fact must name its source: {listed}"
+    );
+    assert_eq!(first["sources"][0].as_i64(), Some(episode_id));
+}
