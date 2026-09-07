@@ -44,19 +44,21 @@ struct Cli {
     /// fact is active on arrival
     #[arg(long, global = true, value_name = "CONFIDENCE")]
     propose_below: Option<f32>,
-    /// Embed code chunks with their file name, enclosing declaration and
-    /// doc comment in front (stored bytes unchanged). Measured on a
-    /// 20-question probe of this repository as 19/20 against 14/20 at
-    /// Recall@5, but the questions paraphrased the doc comments; off
-    /// until held-out phrasing confirms it (E31)
+    /// Embed code chunks as raw text, without the file name, enclosing
+    /// declaration and doc comment that go in front by default (stored
+    /// bytes are the same either way). The prefix scored 10/20 against
+    /// 4/20 at Recall@5 on held-out questions (E33); a store filled
+    /// without it keeps its old vectors until doctor rebuilds them
     #[arg(long, global = true)]
-    contextual_code: bool,
+    no_contextual_code: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Structure every host prompt locally; reads hook JSON, emits hook JSON.
+    PromptHook,
     /// Ingest files, or a note via --note
     Add {
         /// Files to ingest
@@ -83,6 +85,20 @@ enum Cmd {
         /// Focus on episodes carrying ALL of these tags (repeatable)
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Only episodes of this kind (note, file, conversation, ...)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only episodes whose source starts with this text: a path
+        /// prefix, a session id, a URL origin. Literal, not a pattern
+        #[arg(long)]
+        source_prefix: Option<String>,
+        /// Only episodes that happened at or after this RFC 3339 instant
+        /// (bounds created_at; --as-of is about fact validity)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only episodes that happened at or before this RFC 3339 instant
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Claude Code hook handler (reads hook JSON on stdin, fail-open)
     Hook {
@@ -377,6 +393,10 @@ fn data_dir(cli: &Cli) -> Result<PathBuf, String> {
 
 fn run() -> Result<(), String> {
     let mut cli = Cli::parse();
+    if matches!(cli.cmd, Cmd::PromptHook) {
+        scone::prompt::run_stdin();
+        return Ok(());
+    }
     if cli.space == "auto" {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         cli.space = scone::space::auto_space(&cwd);
@@ -393,7 +413,7 @@ fn run() -> Result<(), String> {
     engine
         .set_propose_below(cli.propose_below)
         .map_err(|e| e.to_string())?;
-    engine.set_contextual_code(cli.contextual_code);
+    engine.set_contextual_code(!cli.no_contextual_code);
     #[cfg(feature = "local-embed")]
     if cli.reranker {
         engine.set_reranker(Some(Box::new(
@@ -403,6 +423,7 @@ fn run() -> Result<(), String> {
     }
 
     match &cli.cmd {
+        Cmd::PromptHook => return Ok(()), // handled before engine/model setup
         Cmd::Add {
             paths,
             note,
@@ -474,6 +495,10 @@ fn run() -> Result<(), String> {
             limit,
             as_of,
             tags,
+            kind,
+            source_prefix,
+            since,
+            until,
         } => {
             let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
             let opts = RecallOpts {
@@ -481,6 +506,10 @@ fn run() -> Result<(), String> {
                 budget_bytes: None,
                 as_of: as_of.clone(),
                 tags: tags.clone(),
+                kind: kind.clone(),
+                source_prefix: source_prefix.clone(),
+                since: since.clone(),
+                until: until.clone(),
                 ..Default::default()
             };
             let pack = engine
@@ -757,7 +786,6 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-
         Cmd::Watch {
             dir: watch_dir,
             once,

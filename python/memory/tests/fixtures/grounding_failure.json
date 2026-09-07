@@ -1,0 +1,29 @@
+{
+  "source": "An authenticated memory API only proves the server accepts writes from a caller holding a valid token; it says nothing about whether the Claude Code or Codex hooks are actually installed, fire on the relevant session events, and successfully post to that endpoint, so the capture path can be broken at any hop while the API still looks healthy. The evidence to verify is a live session in each agent that emits a unique marker (a distinctive prompt or tool call), followed by confirmation that the hook fired (hook log or exit status), the server logged the matching request, and the marker is retrievable through the memory search endpoint with correct session attribution and timestamp.",
+  "reply": [
+    {
+      "subject": "hooks",
+      "predicate": "installed",
+      "object": "nothing",
+      "confidence": 0.9,
+      "statement_type": "observation",
+      "quote": "nothing about whether the Claude Code or Codex hooks are actually installed"
+    },
+    {
+      "subject": "hook",
+      "predicate": "fires",
+      "object": "hook log or exit status",
+      "confidence": 0.9,
+      "statement_type": "observation",
+      "quote": "confirmation that the hook fired (hook log or exit status)"
+    },
+    {
+      "subject": "marker",
+      "predicate": "is_retrievable_through",
+      "object": "memory search endpoint",
+      "confidence": 0.9,
+      "statement_type": "observation",
+      "quote": "the marker is retrievable through the memory search endpoint"
+    }
+  ]
+}

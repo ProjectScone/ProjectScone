@@ -899,54 +899,142 @@ fn without_a_gate_an_unsure_fact_is_active_at_once() {
         .stdout(predicates::str::contains("mark lives_in lisbon"));
 }
 
-/// --contextual-code changes what the vector sees, never what is stored.
-/// Two files with unrelated bodies and a query that is one file's name:
-/// the lexical lane finds that file through its path either way, so
-/// the observable is the vector lane's margin. With the prefix embedded
-/// the other file falls well behind; without it the two are a near tie.
+/// Contextual code embedding (on by default since E33) changes what the
+/// vector sees, never what is stored. Two files with unrelated bodies and
+/// a query that is one file's name: the lexical lane finds that file
+/// through its path either way, so the observable is the vector lane's
+/// margin. With the prefix embedded the other file falls well behind;
+/// with --no-contextual-code the two are a near tie.
 #[test]
-fn contextual_code_flag_widens_the_vector_margin_and_stores_raw_bytes() {
-    let dir = tempfile::tempdir().unwrap();
-    let other = dir.path().join("other.rs");
-    std::fs::write(&other, "fn twice(y: u32) -> u32 {\n    y * 2\n}\n").unwrap();
-    let file = dir.path().join("widget.rs");
-    std::fs::write(
-        &file,
-        "/// Adds one.\nfn add_one(x: u32) -> u32 {\n    x + 1\n}\n",
-    )
-    .unwrap();
-    for path in [&other, &file] {
-        scone(dir.path())
-            .arg("--contextual-code")
-            .arg("add")
-            .arg(path)
+fn contextual_code_is_the_default_widens_the_vector_margin_and_stores_raw_bytes() {
+    let margin = |flags: &[&str]| -> (f64, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.rs");
+        std::fs::write(&other, "fn twice(y: u32) -> u32 {\n    y * 2\n}\n").unwrap();
+        let file = dir.path().join("widget.rs");
+        std::fs::write(
+            &file,
+            "/// Adds one.\nfn add_one(x: u32) -> u32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        for path in [&other, &file] {
+            scone(dir.path())
+                .args(flags)
+                .arg("add")
+                .arg(path)
+                .assert()
+                .success();
+        }
+        let out = scone(dir.path())
+            .args(["search", "widget.rs"])
             .assert()
-            .success();
-    }
-    let out = scone(dir.path())
-        .args(["search", "widget.rs"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let out = String::from_utf8(out).unwrap();
-    let score_of = |needle: &str| -> f64 {
-        out.lines()
-            .find(|l| l.contains(needle))
-            .and_then(|l| l.split_whitespace().next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| panic!("no scored line for {needle}: {out}"))
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let out = String::from_utf8(out).unwrap();
+        let score_of = |needle: &str| -> f64 {
+            out.lines()
+                .find(|l| l.contains(needle))
+                .and_then(|l| l.split_whitespace().next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no scored line for {needle}: {out}"))
+        };
+        (score_of("x + 1") - score_of("y * 2"), out)
     };
-    let widget = score_of("x + 1");
-    let other_score = score_of("y * 2");
-    assert!(widget > other_score, "{out}");
+    let (by_default, out) = margin(&[]);
     assert!(
-        widget - other_score > 0.2,
+        by_default > 0.2,
         "the embedded file name should separate the two well beyond a tie: {out}"
     );
     assert!(
         !out.contains("widget.rs | "),
         "the prefix is embedded, not stored: {out}"
+    );
+    let (switched_off, out) = margin(&["--no-contextual-code"]);
+    assert!(
+        switched_off < by_default - 0.1,
+        "without the prefix the vector lane cannot tell the files apart by name: \
+         {switched_off} against {by_default}\n{out}"
+    );
+}
+
+/// search narrows by kind, source prefix and a date window, the same four
+/// filters the core, both MCP servers and the Python CLI already take.
+/// Seeded through import so every episode has a real created_at: --since
+/// and --until bound that, while --as-of stays about fact validity.
+#[test]
+fn search_narrows_by_kind_source_and_date_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("seed.jsonl");
+    std::fs::write(
+        &dump,
+        concat!(
+            r#"{"type":"episode","kind":"note","content":"the harbour crane was repainted","source":"notes://town","created_at":"2024-01-10T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"episode","kind":"file","content":"the harbour crane needs paint","source":"file:///docs/harbour.md","created_at":"2024-06-10T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"episode","kind":"file","content":"the harbour crane was inspected","source":"file:///archive/harbour.md","created_at":"2023-01-10T00:00:00Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    scone(dir.path())
+        .args(["import"])
+        .arg(&dump)
+        .assert()
+        .success();
+
+    let found = |args: &[&str]| -> String {
+        let out = scone(dir.path())
+            .args(["search", "harbour crane"])
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+
+    let all = found(&[]);
+    for needle in ["repainted", "needs paint", "inspected"] {
+        assert!(
+            all.contains(needle),
+            "unnarrowed search misses {needle}: {all}"
+        );
+    }
+
+    let notes = found(&["--kind", "note"]);
+    assert!(notes.contains("repainted"), "{notes}");
+    assert!(
+        !notes.contains("needs paint") && !notes.contains("inspected"),
+        "{notes}"
+    );
+
+    let docs = found(&["--source-prefix", "file:///docs/"]);
+    assert!(docs.contains("needs paint"), "{docs}");
+    assert!(
+        !docs.contains("repainted") && !docs.contains("inspected"),
+        "{docs}"
+    );
+
+    let recent = found(&["--since", "2024-01-01T00:00:00Z"]);
+    assert!(
+        recent.contains("repainted") && recent.contains("needs paint"),
+        "{recent}"
+    );
+    assert!(!recent.contains("inspected"), "{recent}");
+
+    let window = found(&[
+        "--since",
+        "2024-01-01T00:00:00Z",
+        "--until",
+        "2024-03-01T00:00:00Z",
+    ]);
+    assert!(window.contains("repainted"), "{window}");
+    assert!(
+        !window.contains("needs paint") && !window.contains("inspected"),
+        "{window}"
     );
 }

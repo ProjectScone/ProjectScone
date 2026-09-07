@@ -9,6 +9,7 @@ mod db;
 pub mod distill;
 pub mod embed;
 mod error;
+pub mod evidence;
 pub mod index;
 mod ingest;
 pub mod llm;
@@ -84,9 +85,10 @@ pub struct Engine {
     /// out of recall until a person approves them. None: every
     /// extracted fact is active on arrival, as before.
     propose_below: Option<f32>,
-    /// Embed code chunks with their file name and enclosing declaration
-    /// in front (the stored span stays raw). Off until the code probe
-    /// shows a gain; see memory/EXPERIMENTS.md.
+    /// Embed code chunks with their file name, enclosing declaration and
+    /// doc comment in front (the stored span stays raw). On by default
+    /// since the held-out code probe (commit subjects as questions, E33)
+    /// found 10/20 against 4/20 at Recall@5; see memory/EXPERIMENTS.md.
     contextual_code: bool,
 }
 
@@ -130,6 +132,7 @@ impl Engine {
     ) -> Result<Engine> {
         std::fs::create_dir_all(data_dir)?;
         let conn = db::open(&data_dir.join("scone.db"))?;
+        evidence::init(&conn)?;
         if !repair {
             let pinned: Option<String> = match conn.query_row(
                 "SELECT value FROM meta WHERE key = 'embedder_id'",
@@ -168,7 +171,7 @@ impl Engine {
             indexes_dirty: false,
             chunk_target: ingest::CHUNK_TARGET_BYTES,
             propose_below: None,
-            contextual_code: false,
+            contextual_code: true,
         };
         if engine.fts.writable() {
             engine.catch_up_indexes()?;
@@ -201,9 +204,11 @@ impl Engine {
         self.propose_below
     }
 
-    /// Embed code chunks with their file name and enclosing declaration
-    /// in front. Changes what future ingests embed, not what they
-    /// store; an existing store keeps its vectors until rebuilt.
+    /// Embed code chunks with their file name, enclosing declaration and
+    /// doc comment in front (on by default). Changes what future ingests
+    /// embed, not what they store; an existing store keeps its vectors
+    /// until rebuilt, so a store filled before the switch mixes the two
+    /// until doctor rebuilds it.
     pub fn set_contextual_code(&mut self, on: bool) {
         self.contextual_code = on;
     }
@@ -440,6 +445,18 @@ impl Engine {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(SconeError::Db(e)),
         }
+    }
+
+    /// The episodes a fact was drawn from, oldest first. Kept in
+    /// fact_provenance since the first schema and never exposed, which
+    /// left every surface able to show a claim and not where it came
+    /// from.
+    pub fn fact_sources(&self, fact_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT episode_id FROM fact_provenance WHERE fact_id = ?1 ORDER BY episode_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fact_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<i64>, _>>()?)
     }
 
     pub fn space_revision(&self, space: &auth::ScopedSpace) -> Result<i64> {

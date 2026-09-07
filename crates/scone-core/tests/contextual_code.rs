@@ -101,14 +101,15 @@ fn engine_with(seen: Arc<Mutex<Vec<String>>>, dir: &std::path::Path) -> Engine {
 }
 
 #[test]
-fn code_is_embedded_with_context_only_when_asked_and_only_for_code() {
+fn code_is_embedded_with_context_by_default_and_only_for_code() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let dir = tempfile::tempdir().unwrap();
     let mut e = engine_with(seen.clone(), dir.path());
     e.set_chunk_target(64);
     let space = auth::resolve(&mut e, "default", true).unwrap();
 
-    // Off (the default): the vector sees the raw chunk, code or not.
+    // Switched off: the vector sees the raw chunk, code or not.
+    e.set_contextual_code(false);
     e.import_episode(&space, "file", SOURCE, Some("src/lib.rs"), None)
         .unwrap();
     assert!(
@@ -121,7 +122,11 @@ fn code_is_embedded_with_context_only_when_asked_and_only_for_code() {
     );
     seen.lock().unwrap().clear();
 
-    e.set_contextual_code(true);
+    // A fresh engine, nothing set: on by default since E33.
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut e = engine_with(seen.clone(), dir2.path());
+    e.set_chunk_target(64);
+    let space = auth::resolve(&mut e, "default", true).unwrap();
     let content = format!("{SOURCE}\n"); // not a duplicate of the first import
     let (episode_id, _) = e
         .import_episode(&space, "file", &content, Some("src/lib.rs"), None)

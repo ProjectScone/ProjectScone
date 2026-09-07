@@ -24,11 +24,62 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  episode-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build deterministic Rust probe and run shared fixtures
+        # No model download: this profile uses HashEmbedder in both runtimes.
+        run: |
+          cargo test --locked -p scone-core --no-default-features --test shared_contract
+          cargo build --locked -p scone-core --no-default-features --example episode_roundtrip
+      - name: Install Python conformance dependencies
+        run: python -m pip install -e './python/memory[test]'
+      - name: Exchange real exports in both directions
+        working-directory: python/memory
+        env:
+          SCONE_TEST_RUST_ROUNDTRIP: ${{ github.workspace }}/target/debug/examples/episode_roundtrip
+        run: python -m pytest -q tests/test_cross_language.py -k 'memory or sqlite or probe'
+
+  client:
+    # The HTTP client is published separately and claims Python 3.9, so it
+    # is built and tested on the oldest version it claims as well as the
+    # one everything else uses. Nothing here needs a server: the tests run
+    # against a stub, and the integration ones skip when no binary exists.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    defaults:
+      run:
+        working-directory: python/scone-client
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -q -e '.[test]'
+      - name: Tests
+        run: python -m pytest -q -p no:warnings
+      - name: Package
+        # Built and checked the way PyPI would; nothing is uploaded.
+        run: |
+          python -m pip install -q build twine
+          python -m build -q
+          python -m twine check dist/*
+
   python:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/scone-memory
+        working-directory: python/memory
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -72,7 +123,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: |
-          python -m pip install -q -e '.[test,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents]'
+          python -m pip install -q -e '.[test,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents,pipecat]'
           python -m pip install -q faiss-cpu langchain-community  # a real third-party store for the LangChain bridge's contract run
       - name: Tests
         env:

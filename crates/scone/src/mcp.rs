@@ -377,8 +377,15 @@ impl SconeMcp {
         })
     }
 
-    /// Submit facts you extracted from a pending episode. The engine
-    /// applies contradiction closure and provenance; you only propose.
+    /// Submit facts you extracted from a pending episode.
+    ///
+    /// The engine applies contradiction closure and provenance: it
+    /// decides what each fact supersedes and when it stopped holding, not
+    /// you. What it does NOT do here is wait for a person. These become
+    /// active ledger claims immediately unless this server runs with
+    /// --propose-below, which parks anything under that confidence for
+    /// review instead. If you are unsure of a fact, do not submit it: a
+    /// wrong claim is easier to make than to find later.
     #[tool(name = "memory_store_facts")]
     async fn memory_store_facts(
         &self,

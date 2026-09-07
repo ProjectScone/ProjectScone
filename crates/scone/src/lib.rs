@@ -3,6 +3,7 @@
 pub mod connectors;
 pub mod hook;
 pub mod mcp;
+pub mod prompt;
 pub mod serve;
 pub mod setup;
 pub mod space;

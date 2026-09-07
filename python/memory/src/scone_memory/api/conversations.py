@@ -1,0 +1,675 @@
+"""Optional single-process conversation service; native memory routes are mounted.
+
+Linux/macOS local-filesystem journal ownership only. Provider factories and
+engines are server configuration. Turn results are cached for this process,
+not reconstructed or retried after restart; lifecycle receipts are durable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import json
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+import hmac
+import os
+from pathlib import Path
+import stat
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..engine import check_space, normalise_time
+from ..errors import Conflict, InvalidInput, NotFound
+from ..session_journal import SessionJournal
+from ..recall_scope import RecallScope
+from .app import PLAYGROUND, create_app, episode_json
+from .text_stream import MAX_BYTES, MAX_CHUNKS, TextWindow, sse
+
+
+class Command(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+class Create(Command):
+    capture: bool
+    recall_scope: dict[str, object] = Field(default_factory=dict)
+
+
+class Stop(Command):
+    expected_revision: int = Field(ge=1, le=2**63 - 2)
+
+
+class Turn(Stop):
+    text: str = Field(min_length=1, max_length=32000)
+
+
+@dataclass
+class OwnedSession:
+    runtime: object
+    turns: dict = field(default_factory=dict)
+    stops: dict = field(default_factory=dict)
+    active: asyncio.Task | None = None
+    active_id: str | None = None
+    cleanup_task: asyncio.Task | None = None
+
+
+def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
+                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False):
+    """The caller owns engine lifecycle; service owns journal and runtime tasks.
+
+    runtime_factory(space, sid) supplies async reply(text) and close(). None
+    advertises unavailable text. Do not use non-cooperative/untrusted runtimes:
+    cancellation and cleanup use cooperative asyncio, not process termination.
+    console=True serves the packaged React workspace and session deep links.
+    Pages contain no injected keys; the user supplies a space key in the tab.
+    scoped_runtime_factory(space, sid, scope) explicitly opts into fixed recall
+    constraints. It receives an immutable RecallScope; pass scope.kwargs() to
+    the native runtime. When configured it takes precedence for every new session.
+    public_text_streaming=True requires every runtime to accept an async on_text
+    reply keyword delivering public chunks. Defaults off for custom runtimes.
+    """
+    keys = dict(keys)
+    if not keys or any(not isinstance(key, str) or not key for key in keys):
+        raise ValueError("configure nonempty bearer keys")
+    for space in keys.values():
+        check_space(space)
+    for limit in (max_sessions, max_turns):
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("service admission limits must be integers in 1..100")
+    if runtime_factory is not None and not callable(runtime_factory):
+        raise ValueError("runtime_factory must be callable or None")
+    if scoped_runtime_factory is not None and not callable(scoped_runtime_factory):
+        raise ValueError("scoped_runtime_factory must be callable or None")
+    if type(public_text_streaming) is not bool or (public_text_streaming and runtime_factory is None and scoped_runtime_factory is None):
+        raise ValueError("public_text_streaming requires a configured compatible runtime")
+    owned: dict[tuple[str, str], OwnedSession] = {}
+    creates: dict[tuple[str, str], str] = {}
+    journal = None
+    shutting_down = False
+
+    def text_window(entry, request_id):
+        return entry.turns.get(request_id, {}).get("stream") if entry else None
+
+    def end_text(entry):
+        window = text_window(entry, entry.active_id)
+        if window is not None:
+            window.finish()
+
+    def begin_shutdown():
+        nonlocal shutting_down
+        shutting_down = True
+        for entry in owned.values():
+            end_text(entry)
+
+    async def close_owned(entry):
+        if entry.active is not None and not entry.active.done():
+            entry.active.cancel()
+            await asyncio.gather(entry.active, return_exceptions=True)
+        await entry.runtime.close()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        nonlocal journal, shutting_down
+        shutting_down = False
+        try:
+            import fcntl
+        except ImportError as exc:
+            raise RuntimeError("conversation service journal ownership requires Linux or macOS") from exc
+        path = Path(journal_path).resolve()
+        if path.exists() and path.stat().st_nlink != 1:
+            raise InvalidInput("hard-linked conversation journals are not supported")
+        # macOS can make flock on the database conflict with SQLite's locks.
+        # Never unlink the sidecar: another owner might still hold its inode.
+        lock_path = str(path) + ".owner.lock"
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise InvalidInput("journal ownership lock must be a regular file")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("conversation journal is already owned by another service") from exc
+            journal = SessionJournal(path)
+            for space in sorted(set(keys.values())):
+                # A turn still marked accepted belonged to the process this
+                # one replaced, so whether its provider answered is
+                # unknowable; it is settled as interrupted saying that,
+                # rather than left as a receipt that can never come true.
+                # Safe here because the lock above makes this service the
+                # journal's only owner.
+                journal.recover(space)
+                after = ""
+                while True:
+                    page = journal.sessions(space, after=after)
+                    for session in page["items"]:
+                        if session["state"] in {"created", "running", "stopping"}:
+                            journal.transition(space, session["session_id"], "recovery:" + uuid4().hex,
+                                               "interrupt", session["revision"])
+                    if not page["has_more"]:
+                        break
+                    after = page["next_after"]
+            yield
+        finally:
+            begin_shutdown()
+            cleanup_errors = []
+            try:
+                if journal is not None:
+                    for (space, sid), entry in owned.items():
+                        if entry.cleanup_task is not None:
+                            try:
+                                if not await asyncio.shield(entry.cleanup_task):
+                                    cleanup_errors.append(RuntimeError("runtime cleanup failed"))
+                            except Exception as error:
+                                cleanup_errors.append(error)
+                            continue
+                        try:
+                            session = journal.get(space, sid)
+                            if session["state"] in {"created", "running", "stopping"}:
+                                journal.transition(space, sid, "shutdown:" + uuid4().hex, "interrupt", session["revision"])
+                        except Exception as error:
+                            cleanup_errors.append(error)
+                        try:
+                            await asyncio.wait_for(close_owned(entry), 5)
+                        except Exception as error:
+                            cleanup_errors.append(error)
+            finally:
+                if journal is not None:
+                    journal.close()
+                    journal = None
+                owned.clear()
+                creates.clear()
+                os.close(descriptor)
+            if cleanup_errors:
+                raise RuntimeError("conversation service cleanup failed") from None
+
+    app = FastAPI(title="scone-conversations", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # Hosts must notify before draining HTTP tasks, not only at lifespan end:
+    # an idle SSE response is itself one of the tasks they would wait for.
+    app.state.begin_conversation_shutdown = begin_shutdown
+
+    def space_for(request: Request):
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and token:
+            for key, space in keys.items():
+                if hmac.compare_digest(token.encode(), key.encode()):
+                    if shutting_down and request.method == "POST":
+                        raise HTTPException(503, "conversation service is shutting down")
+                    return space
+        raise HTTPException(401, "valid bearer key required")
+
+    @app.middleware("http")
+    async def private_responses(request, call_next):
+        if request.url.path.startswith("/v1/conversations"):
+            if request.method == "POST":
+                # Bound actual bytes rather than trusting Content-Length.
+                chunks, size = [], 0
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > 40000:
+                        return JSONResponse({"error": "conversation request too large"}, 413, headers={"Cache-Control": "no-store"})
+                    chunks.append(chunk)
+                request._body = b"".join(chunks)
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        return await call_next(request)
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_request, error):
+        return JSONResponse({"error": error.detail}, status_code=error.status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request, _error):
+        return JSONResponse({"error": "invalid conversation request"}, status_code=422)
+
+    @app.exception_handler(InvalidInput)
+    async def invalid(_request, _error):
+        return JSONResponse({"error": "invalid conversation argument"}, status_code=422)
+
+    @app.exception_handler(NotFound)
+    async def missing(_request, _error):
+        return JSONResponse({"error": "conversation record not found"}, status_code=404)
+
+    @app.exception_handler(Conflict)
+    async def conflict(_request, error):
+        return JSONResponse({"error": "conversation revision or command conflict", "revision": error.revision}, status_code=409)
+
+    def inspect(space, sid):
+        result = journal.get(space, sid)
+        entry = owned.get((space, sid))
+        result["active_request_id"] = entry.active_id if entry else None
+        result["latest_request_id"] = journal.latest_turn_id(space, sid)
+        return result
+
+    @app.get("/v1/conversations/capabilities")
+    async def capabilities(space=Depends(space_for)):
+        return {"schema_version": 1, "text_configured": runtime_factory is not None or scoped_runtime_factory is not None,
+                "recall_scope": scoped_runtime_factory is not None,
+                "voice": False, "video": False, "streaming": public_text_streaming,
+                "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
+                                  "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
+                "reply_transport": "poll", "reply_replay": "durable_receipts",
+                "session_deletion": True,
+                "turn_cancellation": True,
+                "transcript_pagination": True,
+                "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
+
+    @app.get("/v1/conversations")
+    async def sessions(after: str = "", limit: int = 100, space=Depends(space_for)):
+        return journal.sessions(space, after=after, limit=limit)
+
+    @app.post("/v1/conversations")
+    async def create(body: Create, space=Depends(space_for)):
+        if shutting_down:
+            raise HTTPException(503, "conversation service is shutting down")
+        if not body.capture:
+            raise HTTPException(422, "this runtime requires explicit transcript capture consent")
+        scope = RecallScope.from_mapping(body.recall_scope)
+        if runtime_factory is None and scoped_runtime_factory is None:
+            raise HTTPException(503, "text conversation runtime is not configured")
+        if scope.as_dict() and scoped_runtime_factory is None:
+            raise HTTPException(422, "this runtime does not support session recall constraints")
+        key = (space, body.request_id)
+        if key in creates:
+            # Deleted sessions keep a process-local retry tombstone. Check it
+            # before journal.create can insert a new row for the deleted key.
+            current = inspect(space, creates[key])
+            journal.create(space, body.request_id, recall_scope=scope.as_dict())
+            return current
+        if len(creates) >= max_sessions:
+            raise HTTPException(429, "conversation process capacity reached")
+        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict())
+        sid = receipt["session_id"]
+        creates[key] = sid
+        current = journal.get(space, sid)
+        if current["state"] != "created":
+            return inspect(space, sid)
+        try:
+            runtime = (scoped_runtime_factory(space, sid, RecallScope.from_mapping(current["recall_scope"]))
+                       if scoped_runtime_factory is not None else runtime_factory(space, sid))
+            owned[(space, sid)] = OwnedSession(runtime)
+            journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
+        except Exception:
+            journal.transition(space, sid, "fail:" + uuid4().hex, "fail", current["revision"])
+            raise HTTPException(503, "conversation runtime failed to initialize") from None
+        return inspect(space, sid)
+
+    @app.get("/v1/conversations/{sid}")
+    async def session(sid: str, space=Depends(space_for)):
+        return inspect(space, sid)
+
+    @app.get("/v1/conversations/{sid}/events")
+    async def events(sid: str, after: int = 0, limit: int = 100, space=Depends(space_for)):
+        return journal.events(space, sid, after, limit)
+
+    @app.get("/v1/conversations/{sid}/transcript")
+    async def transcript(sid: str, before: str | None = Query(default=None, max_length=1024),
+                         limit: int = Query(default=200, ge=1, le=200), space=Depends(space_for)):
+        journal.get(space, sid)
+        boundary = None
+        if before is not None:
+            try:
+                raw = base64.b64decode(before + "=" * (-len(before) % 4), altchars=b"-_", validate=True)
+                cursor = json.loads(raw)
+                if (not isinstance(cursor, list) or len(cursor) != 5 or type(cursor[0]) is not int or cursor[:3] != [1, space, sid]
+                        or not isinstance(cursor[3], str) or normalise_time(cursor[3]) != cursor[3]
+                        or type(cursor[4]) is not int or not 1 <= cursor[4] <= 2**63 - 1):
+                    raise ValueError("invalid boundary")
+                boundary = (cursor[3], cursor[4])
+            except (ValueError, TypeError, UnicodeError, binascii.Error, InvalidInput):
+                raise HTTPException(422, "invalid transcript cursor") from None
+        # The engine already walks matching episodes; bound the response, not
+        # the history being searched. Cursors survive deletion of their boundary.
+        episodes = await engine.episodes(space, {"session_id": sid})
+        if boundary is not None:
+            episodes = [e for e in episodes if (e.created_at, e.episode_id) < boundary]
+        page = episodes[-limit:]
+        has_more = len(episodes) > limit
+        next_before = None
+        if has_more:
+            raw = json.dumps([1, space, sid, page[0].created_at, page[0].episode_id], separators=(",", ":"))
+            next_before = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+        return {"episodes": [episode_json(episode) for episode in page],
+                "has_more": has_more, "next_before": next_before}
+
+    async def resolved(space, kept, entry):
+        """One receipt shape, live or rehydrated, with the reply's text
+        read from the episode that holds it every time.
+
+        The text is never served from a remembered copy: a process still
+        holding one must stop serving it the moment the episode is
+        forgotten, or "no stale transcript copies" would hold only across
+        a restart, which is the easy half. A completed turn whose episode
+        is gone is terminal, not failed, and must not invite a resend; an
+        episode that merely could not be read says so, because calling a
+        storage failure "forgotten" would be a deletion nobody performed.
+        """
+        live = entry.turns.get(kept["request_id"], {}).get("receipt") if entry else None
+        status = "pending" if kept["status"] == "accepted" else kept["status"]
+        receipt = {"request_id": kept["request_id"], "status": status,
+                   "result": None, "result_state": None, "error": kept["error"]}
+        if live is not None:
+            receipt = {**live, "result_state": None, "error": live.get("error", kept["error"])}
+            receipt.setdefault("result", None)
+            status = receipt["status"]
+        if status == "pending":
+            return receipt
+        episode_id = kept["episode_id"]
+        if episode_id is None and isinstance(receipt.get("result"), dict):
+            episode_id = receipt["result"].get("assistant_episode_id")
+        if status != "completed" or episode_id is None:
+            return {**receipt, "result": None, "result_state": "unavailable"}
+        try:
+            episode = await engine.episode(space, episode_id)
+        except NotFound:
+            return {**receipt, "result": None, "result_state": "forgotten"}
+        except Exception:
+            return {**receipt, "result": None, "result_state": "unreadable"}
+        result = dict(receipt.get("result") or {})
+        result.update(text=episode.content, assistant_episode_id=episode_id)
+        return {**receipt, "result": result, "result_state": "available"}
+
+    def settle(space, sid, request_id, status, episode_id=None, error=None):
+        """Record a turn's outcome durably, and never let that recording
+        be the thing that breaks a turn: the in-process receipt is still
+        correct if the journal write fails, and the next recover() call
+        settles what this missed."""
+        try:
+            journal.finish_turn(space, sid, request_id, status, episode_id=episode_id, error=error)
+        except (Conflict, NotFound, InvalidInput):
+            pass
+
+    def after_cancel(space, sid, entry, *, failed=False):
+        # Only a runtime explicitly reporting reusable state can keep serving.
+        # Capture/cleanup uncertainty closes the session, not just the receipt.
+        if failed or getattr(entry.runtime, "closed", True) is not False:
+            current = journal.get(space, sid)
+            if current["state"] == "running":
+                journal.transition(space, sid, "cancel-interrupted:" + uuid4().hex, "interrupt", current["revision"])
+                entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
+
+    async def run_turn(space, sid, entry, request_id, text):
+        receipt = entry.turns[request_id]["receipt"]
+        window = text_window(entry, request_id)
+
+        async def observe(chunk):
+            if shutting_down or receipt["status"] != "pending" or journal.get(space, sid)["state"] != "running":
+                raise RuntimeError("text observation is closed")
+            window.append(chunk)
+
+        try:
+            result = await entry.runtime.reply(text, on_text=observe) if window is not None else await entry.runtime.reply(text)
+            if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry)
+                return  # a late result must not overwrite the terminal decision
+            if window is not None and window.failed:
+                raise RuntimeError("public text observation failed")
+            if shutting_down or journal.get(space, sid)["state"] != "running":
+                receipt["status"] = "interrupted"
+                settle(space, sid, request_id, "interrupted")
+            else:
+                receipt.update(status="completed", result=result)
+                # The episode holding the reply's text, not the text: one
+                # copy, so forgetting the episode removes it everywhere.
+                settle(space, sid, request_id, "completed",
+                       episode_id=result.get("assistant_episode_id") if isinstance(result, dict) else None)
+        except asyncio.CancelledError:
+            # The cancelled receipt survives even if capture/cleanup uncertainty
+            # means this runtime cannot accept another turn.
+            if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry)
+                raise
+            receipt["status"] = "interrupted"
+            settle(space, sid, request_id, "interrupted")
+            current = journal.get(space, sid)
+            if current["state"] == "running":
+                journal.transition(space, sid, "interrupted:" + uuid4().hex, "interrupt", current["revision"])
+                entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
+        except Exception:
+            if receipt.get("status") == "cancelled":
+                after_cancel(space, sid, entry, failed=True)
+                return
+            if shutting_down:
+                receipt["status"] = "interrupted"
+                settle(space, sid, request_id, "interrupted")
+                return
+            receipt.update(status="failed", error="conversation turn failed; do not automatically retry")
+            settle(space, sid, request_id, "failed", error=receipt["error"])
+            current = journal.get(space, sid)
+            if current["state"] == "running":
+                journal.transition(space, sid, "failure:" + uuid4().hex, "fail", current["revision"])
+                entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
+        finally:
+            if window is not None:
+                window.finish()
+            entry.active_id = None
+
+    @app.post("/v1/conversations/{sid}/turns", status_code=202)
+    async def turn(sid: str, body: Turn, space=Depends(space_for)):
+        if shutting_down:
+            raise HTTPException(503, "conversation service is shutting down")
+        current = journal.get(space, sid)
+        entry = owned.get((space, sid))
+        signature = body.model_dump()
+        if entry and body.request_id in entry.turns:
+            previous = entry.turns[body.request_id]
+            if previous["signature"] != signature:
+                raise Conflict("turn request changed", current["revision"])
+            # One receipt shape everywhere: a retry answers exactly what a
+            # read of the same turn answers.
+            return await resolved(space, journal.turn(space, sid, body.request_id), entry)
+        if current["state"] != "running" or entry is None:
+            raise Conflict("conversation is not running in this process", current["revision"])
+        if body.expected_revision != current["revision"] or entry.active_id is not None:
+            raise Conflict("stale or busy conversation", current["revision"])
+        if not body.text.strip() or len(body.text.encode()) > 32000:
+            raise HTTPException(422, "message must contain 1..32000 UTF-8 bytes of nonempty text")
+        if len(entry.turns) >= max_turns:
+            raise HTTPException(429, "conversation turn capacity reached")
+        receipt = {"request_id": body.request_id, "status": "pending"}
+        # Durable half: recorded before the provider is asked anything, so a
+        # process that dies mid-turn leaves a receipt rather than a gap.
+        journal.start_turn(space, sid, body.request_id, signature)
+        entry.turns[body.request_id] = {"signature": signature, "receipt": receipt,
+                                      "stream": TextWindow() if public_text_streaming else None}
+        entry.active_id = body.request_id
+        entry.active = asyncio.create_task(run_turn(space, sid, entry, body.request_id, body.text))
+        return await resolved(space, journal.turn(space, sid, body.request_id), entry)
+
+    @app.get("/v1/conversations/{sid}/turns")
+    async def turn_list(sid: str, after: str = "", limit: int = 100, space=Depends(space_for)):
+        """Which turns this session has, so a reloaded page can find its
+        receipts without knowing their request ids. Bounded and scoped
+        like every other read here."""
+        page = journal.turns(space, sid, after=after, limit=limit)
+        entry = owned.get((space, sid))
+        return {**page, "turns": [await resolved(space, kept, entry) for kept in page["turns"]]}
+
+    @app.get("/v1/conversations/{sid}/turns/{request_id}")
+    async def result(sid: str, request_id: str, space=Depends(space_for)):
+        journal.get(space, sid)
+        entry = owned.get((space, sid))
+        # The journal answers when this process does not hold the turn, so
+        # a 404 means only what it should: nobody sent that request.
+        return await resolved(space, journal.turn(space, sid, request_id), entry)
+
+    @app.get("/v1/conversations/{sid}/turns/{request_id}/stream")
+    async def stream(sid: str, request_id: str, request: Request, space=Depends(space_for)):
+        journal.get(space, sid)
+        journal.turn(space, sid, request_id)
+        if not public_text_streaming:
+            raise HTTPException(501, "public text streaming is not configured")
+        values = request.query_params.getlist("after")
+        previous = request.headers.get("last-event-id")
+        raw = values[0] if values else (previous if previous is not None else "0")
+        if (set(request.query_params) - {"after"} or len(values) > 1
+                or not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or int(raw) > 2**63 - 1
+                or (values and previous is not None and previous != raw)):
+            raise HTTPException(422, "invalid stream cursor")
+        cursor = int(raw)
+        entry = owned.get((space, sid))
+        window = text_window(entry, request_id)
+        if window is not None and not window.closed and cursor > window.last_sequence:
+            raise HTTPException(409, "stream cursor is ahead of observed text")
+
+        async def output():
+            after = cursor
+            while True:
+                if shutting_down or journal is None:
+                    yield sse("end", {"request_id": request_id, "reason": "service_shutdown", "read_receipt": True})
+                    return
+                try:
+                    current = journal.get(space, sid)
+                    kept = journal.turn(space, sid, request_id)
+                except NotFound:
+                    yield sse("end", {"request_id": request_id, "reason": "deleted", "read_receipt": True})
+                    return
+                live = entry.turns.get(request_id, {}).get("receipt") if entry else None
+                status = live["status"] if live else ("pending" if kept["status"] == "accepted" else kept["status"])
+                if status != "pending":
+                    yield sse("terminal", {"request_id": request_id, "status": status, "read_receipt": True})
+                    return
+                if current["state"] != "running" or window is None or window.closed:
+                    yield sse("end", {"request_id": request_id, "reason": "window_unavailable", "read_receipt": True})
+                    return
+                gap, chunk = window.next_after(after)
+                if gap is not None:
+                    yield sse("gap", {"after": after, "next_sequence": gap})
+                    after = gap - 1
+                elif chunk is not None:
+                    after, text = chunk
+                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
+                else:
+                    try:
+                        await asyncio.wait_for(window.wait_after(after), 10)
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+
+        return StreamingResponse(output(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
+        })
+
+    @app.delete("/v1/conversations/{sid}", status_code=204)
+    async def delete(sid: str, space=Depends(space_for)):
+        """The session, its transcript and its receipts. A conversation a
+        process is still serving is refused rather than deleted out from
+        under it: stop it first, or that process keeps answering from a
+        transcript that no longer exists."""
+        current = journal.get(space, sid)
+        # State decides, not process ownership: an ended session may still
+        # have an entry in this process, and that entry cannot serve a
+        # deleted turn anyway, because every read goes through the journal.
+        if current["state"] in ("created", "running", "stopping"):
+            raise Conflict("stop the conversation before deleting it", current["revision"])
+        # Episodes first: a receipt naming an episode that is gone reads
+        # as forgotten, which is true, while the reverse leaves episodes
+        # no session can account for.
+        held = {episode.episode_id for episode in await engine.episodes(space, {"session_id": sid})}
+        after = ""
+        while True:
+            page = journal.turns(space, sid, after=after, limit=200)
+            held |= {turn["episode_id"] for turn in page["turns"] if turn["episode_id"] is not None}
+            if not page["has_more"]:
+                break
+            after = page["next_after"]
+        # A receipt names an episode the metadata may not: identical replies
+        # deduplicate, so one episode can be two conversations' transcript.
+        for episode_id in sorted(held - journal.episodes_held_elsewhere(space, sid, held)):
+            try:
+                await engine.forget(space, episode_id)
+            except NotFound:
+                pass  # an independently forgotten reply is already removed
+        journal.delete_session(space, sid)
+        return Response(status_code=204)
+
+    @app.post("/v1/conversations/{sid}/turns/{request_id}/cancel")
+    async def cancel(sid: str, request_id: str, space=Depends(space_for)):
+        """End one turn without ending the conversation.
+
+        Terminal and idempotent: the provider may already have been asked,
+        so a later retry of the same request id answers with the
+        cancellation instead of asking again. Recorded before the task is
+        touched, so a reply that lands during the unwinding cannot
+        overwrite the decision.
+        """
+        current = journal.get(space, sid)
+        kept = journal.turn(space, sid, request_id)
+        if kept["status"] == "cancelled":
+            return await resolved(space, kept, owned.get((space, sid)))
+        # A turn that already settled is refused by the journal itself,
+        # with the same 409; a second guard here would be untestable,
+        # because the conflict handler says one thing for every conflict.
+        settled = journal.finish_turn(space, sid, request_id, "cancelled")
+        entry = owned.get((space, sid))
+        if entry is not None and request_id in entry.turns:
+            entry.turns[request_id]["receipt"]["status"] = "cancelled"
+            window = text_window(entry, request_id)
+            if window is not None:
+                window.finish()
+        if entry is not None and entry.active_id == request_id and entry.active is not None:
+            entry.active.cancel()
+            await asyncio.gather(entry.active, return_exceptions=True)
+        return await resolved(space, settled, entry)
+
+    @app.post("/v1/conversations/{sid}/stop")
+    async def stop(sid: str, body: Stop, space=Depends(space_for)):
+        current = journal.get(space, sid)
+        entry = owned.get((space, sid))
+        signature = body.model_dump()
+        if entry and body.request_id in entry.stops:
+            if entry.stops[body.request_id] != signature:
+                raise Conflict("stop request changed", current["revision"])
+            return inspect(space, sid)
+        if body.expected_revision != current["revision"]:
+            raise Conflict("stale stop", current["revision"])
+        if current["state"] != "running":
+            return inspect(space, sid)
+        if entry is None:
+            raise Conflict("runtime not owned by this process", current["revision"])
+        entry.stops[body.request_id] = signature
+        stopping = journal.transition(space, sid, "stop:" + uuid4().hex, "stop", current["revision"])
+        end_text(entry)
+        # The service owns termination, not the HTTP request that initiated it.
+        # Keep a strong reference so disconnects and matching retries cannot
+        # abandon cleanup or start a second close operation.
+        entry.cleanup_task = asyncio.create_task(finish_stop(space, sid, entry, stopping["revision"]))
+        if not await asyncio.shield(entry.cleanup_task):
+            raise HTTPException(503, "runtime cleanup failed")
+        return inspect(space, sid)
+
+    async def finish_cleanup(entry):
+        try:
+            await asyncio.wait_for(close_owned(entry), 5)
+        except Exception:
+            return False
+        return True
+
+    async def finish_stop(space, sid, entry, revision):
+        if not await finish_cleanup(entry):
+            journal.transition(space, sid, "failure:" + uuid4().hex, "fail", revision)
+            return False
+        journal.transition(space, sid, "end:" + uuid4().hex, "end", revision)
+        return True
+
+    if console:
+        # A single packaged application owns these routes. Never inject space or
+        # provider credentials into its public shell, even for a single-key host.
+        workspace_html = PLAYGROUND.read_text(encoding="utf-8")
+
+        async def workspace_page():
+            return HTMLResponse(workspace_html, headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+            })
+
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
+            app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
+
+    app.mount("/", create_app(engine, keys, console=False))
+    return app
