@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.engine import Record, content_hash
+from scone_memory.memory.engine import Record, content_hash
 
 
 async def moved(dump, into="archive"):

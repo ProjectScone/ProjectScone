@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from .timeutil import parse_rfc3339
+from ..core.timeutil import parse_rfc3339
 
 RRF_K = 60
 W_RECENCY = 0.005

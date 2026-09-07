@@ -51,8 +51,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
-from .engine import MemoryEngine
-from .errors import InvalidInput
+from ..memory.engine import MemoryEngine
+from ..core.errors import InvalidInput
 
 
 @dataclass(frozen=True)
@@ -183,15 +183,15 @@ def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
 
 def build_embedder(settings: Settings):
     if settings.embedder == "hash":
-        from .embedders import HashEmbedder
+        from ..embedders import HashEmbedder
 
         return HashEmbedder()
     if settings.embedder == "local":
-        from .embedders import LocalEmbedder
+        from ..embedders import LocalEmbedder
 
         return LocalEmbedder(settings.embed_model or "bge-small-en-v1.5", settings.embed_cache)
     if settings.embedder == "remote":
-        from .embedders import RemoteEmbedder
+        from ..embedders import RemoteEmbedder
 
         if not settings.embed_url or not settings.embed_model:
             raise InvalidInput("SCONE_EMBEDDER=remote needs SCONE_EMBED_URL and SCONE_EMBED_MODEL")
@@ -201,27 +201,27 @@ def build_embedder(settings: Settings):
 
 def build_documents(settings: Settings):
     if settings.documents == "memory":
-        from .backends import InMemoryDocumentStore
+        from ..backends import InMemoryDocumentStore
 
         return InMemoryDocumentStore()
     if settings.documents == "sqlite":
-        from .backends import SqliteDocumentStore
+        from ..backends import SqliteDocumentStore
 
         return SqliteDocumentStore(settings.sqlite_path)
     if settings.documents == "mongo":
-        from .backends import MongoDocumentStore
+        from ..backends import MongoDocumentStore
 
         if not settings.mongo_url:
             raise InvalidInput("SCONE_DOCUMENTS=mongo needs SCONE_MONGO_URL")
         return MongoDocumentStore(settings.mongo_url, settings.mongo_db)
     if settings.documents == "postgres":
-        from .backends import PostgresDocumentStore
+        from ..backends import PostgresDocumentStore
 
         if not settings.postgres_url:
             raise InvalidInput("SCONE_DOCUMENTS=postgres needs SCONE_POSTGRES_URL")
         return PostgresDocumentStore(settings.postgres_url, settings.postgres_schema)
     if settings.documents == "elasticsearch":
-        from .backends import ElasticsearchDocumentStore
+        from ..backends import ElasticsearchDocumentStore
 
         if not settings.elasticsearch_url:
             raise InvalidInput("SCONE_DOCUMENTS=elasticsearch needs SCONE_ELASTICSEARCH_URL")
@@ -233,7 +233,7 @@ def build_vectors(settings: Settings, documents=None):
     """``documents`` lets a Postgres vector index share the document
     store's pool when both live in the same database."""
     if settings.vectors == "elasticsearch":
-        from .backends import ElasticsearchDocumentStore, ElasticsearchVectorIndex
+        from ..backends import ElasticsearchDocumentStore, ElasticsearchVectorIndex
 
         if isinstance(documents, ElasticsearchDocumentStore):
             return documents.vectors()
@@ -241,7 +241,7 @@ def build_vectors(settings: Settings, documents=None):
             raise InvalidInput("SCONE_VECTORS=elasticsearch needs SCONE_ELASTICSEARCH_URL")
         return ElasticsearchVectorIndex(settings.elasticsearch_url, settings.elasticsearch_prefix, settings.elasticsearch_api_key)
     if settings.vectors == "postgres":
-        from .backends import PostgresDocumentStore, PostgresVectorIndex
+        from ..backends import PostgresDocumentStore, PostgresVectorIndex
 
         if isinstance(documents, PostgresDocumentStore):
             return documents.vectors()
@@ -249,37 +249,37 @@ def build_vectors(settings: Settings, documents=None):
             raise InvalidInput("SCONE_VECTORS=postgres needs SCONE_POSTGRES_URL")
         return PostgresVectorIndex(settings.postgres_url, settings.postgres_schema)
     if settings.vectors == "memory":
-        from .backends import InMemoryVectorIndex
+        from ..backends import InMemoryVectorIndex
 
         return InMemoryVectorIndex()
     if settings.vectors == "sqlite":
-        from .backends import SqliteVectorIndex
+        from ..backends import SqliteVectorIndex
 
         return SqliteVectorIndex(settings.sqlite_path)
     if settings.vectors == "qdrant":
-        from .backends import QdrantVectorIndex
+        from ..backends import QdrantVectorIndex
 
         if not settings.qdrant_url:
             raise InvalidInput("SCONE_VECTORS=qdrant needs SCONE_QDRANT_URL")
         return QdrantVectorIndex(settings.qdrant_url, settings.qdrant_collection, settings.qdrant_api_key)
     if settings.vectors == "chroma":
-        from .backends import ChromaVectorIndex
+        from ..backends import ChromaVectorIndex
 
         return ChromaVectorIndex(path=settings.chroma_path, url=settings.chroma_url)
     if settings.vectors == "lancedb":
-        from .backends import LanceDBVectorIndex
+        from ..backends import LanceDBVectorIndex
 
         if not settings.lancedb_path:
             raise InvalidInput("SCONE_VECTORS=lancedb needs SCONE_LANCEDB_PATH")
         return LanceDBVectorIndex(settings.lancedb_path)
     if settings.vectors == "milvus":
-        from .backends import MilvusVectorIndex
+        from ..backends import MilvusVectorIndex
 
         if not settings.milvus_uri:
             raise InvalidInput("SCONE_VECTORS=milvus needs SCONE_MILVUS_URI")
         return MilvusVectorIndex(settings.milvus_uri, settings.milvus_collection, settings.milvus_token)
     if settings.vectors == "redis":
-        from .backends import RedisVectorIndex
+        from ..backends import RedisVectorIndex
 
         if not settings.redis_url:
             raise InvalidInput("SCONE_VECTORS=redis needs SCONE_REDIS_URL")
@@ -299,7 +299,7 @@ async def build_in_process_engine(settings: Settings, embedder):
     new setting has been added and a bench has gone on measuring the
     default under the new name (contextual embeddings, then restatement
     demotion), so both benches build their engines here."""
-    from .backends import InMemoryDocumentStore, InMemoryVectorIndex
+    from ..backends import InMemoryDocumentStore, InMemoryVectorIndex
 
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
@@ -315,7 +315,7 @@ def build_chat(settings: Settings):
         return None
     if not (settings.chat_url and settings.chat_model):
         raise InvalidInput("consolidation needs both SCONE_CHAT_URL and SCONE_CHAT_MODEL")
-    from .llm import OpenAICompatibleChat
+    from ..providers.llm import OpenAICompatibleChat
 
     return OpenAICompatibleChat(settings.chat_url, settings.chat_model, api_key=settings.chat_api_key, think=settings.chat_think)
 
@@ -325,8 +325,8 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
     chat = build_chat(settings)
     if chat is None:
         return None
-    from .distill import Distiller
-    from .worker import ConsolidationWorker
+    from ..ingestion.distill import Distiller
+    from ..ingestion.worker import ConsolidationWorker
 
     if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
         raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
@@ -339,7 +339,7 @@ def build_events(settings: Settings, documents=None):
     if choice == "none":
         return None
     if choice == "elasticsearch":
-        from .backends import ElasticsearchDocumentStore, ElasticsearchEventLog
+        from ..backends import ElasticsearchDocumentStore, ElasticsearchEventLog
 
         if isinstance(documents, ElasticsearchDocumentStore):
             return documents.events(settings.events_max_age_days)
@@ -348,7 +348,7 @@ def build_events(settings: Settings, documents=None):
         return ElasticsearchEventLog(settings.elasticsearch_url, settings.elasticsearch_prefix, settings.elasticsearch_api_key,
                                      max_age_days=settings.events_max_age_days)
     if choice == "postgres":
-        from .backends import PostgresDocumentStore, PostgresEventLog
+        from ..backends import PostgresDocumentStore, PostgresEventLog
 
         if isinstance(documents, PostgresDocumentStore):
             return documents.events(settings.events_max_age_days)
@@ -356,17 +356,17 @@ def build_events(settings: Settings, documents=None):
             raise InvalidInput("SCONE_EVENTS=postgres needs SCONE_POSTGRES_URL")
         return PostgresEventLog(settings.postgres_url, settings.postgres_schema, settings.events_max_age_days)
     if choice == "mongo":
-        from .events import MongoEventLog
+        from ..observability.events import MongoEventLog
 
         if not settings.mongo_url:
             raise InvalidInput("SCONE_EVENTS=mongo needs SCONE_MONGO_URL")
         return MongoEventLog(settings.mongo_url, settings.mongo_db, settings.events_max_age_days)
     if choice == "memory":
-        from .events import InMemoryEventLog
+        from ..observability.events import InMemoryEventLog
 
         return InMemoryEventLog(settings.events_max)
     if choice == "sqlite":
-        from .events import SqliteEventLog
+        from ..observability.events import SqliteEventLog
 
         return SqliteEventLog(settings.sqlite_path, settings.events_max_age_days)
     raise InvalidInput(f"unknown SCONE_EVENTS {settings.events!r}")
@@ -377,7 +377,7 @@ def build_blobs(settings: Settings):
     directory beside the SQLite file, because a server whose database is
     on disk should not lose its evidence on a restart. With no database on
     disk there is nowhere obvious to write, so bytes stay in memory."""
-    from .blobs import FileBlobStore, InMemoryBlobStore
+    from ..backends.blobs import FileBlobStore, InMemoryBlobStore
 
     if settings.blob_dir:
         return FileBlobStore(Path(settings.blob_dir).expanduser())

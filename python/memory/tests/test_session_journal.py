@@ -6,8 +6,8 @@ from threading import Barrier
 
 import pytest
 
-from scone_memory.errors import Conflict, InvalidInput, NotFound
-from scone_memory.session_journal import SessionJournal
+from scone_memory.core.errors import Conflict, InvalidInput, NotFound
+from scone_memory.realtime.session_journal import SessionJournal
 
 
 def test_lifecycle_and_ordered_receipts_survive_reopen(tmp_path):

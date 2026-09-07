@@ -12,7 +12,7 @@ import math
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, MemoryEngine
-from scone_memory.ports import VectorPoint
+from scone_memory.core.ports import VectorPoint
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("langchain_core") is None, reason="langchain-core not installed")
 

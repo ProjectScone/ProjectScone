@@ -10,8 +10,8 @@ import importlib.util
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InvalidInput, MemoryEngine
-from scone_memory.config import Settings, build_engine, build_vectors
-from scone_memory.ports import VectorPoint
+from scone_memory.runtime.config import Settings, build_engine, build_vectors
+from scone_memory.core.ports import VectorPoint
 
 needs_chroma = pytest.mark.skipif(importlib.util.find_spec("chromadb") is None, reason="chromadb not installed")
 needs_lancedb = pytest.mark.skipif(importlib.util.find_spec("lancedb") is None, reason="lancedb not installed")

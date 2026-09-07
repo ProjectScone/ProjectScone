@@ -40,8 +40,8 @@ import asyncio
 import math
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from ..ports import VectorPoint
-from ..timeutil import epoch_seconds
+from ..core.ports import VectorPoint
+from ..core.timeutil import epoch_seconds
 from .validation import validate_vector
 
 SCORES = ("cosine_similarity", "cosine_distance", "unit_l2_squared", "unknown")

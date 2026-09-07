@@ -3,21 +3,21 @@
 import pytest
 
 from scone_memory.api.conversations import create_conversation_app
-from scone_memory.errors import NotFound
-from scone_memory.session_journal import SessionJournal
+from scone_memory.core.errors import NotFound
+from scone_memory.realtime.session_journal import SessionJournal
 from test_conversations_api import client_for, engine  # noqa: F401
 
 
 def test_latest_turn_survives_reopen_and_ignores_uuid_order_clock_ties_and_retries(tmp_path, monkeypatch):
     path = tmp_path / "journal.db"
-    monkeypatch.setattr("scone_memory.session_journal._now", lambda: "2026-09-06T10:00:00.000Z")
+    monkeypatch.setattr("scone_memory.realtime.session_journal._now", lambda: "2026-09-06T10:00:00.000Z")
     with SessionJournal(path) as journal:
         sid = journal.create("alpha", "create")["session_id"]
         assert journal.latest_turn_id("alpha", sid) is None
         for number in range(205):
             journal.start_turn("alpha", sid, f"z-{number:03}", {"text": "fixture"})
         # A clock adjustment must not make a newly accepted turn look older.
-        monkeypatch.setattr("scone_memory.session_journal._now", lambda: "2026-09-05T10:00:00.000Z")
+        monkeypatch.setattr("scone_memory.realtime.session_journal._now", lambda: "2026-09-05T10:00:00.000Z")
         journal.start_turn("alpha", sid, "a-newest", {"text": "last"})
         journal.start_turn("alpha", sid, "z-204", {"text": "fixture"})
         assert journal.latest_turn_id("alpha", sid) == "a-newest"

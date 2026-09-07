@@ -3,8 +3,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .engine import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
-from .errors import InvalidInput
+from ..memory.engine import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
+from ..core.errors import InvalidInput
 
 
 @dataclass(frozen=True)

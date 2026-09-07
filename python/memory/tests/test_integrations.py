@@ -11,9 +11,9 @@ import json
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, InvalidInput, MemoryEngine, SyncMemoryEngine
-from scone_memory.engine import Record
+from scone_memory.memory.engine import Record
 from scone_memory.integrations.turns import Turn, item_metadata, next_seq, read_turn, turn_records
-from scone_memory.models import RecallItem
+from scone_memory.core.models import RecallItem
 
 
 async def fresh():

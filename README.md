@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://crates.io/crates/scone-cli">CLI</a> ·
   <a href="https://crates.io/crates/scone-core">Rust library</a> ·
-  <a href="python/scone-memory">Python library</a> ·
+  <a href="python/memory">Python library</a> ·
   <a href="https://crates.io/crates/scone-ffi">C ABI</a> ·
   <a href="https://github.com/DrDrewCain/ProjectScone/releases">Releases</a>
 </p>
@@ -216,8 +216,8 @@ The Python console serves the built app directly at `/memory` and `/playground`
 the React Memory page into Python; Rust retains its native root console pending
 independent Memory-page compatibility verification.
 `npm run check:assets` detects drift against that build.
-During the Python directory migration, build tooling accepts either the current
-`python/scone-memory/scone_memory` tree or `python/memory/src/scone_memory`, but
+The native Python package lives in `python/memory/src/scone_memory`. During the
+transition, build tooling also recognizes the legacy `python/scone-memory/scone_memory` tree, but
 refuses two project manifests or an incomplete source tree before publishing.
 Native browser tests use that project's installed `.venv`, or the explicitly
 selected `SCONE_TEST_PYTHON` interpreter; they do not force imports from the old
@@ -390,7 +390,7 @@ let pack = engine.recall(&space, "what do I know about X", &RecallOpts::default(
 Install the native library from this checkout (no Rust toolchain required):
 
 ```sh
-python -m pip install -e './python/scone-memory'
+python -m pip install -e './python/memory'
 # Add extras such as [api], [mcp], [mongo,qdrant], or [local-embed] as needed.
 ```
 
@@ -417,7 +417,7 @@ asyncio.run(main())
 
 These in-memory stores are ephemeral. `HashEmbedder` is a deterministic
 word-overlap baseline, not a semantic model. Choose persistent stores and a
-local or remote embedder for your deployment. The [Python library](python/scone-memory)
+local or remote embedder for your deployment. The [Python library](python/memory)
 provides async `MemoryEngine`, a blocking `SyncMemoryEngine`, document/vector/model
 protocols, FastAPI, MCP and CLI integrations. Python-to-Python episode/fact
 export/import includes provenance-ID remapping and repeat-import tests; missing
@@ -454,7 +454,7 @@ They do not require identical hashes, local IDs, chunk boundaries or rankings.
 ```sh
 cargo test -p scone-core --test shared_contract
 cargo build -p scone-core --example episode_roundtrip
-cd python/scone-memory
+cd python/memory
 SCONE_TEST_RUST_ROUNDTRIP="$(pwd)/../../target/debug/examples/episode_roundtrip" \
   .venv/bin/pytest -q tests/test_cross_language.py
 ```

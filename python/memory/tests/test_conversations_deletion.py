@@ -9,8 +9,8 @@ import asyncio
 
 import pytest
 
-from scone_memory.errors import NotFound
-from scone_memory.session_journal import SessionJournal
+from scone_memory.core.errors import NotFound
+from scone_memory.realtime.session_journal import SessionJournal
 from test_conversations_api import client_for, configured, create, engine  # noqa: F401
 
 

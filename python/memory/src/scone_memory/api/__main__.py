@@ -8,7 +8,7 @@ import asyncio
 import sys
 from typing import Optional
 
-from ..config import Settings, build_engine, build_worker
+from ..runtime.config import Settings, build_engine, build_worker
 from .app import create_app
 
 

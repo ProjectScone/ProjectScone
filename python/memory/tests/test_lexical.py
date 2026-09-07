@@ -1,4 +1,4 @@
-from scone_memory.lexical import Bm25, tokenize
+from scone_memory.retrieval.lexical import Bm25, tokenize
 
 
 def test_more_query_terms_rank_higher():

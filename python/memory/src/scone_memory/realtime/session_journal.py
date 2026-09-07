@@ -15,9 +15,9 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-from .engine import check_space
-from .errors import Conflict, InvalidInput, NotFound
-from .recall_scope import RecallScope
+from ..memory.engine import check_space
+from ..core.errors import Conflict, InvalidInput, NotFound
+from ..retrieval.recall_scope import RecallScope
 
 _APPLICATION_ID = 0x53434A31
 _VERSION = 3

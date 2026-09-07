@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ..errors import InvalidInput, NotFound
+from ..core.errors import InvalidInput, NotFound
 
 
 async def test_a_proposal_answers_nothing_until_a_person_approves_it(engine):

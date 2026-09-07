@@ -11,8 +11,8 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InvalidInput, MemoryEngine
-from scone_memory.config import Settings, build_engine, build_vectors
-from scone_memory.ports import VectorPoint
+from scone_memory.runtime.config import Settings, build_engine, build_vectors
+from scone_memory.core.ports import VectorPoint
 
 URL = os.environ.get("SCONE_TEST_REDIS_URL")
 pytestmark = [pytest.mark.redis, pytest.mark.skipif(not URL, reason="needs a live Redis with RediSearch")]

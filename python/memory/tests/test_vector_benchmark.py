@@ -2,7 +2,7 @@
 
 import pytest
 
-from scone_memory.ports import VectorPoint
+from scone_memory.core.ports import VectorPoint
 from scone_memory.testing.vector_benchmark import SearchCase, measure_search
 
 
@@ -106,7 +106,7 @@ async def test_live_job_observer_records_actual_progress_in_its_space(engine):
     import httpx
 
     from scone_memory.api import create_app
-    from scone_memory.events import InMemoryEventLog
+    from scone_memory.observability.events import InMemoryEventLog
 
     a = await populate(engine)
     engine.events = InMemoryEventLog()

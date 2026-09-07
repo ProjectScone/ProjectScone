@@ -19,7 +19,7 @@ from scone_memory import (
     SyncMemoryEngine,
 )
 from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
-from scone_memory import cli
+from scone_memory.runtime import cli
 
 
 class CountingEmbedder(HashEmbedder):
@@ -267,7 +267,7 @@ def test_cli_distill_reports_a_pass_or_refuses_without_a_model(tmp_path, monkeyp
     assert cli.main(["distill"], env=env, stdin=io.StringIO(), out=out) == 2
 
     from scone_memory import FakeChat
-    import scone_memory.config as config
+    import scone_memory.runtime.config as config
 
     monkeypatch.setattr(
         config,
@@ -334,8 +334,8 @@ class SeeingEmbedder(HashEmbedder):
 
 
 async def test_contextual_embeddings_change_what_is_embedded_not_what_is_stored():
-    from scone_memory.engine import contextual_prefix
-    from scone_memory.ports import NewEpisode
+    from scone_memory.memory.engine import contextual_prefix
+    from scone_memory.core.ports import NewEpisode
 
     plain, ctx = SeeingEmbedder(), SeeingEmbedder()
     off = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), plain).open()

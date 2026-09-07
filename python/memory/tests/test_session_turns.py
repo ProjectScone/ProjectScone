@@ -12,8 +12,8 @@ import sqlite3
 
 import pytest
 
-from scone_memory.errors import Conflict, NotFound
-from scone_memory.session_journal import SessionJournal
+from scone_memory.core.errors import Conflict, NotFound
+from scone_memory.realtime.session_journal import SessionJournal
 
 
 def running_session(journal, space="alpha"):

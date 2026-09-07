@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from ..ports import DuplicateEvent, NewEvent
+from ..core.ports import DuplicateEvent, NewEvent
 
 
 def ev(space, kind, ts="2025-01-01T00:00:00.000Z", **payload):

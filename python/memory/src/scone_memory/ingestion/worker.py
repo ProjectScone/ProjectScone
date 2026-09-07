@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 from .distill import DistillError, Distiller
-from .engine import MemoryEngine
-from .errors import SconeError
+from ..memory.engine import MemoryEngine
+from ..core.errors import SconeError
 
 
 @dataclass

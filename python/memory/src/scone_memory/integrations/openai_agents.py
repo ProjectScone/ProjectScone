@@ -17,8 +17,8 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without the extra
     raise ImportError("scone_memory.integrations.openai_agents needs openai-agents: pip install 'scone-memory[openai-agents]'") from e
 
-from ..engine import MemoryEngine
-from ..sync import SyncMemoryEngine
+from ..memory.engine import MemoryEngine
+from ..memory.sync import SyncMemoryEngine
 from .turns import Turn, next_seq, read_turn, turn_records
 
 

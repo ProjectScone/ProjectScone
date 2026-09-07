@@ -19,8 +19,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from ..engine import Record
-from ..models import Episode, RecallItem
+from ..memory.engine import Record
+from ..core.models import Episode, RecallItem
 
 
 @dataclass(frozen=True)

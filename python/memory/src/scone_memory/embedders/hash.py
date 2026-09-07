@@ -4,7 +4,7 @@ import hashlib
 import math
 from typing import Sequence
 
-from ..lexical import tokenize
+from ..retrieval.lexical import tokenize
 
 
 class HashEmbedder:

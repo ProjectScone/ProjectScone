@@ -15,8 +15,8 @@ import threading
 from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
 from .engine import ImportSummary, MemoryEngine, Profile, Record
-from .models import Added, Episode, Fact, RecallResult, Status
-from .ports import SourcePage
+from ..core.models import Added, Episode, Fact, RecallResult, Status
+from ..core.ports import SourcePage
 
 
 class SyncMemoryEngine:
@@ -56,7 +56,7 @@ class SyncMemoryEngine:
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "SyncMemoryEngine":
         import os
 
-        from .config import Settings, build_engine
+        from ..runtime.config import Settings, build_engine
 
         settings = Settings.from_env(env if env is not None else os.environ)
         return cls(lambda: build_engine(settings))

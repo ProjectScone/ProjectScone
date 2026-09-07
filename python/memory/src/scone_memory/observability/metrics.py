@@ -20,8 +20,8 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, Optional, Sequence
 
-from .ports import Event
-from .timeutil import parse_rfc3339
+from ..core.ports import Event
+from ..core.timeutil import parse_rfc3339
 
 
 @dataclass

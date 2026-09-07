@@ -11,8 +11,8 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without the extra
     raise ImportError("scone_memory.integrations.llamaindex needs llama-index-core: pip install 'scone-memory[llamaindex]'") from e
 
-from ..models import RecallResult
-from ..sync import SyncMemoryEngine
+from ..core.models import RecallResult
+from ..memory.sync import SyncMemoryEngine
 from .turns import item_metadata
 
 

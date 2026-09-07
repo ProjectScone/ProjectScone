@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.events import InMemoryEventLog, SqliteEventLog
+from scone_memory.observability.events import InMemoryEventLog, SqliteEventLog
 from scone_memory.testing import Clock
 
 MONGO_URL = os.environ.get("SCONE_TEST_MONGO_URL")

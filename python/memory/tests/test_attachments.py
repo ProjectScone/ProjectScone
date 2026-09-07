@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import create_app
-from scone_memory.blobs import FileBlobStore
-from scone_memory.errors import InvalidInput, NotFound
+from scone_memory.backends.blobs import FileBlobStore
+from scone_memory.core.errors import InvalidInput, NotFound
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pretend pixels" * 8
 SPACE = "alpha"
@@ -139,7 +139,7 @@ async def test_a_configured_server_keeps_attachments_across_a_restart(tmp_path):
     because an attachment that does not survive a restart is not evidence.
     SCONE_BLOB_DIR moves it; an engine with no database keeps bytes in
     memory rather than writing somewhere it was not asked to."""
-    from scone_memory.config import Settings, build_engine
+    from scone_memory.runtime.config import Settings, build_engine
 
     env = {"SCONE_DOCUMENTS": "sqlite", "SCONE_SQLITE_PATH": str(tmp_path / "memory.db"),
            "SCONE_EMBEDDER": "hash"}

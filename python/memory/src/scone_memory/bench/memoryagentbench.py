@@ -34,8 +34,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from ..engine import MemoryEngine, Record
-from ..llm import ChatModel
+from ..memory.engine import MemoryEngine, Record
+from ..providers.llm import ChatModel
 
 FACT_LINE = re.compile(r"^\s*(\d+)\.\s+(.*\S)\s*$")
 

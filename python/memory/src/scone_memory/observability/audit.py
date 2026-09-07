@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterator, Optional, Sequence
 
-from .errors import NotFound
+from ..core.errors import NotFound
 
 # What the distiller refuses and what an audit may condemn are not the
 # same list. The distiller refuses doubt as well as denial, because a

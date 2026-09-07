@@ -9,7 +9,7 @@
 #   prove-test.sh <file> <needle> <replacement> <test runner args...>
 #
 # The runner defaults to `cargo test`; set PROVE_RUNNER to prove a test
-# in another stack, e.g. PROVE_RUNNER="pytest -q" for python/scone-memory.
+# in another stack, e.g. PROVE_RUNNER="pytest -q" for python/memory.
 #
 # Example:
 #   prove-test.sh crates/scone-core/src/recall.rs \

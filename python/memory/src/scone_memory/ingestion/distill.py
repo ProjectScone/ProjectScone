@@ -21,11 +21,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterator, Optional, Sequence
 
-from .engine import MemoryEngine, check_space, normalise_term
-from .errors import SconeError
-from .llm import ChatModel
-from .models import Episode, Fact
-from .timeutil import parse_rfc3339
+from ..memory.engine import MemoryEngine, check_space, normalise_term
+from ..core.errors import SconeError
+from ..providers.llm import ChatModel
+from ..core.models import Episode, Fact
+from ..core.timeutil import parse_rfc3339
 
 EXTRACTION_PROMPT = """\
 You turn a piece of someone's memory into durable facts.

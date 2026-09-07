@@ -18,8 +18,8 @@ from itertools import count
 from pathlib import Path
 from typing import Callable, Optional
 
-from .ports import DuplicateEvent, Event, NewEvent
-from .timeutil import format_rfc3339, now, parse_rfc3339
+from ..core.ports import DuplicateEvent, Event, NewEvent
+from ..core.timeutil import format_rfc3339, now, parse_rfc3339
 
 
 def _same_payload(a, b) -> bool:

@@ -131,7 +131,7 @@ class Stub:
         return []
 
     async def recall(self, space, question, limit, history=False):
-        from scone_memory.models import RecallResult
+        from scone_memory.core.models import RecallResult
 
         top = self.tops[question]
         verdict = None if self.similarity_floor is None else (top is None or top < self.similarity_floor)
@@ -204,7 +204,7 @@ async def test_history_is_passed_through_and_counted_honestly(tmp_path):
             seen.append(history)
             r = await super().recall(space, question, limit)
             if history and question == "a?":
-                from scone_memory.models import Fact
+                from scone_memory.core.models import Fact
 
                 f = Fact(fact_id=1, space=space, subject="s", predicate="p", object="o", confidence=1.0, valid_from="2020-01-01T00:00:00.000Z", status="active")
                 r.facts = [f]
@@ -261,7 +261,7 @@ def test_the_cli_runs_the_sample_the_harness_would(tmp_path):
     local embedder against a hash-embedded file failed on the dimension)."""
     import io
 
-    from scone_memory import cli
+    from scone_memory.runtime import cli
 
     dataset = tmp_path / "d.json"
     dataset.write_text(json.dumps(synthetic(100, 80)))
@@ -284,7 +284,7 @@ def test_the_bench_engine_takes_the_contextual_and_floor_settings(tmp_path):
     changed similarity."""
     import io
 
-    from scone_memory import cli
+    from scone_memory.runtime import cli
 
     dataset = tmp_path / "d.json"
     dataset.write_text(json.dumps(DATASET))

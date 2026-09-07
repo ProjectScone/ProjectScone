@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence
 
-from ..errors import SconeError
-from ..lexical import tokenize
-from ..models import Chunk, Episode, Fact
-from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
+from ..core.errors import SconeError
+from ..retrieval.lexical import tokenize
+from ..core.models import Chunk, Episode, Fact
+from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.

@@ -18,8 +18,9 @@ import json
 
 import pytest
 
-from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, InvalidInput, MemoryEngine, cli
-from scone_memory.config import Settings, build_engine
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, InvalidInput, MemoryEngine
+from scone_memory.runtime import cli
+from scone_memory.runtime.config import Settings, build_engine
 
 TEXT = "the deploy runbook lives in the ops wiki under release checklist"
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
-from scone_memory.worker import ConsolidationWorker
+from scone_memory.ingestion.worker import ConsolidationWorker
 
 
 @dataclass

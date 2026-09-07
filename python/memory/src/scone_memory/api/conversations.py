@@ -24,10 +24,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..engine import check_space, normalise_time
-from ..errors import Conflict, InvalidInput, NotFound
-from ..session_journal import SessionJournal
-from ..recall_scope import RecallScope
+from ..memory.engine import check_space, normalise_time
+from ..core.errors import Conflict, InvalidInput, NotFound
+from ..realtime.session_journal import SessionJournal
+from ..retrieval.recall_scope import RecallScope
 from .app import PLAYGROUND, create_app, episode_json
 from .text_stream import MAX_BYTES, MAX_CHUNKS, TextWindow, sse
 

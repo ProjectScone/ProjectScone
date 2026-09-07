@@ -3,8 +3,8 @@ import sqlite3
 
 import pytest
 
-from scone_memory.errors import Conflict, InvalidInput, NotFound
-from scone_memory.session_journal import SessionJournal
+from scone_memory.core.errors import Conflict, InvalidInput, NotFound
+from scone_memory.realtime.session_journal import SessionJournal
 
 
 def test_scope_is_copied_persisted_and_bound_to_the_create_request(tmp_path):

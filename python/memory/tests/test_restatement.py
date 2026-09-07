@@ -6,7 +6,7 @@ the superseded statement above its replacement in 72 of 74 cases."""
 
 from __future__ import annotations
 
-from scone_memory.fusion import Fused, demote_restated, restates, words_of
+from scone_memory.retrieval.fusion import Fused, demote_restated, restates, words_of
 
 FINLAND = "pesäpallo was created in the country of Finland."
 PHILIPPINES = "pesäpallo was created in the country of Philippines."
@@ -61,7 +61,7 @@ def test_nothing_moves_without_a_restatement_and_nothing_is_dropped():
 
 async def test_the_engine_puts_the_replacement_first_only_when_asked():
     from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-    from scone_memory.engine import Record
+    from scone_memory.memory.engine import Record
 
     async def engine_with(**kw):
         e = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), **kw).open()
@@ -86,7 +86,7 @@ async def test_the_engine_puts_the_replacement_first_only_when_asked():
 
 
 def test_the_setting_comes_from_the_environment():
-    from scone_memory.config import Settings
+    from scone_memory.runtime.config import Settings
 
     assert Settings.from_env({"SCONE_DEMOTE_RESTATED": "1"}).demote_restated is True
     assert Settings.from_env({}).demote_restated is False
@@ -99,8 +99,8 @@ def test_both_benches_build_their_engines_with_every_setting():
     both benches use is built in one place and every setting is carried."""
     import inspect
 
-    from scone_memory import cli
-    from scone_memory.config import ENGINE_SETTINGS, Settings, build_in_process_engine
+    from scone_memory.runtime import cli
+    from scone_memory.runtime.config import ENGINE_SETTINGS, Settings, build_in_process_engine
 
     for command in (cli.bench_command, cli.conflicts_command):
         assert "build_in_process_engine" in inspect.getsource(command), command.__name__

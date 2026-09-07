@@ -11,7 +11,7 @@ from collections import Counter
 
 import pytest
 
-from ..errors import InvalidInput, NotFound
+from ..core.errors import InvalidInput, NotFound
 
 async def test_remember_then_recall_finds_it(engine):
     added = await engine.remember("default", "Moved to Lisbon in March; the flat is on Rua Augusta")

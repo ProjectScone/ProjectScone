@@ -15,8 +15,8 @@ from contextlib import aclosing
 from contextvars import ContextVar
 from uuid import uuid4
 
-from ..engine import MemoryEngine, Record, check_space
-from ..recall_scope import RecallScope
+from ..memory.engine import MemoryEngine, Record, check_space
+from ..retrieval.recall_scope import RecallScope
 from .context import MemoryContext
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .audio import (

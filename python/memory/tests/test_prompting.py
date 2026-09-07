@@ -6,8 +6,8 @@ import io
 import json
 import pathlib
 
-from scone_memory import agent_hook
-from scone_memory.prompting import CONTEXT_PREFIX, INSTRUCTIONS, additional_context, clean_request, compile_payload, hook_output
+from scone_memory.capture import agent_hook
+from scone_memory.capture.prompting import CONTEXT_PREFIX, INSTRUCTIONS, additional_context, clean_request, compile_payload, hook_output
 
 #: The shared fixture. The repository root copy (tests/fixtures/) is the
 #: one both compilers are held to; this package keeps a byte-identical
