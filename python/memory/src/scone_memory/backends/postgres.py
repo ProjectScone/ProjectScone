@@ -655,8 +655,8 @@ class PostgresEventLog:
 
     async def purge(self, space: str, *, preview: bool = False) -> int:
         if preview:
-            row = await self._row(f"SELECT count(*) AS n FROM {self.schema}.events WHERE space = %s", (space,))
-            return int(row["n"]) if row else 0
+            rows = await self._rows(f"SELECT count(*) AS n FROM {self.schema}.events WHERE space = %s", (space,))
+            return int(rows[0]["n"]) if rows else 0
         return len(await self._rows(f"DELETE FROM {self.schema}.events WHERE space = %s RETURNING id", (space,)))
 
     async def sweep(self) -> int:
