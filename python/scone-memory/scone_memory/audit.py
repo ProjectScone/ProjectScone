@@ -66,6 +66,10 @@ class Finding:
     #: The clause that decided a flagged verdict, so a person can read the
     #: evidence without opening the episode.
     evidence: Optional[str] = None
+    #: For a claim with no stored quote, the sentence in its source that
+    #: best covers it. Not evidence: a sentence to read, offered so the
+    #: reader does not have to search the episode themselves.
+    candidate_quote: Optional[str] = None
 
 
 async def audit_grounding(engine, space: str, statuses: Sequence[str] = ("active",)) -> list[Finding]:
@@ -100,11 +104,12 @@ async def _judge(engine, space: str, fact, sources: dict) -> Finding:
         return _judge_quote(fact, source)
     spans = list(_spans(source, fact.object))
     if not spans:
-        return _finding(fact, _absent_verdict(source, fact.object))
+        verdict = _absent_verdict(source, fact.object)
+        return _finding(fact, verdict, candidate=_candidate(source, fact) if verdict != "object_not_in_source" else None)
     clauses = [_clause_around(source, start, end) for start, end in spans]
     denials = [clause for clause in clauses if _DENIAL.search(clause)]
     if len(denials) < len(clauses):
-        return _finding(fact, "unverifiable_without_a_quote")
+        return _finding(fact, "unverifiable_without_a_quote", candidate=_candidate(source, fact))
     if _is_a_denial(fact.object):
         return _finding(fact, "object_is_a_denial", evidence=denials[0])
     # A real object inside a denied clause may or may not survive
@@ -188,12 +193,45 @@ def _is_a_denial(object: str) -> bool:
     return bool(words) and words <= _DENIAL_WORDS
 
 
-def _finding(fact, verdict: str, evidence: Optional[str] = None) -> Finding:
+#: How much of a claim's vocabulary a sentence must carry before it is
+#: worth offering. Below this it is the least bad sentence, not a lead.
+MIN_CANDIDATE_SHARE = 0.6
+
+
+def _candidate(source: str, fact) -> Optional[str]:
+    """The sentence that best covers this claim, or nothing.
+
+    Coverage is over the claim's own content words, subject and object
+    together, so a sentence naming the object in the wrong context does
+    not outrank one that names both. Ties go to the earlier sentence,
+    which is where a statement is usually made rather than referred back
+    to. Offering the least bad sentence would be inventing evidence, so
+    below the threshold this returns None.
+    """
+    wanted = _content_words(f"{fact.subject} {fact.object}")
+    if not wanted:
+        return None
+    best, best_share = None, 0.0
+    for sentence in _sentences(source):
+        have = {form for word in _content_words(sentence) for form in _forms(word)}
+        share = sum(1 for word in wanted if _forms(word) & have) / len(wanted)
+        if share > best_share:
+            best, best_share = sentence, share
+    return best if best_share >= MIN_CANDIDATE_SHARE else None
+
+
+def _sentences(source: str) -> list[str]:
+    found = [part.strip() for part in re.split(r"(?<=[.?!])\s+|\n+", source)]
+    return [part for part in found if part]
+
+
+def _finding(fact, verdict: str, evidence: Optional[str] = None,
+             candidate: Optional[str] = None) -> Finding:
     return Finding(
         fact_id=fact.fact_id, subject=fact.subject, predicate=fact.predicate, object=fact.object,
         status=fact.status, source_episode_id=fact.source_episode_id,
         verdict=verdict, flagged=verdict in FLAGGED,
-        quote=fact.quote, evidence=evidence,
+        quote=fact.quote, evidence=evidence, candidate_quote=candidate,
     )
 
 

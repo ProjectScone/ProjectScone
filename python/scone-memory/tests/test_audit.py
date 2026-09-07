@@ -299,3 +299,58 @@ async def test_a_claim_whose_words_are_absent_is_still_flagged(engine):
     found = await audit_grounding(engine, SPACE)
 
     assert [(f.verdict, f.flagged) for f in found] == [("object_not_in_source", True)]
+
+
+async def test_an_unprovable_claim_is_given_the_sentence_to_check_it_against(engine):
+    """184 claims in the live store carry no quote, so the audit can only
+    say it cannot tell. It can do better than that: find the sentence in
+    the source that best covers the claim and hand it over, so a person
+    reads one line instead of a whole episode. The audit still asserts
+    nothing; it just stops making the reader do the searching."""
+    added = await engine.remember(SPACE, (
+        "Lisbon was warm that spring. Ana moved to Lisbon in March and started at "
+        "Farfetch the same week. Nobody has reviewed the backlog since."
+    ))
+    await engine.assert_fact(
+        SPACE, "ana", "moved_to", "Lisbon",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert found[0].verdict == "unverifiable_without_a_quote"
+    assert found[0].candidate_quote == "Ana moved to Lisbon in March and started at Farfetch the same week."
+
+
+async def test_a_claim_with_a_real_quote_needs_no_candidate(engine):
+    added = await engine.remember(SPACE, "Ana moved to Lisbon in March.")
+    await engine.assert_fact(
+        SPACE, "ana", "moved_to", "Lisbon", source_episode_id=added.episode_id,
+        origin="extracted", quote="Ana moved to Lisbon in March.",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert (found[0].verdict, found[0].candidate_quote) == ("grounded", None)
+
+
+async def test_no_sentence_is_offered_when_none_covers_the_claim(engine):
+    """Offering the least bad sentence would be inventing evidence.
+
+    Every word of this claim is somewhere in the source, so the audit
+    cannot call it absent, but no single sentence carries enough of it to
+    be worth a person's eye. Handing over the closest one would dress up
+    a scattered coincidence as a lead."""
+    added = await engine.remember(SPACE, (
+        "Ana signed the lease. Lisbon appeared first. Porto came later. "
+        "Madrid and Faro followed."
+    ))
+    await engine.assert_fact(
+        SPACE, "ana", "lived_in", "Lisbon Porto Madrid Faro",
+        source_episode_id=added.episode_id, origin="extracted",
+    )
+
+    found = await audit_grounding(engine, SPACE)
+
+    assert found[0].verdict == "unverifiable_without_a_quote"
+    assert found[0].candidate_quote is None
