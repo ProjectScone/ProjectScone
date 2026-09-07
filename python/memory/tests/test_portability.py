@@ -58,3 +58,46 @@ async def test_a_dump_without_a_space_field_is_taken_as_it_is():
     target = await moved(dump, into="archive")
     [stored] = await target.documents.recent_episodes("archive", 10)
     assert stored.content_hash == content_hash("work", "note"), "an older dump names no space, so its identity is passed through"
+
+
+async def test_links_travel_in_a_dump_with_their_ends_and_sources_remapped():
+    """A relation is part of the ledger's history, so it moves with it.
+    Ids are store-local: a link's ends and its source are remapped through
+    the ids the import produced, a link to a fact not in the dump is
+    dropped and counted, and importing the same dump twice adds nothing."""
+    source = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    episode = await source.remember("default", "Acme is headquartered in Lisbon, near the river.")
+    works = await source.assert_fact("default", "mark", "works_at", "Acme")
+    based = await source.assert_fact("default", "Acme", "based_in", "Lisbon", source_episode_id=episode.episode_id, quote="headquartered in Lisbon")
+    derived = await source.assert_fact("default", "mark", "works_in", "Lisbon", derived_from=[works.fact_id, based.fact_id])
+    await source.link_facts("default", works.fact_id, based.fact_id, "supports", source_episode_id=episode.episode_id, quote="headquartered in Lisbon")
+    dump = [record async for record in source.export("default")]
+    links = [r for r in dump if r["type"] == "fact_link"]
+    assert sorted(l["kind"] for l in links) == ["derived_from", "derived_from", "supports"]
+    assert all({"from_fact", "to_fact", "kind", "created_at", "source_episode_id", "quote"} <= set(l) for l in links)
+
+    # The target already holds an unrelated episode, so every id shifts.
+    target = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await target.remember("default", "something else entirely")
+    await target.assert_fact("default", "zed", "is", "first")
+    summary = await target.import_records("default", dump)
+    assert (summary.facts, summary.links, summary.links_skipped) == (3, 3, 0)
+    facts = {(f.subject, f.predicate): f for f in await target.facts("default", include_closed=True)}
+    moved = await target.fact_links("default", facts[("mark", "works_in")].fact_id)
+    assert sorted((l.from_fact, l.to_fact, l.kind) for l in moved) == sorted([
+        (facts[("mark", "works_in")].fact_id, facts[("mark", "works_at")].fact_id, "derived_from"),
+        (facts[("mark", "works_in")].fact_id, facts[("acme", "based_in")].fact_id, "derived_from"),
+    ])
+    [supports] = [l for l in await target.fact_links("default", facts[("acme", "based_in")].fact_id) if l.kind == "supports"]
+    moved_episode = next(e for e in await target.documents.recent_episodes("default", 10) if "headquartered" in e.content)
+    assert supports.source_episode_id == moved_episode.episode_id != episode.episode_id, "the source follows the episode's new id"
+    assert supports.quote == "headquartered in Lisbon"
+
+    again = await target.import_records("default", dump)
+    assert (again.facts, again.links, again.links_skipped) == (0, 0, 3), "the same dump twice adds nothing"
+    assert len(await target.fact_links("default", facts[("mark", "works_in")].fact_id)) == 2
+
+    orphan = [r for r in dump if r["type"] != "fact" or r["subject"] != "mark" or r["predicate"] != "works_at"]
+    fresh = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    partial = await fresh.import_records("default", orphan)
+    assert (partial.facts, partial.links, partial.links_skipped) == (2, 1, 2), "both links that named the missing fact are dropped, not pointed elsewhere"

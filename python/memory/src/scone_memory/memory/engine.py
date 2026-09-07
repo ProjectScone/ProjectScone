@@ -165,6 +165,9 @@ class ImportSummary:
     #: Episodes already present in the target.
     deduplicated: int = 0
     facts: int = 0
+    #: Relations stored, and those dropped or already present.
+    links: int = 0
+    links_skipped: int = 0
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
@@ -1592,8 +1595,17 @@ class MemoryEngine:
                 "metadata": dict(episode.metadata),
                 "created_at": episode.created_at,
             }
-        for fact in await self.documents.list_facts(space, include_closed=True):
+        facts = await self.documents.list_facts(space, include_closed=True)
+        for fact in facts:
             yield {"type": "fact", **fact.model_dump(exclude={"space"})}
+        # A relation is part of the ledger's history, so it moves with it;
+        # each link is read from both ends and written once.
+        seen: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.link_id not in seen:
+                    seen.add(link.link_id)
+                    yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
 
     async def import_records(self, space: str, records: Iterable[Mapping]) -> ImportSummary:
         """Load an export. Episodes go through the normal ingest, so they
@@ -1613,6 +1625,7 @@ class MemoryEngine:
         episodes: list[Record] = []
         source_ids: list[Optional[int]] = []
         facts: list[Mapping] = []
+        links: list[Mapping] = []
         for record in records:
             kind = record.get("type", "episode")
             if kind == "episode":
@@ -1620,6 +1633,8 @@ class MemoryEngine:
                 source_ids.append(record.get("episode_id"))
             elif kind == "fact":
                 facts.append(record)
+            elif kind == "fact_link":
+                links.append(record)
             else:
                 raise InvalidInput(f"unknown record type {kind!r}")
         # Ids are store-local (spec 3.1). Provenance in the dump names the
@@ -1632,7 +1647,10 @@ class MemoryEngine:
             summary.deduplicated += 1 if added.deduplicated else 0
             if old_id is not None:
                 id_map[int(old_id)] = added.episode_id
-        existing = {_fact_identity(f) for f in await self.documents.list_facts(space, include_closed=True)}
+        existing = {_fact_identity(f): f.fact_id for f in await self.documents.list_facts(space, include_closed=True)}
+        # Fact ids are store-local too: a link's ends are remapped through
+        # the ids this import produced or found already present.
+        fact_map: dict[int, int] = {}
         for f in facts:
             source = f.get("source_episode_id")
             new = NewFact(
@@ -1659,11 +1677,36 @@ class MemoryEngine:
             )
             if identity in existing:
                 summary.facts_skipped += 1
+                if f.get("fact_id") is not None:
+                    fact_map[int(f["fact_id"])] = existing[identity]
                 continue
-            existing.add(identity)
-            await self.documents.insert_fact(new)
+            stored = await self.documents.insert_fact(new)
+            existing[identity] = stored.fact_id
+            if f.get("fact_id") is not None:
+                fact_map[int(f["fact_id"])] = stored.fact_id
             summary.facts += 1
-        if summary.facts:
+        for record in links:
+            kind = str(record.get("kind", ""))
+            ends = (fact_map.get(int(record["from_fact"])), fact_map.get(int(record["to_fact"])))
+            if kind not in LINK_KINDS or None in ends or ends[0] == ends[1]:
+                # A link to a fact not in the dump is dropped, not pointed at
+                # an unrelated record; a bad kind is a bad record.
+                summary.links_skipped += 1
+                continue
+            source = record.get("source_episode_id")
+            new_link = NewFactLink(
+                space=space, from_fact=ends[0], to_fact=ends[1], kind=kind,
+                created_at=normalise_time(str(record["created_at"])) if record.get("created_at") else self.clock(),
+                source_episode_id=id_map.get(int(source)) if source is not None else None,
+                quote=record.get("quote"),
+            )
+            already = any((l.to_fact, l.kind) == (ends[1], kind) for l in await self.documents.fact_links(space, ends[0]) if l.from_fact == ends[0])
+            if already:
+                summary.links_skipped += 1
+                continue
+            await self.documents.insert_fact_link(new_link)
+            summary.links += 1
+        if summary.facts or summary.links:
             await self.documents.bump_revision(space)
         return summary
 

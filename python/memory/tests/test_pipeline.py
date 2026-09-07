@@ -108,7 +108,7 @@ def test_cli_round_trip_through_sqlite(tmp_path):
     env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "second.db")}
     out = io.StringIO()
     assert cli.main(["import", "--json"], env=env2, stdin=io.StringIO(dump), out=out) == 0
-    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0}
+    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0, "links": 0, "links_skipped": 0}
     out = io.StringIO()
     cli.main(["status", "--json"], env=env2, stdin=io.StringIO(), out=out)
     assert json.loads(out.getvalue())["episodes"] == 1
