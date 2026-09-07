@@ -1300,18 +1300,38 @@ class MemoryEngine:
         for c in chunks:
             episode_ids.add(c.episode_id)
 
+        def draw_episode(ep) -> None:
+            g.add(G.Node(f"episode:{ep.episode_id}", "episode", ep.content[:80], ep.created_at,
+                         {"kind": ep.kind, "source": ep.source, "tags": list(ep.tags),
+                          "metadata": dict(ep.metadata), "content": ep.content}))
+
         for eid in sorted(episode_ids):
             ep = await self.documents.get_episode(space, eid)
             if ep is None:
                 continue
-            g.add(G.Node(f"episode:{eid}", "episode", ep.content[:80], ep.created_at,
-                         {"kind": ep.kind, "source": ep.source, "tags": list(ep.tags), "metadata": dict(ep.metadata), "content": ep.content}))
+            draw_episode(ep)
         for c in chunks:
             if f"episode:{c.episode_id}" in g.nodes:
                 g.add(G.Node(f"chunk:{c.chunk_id}", "chunk", c.text[:80], c.created_at, {"ordinal": c.ordinal, "start": c.start, "end": c.end, "text": c.text}))
                 g.link(f"episode:{c.episode_id}", f"chunk:{c.chunk_id}", "chunked_into")
         facts = await self.documents.list_facts(space, include_closed=True)
         wanted = [f for f in facts if (f.source_episode_id in episode_ids) or not focused]
+        # A claim's source is part of the claim. Drawing the claim while
+        # leaving out the episode it came from turns provenance into a
+        # silent absence, which reads as "no evidence" rather than "not in
+        # this snapshot". Sources the window never mentioned are hydrated
+        # here, bounded the same way the window is, and whatever does not
+        # fit is counted so the snapshot can say what it left out. An
+        # episode that was forgotten has no node and no edge, which is the
+        # truth about it rather than an omission.
+        elsewhere = list(dict.fromkeys(
+            f.source_episode_id for f in wanted
+            if f.source_episode_id is not None and f"episode:{f.source_episode_id}" not in g.nodes))
+        for eid in sorted(elsewhere)[:limit]:
+            ep = await self.documents.get_episode(space, eid)
+            if ep is not None:
+                draw_episode(ep)
+        g.provenance_omitted = max(0, len(elsewhere) - limit)
         for f in wanted:
             g.add(G.Node(f"claim:{f.fact_id}", "claim", f"{f.subject} {f.predicate.replace('_', ' ')} {f.object}", f.valid_from, {
                 "status": f.status, "origin": f.origin, "confidence": f.confidence, "valid_from": f.valid_from,
