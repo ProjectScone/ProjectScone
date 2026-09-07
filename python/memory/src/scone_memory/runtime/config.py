@@ -112,6 +112,10 @@ class Settings:
     # as `serve-conversations --model-factory`, absent meaning history-only.
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
+    # A persona catalog (JSON array of Persona documents) needs a registry
+    # (trusted module:callable returning a ProviderRegistry) to bind it.
+    conversations_personas: Optional[str] = None
+    conversations_registry: Optional[str] = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -165,6 +169,8 @@ class Settings:
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
+            conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
+            conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
         )
 
 

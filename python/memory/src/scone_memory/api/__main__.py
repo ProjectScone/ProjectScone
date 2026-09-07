@@ -27,6 +27,19 @@ def build_app(settings: Settings, engine):
     from .conversations import create_conversation_app
 
     journal = journal_path(settings, settings.conversations_journal)
+    catalog = None
+    if settings.conversations_personas:
+        if not settings.conversations_registry:
+            raise ValueError("SCONE_CONVERSATIONS_REGISTRY is required with a persona catalog")
+        from ..realtime.catalog import bind_catalog, load_personas
+        from ..realtime.providers import ProviderRegistry
+
+        # The same trust rule as a model factory; this one is called once,
+        # here, and may close over the operator's provider credentials.
+        registry = load_model_factory(settings.conversations_registry)()
+        if not isinstance(registry, ProviderRegistry):
+            raise ValueError("SCONE_CONVERSATIONS_REGISTRY must return a ProviderRegistry")
+        catalog = bind_catalog(load_personas(settings.conversations_personas), registry)
     scoped = None
     if settings.conversations_model_factory:
         factory = load_model_factory(settings.conversations_model_factory)
@@ -36,8 +49,8 @@ def build_app(settings: Settings, engine):
             return TextConversation(engine, space, sid, factory, **scope.kwargs())
     # The composed shell never carries a key: the tab asks for one.
     return create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
-                                   console=True, public_text_streaming=scoped is not None,
-                                   worker=worker, reload_pages=settings.reload_pages)
+                                   console=True, public_text_streaming=scoped is not None or catalog is not None,
+                                   worker=worker, reload_pages=settings.reload_pages, catalog=catalog)
 
 
 def build_server(settings: Settings, app):

@@ -623,6 +623,19 @@ SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db scone-memory serve
 SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db SCONE_CONVERSATIONS_MODEL_FACTORY=my_models:create scone-memory serve
 ```
 
+A composed host can also serve a saved persona catalog. `SCONE_CONVERSATIONS_PERSONAS`
+names a JSON array of Persona documents (`scone_memory.realtime.persona.Persona`,
+schema 1: id, name, instructions, and exact reply/transcription/speech/activity
+choices); `SCONE_CONVERSATIONS_REGISTRY` names a trusted zero-argument callable
+returning the `ProviderRegistry` that admits those choices. Every persona is bound
+at startup, so a choice the registry does not register stops `serve` with exit 2
+naming the persona and the stage. Clients read `GET /v1/conversations/personas`
+(ids, names, provider/model labels, `text_ready`, `voice_ready`; never the
+instructions), pick one with `persona` on `POST /v1/conversations`, and see
+`{"id", "name"}` in every session receipt. With a catalog and no bare model
+factory, a session must name a persona; nothing is chosen for it. `voice_ready`
+is false for every persona until a browser audio transport exists.
+
 On a composed host the pages carry no baked key even with a single configured
 key (the tab asks for one), `GET /v1/capabilities` reports
 `features.conversations: true`, and `GET /v1/conversations/capabilities` says

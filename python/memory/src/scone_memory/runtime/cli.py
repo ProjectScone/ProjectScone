@@ -130,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT; "
-                                "SCONE_CONVERSATIONS_JOURNAL composes the conversation service on the same origin)")
+                                "SCONE_CONVERSATIONS_JOURNAL composes the conversation service on the same origin; "
+                                "SCONE_CONVERSATIONS_PERSONAS + SCONE_CONVERSATIONS_REGISTRY add a persona catalog)")
     p = sub.add_parser("serve-conversations", help="run the optional authenticated conversation service")
     p.add_argument("--journal", required=True, help="separate conversation SQLite database; parent must exist")
     runtime = p.add_mutually_exclusive_group(required=True)

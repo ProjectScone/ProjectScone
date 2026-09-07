@@ -40,6 +40,8 @@ class Command(BaseModel):
 class Create(Command):
     capture: bool
     recall_scope: dict[str, object] = Field(default_factory=dict)
+    # A catalog id; fixed for the session's life and echoed in its receipts.
+    persona: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class Stop(Command):
@@ -62,7 +64,7 @@ class OwnedSession:
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
-                            worker=None, reload_pages=False):
+                            worker=None, reload_pages=False, catalog=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -78,6 +80,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     worker is a ConsolidationWorker started once the journal is owned and
     stopped with the service; a mounted memory app's own lifespan never runs,
     so the service must carry it. reload_pages re-reads the shell per request.
+    catalog is a bound PersonaCatalog: sessions may name one of its personas at
+    creation and then run that persona's native text runtime. A host with a
+    catalog and no bare runtime requires the choice; nothing is chosen for it.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -91,7 +96,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("runtime_factory must be callable or None")
     if scoped_runtime_factory is not None and not callable(scoped_runtime_factory):
         raise ValueError("scoped_runtime_factory must be callable or None")
-    if type(public_text_streaming) is not bool or (public_text_streaming and runtime_factory is None and scoped_runtime_factory is None):
+    if catalog is not None and not hasattr(catalog, "public"):
+        raise ValueError("catalog must be a bound PersonaCatalog or None")
+    # A catalog's sessions run the native text runtime, which streams.
+    configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
+    if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
     creates: dict[tuple[str, str], str] = {}
@@ -253,8 +262,16 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def conflict(_request, error):
         return JSONResponse({"error": "conversation revision or command conflict", "revision": error.revision}, status_code=409)
 
+    def describe(session):
+        """A session receipt names its persona from this process's catalog; an
+        id the catalog no longer has keeps its id and gets no name."""
+        chosen = session.get("persona")
+        session["persona"] = ({"id": chosen, "name": catalog.name(chosen) if catalog is not None else None}
+                              if chosen else None)
+        return session
+
     def inspect(space, sid):
-        result = journal.get(space, sid)
+        result = describe(journal.get(space, sid))
         entry = owned.get((space, sid))
         result["active_request_id"] = entry.active_id if entry else None
         result["latest_request_id"] = journal.latest_turn_id(space, sid)
@@ -262,8 +279,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
-        return {"schema_version": 1, "text_configured": runtime_factory is not None or scoped_runtime_factory is not None,
-                "recall_scope": scoped_runtime_factory is not None,
+        return {"schema_version": 1,
+                "text_configured": runtime_factory is not None or scoped_runtime_factory is not None or bool(catalog and catalog.personas),
+                "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
+                "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": False, "video": False, "streaming": public_text_streaming,
                 "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
                                   "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
@@ -273,9 +292,18 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "transcript_pagination": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
+    @app.get("/v1/conversations/personas")
+    async def personas(space=Depends(space_for)):
+        """The choices this host can run, for a client to pick from. Never the
+        instructions, and nothing the registry closed over."""
+        return {"schema_version": 1, "personas": catalog.public() if catalog is not None else []}
+
     @app.get("/v1/conversations")
     async def sessions(after: str = "", limit: int = 100, space=Depends(space_for)):
-        return journal.sessions(space, after=after, limit=limit)
+        page = journal.sessions(space, after=after, limit=limit)
+        for item in page["items"]:
+            describe(item)
+        return page
 
     @app.post("/v1/conversations")
     async def create(body: Create, space=Depends(space_for)):
@@ -284,28 +312,39 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if not body.capture:
             raise HTTPException(422, "this runtime requires explicit transcript capture consent")
         scope = RecallScope.from_mapping(body.recall_scope)
-        if runtime_factory is None and scoped_runtime_factory is None:
+        chosen = None
+        if body.persona is not None:
+            chosen = catalog.get(body.persona) if catalog is not None else None
+            if chosen is None:
+                raise HTTPException(422, f"persona is not in this host's catalog: {body.persona}")
+        elif runtime_factory is None and scoped_runtime_factory is None:
+            if catalog is not None and catalog.personas:
+                raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
             raise HTTPException(503, "text conversation runtime is not configured")
-        if scope.as_dict() and scoped_runtime_factory is None:
+        if scope.as_dict() and scoped_runtime_factory is None and chosen is None:
             raise HTTPException(422, "this runtime does not support session recall constraints")
         key = (space, body.request_id)
         if key in creates:
             # Deleted sessions keep a process-local retry tombstone. Check it
             # before journal.create can insert a new row for the deleted key.
             current = inspect(space, creates[key])
-            journal.create(space, body.request_id, recall_scope=scope.as_dict())
+            journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona)
             return current
         if len(creates) >= max_sessions:
             raise HTTPException(429, "conversation process capacity reached")
-        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict())
+        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict(), persona=body.persona)
         sid = receipt["session_id"]
         creates[key] = sid
         current = journal.get(space, sid)
         if current["state"] != "created":
             return inspect(space, sid)
         try:
-            runtime = (scoped_runtime_factory(space, sid, RecallScope.from_mapping(current["recall_scope"]))
-                       if scoped_runtime_factory is not None else runtime_factory(space, sid))
+            fixed = RecallScope.from_mapping(current["recall_scope"])
+            if chosen is not None:
+                runtime = chosen.text(engine, space, sid, **fixed.kwargs())
+            else:
+                runtime = (scoped_runtime_factory(space, sid, fixed)
+                           if scoped_runtime_factory is not None else runtime_factory(space, sid))
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
