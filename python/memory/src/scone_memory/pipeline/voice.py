@@ -107,8 +107,10 @@ class RecognizerStage:
 
     def __init__(self, recognizer: SpeechRecognizer, *, backlog: int = 8) -> None:
         self.recognizer = recognizer
-        self.backlog = backlog
-        self._audio: Optional[asyncio.Queue] = None
+        # Built here rather than on start, so audio arriving from a stage
+        # in front of this one before its own turn to start has somewhere
+        # to wait. Whether that happens is the other stage's business.
+        self._audio: asyncio.Queue = asyncio.Queue(backlog)
         self._feed = None
         self._task: Optional[asyncio.Task] = None
 
@@ -116,7 +118,6 @@ class RecognizerStage:
         self._feed = feed
 
     async def start(self) -> None:
-        self._audio = asyncio.Queue(self.backlog)
         self._task = asyncio.create_task(self._read(), name="voice-recognizer")
 
     async def stop(self) -> None:

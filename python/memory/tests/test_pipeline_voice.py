@@ -336,3 +336,38 @@ async def test_a_model_that_keeps_talking_after_it_has_finished_is_refused():
     assert mouth.spoken == ["done."], "what came before the ending was said, and nothing after it"
     assert not pipeline.ended.is_set(), "a misbehaving model costs the turn, not the call"
     await pipeline.stop()
+
+
+async def test_the_ear_is_ready_before_anything_in_front_of_it_can_speak():
+    """Stages start in order, so a source in front of the ear can be
+    sending before the ear's own turn to start comes round. Whether that
+    happens depends on whether the source's start waits on anything,
+    which is not the ear's business to know."""
+
+    class Eager:
+        """A source whose start waits, letting what it has already sent
+        run while the stages behind it are still being started."""
+
+        def __init__(self):
+            self.feed = None
+
+        async def attach(self, feed):
+            self.feed = feed
+
+        async def start(self):
+            asyncio.create_task(self.feed(SOUND))
+            await asyncio.sleep(0)
+
+        async def handle(self, frame, emit):
+            pass
+
+    ear = RecognizerStage(Ear([Transcript(text="hello?", final=True)]))
+    far = FarEnd()
+    pipeline = Pipeline([Eager(), ear, ModelStage(Mind(["hi."])), SynthesizerStage(Mouth()),
+                         CallerStage(far)])
+    await pipeline.start()
+    await until(lambda: ear.recognizer.heard, "the audio that arrived early to be heard")
+
+    assert pipeline.failures == 0, "the early chunk was kept, not dropped on the floor"
+    assert not pipeline.ended.is_set()
+    await pipeline.stop()
