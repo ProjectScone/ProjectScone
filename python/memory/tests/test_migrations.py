@@ -70,13 +70,14 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     before = snapshot(path)
 
     store = SqliteDocumentStore(path)  # opening applies every step, 5 -> 6 -> 7 -> 8 -> 9 -> 10
-    assert schema_version(store.conn) == SCHEMA_VERSION == 10
+    assert schema_version(store.conn) == SCHEMA_VERSION == 11
     cols = [r[1] for r in store.conn.execute("PRAGMA table_info(facts)")]
     assert "quote" in cols
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'inflight'").fetchone()[0] == 1
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'fact_links'").fetchone()[0] == 1
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'tombstones'").fetchone()[0] == 1
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'erased_spaces'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'ingest_jobs'").fetchone()[0] == 1
     after = snapshot(path)
     assert after["episodes"] == before["episodes"], "episode rows and ids untouched"
     assert after["facts"] == before["facts"], "fact rows, ids, statuses, reasons untouched"
@@ -106,7 +107,9 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     assert fourth.exists() and snapshot(fourth) == before, "and one before the fourth"
     fifth = tmp_path / "live.db.v9.bak"
     assert fifth.exists() and snapshot(fifth) == before, "and one before the fifth"
-    assert schema_version(again.conn) == 10 and not (tmp_path / "live.db.v10.bak").exists()
+    sixth = tmp_path / "live.db.v10.bak"
+    assert sixth.exists() and snapshot(sixth) == before, "and one before the sixth"
+    assert schema_version(again.conn) == 11 and not (tmp_path / "live.db.v11.bak").exists()
 
 
 def test_the_step_is_atomic(tmp_path, monkeypatch):
@@ -168,7 +171,7 @@ def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
 
 
 def test_other_versions_are_still_refused_not_rewritten(tmp_path):
-    for version in ("2", "4", "11"):  # 11 stands for a build newer than this one
+    for version in ("2", "4", "12"):  # 12 stands for a build newer than this one
         path = tmp_path / f"v{version}.db"
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)

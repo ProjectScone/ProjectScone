@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Chunk, Episode, Fact, FactLink, Tombstone
+from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,17 @@ class DeletedSpace:
     tombstones: int
 
 
+@dataclass(frozen=True)
+class NewJob:
+    """A batch to record, with the receipts its records already have."""
+
+    job_id: str
+    space: str
+    created_at: str
+    request_id: Optional[str]
+    items: tuple[JobItem, ...]
+
+
 @runtime_checkable
 class EpisodeInventory(Protocol):
     """Optional bounded inventory, newest ID first; apply filters before LIMIT.
@@ -213,6 +224,22 @@ class DocumentStore(Protocol):
         ...
     async def space_deleted(self, space: str) -> Optional[str]:
         """When the space was deleted, or None while it lives."""
+        ...
+    async def create_job(self, new: NewJob) -> IngestJob:
+        """Record a batch. Optional: a store that cannot keep jobs simply
+        does not implement this, and the engine says so plainly."""
+        ...
+    async def get_job(self, space: str, job_id: str) -> Optional[IngestJob]: ...
+    async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
+        """The job this request already made, so a retry is not a second one."""
+        ...
+    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
+        """Newest first."""
+        ...
+    async def update_job(self, job: IngestJob) -> None: ...
+    async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
+        """Record that these episodes have been read; returns how many
+        items moved, so marking the same episode twice is not two moves."""
         ...
 
 

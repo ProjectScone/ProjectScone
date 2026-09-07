@@ -384,6 +384,10 @@ class Distiller:
                 continue
             seen.add(fact.fact_id)
             outcome.added.append(fact)
+        # The record has been read, whether or not it yielded a claim: an
+        # episode nothing can be extracted from is finished, not pending.
+        if episode_id is not None:
+            await self.engine.note_consolidated(space, [episode_id])
         return outcome
 
     async def _active_ids(self, space: str, subject: str, predicate: str) -> set[int]:

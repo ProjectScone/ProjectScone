@@ -14,6 +14,7 @@ import hashlib
 import math
 import re
 import time
+from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -35,6 +36,8 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
+    JobItem,
+    IngestJob,
     SpaceReceipt,
     Tombstone,
     DEPENDENCY_KINDS,
@@ -55,6 +58,7 @@ from ..core.ports import (
     NewEvent,
     NewFact,
     NewFactLink,
+    NewJob,
     NewTombstone,
     SourcePage,
     TextFilter,
@@ -789,6 +793,86 @@ class MemoryEngine:
             "latency_ms": _ms(started),
         })
         return receipt
+
+    # -- ingest jobs ---------------------------------------------------------
+
+    def _keeps_jobs(self) -> None:
+        """Recording jobs is a store's choice: one that cannot keep them
+        says so rather than pretending a batch was never tracked."""
+        if not callable(getattr(self.documents, "create_job", None)):
+            raise InvalidInput("this document store does not record ingest jobs")
+
+    async def ingest_batch(self, space: str, records: Iterable[Record], *,
+                           request_id: Optional[str] = None) -> "IngestJob":
+        """Ingest a batch and keep the receipt of what it became.
+
+        Two receipts per record, never one: ``searchable_at`` is set here,
+        because chunks and vectors land with the batch, and
+        ``consolidated_at`` only when a model has read claims out of the
+        record, which happens later and may never happen. A request id
+        makes a retry the same job rather than a second one."""
+        check_space(space)
+        await self._living(space)
+        self._keeps_jobs()
+        if request_id:
+            already = await self.documents.job_by_request(space, request_id)
+            if already is not None:
+                return already
+        records = list(records)
+        added = await self.remember_many(space, records)
+        when = self.clock()
+        items = tuple(
+            JobItem(index=index, episode_id=one.episode_id, outcome=one.outcome,
+                    state="searchable", searchable_at=when)
+            for index, one in enumerate(added)
+        )
+        job = await self.documents.create_job(NewJob(
+            job_id=uuid4().hex, space=space, created_at=when, request_id=request_id, items=items))
+        await self._emit(space, "ingest_job", {
+            "job_id": job.job_id, "records": len(items), "request_id": request_id,
+        })
+        return job
+
+    async def job(self, space: str, job_id: str) -> "IngestJob":
+        """One batch's receipt."""
+        check_space(space)
+        self._keeps_jobs()
+        found = await self.documents.get_job(space, job_id)
+        if found is None:
+            raise NotFound(f"job {job_id!r} in {space!r}")
+        return found
+
+    async def jobs(self, space: str, limit: int = 20) -> list["IngestJob"]:
+        """Recent batches, newest first."""
+        check_space(space)
+        self._keeps_jobs()
+        return await self.documents.list_jobs(space, max(1, min(limit, 100)))
+
+    async def cancel_job(self, space: str, job_id: str) -> "IngestJob":
+        """Stop expecting more of this batch. What has already been read
+        stays read and what was searchable stays searchable: cancelling a
+        job abandons the work still to come, it does not delete memory."""
+        job = await self.job(space, job_id)
+        if job.cancelled_at:
+            raise InvalidInput(f"job {job_id!r} was already cancelled at {job.cancelled_at}")
+        when = self.clock()
+        stopped = job.model_copy(update={
+            "cancelled_at": when,
+            "items": [item if item.consolidated_at else item.model_copy(update={"state": "cancelled"})
+                      for item in job.items],
+        })
+        await self.documents.update_job(stopped)
+        await self._emit(space, "ingest_job", {"job_id": job_id, "cancelled": len(stopped.items)})
+        return stopped
+
+    async def note_consolidated(self, space: str, episode_ids: Sequence[int]) -> int:
+        """Record that these episodes have been read into claims. Marking
+        the same episode twice moves nothing, so a re-run of the extractor
+        does not rewrite a receipt that already stands."""
+        check_space(space)
+        if not callable(getattr(self.documents, "mark_consolidated", None)):
+            return 0
+        return await self.documents.mark_consolidated(space, list(episode_ids), self.clock())
 
     # -- a whole space ------------------------------------------------------
 

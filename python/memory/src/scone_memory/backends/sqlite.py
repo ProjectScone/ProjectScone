@@ -20,8 +20,8 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """
@@ -67,12 +67,15 @@ CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
 CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ingest_jobs (space TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL, request_id TEXT, cancelled_at TEXT, PRIMARY KEY (space, job_id), UNIQUE (space, request_id));
+CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, PRIMARY KEY (space, job_id, idx));
+CREATE INDEX IF NOT EXISTS ingest_items_episode ON ingest_items(space, episode_id);
 """
 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 10  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones; 10: deleted spaces
+SCHEMA_VERSION = 11  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones; 10: erased spaces; 11: ingest jobs
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -93,6 +96,9 @@ STEPS: dict[int, tuple[str, ...]] = {
         " forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id))",
     ),
     9: ("CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL)",),
+    10: tuple(statement.strip() for statement in """CREATE TABLE IF NOT EXISTS ingest_jobs (space TEXT NOT NULL, job_id TEXT NOT NULL, created_at TEXT NOT NULL, request_id TEXT, cancelled_at TEXT, PRIMARY KEY (space, job_id), UNIQUE (space, request_id));
+CREATE TABLE IF NOT EXISTS ingest_items (space TEXT NOT NULL, job_id TEXT NOT NULL, idx INTEGER NOT NULL, episode_id INTEGER NOT NULL, outcome TEXT NOT NULL, state TEXT NOT NULL, searchable_at TEXT, consolidated_at TEXT, error TEXT, PRIMARY KEY (space, job_id, idx));
+CREATE INDEX IF NOT EXISTS ingest_items_episode ON ingest_items(space, episode_id);""".split(";\n") if statement.strip()),
 }
 
 
@@ -508,7 +514,8 @@ class SqliteDocumentStore:
 
             gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
                                 links=count("fact_links"), tombstones=count("tombstones"))
-            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions",
+                          "ingest_items", "ingest_jobs"):
                 conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
             conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
             conn.commit()
@@ -520,6 +527,69 @@ class SqliteDocumentStore:
     async def space_deleted(self, space: str) -> Optional[str]:
         row = self.conn.execute("SELECT erased_at FROM erased_spaces WHERE space = ?", (space,)).fetchone()
         return row[0] if row else None
+
+    # -- ingest jobs ------------------------------------------------------
+
+    def _job(self, space: str, row) -> IngestJob:
+        items = self.conn.execute(
+            "SELECT idx, episode_id, outcome, state, searchable_at, consolidated_at, error"
+            " FROM ingest_items WHERE space = ? AND job_id = ? ORDER BY idx", (space, row["job_id"]))
+        return IngestJob(
+            job_id=row["job_id"], space=space, created_at=row["created_at"],
+            request_id=row["request_id"], cancelled_at=row["cancelled_at"],
+            items=[JobItem(index=i["idx"], episode_id=i["episode_id"], outcome=i["outcome"], state=i["state"],
+                           searchable_at=i["searchable_at"], consolidated_at=i["consolidated_at"], error=i["error"])
+                   for i in items],
+        )
+
+    async def create_job(self, new: NewJob) -> IngestJob:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO ingest_jobs (space, job_id, created_at, request_id) VALUES (?, ?, ?, ?)",
+                (new.space, new.job_id, new.created_at, new.request_id))
+            self.conn.executemany(
+                "INSERT INTO ingest_items (space, job_id, idx, episode_id, outcome, state, searchable_at,"
+                " consolidated_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(new.space, new.job_id, i.index, i.episode_id, i.outcome, i.state,
+                  i.searchable_at, i.consolidated_at, i.error) for i in new.items])
+        return IngestJob(job_id=new.job_id, space=new.space, created_at=new.created_at,
+                         request_id=new.request_id, items=list(new.items))
+
+    async def get_job(self, space: str, job_id: str) -> Optional[IngestJob]:
+        row = self.conn.execute("SELECT * FROM ingest_jobs WHERE space = ? AND job_id = ?", (space, job_id)).fetchone()
+        return self._job(space, row) if row else None
+
+    async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
+        row = self.conn.execute(
+            "SELECT * FROM ingest_jobs WHERE space = ? AND request_id = ?", (space, request_id)).fetchone()
+        return self._job(space, row) if row else None
+
+    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
+        rows = self.conn.execute(
+            "SELECT * FROM ingest_jobs WHERE space = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (space, limit)).fetchall()
+        return [self._job(space, row) for row in rows]
+
+    async def update_job(self, job: IngestJob) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE ingest_jobs SET cancelled_at = ? WHERE space = ? AND job_id = ?",
+                              (job.cancelled_at, job.space, job.job_id))
+            self.conn.executemany(
+                "UPDATE ingest_items SET outcome = ?, state = ?, searchable_at = ?, consolidated_at = ?, error = ?"
+                " WHERE space = ? AND job_id = ? AND idx = ?",
+                [(i.outcome, i.state, i.searchable_at, i.consolidated_at, i.error, job.space, job.job_id, i.index)
+                 for i in job.items])
+
+    async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
+        if not episode_ids:
+            return 0
+        marks = ",".join("?" * len(episode_ids))
+        with self.conn:
+            changed = self.conn.execute(
+                f"UPDATE ingest_items SET consolidated_at = ?, state = 'consolidated'"
+                f" WHERE space = ? AND consolidated_at IS NULL AND episode_id IN ({marks})",
+                (when, space, *episode_ids)).rowcount
+        return int(changed)
 
     async def chunk_index(self, space: str) -> list[tuple[int, int]]:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""

@@ -173,6 +173,60 @@ class Tombstone(BaseModel):
     reason: Optional[str] = None
 
 
+class JobItem(BaseModel):
+    """One record of a batch, and how far it has got.
+
+    ``searchable_at`` is set when the words are findable; ``consolidated_at``
+    when a model has read claims out of them. They are separate because
+    they happen at different times and either can be the last thing that
+    happens: telling a person their knowledge is ready when it is only
+    findable is the failure this shape prevents."""
+
+    model_config = ConfigDict(frozen=True)
+
+    index: int
+    episode_id: int
+    #: accepted, duplicate or updated, as the write reported it.
+    outcome: str = "accepted"
+    #: searchable, consolidated, cancelled or failed.
+    state: str = "searchable"
+    searchable_at: Optional[str] = None
+    consolidated_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class IngestJob(BaseModel):
+    """What one batch became, durable enough to ask about after a restart."""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: str
+    space: str
+    created_at: str
+    #: The caller's id for this request, so a retry is the same job.
+    request_id: Optional[str] = None
+    cancelled_at: Optional[str] = None
+    items: list[JobItem] = Field(default_factory=list)
+
+    @property
+    def searchable(self) -> int:
+        return sum(1 for i in self.items if i.searchable_at)
+
+    @property
+    def consolidated(self) -> int:
+        return sum(1 for i in self.items if i.consolidated_at)
+
+    @property
+    def state(self) -> str:
+        """Where the whole job is: cancelled, consolidated once every
+        record has been read, else searchable."""
+        if self.cancelled_at:
+            return "cancelled"
+        if self.items and self.consolidated == len(self.items):
+            return "consolidated"
+        return "searchable"
+
+
 class SpaceReceipt(BaseModel):
     """What deleting a space takes with it, the same shape for the preview
     and the deed: episodes with their chunks and vectors, claims and the

@@ -15,8 +15,8 @@ from itertools import count
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
-from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 
@@ -38,6 +38,8 @@ class InMemoryDocumentStore:
         self._revision: dict[str, int] = defaultdict(int)
         self._inflight: set[tuple[str, str]] = set()
         self._deleted: dict[str, str] = {}
+        self._jobs: dict[tuple[str, str], IngestJob] = {}
+        self._job_seq: dict[tuple[str, str], int] = {}
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
         episode = Episode(episode_id=next(self._episode_ids), **new.__dict__)
@@ -72,6 +74,9 @@ class InMemoryDocumentStore:
         for key in stones:
             del self._tombstones[key]
         self._inflight = {mark for mark in self._inflight if mark[0] != space}
+        for key in [k for k in self._jobs if k[0] == space]:
+            del self._jobs[key]
+            self._job_seq.pop(key, None)
         self._revision.pop(space, None)
         self._deleted[space] = deleted_at
         return DeletedSpace(chunk_ids=chunk_ids, episodes=len(episode_ids), facts=len(fact_ids),
@@ -79,6 +84,44 @@ class InMemoryDocumentStore:
 
     async def space_deleted(self, space: str) -> Optional[str]:
         return self._deleted.get(space)
+
+    # -- ingest jobs ------------------------------------------------------
+
+    async def create_job(self, new: NewJob) -> IngestJob:
+        job = IngestJob(job_id=new.job_id, space=new.space, created_at=new.created_at,
+                        request_id=new.request_id, items=list(new.items))
+        self._jobs[(new.space, new.job_id)] = job
+        self._job_seq[(new.space, new.job_id)] = len(self._job_seq)
+        return job
+
+    async def get_job(self, space: str, job_id: str) -> Optional[IngestJob]:
+        return self._jobs.get((space, job_id))
+
+    async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
+        return next((j for (s, _), j in self._jobs.items() if s == space and j.request_id == request_id), None)
+
+    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
+        mine = [(key, job) for key, job in self._jobs.items() if key[0] == space]
+        ordered = sorted(mine, key=lambda pair: (pair[1].created_at, self._job_seq[pair[0]]), reverse=True)
+        return [job for _, job in ordered][:limit]
+
+    async def update_job(self, job: IngestJob) -> None:
+        self._jobs[(job.space, job.job_id)] = job
+
+    async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
+        wanted, moved = set(episode_ids), 0
+        for key, job in list(self._jobs.items()):
+            if key[0] != space:
+                continue
+            items = []
+            for item in job.items:
+                if item.episode_id in wanted and item.consolidated_at is None:
+                    items.append(item.model_copy(update={"consolidated_at": when, "state": "consolidated"}))
+                    moved += 1
+                else:
+                    items.append(item)
+            self._jobs[key] = job.model_copy(update={"items": items})
+        return moved
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         episode = await self.get_episode(space, episode_id)
