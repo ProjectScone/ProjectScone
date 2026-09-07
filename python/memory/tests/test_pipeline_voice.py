@@ -306,3 +306,33 @@ async def test_a_call_can_be_hung_up_with_the_ear_still_backed_up():
         await far.says()
     await until(lambda: ear._audio.full(), "the ear to back up")
     await asyncio.wait_for(pipeline.stop(), 2)
+
+
+async def test_a_model_that_keeps_talking_after_it_has_finished_is_refused():
+    """Saying it has finished and then saying more is a provider out of
+    step with its own protocol. What follows an ending is not an answer,
+    it is whatever the adapter had lying around, so the turn is a fault
+    rather than a longer reply."""
+
+    class Rambles:
+        def respond(self, messages):
+            async def words():
+                yield TextDelta(text="done. ")
+                yield ReplyCompleted()
+                yield TextDelta(text="and another thing. ")
+
+            return words()
+
+        async def aclose(self):
+            pass
+
+    far, ear = FarEnd(), Ear([Transcript(text="hello?", final=True)])
+    mouth = Mouth()
+    pipeline = line(far, ear, Rambles(), mouth)
+    await pipeline.start()
+    await far.says()
+    await until(lambda: pipeline.failures, "the turn to be refused")
+
+    assert mouth.spoken == ["done."], "what came before the ending was said, and nothing after it"
+    assert not pipeline.ended.is_set(), "a misbehaving model costs the turn, not the call"
+    await pipeline.stop()

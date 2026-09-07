@@ -24,8 +24,9 @@ import contextlib
 from dataclasses import dataclass
 from typing import Optional
 
-from ..realtime.audio import (AudioChunk, AudioTransport, SpeechRecognizer, SpeechStarted,
-                              SpeechSynthesizer, Transcript, VoiceModel, sentences)
+from ..realtime.audio import (AudioChunk, AudioTransport, Reply, SpeechRecognizer, SpeechStarted,
+                              SpeechSynthesizer, Transcript, VoiceModel, check_audio, is_question,
+                              sentences)
 from ..realtime.events import ReplyCompleted, TextDelta
 from .core import Interrupted
 from .memory import Prompt
@@ -78,9 +79,7 @@ class CallerStage:
         try:
             async with contextlib.aclosing(self.transport.receive()) as incoming:
                 async for chunk in incoming:
-                    if not isinstance(chunk, AudioChunk) or len(chunk.pcm) > self.max_bytes:
-                        raise ValueError("the far end sent audio that is not audio, or too much of it")
-                    await self._feed(chunk)
+                    await self._feed(check_audio(chunk, self.max_bytes))
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a dead line ends the call, it does not raise into nothing
@@ -149,9 +148,7 @@ class RecognizerStage:
         if isinstance(event, SpeechStarted):
             await self._feed.interrupt()
             return
-        if not isinstance(event, Transcript):
-            raise ValueError("a recognizer may report speech beginning, or words, and nothing else")
-        if not event.final or not event.text.strip():
+        if not is_question(event):
             return
         # A finished question ends whatever was being said: answering the
         # last one over the top of the new one helps nobody.
@@ -196,27 +193,22 @@ class ModelStage:
         messages = self._messages(frame)
         if messages is None:
             return
-        size, said = 0, False
-        async with contextlib.aclosing(self.model.respond(messages)) as reply:
-            async for event in reply:
+        reply, said = Reply(self.max_bytes), False
+        # Read to the end of the stream rather than stopping at the
+        # ending it declares: what a provider says afterwards is the
+        # thing worth catching, and it can only be seen by looking.
+        async with contextlib.aclosing(self.model.respond(messages)) as stream:
+            async for event in stream:
                 if emit.cut_off:
                     return
-                if isinstance(event, TextDelta):
-                    size += len(event.text.encode("utf-8"))
-                    if size > self.max_bytes:
-                        raise RuntimeError("the model said more than a turn is allowed to say")
-                    said = True
-                elif not isinstance(event, ReplyCompleted):
-                    raise ValueError("a model may say words, and say it has finished, and nothing else")
+                reply.accept(event)
+                said = said or isinstance(event, TextDelta)
                 await emit(event)
                 # Memory sits in front of the model, so what the model
                 # says has to travel back to reach it.
                 await emit.up(event)
-                if isinstance(event, ReplyCompleted):
-                    if not said:
-                        raise RuntimeError("the model finished without saying anything")
-                    return
-        raise RuntimeError("the model stopped without saying it had finished")
+        if not reply.done or not said:
+            raise RuntimeError("the model stopped without a finished answer")
 
 
 class SynthesizerStage:
