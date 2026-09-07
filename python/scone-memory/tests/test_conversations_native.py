@@ -1,4 +1,4 @@
-"""API → real Pipecat scheduling → scoped memory; scripted model, no network."""
+"""API → real Scone scheduling → scoped memory; scripted model, no network."""
 
 import asyncio
 import copy
@@ -6,21 +6,16 @@ import copy
 import httpx
 import pytest
 
-pytest.importorskip("pipecat")
-from pipecat.frames.frames import (
-    LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
-    LLMTextFrame, LLMThoughtTextFrame,
-)
-from pipecat.processors.frame_processor import FrameProcessor
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api.conversations import create_conversation_app
-from scone_memory.integrations.pipecat_text import PipecatTextConversation
+from scone_memory.realtime.text import TextConversation
+from scone_memory.realtime.events import TextDelta, ReplyCompleted
 
 
 @pytest.mark.parametrize("empty_scope", [False, True])
-async def test_session_scope_controls_real_pipecat_context_across_turns(tmp_path, empty_scope):
-    from test_pipecat_text import ScriptedModel
+async def test_session_scope_controls_real_native_context_across_turns(tmp_path, empty_scope):
+    from test_text_conversation import ScriptedModel
     from test_conversations_api import client_for
 
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
@@ -43,7 +38,7 @@ async def test_session_scope_controls_real_pipecat_context_across_turns(tmp_path
         models.append(model)
         return model
     def scoped(space, sid, scope):
-        return PipecatTextConversation(memory, space, sid, model_factory, **scope.kwargs())
+        return TextConversation(memory, space, sid, model_factory, **scope.kwargs())
     app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db", None,
                                   scoped_runtime_factory=scoped)
     scope = {"kind": "file", "where": {"collection": "missing" if empty_scope else "manuals"},
@@ -76,8 +71,8 @@ async def test_session_scope_controls_real_pipecat_context_across_turns(tmp_path
         assert len((await client.get(url + "/transcript")).json()["episodes"]) == 4
 
 
-async def test_cancelled_pipecat_turn_can_be_followed_by_a_completed_reply(tmp_path):
-    from test_pipecat_text import ScriptedModel
+async def test_cancelled_native_turn_can_be_followed_by_a_completed_reply(tmp_path):
+    from test_text_conversation import ScriptedModel
     from test_conversations_api import client_for, create
 
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
@@ -85,7 +80,7 @@ async def test_cancelled_pipecat_turn_can_be_followed_by_a_completed_reply(tmp_p
     following = ScriptedModel("A new answer")
     models = iter([waiting, following])
     app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db",
-                                 lambda space, sid: PipecatTextConversation(memory, space, sid, lambda: next(models)))
+                                 lambda space, sid: TextConversation(memory, space, sid, lambda: next(models)))
     async with client_for(app) as client:
         created = await create(client)
         url = "/v1/conversations/" + created["session_id"]
@@ -116,7 +111,7 @@ async def test_cancelled_pipecat_turn_can_be_followed_by_a_completed_reply(tmp_p
 
 @pytest.mark.parametrize("role", ["user", "assistant"])
 async def test_cancellation_during_capture_does_not_leave_a_closed_runtime_running(tmp_path, monkeypatch, role):
-    from test_pipecat_text import ScriptedModel
+    from test_text_conversation import ScriptedModel
     from test_conversations_api import client_for, create
 
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
@@ -130,7 +125,7 @@ async def test_cancellation_during_capture_does_not_leave_a_closed_runtime_runni
             await asyncio.Event().wait()  # write happened; acknowledgment is interrupted
         return added
     monkeypatch.setattr(memory, "remember_many", pause_capture)
-    runtime = PipecatTextConversation(memory, "alpha", "capture-session", ScriptedModel)
+    runtime = TextConversation(memory, "alpha", "capture-session", ScriptedModel)
     app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "sessions.db", lambda space, sid: runtime)
     async with client_for(app) as client:
         created = await create(client)
@@ -147,17 +142,17 @@ async def test_cancellation_during_capture_does_not_leave_a_closed_runtime_runni
 async def test_identical_public_messages_remain_distinct_and_delete_only_their_session(tmp_path):
     """Real capture keys must include session, turn and speaker, not just text.
 
-    Unlike the content-deduplicating custom API fixture, Pipecat preserves
+    Unlike the content-deduplicating custom API fixture, Scone preserves
     each occurrence. Deletion must remove all four occurrences in one session
     without removing the other's identical text or independent knowledge.
     """
-    from test_pipecat_text import ScriptedModel
+    from test_text_conversation import ScriptedModel
     from test_conversations_api import client_for, create
 
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     manual = await memory.remember("alpha", "Same words", metadata={"collection": "manuals"})
     def factory(space, sid):
-        return PipecatTextConversation(memory, space, sid, lambda: ScriptedModel("Same words"))
+        return TextConversation(memory, space, sid, lambda: ScriptedModel("Same words"))
     app = create_conversation_app(memory, {"alpha-key": "alpha", "beta-key": "beta"}, tmp_path / "sessions.db", factory)
     async with client_for(app) as client:
         sessions = [await create(client, "first"), await create(client, "second")]
@@ -194,25 +189,22 @@ async def test_identical_public_messages_remain_distinct_and_delete_only_their_s
         assert (await client.get("/v1/conversations/capabilities")).json()["session_deletion"] is True
 
 
-async def test_http_sessions_use_pipecat_context_history_and_public_capture(tmp_path):
+async def test_http_sessions_use_native_context_history_and_public_capture(tmp_path):
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await memory.remember("alpha", "Juniper is calibrated with Polaris.", metadata={"collection": "manuals"})
     requests = []
 
-    class ScriptedModel(FrameProcessor):
-        async def process_frame(self, frame, direction):
-            await super().process_frame(frame, direction)
-            if not isinstance(frame, LLMContextFrame):
-                await self.push_frame(frame, direction)
-                return
-            requests.append(copy.deepcopy(frame.context.get_messages()))
-            await self.push_frame(LLMFullResponseStartFrame())
-            await self.push_frame(LLMThoughtTextFrame("not public"))
-            await self.push_frame(LLMTextFrame("Scripted Polaris answer."))
-            await self.push_frame(LLMFullResponseEndFrame())
+    class ScriptedModel:
+        async def aclose(self):
+            pass
+
+        async def respond(self, messages):
+            requests.append(copy.deepcopy(messages))
+            yield TextDelta("Scripted Polaris answer.")
+            yield ReplyCompleted()
 
     def factory(space, sid):
-        return PipecatTextConversation(memory, space, sid, ScriptedModel, where={"collection": "manuals"})
+        return TextConversation(memory, space, sid, ScriptedModel, where={"collection": "manuals"})
 
     app = create_conversation_app(memory, {"alpha-key": "alpha", "beta-key": "beta"}, tmp_path / "sessions.db", factory)
     async with app.router.lifespan_context(app):

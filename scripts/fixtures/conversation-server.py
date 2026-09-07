@@ -1,4 +1,4 @@
-"""Isolated browser fixture: real API/Pipecat, scripted model, temporary state."""
+"""Isolated browser fixture: real API/Scone, scripted model, temporary state."""
 
 import asyncio
 import os
@@ -13,34 +13,26 @@ if os.environ.get("SCONE_TEST_EXTRA_SITEPACKAGES"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python/scone-memory"))
 
 import httpx
-from pipecat.frames.frames import (
-    LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
-    LLMTextFrame, LLMThoughtTextFrame,
-)
-from pipecat.processors.frame_processor import FrameProcessor
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import conversations
 from scone_memory.api.conversation_server import create_server
-from scone_memory.integrations.pipecat_text import PipecatTextConversation
+from scone_memory.realtime.text import TextConversation
+from scone_memory.realtime.events import TextDelta, ReplyCompleted
 
 release_reply = asyncio.Event()
 
-class ScriptedModel(FrameProcessor):
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if not isinstance(frame, LLMContextFrame):
-            await self.push_frame(frame, direction)
-            return
-        messages = frame.context.get_messages()
+class ScriptedModel:
+    async def aclose(self):
+        pass
+
+    async def respond(self, messages):
         assert any("Juniper is calibrated with Polaris." in m["content"] for m in messages)
         if messages[-1]["content"] == "Stream Juniper":
-            await self.push_frame(LLMFullResponseStartFrame())
-            await self.push_frame(LLMThoughtTextFrame("private-fixture-thought-must-not-be-captured"))
-            await self.push_frame(LLMTextFrame("Juniper 🌿 "))
+            yield TextDelta("Juniper 🌿 ")
             print("CONVERSATIONS_MODEL_WAITING", flush=True)
             await release_reply.wait()
-            await self.push_frame(LLMTextFrame("uses Polaris."))
-            await self.push_frame(LLMFullResponseEndFrame())
+            yield TextDelta("uses Polaris.")
+            yield ReplyCompleted()
             return
         if messages[-1]["content"] == "Wait for cancellation":
             print("CONVERSATIONS_MODEL_WAITING", flush=True)
@@ -51,26 +43,21 @@ class ScriptedModel(FrameProcessor):
             reply = "Scripted follow-up: you asked about Juniper calibration."
         else:
             reply = "Scripted answer: use Polaris."
-        await self.push_frame(LLMFullResponseStartFrame())
-        await self.push_frame(LLMThoughtTextFrame("private-fixture-thought-must-not-be-captured"))
-        await self.push_frame(LLMTextFrame(reply))
-        await self.push_frame(LLMFullResponseEndFrame())
+        yield TextDelta(reply)
+        yield ReplyCompleted()
 
 
-class ScopedModel(FrameProcessor):
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if not isinstance(frame, LLMContextFrame):
-            await self.push_frame(frame, direction)
-            return
-        messages = frame.context.get_messages()
+class ScopedModel:
+    async def aclose(self):
+        pass
+
+    async def respond(self, messages):
         context = repr(messages)
         no_matches = "No matching" in messages[-1]["content"]
         assert ("scope-eligible-guide" in context) is not no_matches
         assert "scope-excluded-guide" not in context
-        await self.push_frame(LLMFullResponseStartFrame())
-        await self.push_frame(LLMTextFrame("Scoped answer: no retrieved context." if no_matches else "Scoped answer: the selected guide."))
-        await self.push_frame(LLMFullResponseEndFrame())
+        yield TextDelta("Scoped answer: no retrieved context." if no_matches else "Scoped answer: the selected guide.")
+        yield ReplyCompleted()
 
 
 async def run():
@@ -86,11 +73,11 @@ async def run():
         app = conversations.create_conversation_app(
             memory, {"conversation-fixture-alpha": "alpha", "conversation-fixture-beta": "beta"},
             Path(temporary) / "sessions.db",
-            lambda space, sid: PipecatTextConversation(memory, space, sid, ScriptedModel,
+            lambda space, sid: TextConversation(memory, space, sid, ScriptedModel,
                                                       where={"collection": "manuals"}),
             console=True,
             public_text_streaming="--streaming" in sys.argv[2:],
-            **({"scoped_runtime_factory": lambda space, sid, scope: PipecatTextConversation(
+            **({"scoped_runtime_factory": lambda space, sid, scope: TextConversation(
                 memory, space, sid, ScopedModel, **scope.kwargs())} if "--scoped" in sys.argv[2:] else {}),
         )
         if "--reopened" in sys.argv[2:]:

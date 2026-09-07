@@ -206,9 +206,8 @@ def test_history_only_launch_has_real_memory_and_opt_in_pages(launched):
         assert client.get("/v1/episodes/" + str(added.json()["episode_id"]), headers={"Authorization": "Bearer launcher-beta"}).status_code == 404
 
 
-def test_configured_launcher_runs_native_pipecat_and_serves_keyless_pages(launched):
-    pytest.importorskip("pipecat")
-    client, _ = launched("--model-factory", "test_pipecat_text:ScriptedModel", "--console")
+def test_configured_launcher_runs_native_scone_and_serves_keyless_pages(launched):
+    client, _ = launched("--model-factory", "test_text_conversation:ScriptedModel", "--console")
     with closing(client):
         page = client.get("/conversations")
         assert page.status_code == 200 and "launcher-alpha" not in page.text

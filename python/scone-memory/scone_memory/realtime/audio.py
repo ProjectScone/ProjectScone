@@ -8,6 +8,11 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
+from .events import TextDelta, ReplyCompleted, TextModel
+
+# Shared response protocol for both audio and text sessions.
+VoiceModel = TextModel
+
 
 @dataclass(frozen=True)
 class AudioChunk:
@@ -40,18 +45,6 @@ class Transcript:
     speaker: str = "user"
 
 
-@dataclass(frozen=True)
-class TextDelta:
-    """Public response text only. Adapters must not map reasoning into this."""
-
-    text: str
-
-
-@dataclass(frozen=True)
-class ReplyCompleted:
-    """Adapter's explicit successful response end, not a playback receipt."""
-
-
 class AudioTransport(Protocol):
     def receive(self) -> AsyncIterator[AudioChunk]: ...
     async def send(self, audio: AudioChunk, turn_id: str) -> None: ...
@@ -63,11 +56,6 @@ class AudioTransport(Protocol):
 
 class SpeechRecognizer(Protocol):
     def transcribe(self, audio: AsyncIterator[AudioChunk]) -> AsyncIterator[SpeechStarted | Transcript]: ...
-    async def aclose(self) -> None: ...
-
-
-class VoiceModel(Protocol):
-    def respond(self, messages: list[dict[str, str]]) -> AsyncIterator[TextDelta | ReplyCompleted]: ...
     async def aclose(self) -> None: ...
 
 

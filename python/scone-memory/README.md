@@ -292,247 +292,120 @@ added is what comes back. Turns are deduplicated by position, not text
 turn; a dump carries each episode's identity, so a re-imported transcript
 keeps its repeats.
 
-### Pipecat public transcripts
+### Native real-time conversations
 
-Install `pip install 'scone-memory[pipecat]'` in a **Python 3.11+** environment.
-This optional extra pins the tested Pipecat 1.8.1 release; base Scone still
-supports Python 3.10 and does not import or install Pipecat.
+Scone owns conversation scheduling, source preparation, public streaming and
+transcript capture. Python **3.11+** is required for real-time sessions; the base
+memory package still supports Python 3.10. No external conversation framework,
+audio model, device or credential is installed or selected by this runtime.
 
-Provision NLTK's `punkt_tab` resource during environment/image setup and set
-`NLTK_DATA` to its directory. Otherwise Pipecat's tokenizer warm-up may attempt a
-download at runtime, even in a text-only pipeline:
+The implementation lives in `scone_memory.realtime`:
 
-```sh
-python -m nltk.downloader -d ./nltk_data punkt_tab
-export NLTK_DATA="$PWD/nltk_data"
-```
+- `text.TextConversation`: bounded text turns and public-chunk observation.
+- `voice.VoiceSession`: audio input, transcription, interruptions and spoken output.
+- `context.MemoryContext`: immutable-scope, transient source preparation.
+- `events`: shared `TextDelta`, `ReplyCompleted` and `TextModel` protocol.
+- `audio`: PCM packets, speech events and transport/STT/TTS protocols.
+- `lifecycle`: cancellation and owned-cleanup handling.
 
-For an existing Pipecat `LLMContextAggregatorPair`, attach before running:
-
-```python
-from scone_memory.integrations.pipecat import SconePipecatMemory
-
-capture = SconePipecatMemory(engine, "default", session_id="conversation-1")
-capture.attach(context_aggregators)
-try:
-    await runner.run()  # your configured Pipecat pipeline, including its cleanup
-    capture.raise_if_failed()  # finishing a conversation does not prove capture succeeded
-finally:
-    capture.detach()
-
-result = await engine.recall("default", "telescope", where={"session_id": "conversation-1"})
-```
-
-Only user `on_user_turn_message_added` and assistant `on_assistant_turn_stopped`
-events become conversation episodes. User records have `capture_status=context_message`;
-assistant records have `aggregated` or `interrupted`. A user context message may
-be a segment rather than a complete turn. An assistant aggregation can be flushed
-at shutdown: it does **not** prove normal response completion or audio playback.
-Pipecat's supplied text is preserved, not the original audio or raw token sequence.
-Thought events, interim transcription frames, tools and whole context snapshots
-are not subscribed to. Empty events are counted without fabricating memory text.
-
-The episode retains session, role, capture identity, observation sequence and
-the supplied timestamp/user ID when available. Source timestamps describe what
-Pipecat reported, not an independently verified clock. Each adapter instance has
-a new capture identity; repeated text and reconnects stay distinct. This does not
-deduplicate replay after a crash or provide a durable delivery queue.
-
-Capture runs in Pipecat's event tasks, serializing writes within an adapter.
-`write_timeout` defaults to 5 seconds (including waiting for another write) and
-`max_pending` to 128 admitted callbacks. A timeout, cancellation, overflow or
-storage failure latches `capture.error`; subsequent nonempty events increment
-`unrecorded_count` instead of silently resuming past the gap. Poll that error
-during a live session and call `raise_if_failed()` after Pipecat cleanup. An
-already-running write may still take effect; inspect stored records before
-retrying. The limits do not bound Pipecat's own event dispatch queue, and timeouts
-require cancellation-cooperative dependencies. `stored_count` counts acknowledged
-writes, not proof of crash-safe storage on every backend.
-
-This is a Python-native transcript integration, not a configured voice service:
-browser devices, transport/provider setup, audio/video recording,
-Rust HTTP interoperability and graph session-event wiring
-remain separate work. Never use transcripts as approved facts without review.
-See [the isolated pipeline example](examples/pipecat_memory.py) for a runnable,
-credential-free capture-and-recall demonstration using clearly labeled fixtures.
-
-### Pipecat request memory
-
-The same optional extra includes `SconeMemoryContextProcessor`. Place it after
-the user aggregator and before a compatible text LLM service:
+A model is a small provider adapter, not a frame processor:
 
 ```python
-from pipecat.pipeline.pipeline import Pipeline
-from scone_memory.integrations.pipecat_context import SconeMemoryContextProcessor
+from scone_memory.realtime.events import TextDelta, ReplyCompleted
+from scone_memory.realtime.text import TextConversation
 
-memory_context = SconeMemoryContextProcessor(
-    engine, "default", session_id="conversation-1",
-    where={"collection": "manuals"},  # optional metadata filter inside the space
-    limit=5, max_context_bytes=8000, recall_timeout=2.0,
-)
-# `pair` is your LLMContextAggregatorPair; `llm` is your configured text service.
-pipeline = Pipeline([pair.user(), memory_context, llm, pair.assistant()])
-```
+class MyModel:
+    async def respond(self, messages):
+        # Replace this scripted response with your explicitly configured provider.
+        yield TextDelta("Hello.")
+        yield ReplyCompleted()  # only after the provider's successful response end
 
-This is a native Python adapter, not an HTTP client. The caller must authorize
-the fixed space and filters. `session_id` labels receipts; it neither grants
-access nor restricts recall to that session. Without `where`, recall searches
-the fixed space. Use a knowledge collection filter when current conversation
-capture should not feed the same prompt back into retrieval.
+    async def aclose(self):
+        # Close any clients owned by this adapter.
+        pass
 
-For a latest plain-text user message, the processor recalls source passages and
-copies the request context. It inserts a user-level, explicitly untrusted JSON
-source block immediately before that request, preserving source text, episode /
-chunk IDs, source identity, creation time and capture status. It does **not**
-modify the shared aggregator history or turn retrieved material into a captured
-user message. Tools and tool choice are carried into the copied request.
-
-The byte budget covers the UTF-8 source block, not the entire model request or
-its token count. Oversized passages are omitted whole; they are never silently
-clipped. A configured engine low-similarity warning suppresses the block.
-Otherwise ranking alone does not establish relevance, approval or truth. The
-JSON boundary labels untrusted data; it is not a guarantee against prompt injection.
-
-Each forwarded context frame carries `metadata["scone_memory"]`: status,
-request/session/source-frame IDs, selected references, exact-block SHA-256 and
-byte count, omitted count, and the engine's recall event ID when available.
-Statuses are `prepared`, `empty`, `skipped` or `failed`; cancelled and superseded
-requests are discarded and reported through `last_receipt`. A failed recall
-passes the original request with a failed receipt, not cached or invented memory.
-Surface that state in your application. `last_error` holds the actual local
-exception; frame receipts contain only its type, not raw diagnostic text.
-
-Receipts establish preparation/forwarding, **not provider delivery or model
-use**. Frame metadata and `last_receipt` are not a durable delivery journal. A
-configured Scone event log separately records retrieval. Recall timeouts are
-cooperative; interruptions and a changed current request discard stale results.
-
-Multimodal inputs, tool continuations and non-user final messages pass through
-without recall. Provider compatibility and tool-loop context continuity are not
-certified by the pipeline tests. Live voice/video, durable delivery, Rust HTTP
-interoperability and a browser session service remain unfinished.
-
-Run `python examples/pipecat_context.py` after the NLTK setup above for an
-[isolated source-to-request-to-capture example](examples/pipecat_context.py).
-It uses real Pipecat scheduling and native Scone retrieval, but an explicitly
-scripted responder instead of a model; all fixture data stays in process memory.
-
-### Pipecat text conversation runtime (service foundation)
-
-`scone_memory.integrations.pipecat_text.PipecatTextConversation` runs role-separated
-text exchanges through a supplied Pipecat model processor. It requires the same
-optional Pipecat environment and NLTK provisioning described above. Supply an
-already-open native engine, an authorized space and session ID, and a **factory**
-that creates a fresh compatible `FrameProcessor` for each turn. The processor's
-cleanup must release any clients it owns; a provider class is not automatically
-certified merely because it is a Pipecat processor.
-
-```python
-from scone_memory.integrations.pipecat_text import PipecatTextConversation
-
-# memory is your open native engine; model_factory is your configured factory.
-conversation = PipecatTextConversation(
-    memory, "default", "conversation-1", model_factory,
-    where={"collection": "manuals"},
-    kind="file", source_prefix="manuals/",
-    since="2026-01-01T00:00:00Z", until="2026-12-31T23:59:59Z",
+conversation = TextConversation(
+    memory, "authorized-space", "session-1", MyModel,
+    where={"collection": "manuals"}, kind="file", source_prefix="docs/",
 )
 try:
-    first = await conversation.reply("What does the calibration manual say?")
-    followup = await conversation.reply("Explain the next step.")
+    result = await conversation.reply("What does the manual say?")
 finally:
     await conversation.close()
 ```
 
-For live **native Python** output, pass an async `on_text` observer to a reply:
+The host authorizes the memory space and public transcript retention. A synchronous,
+zero-argument factory returns a **fresh model per text turn**. Its `respond`
+method returns an async iterator supporting `aclose()`. Requests are deep copies;
+provider mutations cannot rewrite conversation history. No tools, hidden reasoning
+or media events are accepted at this text boundary.
 
-```python
-async def show_chunk(text: str) -> None:
-    # Send to your own cooperative async consumer; do not save it as completed.
-    await output.send(text)
+`reply(text, on_text=async_callback)` optionally sends actual, serial public
+chunks to an observer before the response ends. These chunks are provisional and
+are not necessarily tokens. Backpressure reaches the adapter iterator; this does
+not establish buffering guarantees inside a provider's SDK. Empty chunks are
+ignored by the observer. Unsupported events, chunks after completion, observer
+failures, missing completion and cleanup failures prevent completed capture.
 
-conversation = PipecatTextConversation(memory, "default", "conversation-2", model_factory)
-try:
-    result = await conversation.reply("Explain the next step.", on_text=show_chunk)
-    # Only a successful result acknowledges the saved aggregate and episode IDs.
-finally:
-    await conversation.close()
-```
+Each successful result contains `turn_id`, `text`, `user_episode_id`,
+`assistant_episode_id`, `memory_context` and `provider_completion="unverified"`.
+User text is retained before inference. Assistant text is saved only after
+explicit adapter completion, iterator EOF and successful owned-provider cleanup.
+Metadata records `integration=scone-text`, role/turn/session, aggregated text and
+`completion_evidence=adapter_end_and_stream_closed`. This is not independent
+proof of provider correctness, use of memory, or audio playback. Historical
+records keep their original metadata; migration never rewrites evidence.
 
-The callback receives nonempty downstream public `LLMTextFrame` chunks between
-response-start and response-end frames, in order and without splitting or
-reconstructing them. Chunks are **not necessarily tokens**. Thought frames, tool
-payloads, context and text outside the response are not delivered. The observer
-applies only to that reply; omitting it retains the aggregate-only interface.
+Input is bounded to 32,000 UTF-8 bytes. Defaults are 64,000 reply bytes,
+128,000 history bytes and a 30-second turn deadline. One turn runs at a time.
+`close()` cancels active work and joins cleanup. External cancellation can permit
+another turn only after safe cleanup; interrupted observer or store effects close
+the conversation. A submitted user message can remain after a cancelled/failed
+reply. An uncertain store acknowledgment must not be automatically retried.
+Cooperative cleanup can exceed a deadline; it is not hard process termination.
 
-Observation is provisional: all text can be displayed before finalization or
-storage fails. No partial assistant episode or chunk journal is created. The
-callback is awaited serially before the next chunk is delivered, and the reply
-byte limit is checked first. This adds no detached callback queue; it does not
-bound Pipecat/provider queues or guarantee upstream network backpressure. A slow
-observer consumes the same turn deadline as the model. Callbacks must cooperate
-with cancellation, avoid blocking the event loop, and not await lifecycle
-operations on their own conversation. Direct `close()` inside the observer is
-rejected; cancel or close from the caller instead. Observer failure or interrupted
-observation closes the conversation, without retrying uncertain consumer effects.
-Already displayed text cannot be retracted by the runtime.
+#### Memory preparation
 
-The native callback alone does not enable streaming in a custom HTTP service.
-The explicit service opt-in below connects it to SSE; browser rendering remains
-separate work. Voice, video and durable chunk delivery/replay receipts require
-their own transports and contracts.
+`TextConversation` and `MemoryContext` accept `where`, `kind`,
+`source_prefix`, `since` and `until`. Scope is validated/copied at construction
+and never broadens after a miss or error. Space authorization belongs to the host.
 
-Both `PipecatTextConversation` and `SconeMemoryContextProcessor` accept `where`,
-`kind`, `source_prefix`, `since`, and `until`. They validate and copy these filters
-at construction; later caller mutations cannot change the session's recall scope.
-Dates are inclusive RFC3339 bounds on source creation time, and source prefixes
-are literal strings, not glob patterns. Invalid values or reversed dates fail
-before retrieval, capture, or model startup. These filters narrow the authorized
-space, never grant access to another one, and do not filter out saved user/reply
-messages from the transcript.
+`await MemoryContext(memory, space, session_id, ...).prepare(messages)` returns
+a copied request and a preparation receipt. Only a final plain-text user message
+triggers recall. Sources are verbatim JSON values in a labeled, untrusted source
+block before the current request; they grant no permissions and are not approved
+facts. That block never enters shared history or captured transcripts. The
+default 8,000-byte budget omits whole passages rather than silently clipping them.
+A low-confidence result supplies no source block.
 
-The native engine applies kind/source/date narrowing to its bounded candidate
-window; a matching source outside that window is not guaranteed to be returned.
-An empty scoped result supplies no source block, not a broader fallback search.
-This native adapter support is separate from user-configurable session scope in
-the HTTP service and webapp; those surfaces must negotiate and persist their own
-scope contract before exposing controls.
+Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
+references, recall event ID when available, context hash/bytes, omissions and
+sanitized degradation/error types. They prove preparation—not delivery or use.
+Cancellation propagates instead of producing a success receipt.
 
-Each result contains `turn_id`, `text`, `user_episode_id`,
-`assistant_episode_id`, `memory_context`, and `provider_completion="unverified"`.
-The model receives previous user/assistant messages plus a transient source block.
-Neither that source block nor model-side context mutations rewrite stored history.
-Public user and assistant text becomes scoped conversation episodes. Thought
-frames are not captured. Assistant metadata says `aggregated` and records
-`completion_evidence=response_end_frame`: that frame alone cannot prove a provider
-stopped successfully, so it is not labeled as verified provider completion.
+See [the executable native example](examples/realtime_conversation.py). It uses
+real Scone memory and scheduling with a scripted provider, not live inference.
 
-One turn may run at a time. Input is bounded to 32,000 UTF-8 bytes; defaults are
-64,000 reply bytes, 128,000 history bytes, and a 30-second turn deadline. History
-budget counts JSON-encoded role/text messages; the retrieved source block has its
-own budget. Turn errors, pipeline errors/timeouts, unsupported tool flow and
-interruptions prevent a successful result and close the instance. `close()`
-cancels an active turn. A submitted user message can remain after a failed reply;
-a timed-out store write may have committed and is not automatically retried.
-Deadlines rely on cooperative providers/stores, not hard process termination.
+#### Migration from the experimental framework adapters
 
-History is in-process, not automatically restored after restart. This module has
-no session authentication, browser routes, durable request-id replay, network
-stream or audio/video transport. Tests use real Pipecat scheduling with an
-explicitly scripted processor—not live inference. Provider-specific completion,
-retry policy and client cleanup, the authenticated service, React controls and
-Rust HTTP interoperability remain release gates.
+The three former `integrations/pipecat*.py` modules and their optional dependency
+have been removed. Replace processor factories with the `TextModel` protocol
+above and import `TextConversation` from `scone_memory.realtime.text`.
+Audio imports are now `scone_memory.realtime.voice` and
+`scone_memory.realtime.audio`. No compatibility layer pretends a framework
+processor is a native Scone provider. Existing HTTP routes, result field names,
+saved transcripts and request-replay semantics remain unchanged.
 
 ### Scone Voice (native sessions)
 
-Scone owns the audio runtime in `scone_memory.voice.VoiceSession`: its event types,
+Scone owns the audio runtime in `scone_memory.realtime.voice.VoiceSession`: its event types,
 bounded input queue, turn lifecycle, interruption, response/speech sequencing and
 memory capture. It uses standard Python `asyncio` and the native Scone engine.
 **No Pipecat installation, import, probe environment or framework scheduler is
 required.** Python 3.11+ is needed for this runtime's structured deadlines; the
 base package and independent Rust/Python CLIs retain their existing requirements.
 
-The native provider interfaces live in `scone_memory.voice_types`:
+The native provider interfaces live in `scone_memory.realtime.audio`:
 
 | Interface | Host adapter implements |
 | --- | --- |
@@ -549,7 +422,7 @@ resample. Methods and factories must cooperate asynchronously and never block
 the event loop. Resources must be fresh and distinct per session.
 
 ```python
-from scone_memory.voice import VoiceSession
+from scone_memory.realtime.voice import VoiceSession
 
 # These factories are configured by your trusted host, not supplied as code or
 # credentials by a browser. They implement the Scone interfaces above.
@@ -630,9 +503,8 @@ python/scone-memory/.venv/bin/python -m pytest python/scone-memory/tests/test_vo
 Tests use scripted protocol adapters and real isolated Scone memory, not live
 recognition/model calls. Concrete provider adapters, authenticated browser audio
 transport, React voice controls and video remain release gates. HTTP capabilities
-still advertise `voice: false` until that entire path works. Existing optional
-Pipecat text integrations below are legacy migration work, not the foundation
-of Scone Voice.
+still advertise `voice: false` until that entire path works. The text runtime and voice runtime share Scone-owned public events and scoped
+context preparation; neither depends on an external conversation framework.
 
 ### Browsing retained sources
 
@@ -667,8 +539,7 @@ bounded response contract. The Documents browser UI is subsequent work.
 
 `scone_memory.api.conversations.create_conversation_app` exposes the journal and
 a configured text runtime under `/v1/conversations`, with the existing native
-memory routes mounted at the same origin. Install the `api` extra; Pipecat-backed
-runtimes additionally need the optional Pipecat environment described above.
+memory routes mounted at the same origin. Install the `api` extra and use Python 3.11+ for native real-time sessions.
 The caller owns the open engine; the ASGI lifespan owns its journal and runtime
 tasks. This factory does not launch a server or select a provider for you.
 
@@ -684,7 +555,7 @@ scone-memory serve-conversations --journal ./conversation-sessions.db --model-fa
 ```
 
 `my_models:create` must be a synchronous, zero-argument callable returning a
-**fresh Pipecat FrameProcessor per turn**. Importing the module executes trusted
+**fresh native `TextModel` adapter per turn**. Importing the module executes trusted
 Python code; use only operator-controlled modules. The launcher checks the
 callable without invoking it; the text runtime invokes it when a turn runs.
 Provider credentials, dependencies and client lifecycle belong to that factory.
@@ -692,7 +563,7 @@ No default provider is selected, and `SCONE_CHAT_*` consolidation settings do no
 configure the conversation model. Configured remote stores or embedders can
 still perform their normal network access at startup or during memory requests.
 
-`--history-only` does not import Pipecat or accept new text sessions. It permits
+`--history-only` does not import a model adapter or accept new text sessions. It permits
 inspection of saved conversations and retains the authenticated native memory
 routes; it is **not a read-only memory server**. `--console` opts into the packaged
 React pages, with no keys embedded. The CLI uses SQLite persistence by default,
@@ -700,19 +571,18 @@ and the same host/port environment settings as `serve`. Stop the other server or
 choose a different `SCONE_PORT` before launching. This command does not start a
 consolidation worker. It builds and serves native memory on one event loop and
 closes owned backends after shutdown. Journal locking requires Linux/macOS and a
-local filesystem. The configured Pipecat launcher enables public-text SSE;
-history-only mode does not. Voice, video, browser stream rendering and live-provider
-certification remain separate work; the existing `serve` command is unchanged.
+local filesystem. The configured Scone launcher enables public-text SSE;
+history-only mode does not. Voice, video and live-provider certification remain separate work; the existing `serve` command is unchanged.
 
 ```python
 from scone_memory.api.conversations import create_conversation_app
-from scone_memory.integrations.pipecat_text import PipecatTextConversation
+from scone_memory.realtime.text import TextConversation
 
 # memory, space_keys and model_factory are explicit server configuration.
 # Never use your native memory database as the conversation journal.
 app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
-    lambda space, sid: PipecatTextConversation(memory, space, sid, model_factory),
+    lambda space, sid: TextConversation(memory, space, sid, model_factory),
     console=True,  # optional same-origin packaged React workspace; no keys embedded
     public_text_streaming=True,  # known-compatible native runtime; default is False
 )
@@ -722,7 +592,7 @@ app = create_conversation_app(
 
 `public_text_streaming=True` opts every configured runtime into
 `reply(text, on_text=async_callback)`. Custom factories default to off and must
-explicitly implement that public-text contract. The Pipecat CLI launcher enables
+explicitly implement that public-text contract. The Scone CLI launcher enables
 it for its known runtime. Capabilities advertise `streaming: true` and
 `text_stream: {transport: "sse", replay: "active_window", max_bytes: 65536,
 max_chunks: 256}`. `reply_transport: "poll"` still describes final receipts.
@@ -759,7 +629,7 @@ Final text is read from the retained episode, so forgetting it cannot expose a
 stale streaming copy. Text already sent to clients cannot be revoked.
 
 This window is not a durable event journal or delivery acknowledgement. It does
-not bound upstream Pipecat/provider queues; connection counts, rates and slow
+not bound upstream provider queues; connection counts, rates and slow
 client limits belong in the serving ASGI/proxy configuration. The React consumer
 is separate work; enabling the API does not change the deployed browser bundle.
 
@@ -777,7 +647,7 @@ To let an API caller narrow recall for each session, opt in explicitly:
 ```python
 app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db", None,
-    scoped_runtime_factory=lambda space, sid, scope: PipecatTextConversation(
+    scoped_runtime_factory=lambda space, sid, scope: TextConversation(
         memory, space, sid, model_factory, **scope.kwargs()
     ),
     console=True,
@@ -793,7 +663,7 @@ Changing the scope with the same create request ID conflicts, including after a
 restart. Dates are inclusive; reversed ranges are rejected. An empty
 `source_prefix` still requires an episode to have a source; omit the field to
 include sourceless episodes. Empty results never
-cause the native Pipecat runtime to broaden its recall. Scope limits retrieved
+cause the native Scone runtime to broaden its recall. Scope limits retrieved
 knowledge, not capture or the session's own conversation history.
 
 The scoped factory receives an immutable `scone_memory.recall_scope.RecallScope`.
@@ -833,7 +703,7 @@ receipt without resubmitting the message. A cancelled receipt stays cancelled,
 even if a custom runtime returns late. Cancellation is local, not proof that an
 external provider stopped processing; the submitted message remains captured.
 
-The Pipecat text runtime can accept another turn after model cancellation only
+The Scone text runtime can accept another turn after model cancellation only
 when owned processor cleanup succeeds. Interrupted capture or failed cleanup
 interrupts the session instead. Custom runtimes must explicitly expose
 `closed is False` after cancellation to allow continuation; absent or uncertain
@@ -888,7 +758,7 @@ creation capacity. If the response is uncertain, the UI offers a read-only statu
 check, never an automatic delete retry. A remaining session may be partially
 deleted after a storage failure; inspect it before confirming another attempt.
 
-The Pipecat text adapter gives each session, turn and speaker a distinct capture
+The Scone text runtime gives each session, turn and speaker a distinct capture
 identity, so repeated identical messages remain separate transcript occurrences.
 Custom runtime factories must also preserve session attribution; content-only
 deduplication can make their metadata-based transcripts incomplete.
@@ -907,7 +777,7 @@ against a hostile filesystem owner, or support for uncooperative runtimes.
 
 Capabilities explicitly report configured text, polling, no voice/video, and no
 token stream. `runtime_factory=None` reports text unavailable and refuses starts.
-Tests connect HTTP controls to real Pipecat scheduling and native memory using a
+Tests connect HTTP controls to native Scone scheduling and native memory using a
 scripted model; they do not certify a live provider. The React page supports
 start, send, saved transcripts, source inspection, recovered outcomes and stop.
 Provider certification, process-crash recovery evaluation, Rust HTTP memory adapters and

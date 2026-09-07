@@ -102,10 +102,10 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None,
     if model_factory is not None:
         try:
             factory = load_model_factory(model_factory)
-            from ..integrations.pipecat_text import PipecatTextConversation
-            runtime_type = PipecatTextConversation
+            from ..realtime.text import TextConversation
+            runtime_type = TextConversation
         except Exception:
-            print("cannot load model factory: check trusted module:callable, zero-argument signature and Pipecat dependencies", file=sys.stderr)
+            print("cannot load model factory: check trusted module:callable and zero-argument signature", file=sys.stderr)
             return 2
 
     async def run():

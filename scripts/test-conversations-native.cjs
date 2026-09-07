@@ -1,4 +1,4 @@
-// Real React → HTTP service → Pipecat scheduler → native memory, no live provider.
+// Real React → HTTP service → Scone scheduler → native memory, no live provider.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {spawn}=require('node:child_process');
@@ -47,7 +47,7 @@ async function fixture(t,{reopened=false,scoped=false,streaming=false}={}){
   return {page,base,errors,modelWaiting,release:()=>server.stdin.write('release\n')};
 }
 
-for(const outcome of ['complete','cancel','stop','switch-space'])test(`native Pipecat public-text preview → ${outcome}`,{timeout:60000},async t=>{
+for(const outcome of ['complete','cancel','stop','switch-space'])test(`native Scone public-text preview → ${outcome}`,{timeout:60000},async t=>{
   const {page,base,errors,release,modelWaiting}=await fixture(t,{streaming:true});page.setDefaultTimeout(8000);
   await page.goto(base+'/conversations');
   await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
@@ -136,7 +136,7 @@ test('Documents browse native inventory, import retained text, and inspect saved
   assert.deepEqual(errors,[]);
 });
 
-for(const collection of ['manuals','missing'])test(`browser-selected scope reaches Pipecat and survives reload: ${collection}`,{timeout:60000},async t=>{
+for(const collection of ['manuals','missing'])test(`browser-selected scope reaches Scone and survives reload: ${collection}`,{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t,{scoped:true});page.setDefaultTimeout(8000);
   await page.goto(base+'/conversations');
   await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
@@ -229,7 +229,7 @@ test('the browser pages a native transcript and opens an older original source',
   assert.deepEqual(errors,[]);
 });
 
-test('the browser cancels a real Pipecat reply and completes the next question',{timeout:60000},async t=>{
+test('the browser cancels a real Scone reply and completes the next question',{timeout:60000},async t=>{
   const {page,base,errors,modelWaiting}=await fixture(t);page.setDefaultTimeout(8000);
   const writes=[];page.on('request',request=>{if(request.method()==='POST')writes.push(new URL(request.url()).pathname);});
   await page.goto(base+'/conversations');
@@ -254,7 +254,7 @@ test('the browser cancels a real Pipecat reply and completes the next question',
   assert.deepEqual(errors,[]);
 });
 
-test('conversation deep links, public capture and sources work through native Pipecat',{timeout:60000},async t=>{
+test('conversation deep links, public capture and sources work through native Scone',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t);
   await page.goto(base+'/conversations');
   assert.equal(await page.getByRole('dialog',{name:'Memory connection'}).count(),1);

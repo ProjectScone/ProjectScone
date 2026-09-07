@@ -1,4 +1,4 @@
-"""Real TCP and real Pipecat scheduling; no paid model or live database."""
+"""Real TCP and real Scone scheduling; no paid model or live database."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -8,14 +8,12 @@ import socket
 import httpx
 import pytest
 
-pytest.importorskip("pipecat")
-from pipecat.frames.frames import LLMContextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame, LLMTextFrame, LLMThoughtTextFrame
-from pipecat.processors.frame_processor import FrameProcessor
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api.conversations import create_conversation_app
 from scone_memory.api.conversation_server import create_server
-from scone_memory.integrations.pipecat_text import PipecatTextConversation
+from scone_memory.realtime.text import TextConversation
+from scone_memory.realtime.events import TextDelta, ReplyCompleted
 
 
 @asynccontextmanager
@@ -55,25 +53,21 @@ async def next_event(lines):
     raise AssertionError("stream ended before the next event")
 
 
-class LiveModel(FrameProcessor):
+class LiveModel:
+    async def aclose(self):
+        pass
+
     def __init__(self):
-        super().__init__()
         self.next_chunk, self.end_response = asyncio.Event(), asyncio.Event()
         self.ended = False
 
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if not isinstance(frame, LLMContextFrame):
-            await self.push_frame(frame, direction)
-            return
-        await self.push_frame(LLMFullResponseStartFrame())
-        await self.push_frame(LLMThoughtTextFrame("never public"))
-        await self.push_frame(LLMTextFrame("First "))
+    async def respond(self, messages):
+        yield TextDelta("First ")
         await self.next_chunk.wait()
-        await self.push_frame(LLMTextFrame("🌍\nsecond"))
+        yield TextDelta("🌍\nsecond")
         await self.end_response.wait()
         self.ended = True
-        await self.push_frame(LLMFullResponseEndFrame())
+        yield ReplyCompleted()
 
 
 @pytest.mark.parametrize("outcome", ["complete", "cancel", "stop"])
@@ -85,7 +79,7 @@ async def test_native_http_live_chunks_reconnect_and_terminal_evidence(tmp_path,
         models.append(model)
         return model
     app = create_conversation_app(memory, {"alpha-key": "alpha", "beta-key": "beta"}, tmp_path / "journal.db",
-                                  lambda space, sid: PipecatTextConversation(memory, space, sid, factory),
+                                  lambda space, sid: TextConversation(memory, space, sid, factory),
                                   public_text_streaming=True)
     async with serving(app) as client:
         session = (await client.post("/v1/conversations", json={"request_id": "new", "capture": True})).json()
@@ -157,7 +151,7 @@ async def test_server_shutdown_closes_idle_stream_before_waiting_for_http_tasks(
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     model = LiveModel()
     app = create_conversation_app(memory, {"alpha-key": "alpha"}, tmp_path / "journal.db",
-                                  lambda space, sid: PipecatTextConversation(memory, space, sid, lambda: model),
+                                  lambda space, sid: TextConversation(memory, space, sid, lambda: model),
                                   public_text_streaming=True)
     servers = []
     async with serving(app, servers=servers) as client:

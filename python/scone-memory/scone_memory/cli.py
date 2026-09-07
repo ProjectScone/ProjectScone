@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve-conversations", help="run the optional authenticated conversation service")
     p.add_argument("--journal", required=True, help="separate conversation SQLite database; parent must exist")
     runtime = p.add_mutually_exclusive_group(required=True)
-    runtime.add_argument("--model-factory", help="trusted module:callable returning a fresh Pipecat processor")
+    runtime.add_argument("--model-factory", help="trusted module:callable returning a fresh native TextModel adapter")
     runtime.add_argument("--history-only", action="store_true", help="inspect saved conversations without a model")
     p.add_argument("--console", action="store_true", help="serve the packaged React workspace (no keys embedded)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")

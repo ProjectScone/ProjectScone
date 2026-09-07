@@ -10,11 +10,11 @@ from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorInde
 
 
 def api():
-    assert importlib.util.find_spec("scone_memory.voice_types") is not None, (
+    assert importlib.util.find_spec("scone_memory.realtime.audio") is not None, (
         "Voice needs Scone-owned protocols, not third-party frame classes"
     )
-    from scone_memory import voice_types
-    from scone_memory.voice import VoiceSession
+    from scone_memory.realtime import audio as voice_types
+    from scone_memory.realtime.voice import VoiceSession
     return voice_types, VoiceSession
 
 
