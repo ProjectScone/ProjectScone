@@ -1,3 +1,4 @@
+import {SourceContent} from '../components/SourceContent';
 // The memory console as a React page. Same semantics as the packaged
 // console.html it replaces: every figure carries its n, retrieved text is
 // an excerpt, claims say where they came from, and nothing is shown that
@@ -378,7 +379,7 @@ function ClaimSource({ fact, api }: { fact: Fact; api: ApiClient }) {
 
 function ClaimEpisode({ id, api }: { id: number; api: ApiClient }) {
   const source = useAsync(() => api.request<Episode>(`/v1/episodes/${id}`, {signal: AbortSignal.timeout(10000)}), [api, id]);
-  return <div className="claim-episode">{source.error ? <><ErrorLine message={`Source unavailable: ${source.error}`} /><button className="btn small quiet" onClick={() => void source.reload()}>Retry source</button></> : !source.data ? <p role="status">Loading source…</p> : <><p className="sub">Episode #{id} · {day(source.data.created_at)} · {source.data.kind}</p><div>{source.data.content}</div></>}</div>;
+  return <div className="claim-episode">{source.error ? <><ErrorLine message={`Source unavailable: ${source.error}`} /><button className="btn small quiet" onClick={() => void source.reload()}>Retry source</button></> : !source.data ? <p role="status">Loading source…</p> : <><p className="sub">Episode #{id} · {day(source.data.created_at)} · {source.data.kind}</p><SourceContent text={source.data.content}/></>}</div>;
 }
 
 function BeliefsView({ api, onChanged, features }: { api: ApiClient; onChanged: () => void; features: Capabilities['features'] }) {

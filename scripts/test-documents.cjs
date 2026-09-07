@@ -12,7 +12,7 @@ after(async()=>{await browser?.close();});
 const row=(id,kind='file')=>({episode_id:id,kind,source:kind==='file'?`guide-${id}.md`:null,created_at:'2026-09-06',byte_count:1600,preview:`Source ${id} <script>not markup</script>`,preview_truncated:true});
 async function fixture(t,{supported=true,mobile=false,crowded=false}={}){
   const html=fs.readFileSync(process.env.SCONE_DOCUMENTS_HTML,'utf8').replaceAll('__SCONE_TOKEN__','documents-fixture');
-  const requests=[];const state={fail:false,malformed:false,delay:null,detailDelay:null};
+  const requests=[];const state={fail:false,malformed:false,delay:null,detailDelay:null,empty:false};
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://fixture');
     if(url.pathname==='/memory'){res.setHeader('content-type','text/html');return res.end(html);}
@@ -35,7 +35,7 @@ async function fixture(t,{supported=true,mobile=false,crowded=false}={}){
     }
     if(/^\/v1\/episodes\/\d+$/.test(url.pathname)){
       const id=Number(url.pathname.split('/').at(-1));if(id===30&&state.detailDelay)await state.detailDelay;
-      return res.end(JSON.stringify({...row(id),content:`Full retained text ${id}\n<script>not executable</script>\nEND`,tags:[],metadata:{collection:'manuals'}}));
+      return res.end(JSON.stringify({...row(id),content:state.empty?'':`Full retained text ${id}\n<script>not executable</script>\nEND`,tags:[],metadata:{collection:'manuals'}}));
     }
     res.statusCode=404;res.end('{}');
   });
@@ -51,14 +51,23 @@ test('Documents browse and inspect retained sources without search or unsupporte
   await page.getByRole('button',{name:'Open guide-30.md',exact:true}).waitFor();
   await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
   const detail=page.getByRole('region',{name:'Retained source'});
-  await detail.getByText(/Full retained text 30/).waitFor();
-  assert.equal(await detail.locator('pre').textContent(),'Full retained text 30\n<script>not executable</script>\nEND');
+  await detail.locator('.source-markdown').getByText(/Full retained text 30/).waitFor();
+  await detail.getByText('View original Markdown',{exact:true}).click();
+  assert.equal(await detail.getByLabel('Original source text').textContent(),'Full retained text 30\n<script>not executable</script>\nEND');
   assert.equal(await detail.locator('script').count(),0);
   assert.equal(await detail.locator('a[href="guide-30.md"]').count(),0);
   assert.equal(await page.getByRole('button',{name:'Add source',exact:true}).count(),0);
   assert.equal(await page.getByRole('button',{name:'View source images',exact:true}).count(),0);
   assert.equal(requests.some(r=>r.url.pathname==='/v1/recall'||r.method!=='GET'),false);
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'documents-desktop.png'),fullPage:true});
+});
+test('an empty retained source never replaces the original with an empty-state message',async t=>{
+  const {page,state}=await fixture(t);state.empty=true;
+  await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
+  const detail=page.getByRole('region',{name:'Retained source'});
+  await detail.getByText('No retained text.',{exact:true}).waitFor();
+  await detail.getByText('View original Markdown',{exact:true}).click();
+  assert.equal(await detail.getByLabel('Original source text').textContent(),'');
 });
 test('source paging retains kind, navigates boundaries, and refresh returns to latest',async t=>{
   const {page,requests}=await fixture(t);
@@ -94,7 +103,7 @@ test('late source inspection cannot replace a newer selection',async t=>{
   await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
   await page.getByRole('region',{name:'Retained source'}).getByText(/Loading source/).waitFor();
   await page.getByRole('button',{name:'Open guide-29.md',exact:true}).click();
-  await page.getByText(/Full retained text 29/).waitFor();release();
+  await page.locator('.source-markdown').getByText(/Full retained text 29/).waitFor();release();
   await page.getByRole('button',{name:'Notes',exact:true}).click();
   await page.getByRole('button',{name:'Open Note #6',exact:true}).waitFor();
   assert.equal(await page.getByRole('region',{name:'Retained source'}).count(),0);
@@ -111,7 +120,7 @@ test('a slow older-page response cannot overwrite a newly selected source filter
   await page.getByRole('button',{name:'Open Note #6',exact:true}).waitFor();
   release();
   await page.getByRole('button',{name:'Open Note #6',exact:true}).click();
-  await page.getByText(/Full retained text 6/).waitFor();
+  await page.locator('.source-markdown').getByText(/Full retained text 6/).waitFor();
   assert.equal(await page.getByRole('button',{name:'Open guide-4.md',exact:true}).count(),0);
 });
 test('an inspection opened while paging is cleared when the new page arrives',async t=>{
@@ -121,14 +130,14 @@ test('an inspection opened while paging is cleared when the new page arrives',as
   await page.getByRole('button',{name:'Older sources',exact:true}).click();
   await page.getByRole('status').filter({hasText:'Loading all sources'}).waitFor();
   await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
-  await page.getByText(/Full retained text 30/).waitFor();release();
+  await page.locator('.source-markdown').getByText(/Full retained text 30/).waitFor();release();
   await page.getByRole('button',{name:'Open guide-4.md',exact:true}).waitFor();
   assert.equal(await page.getByRole('region',{name:'Retained source'}).count(),0);
 });
 test('empty filtered inventory and mobile layout remain explicit and usable',async t=>{
   const {page}=await fixture(t,{mobile:true});
   await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
-  await page.getByText(/Full retained text 30/).waitFor();
+  await page.locator('.source-markdown').getByText(/Full retained text 30/).waitFor();
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'library fits a phone');
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'documents-mobile.png'),fullPage:true});
   await page.getByRole('button',{name:'Connectors',exact:true}).click();
@@ -139,7 +148,7 @@ test('opening a later mobile source brings its inspector into view and closing r
   const card=page.getByRole('button',{name:'Open guide-26.md',exact:true});
   await card.click();
   const heading=page.getByRole('region',{name:'Retained source'}).getByRole('heading',{name:'guide-26.md',exact:true});
-  await page.getByText(/Full retained text 26/).waitFor();
+  await page.locator('.source-markdown').getByText(/Full retained text 26/).waitFor();
   assert.ok(await heading.evaluate(el=>{const box=el.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight;}),'the selected source heading must be onscreen');
   await page.getByRole('button',{name:'Close source',exact:true}).click();
   await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Open guide-26.md');

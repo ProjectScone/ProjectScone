@@ -28,7 +28,7 @@ async function chooseLayout(page,mode) {
   await page.getByRole('button',{name:'Graph layout',exact:true}).click();
   await page.getByRole('menuitemradio',{name:({constellation:'Constellation',radial:'Radial clusters',flow:'Evidence flow',growth:'Growth spiral'})[mode],exact:true}).click();
 }
-async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,claimBacklog=false,capabilityMode='ok',rustCapabilities=false}={}) {
+async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,claimBacklog=false,markdownQuote=false,capabilityMode='ok',rustCapabilities=false}={}) {
   let graphCalls=0, unauthorized=false, revision=1, pageLoads=0;
   let pendingFacts=[{fact_id:41,subject:'Ada',predicate:'prefers',object:'local storage',confidence:1,valid_from:'2026-09-06T03:00:00Z',valid_until:null,status:'proposed',source_episode_id:7,origin:'extracted',quote:null,grounded:false}];
   if(backlog) pendingFacts=[
@@ -38,6 +38,7 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
   ];
   if(chronological) pendingFacts=pendingFacts.map(f=>({...f,valid_from:f.fact_id===42?'2020-01-01T00:00:00Z':'2030-01-01T00:00:00Z'}));
   if(paged) pendingFacts=Array.from({length:26},(_,i)=>({...pendingFacts[0],fact_id:41+i}));
+  if(markdownQuote) pendingFacts=pendingFacts.map(f=>({...f,quote:'and `target` held at **4.0 GB** afterward · ![proof](https://tracking.invalid/proof.png)',grounded:true}));
   let ledger=[{...pendingFacts[0],status:'active',excluded_reason:null,closed_reason:null}];
   if(claimBacklog)ledger=[...ledger,
     {...ledger[0],fact_id:40,object:'cloud storage',status:'closed',valid_from:'2019-01-01T00:00:00Z',valid_until:'2020-01-01T00:00:00Z'},
@@ -145,7 +146,7 @@ test('belief evidence can be inspected without changing the ledger',async t=>{
   const evidence=page.getByRole('button',{name:'Read source episode #7',exact:true});
   await evidence.waitFor({timeout:2000});
   await evidence.click();
-  await page.getByText(/END OF SOURCE/).waitFor();
+  await page.locator('.source-markdown').getByText(/END OF SOURCE/).waitFor();
   assert.equal(decisions.length,0);
   assert.equal(await page.locator('.timeline').count(),0,'a duration bar should not present active claims as truth');
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'belief-purpose-desktop.png'),fullPage:true});
@@ -270,6 +271,38 @@ test('review failures stay visible and approval only removes a confirmed decisio
   assert.equal(decisions[0].path,'/v1/facts/41/approve');
   assert.match(await page.getByRole('status').last().innerText(),/approved/i);
 });
+test('review sources render Markdown without executing HTML or loading remote images',async t=>{
+  const {page,decisions}=await fixture(t,{review:true});
+  const source='**Heartbeat tick.**\n\nThe `llama-server` is holding **5.8 GB**.\n\n- First check\n- Second check\n\n```sh\necho "unchanged"\n```\n\n[Provider docs](https://example.com/docs)\n\n[Unsafe](javascript:alert(1))\n\n![tracking pixel](https://tracking.invalid/image.png)\n\n<script>window.sourceExecuted=true</script>';
+  const remote=[];page.on('request',request=>{if(request.url().includes('tracking.invalid'))remote.push(request.url());});
+  await page.route('**/v1/episodes/7',route=>route.fulfill({json:{episode_id:7,kind:'conversation',source:'fixture',tags:[],metadata:{},content:source,created_at:'2026-09-06'}}));
+  await page.getByText('Read full source',{exact:false}).click();
+  const content=page.locator('.review-source');
+  await content.locator('strong').filter({hasText:'Heartbeat tick.'}).waitFor({timeout:2000});
+  assert.equal(await content.locator('code').first().textContent(),'llama-server');
+  assert.equal(await content.locator('li').count(),2);
+  assert.equal(await content.locator('pre code').textContent(),'echo "unchanged"\n');
+  const link=content.getByRole('link',{name:'Provider docs'});
+  assert.equal(await link.getAttribute('href'),'https://example.com/docs');
+  assert.match(await link.getAttribute('rel'),/noreferrer/);
+  assert.equal(await content.locator('a[href^="javascript:"],script,iframe,img').count(),0);
+  assert.equal(await page.evaluate(()=>window.sourceExecuted),undefined);
+  assert.deepEqual(remote,[]);
+  await content.getByText('View original Markdown',{exact:true}).click();
+  assert.equal(await content.getByLabel('Original source text',{exact:true}).textContent(),source);
+  assert.equal(decisions.length,0,'formatting source text must not make a decision');
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'source-markdown.png'),fullPage:true});
+});
+test('review quotations format emphasis and code while retaining inert image descriptions',async t=>{
+  const {page}=await fixture(t,{review:true,markdownQuote:true,mobile:true});
+  const quote=page.locator('.proposal blockquote');
+  await quote.locator('strong').waitFor();
+  assert.equal(await quote.locator('strong').textContent(),'4.0 GB');
+  assert.equal(await quote.locator('code').textContent(),'target');
+  assert.match(await quote.textContent(),/Image reference: proof · not loaded/);
+  assert.equal(await quote.locator('img').count(),0);
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+});
 test('review backlog groups and filters without eagerly fetching sources',async t=>{
   const {page,sourceCalls}=await fixture(t,{review:true,backlog:true});
   await page.locator('.proposal').first().waitFor();
@@ -342,7 +375,7 @@ test('review source failures offer retry without claiming evidence was deleted',
   assert.doesNotMatch(await page.locator('.excerpt').innerText(),/no longer available/);
   await page.unroute('**/v1/episodes/7');
   await page.getByRole('button',{name:'Retry source'}).click();
-  await page.getByText(/END OF SOURCE/).waitFor();
+  await page.locator('.source-markdown').getByText(/END OF SOURCE/).waitFor();
 });
 test('review duplicate and historical receipts stay attached to the submitted proposal',async t=>{
   for(const [reply,expected] of [[{fact_id:12,status:'active'},/Proposal #41 resolved as duplicate of #12/],[{fact_id:41,status:'closed'},/Proposal #41 approved as historical memory/]]){
@@ -374,7 +407,7 @@ test('decline has an inline reason, safe cancellation and full source on mobile'
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   assert.equal(await reason.count(),0);assert.equal(decisions.length,0);
   await page.getByText('Read full source',{exact:false}).click();
-  await page.getByText(/END OF SOURCE/).waitFor();
+  await page.locator('.source-markdown').getByText(/END OF SOURCE/).waitFor();
   assert.match(await page.locator('.excerpt').innerText(),/END OF SOURCE/);
   await page.getByRole('button',{name:'Decline',exact:true}).click();
   await reason.fill('This is a hypothetical, not an observation.');

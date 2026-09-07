@@ -30,7 +30,7 @@ npm run check:assets
 Production packaging embeds built JS, CSS and the original Scone mark into both
 native playground distributions and the Python Memory console. Node is not required to run the packaged Rust
 or Python server. `dist/` and `node_modules/` are ignored. The lockfile belongs to
-this app; the upstream `../supermemory/` directory is ignored reference material.
+this app; upstream projects under `../reference/` are ignored reference material.
 
 To test a backend-dependent UI before publishing it to running native servers:
 
@@ -61,12 +61,21 @@ ordered by descending stored episode ID. Type filters apply server-side before
 pagination; Newer/Older navigate the cursor history, and Refresh restarts at the
 newest IDs for the selected type. Page counts are not whole-library totals.
 
-Open a source to read its retained text literally. Filenames and local paths
+Open a source to read its retained text with Markdown formatting. Filenames and local paths
 remain provenance labels; only absolute HTTP(S) source URLs become external
 links. Available original images use the existing authenticated, digest-checked
 preview. A source record is not an approved memory claim, and retained text is
 not a downloadable copy of the original file. Newly added or removed records can
 change the inventory; it is not a frozen export.
+
+Source inspections, review quotes and retrieved passages render emphasis, code,
+lists and tables without modifying stored evidence. **View original Markdown**
+reveals the exact retained string. Formatted full-source previews are limited to
+80,000 characters; the complete original remains available below that preview.
+Embedded HTML is never executed. Only absolute HTTP(S) and mailto Markdown links
+are navigable; relative links and unsafe schemes are inert. Markdown images show
+their descriptions without fetching remote bytes. Saved image attachments still
+use the separate authenticated image viewer.
 
 On attachment-capable servers, Add source reuses the existing note/image and
 UTF-8 text-file import flow. A verified save refreshes All sources at the newest

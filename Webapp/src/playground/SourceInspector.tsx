@@ -1,6 +1,7 @@
 import type { EvidenceGraph, EvidenceNode } from '../types';
 import type { ApiClient } from '../api';
 import { SourceImages } from '../components/SourceImages';
+import { SourceContent } from '../components/SourceContent';
 
 export function SourceInspector({ node, graph, api, select, close }: { node?: EvidenceNode; graph: EvidenceGraph; api: ApiClient; select: (id: string) => void; close?: () => void }) {
   const data = node?.data || {};
@@ -15,7 +16,7 @@ export function SourceInspector({ node, graph, api, select, close }: { node?: Ev
     <h2>{node?.label || 'Inspect the evidence'}</h2>
     {!node && <p className="intro">Select a record to see its source, contents and recorded connections. A relationship is never inferred from visual proximity.</p>}
     {node && <>
-      {content != null ? <div className="source-content">{typeof content === 'string' ? content : JSON.stringify(content, null, 2)}</div> : <p className="intro">This record has no captured text.</p>}
+      {content != null ? <div className="source-content">{typeof content === 'string' ? <SourceContent text={content}/> : <pre>{JSON.stringify(content, null, 2)}</pre>}</div> : <p className="intro">This record has no captured text.</p>}
       {data.text_truncated === true && <p className="note">The connector truncated this text. The full original is not present in this event.</p>}
       {episodeId && <SourceImages key={node.id} episodeId={episodeId} api={api} />}
       <div className="field"><span>Record ID</span><div className="mono">{node.id}</div></div>

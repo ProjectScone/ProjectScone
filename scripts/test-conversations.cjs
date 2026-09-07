@@ -424,7 +424,7 @@ test('capture consent, send, prepared sources and stop operate through the API',
   await page.getByText('Use Polaris.',{exact:true}).waitFor();
   assert.equal(posts(),1);
   await page.getByRole('button',{name:'Source episode 7',exact:true}).click();
-  await page.getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
+  await page.locator('.source-markdown').getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
   await page.getByRole('button',{name:'End conversation',exact:true}).click();
   await page.getByText('Conversation ended',{exact:true}).waitFor();
   await page.waitForFunction(()=>document.querySelector('nav[aria-label="Saved conversations"] a.active')?.textContent.includes('ended'));
@@ -555,7 +555,7 @@ test('a forgotten settled reply clears its cached evidence on the next receipt c
   await page.getByText('Use Polaris.',{exact:true}).waitFor();
   const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
   await evidence.getByRole('button',{name:'Source episode 7',exact:true}).click();
-  await evidence.getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
+  await evidence.locator('.source-markdown').getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
   await page.route('**/current/turns/*',route=>route.fulfill({json:{
     request_id:new URL(route.request().url()).pathname.split('/').at(-1),
     status:'completed',result_state:'forgotten',result:null,
@@ -624,7 +624,7 @@ test('a forgotten reply does not repeatedly close a retained source the user ins
   const source=page.getByRole('complementary',{name:'Conversation evidence'}).locator('.conversation-source-text');
   await source.waitFor();
   await page.waitForResponse(r=>r.url().includes('/current/turns/'));await page.waitForTimeout(150);
-  assert.equal(await source.textContent(),'Retained user question');
+  assert.equal(await source.locator('.source-markdown').textContent(),'Retained user question');
 });
 
 test('polling preserves a send that is still waiting for its HTTP acknowledgment',async t=>{

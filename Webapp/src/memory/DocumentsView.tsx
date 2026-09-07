@@ -1,3 +1,4 @@
+import {SourceContent} from '../components/SourceContent';
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {ApiError,type ApiClient} from '../api';
 import {SourceImages} from '../components/SourceImages';
@@ -73,7 +74,7 @@ function SourceDetail({source,api,attachments,close}:{source:SourceSummary;api:A
     <h2 tabIndex={-1} ref={heading}>{name(source)}</h2><p className="document-provenance">{source.kind} · {source.created_at||'Date unavailable'}</p>
     {href&&<a href={href} target="_blank" rel="noopener noreferrer">Open source link ↗</a>}
     <p className="document-detail-note">Text retained by Scone, shown as written. This is source material, not a verified belief or an original-file download.</p>
-    {error?<div role="alert"><p>{error}</p><button className="btn quiet small" onClick={()=>setAttempt(n=>n+1)}>Retry source</button></div>:content===null?<p role="status">Loading source…</p>:<pre tabIndex={0} aria-label="Retained text">{content||'No retained text.'}</pre>}
+    {error?<div role="alert"><p>{error}</p><button className="btn quiet small" onClick={()=>setAttempt(n=>n+1)}>Retry source</button></div>:content===null?<p role="status">Loading source…</p>:<div aria-label="Retained text">{content===''&&<p>No retained text.</p>}<SourceContent text={content}/></div>}
     {attachments&&content!==null&&<SourceImages api={api} episodeId={source.episode_id}/>}
   </section>;
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../api';
 import { Modal } from '../components/Modal';
+import { MarkdownText, SourceContent } from '../components/SourceContent';
 import type { ApiClient, Episode, Fact } from './types';
 import './review.css';
 
@@ -40,7 +41,7 @@ function SourceExcerpt({ api, id }: { api: ApiClient; id?: number | null }) {
       <summary>Read full source <span>Episode #{id}</span></summary>
       {loading && <p role="status">Loading source…</p>}
       {error && <div><p role="alert">{error}</p><button className="btn small quiet" onClick={() => void load()}>Retry source</button></div>}
-      {episode && <><div className="source-meta">{episode.source || 'Recorded episode'} · {episode.created_at?.slice(0, 10)}</div><div className="review-source">{episode.content}</div></>}
+      {episode && <><div className="source-meta">{episode.source || 'Recorded episode'} · {episode.created_at?.slice(0, 10)}</div><div className="review-source"><SourceContent text={episode.content}/></div></>}
     </details>}
   </div>;
 }
@@ -204,13 +205,13 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
         {needsRefresh && <p className="review-reconcile">Decisions are paused until you refresh. A timed-out request may still have reached the server.</p>}
         {loaded && !matching.length && <div className="review-empty"><span className="review-empty-symbol" aria-hidden="true">✓</span><h2>{facts.length ? 'No matching proposals' : 'Nothing awaits review.'}</h2><p>{facts.length ? 'Try another subject or clear your filters.' : 'New claims will appear here for your review. Nothing is approved automatically.'}</p>{facts.length > 0 && <button className="btn small quiet" onClick={clearFilters}>Clear filters</button>}</div>}
         {[...groups].map(([name, rows]) => <section className="review-group" key={name}>
-          <button className="review-group-heading" aria-expanded={!collapsed.has(name)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(name)) next.delete(name); else next.add(name); return next; })}><span aria-hidden="true">{collapsed.has(name) ? '›' : '⌄'}</span><h2>{name}</h2><span>{rows.length} on this page</span></button>
+          <button className="review-group-heading" aria-expanded={!collapsed.has(name)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(name)) next.delete(name); else next.add(name); return next; })}><span aria-hidden="true">{collapsed.has(name) ? '›' : '⌄'}</span><h2><MarkdownText text={name} inline/></h2><span>{rows.length} on this page</span></button>
           {!collapsed.has(name) && rows.map(f => <article className="proposal" data-fact-id={f.fact_id} key={f.fact_id} aria-busy={saving === f.fact_id}>
             <div className="review-claim">
               <div className="review-record"><span>#{f.fact_id} · {f.origin || 'Origin not recorded'}</span><span className={f.grounded === true ? 'review-grounded' : 'review-unchecked'}>{f.grounded === true ? 'Source quote checked' : 'No checked quote'}</span></div>
-              <div className="triple"><b>{f.subject}</b> {f.predicate.replaceAll('_', ' ')} <span>{f.object}</span></div>
+              <div className="triple"><b><MarkdownText text={f.subject} inline/></b> <MarkdownText text={f.predicate.replaceAll('_', ' ')} inline/> <MarkdownText text={f.object} inline/></div>
               <div className="review-claim-meta">Effective {f.valid_from.slice(0, 10)} · Model confidence {Number.isFinite(f.confidence) ? f.confidence.toFixed(2) : 'not recorded'} <span title="Model-provided confidence is not calibrated probability">(uncalibrated)</span></div>
-              {f.quote && <blockquote className="quote">“{f.quote}”</blockquote>}
+              {f.quote && <blockquote className="quote">“<MarkdownText text={f.quote} inline/>”</blockquote>}
             </div>
             <div className="decide"><button className="btn small" disabled={cannotDecide} onClick={() => void decide([f], 'approve')}>{saving === f.fact_id ? 'Saving…' : 'Approve'}</button><button className="btn small danger" disabled={cannotDecide} onClick={() => { setDeclining(f.fact_id); setReason(''); }}>Decline</button></div>
             {declining === f.fact_id && <form className="review-decline" onSubmit={event => { event.preventDefault(); void decide([f], 'decline'); }}><label htmlFor={`decline-${f.fact_id}`}>Reason for declining</label><p>The proposal stays in history with this reason. Its source is not deleted.</p><textarea id={`decline-${f.fact_id}`} autoFocus required maxLength={2000} value={reason} disabled={locked} onChange={event => setReason(event.target.value)} /><div className="decide"><button type="submit" className="btn small danger" disabled={cannotDecide || !reason.trim()}>Confirm decline</button><button className="btn small quiet" type="button" disabled={locked} onClick={() => setDeclining(null)}>Cancel</button></div></form>}
