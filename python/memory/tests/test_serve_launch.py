@@ -76,10 +76,13 @@ def composed(tmp_path):
     process = subprocess.Popen([sys.executable, "-m", "scone_memory.runtime.cli", "serve"], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"Authorization": f"Bearer {KEY}"}, timeout=2)
-    # A loaded machine (another gate, a cargo build) has taken more than 20 s
-    # to import and bind; the bound is generous so the test measures the
-    # server, not the neighbours, and says what stderr held if it still fails.
-    deadline = time.monotonic() + 90
+    # A loaded machine (another gate, a cargo build, a benchmark pinning
+    # every core) has taken more than 20 s to import and bind, and at 90 s
+    # this failed twice during a bench run while passing alone in three
+    # seconds. The bound is generous so the test measures the server
+    # rather than its neighbours, still fails rather than hanging, and
+    # says what stderr held when it does.
+    deadline = time.monotonic() + 240
     while True:
         if process.poll() is not None:
             raise AssertionError("serve exited: " + process.communicate()[1])
@@ -91,7 +94,7 @@ def composed(tmp_path):
         if time.monotonic() > deadline:
             process.kill()
             _, stderr = process.communicate()
-            raise AssertionError("serve did not become ready within 90 s; stderr: " + stderr[-2000:])
+            raise AssertionError("serve did not become ready within 240 s; stderr: " + stderr[-2000:])
         time.sleep(0.025)
     yield client, port, process, tmp_path / "sessions.db"
     client.close()
