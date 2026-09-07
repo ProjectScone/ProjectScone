@@ -1,0 +1,192 @@
+"""Choosing which memories a search may see, by what was recorded.
+
+A filter narrows the candidates before anything is ranked, so one
+customer's notes cannot be crowded out of a search by another's, and a
+question about published work never has to look at drafts.
+
+The shape is deliberately small. A condition names one metadata key and
+one test of it; `all` and `any` combine conditions; `not` inverts one.
+That is the whole grammar, and it is enough for the filtering people
+actually write, while staying something a store can turn into a WHERE
+clause rather than a pass over everything it just fetched.
+
+Two decisions worth stating, because both are places where a filter can
+silently stop filtering:
+
+An absent key satisfies nothing, negation included. A memory with no
+priority is not a memory of priority zero, and "not a draft" must not
+quietly match every memory that has no status at all.
+
+Values are stored as text, so "10" sorts before "9". A numeric test
+parses both sides first, and a value that is not a number fails the
+test rather than being compared as letters.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Optional, Union
+
+from ..core.errors import InvalidInput
+from ..memory.engine import METADATA_KEY
+
+#: Conditions in one filter. Beyond this it is a program in a loop.
+MAX_CONDITIONS = 200
+#: Groups inside groups. Deeper than anyone reads a query back.
+MAX_DEPTH = 8
+
+#: The tests a condition can make, and what each does to one value.
+TESTS = ("is", "has", "in", "above", "below", "at_least", "at_most", "present")
+
+
+def _number(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise InvalidInput(f"{what} must be a number")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise InvalidInput(f"{what} must be a number") from None
+
+
+def _stored_number(value: str) -> Optional[float]:
+    """The stored text as a number, or None when it is not one."""
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class Condition:
+    """One test of one metadata key."""
+
+    field: str
+    test: str
+    value: object
+    negate: bool = False
+
+    def matches(self, metadata: Mapping[str, str]) -> bool:
+        found = metadata.get(self.field)
+        if found is None:
+            # Absent satisfies nothing, and inverting nothing is still
+            # nothing: a key that was never recorded cannot answer.
+            return False
+        return self._holds(found) != self.negate
+
+    def _holds(self, found: str) -> bool:
+        if self.test == "present":
+            return True
+        if self.test == "is":
+            return found == self.value
+        if self.test == "has":
+            return self.value in found
+        if self.test == "in":
+            return found in self.value
+        number = _stored_number(found)
+        if number is None:
+            return False
+        if self.test == "above":
+            return number > self.value
+        if self.test == "below":
+            return number < self.value
+        if self.test == "at_least":
+            return number >= self.value
+        return number <= self.value
+
+    def fields(self) -> set[str]:
+        return {self.field}
+
+    def count(self) -> int:
+        return 1
+
+
+@dataclass(frozen=True)
+class Group:
+    """Conditions that must all hold, or of which any may."""
+
+    every: bool
+    parts: tuple["Filter", ...]
+
+    def matches(self, metadata: Mapping[str, str]) -> bool:
+        results = (part.matches(metadata) for part in self.parts)
+        return all(results) if self.every else any(results)
+
+    def fields(self) -> set[str]:
+        return set().union(*(part.fields() for part in self.parts))
+
+    def count(self) -> int:
+        return sum(part.count() for part in self.parts)
+
+
+Filter = Union[Condition, Group]
+
+
+def parse_filter(spec: object) -> Filter:
+    """Read a filter, or say exactly why it cannot mean anything.
+
+    Every refusal here is a question that would otherwise be answered
+    with the wrong memories rather than with an error."""
+    parsed = _read(spec, depth=1)
+    total = parsed.count()
+    if total > MAX_CONDITIONS:
+        raise InvalidInput(f"a filter may hold at most {MAX_CONDITIONS} conditions, got {total}")
+    return parsed
+
+
+def _read(spec: object, depth: int) -> Filter:
+    if not isinstance(spec, Mapping):
+        raise InvalidInput("a filter must be a mapping naming a field, or all, or any")
+    groups = [name for name in ("all", "any") if name in spec]
+    if len(groups) == 2:
+        raise InvalidInput("a group is all or any, not both")
+    if groups:
+        return _group(spec, groups[0], depth)
+    return _condition(spec)
+
+
+def _group(spec: Mapping, name: str, depth: int) -> Group:
+    if depth > MAX_DEPTH:
+        raise InvalidInput(f"a filter may be nested {MAX_DEPTH} groups deep, no further")
+    if set(spec) - {name}:
+        raise InvalidInput(f"a {name} group takes only its own list of conditions")
+    parts = spec[name]
+    if not isinstance(parts, Sequence) or isinstance(parts, (str, bytes)):
+        raise InvalidInput(f"{name} must be a list of conditions")
+    if not parts:
+        raise InvalidInput(f"{name} needs at least one condition to mean anything")
+    return Group(every=name == "all", parts=tuple(_read(part, depth + 1) for part in parts))
+
+
+def _condition(spec: Mapping) -> Condition:
+    field = spec.get("field")
+    if not isinstance(field, str) or not METADATA_KEY.match(field):
+        raise InvalidInput("a condition needs a field naming a metadata key")
+    named = [test for test in TESTS if test in spec]
+    if len(named) != 1 or set(spec) - {"field", "not", *named}:
+        raise InvalidInput(f"a condition makes exactly one test of its field, one of: {', '.join(TESTS)}")
+    test, value = named[0], spec[named[0]]
+    negate = spec.get("not", False)
+    if not isinstance(negate, bool):
+        raise InvalidInput("not must be true or false")
+    return Condition(field=field, test=test, value=_value(test, field, value), negate=negate)
+
+
+def _value(test: str, field: str, value: object) -> object:
+    if test == "present":
+        if value is not True:
+            raise InvalidInput(f"present is a question, so {field}'s present must be true")
+        return True
+    if test in ("is", "has"):
+        if not isinstance(value, str):
+            raise InvalidInput(f"{field}'s {test} compares against text")
+        return value
+    if test == "in":
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            raise InvalidInput(f"{field}'s in takes a list of values")
+        if not value:
+            raise InvalidInput(f"{field}'s in needs at least one value to choose between")
+        if any(not isinstance(item, str) for item in value):
+            raise InvalidInput(f"{field}'s in compares against text")
+        return tuple(value)
+    return _number(value, f"{field}'s {test}")
