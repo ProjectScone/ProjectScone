@@ -51,7 +51,8 @@ class Stage(Protocol):
     """Anything that reads a frame and sends what should continue.
 
     ``start`` and ``stop`` are optional. ``buffered = True`` asks for a
-    queue and a task, for work that waits on something outside."""
+    queue and a task, for work that waits on something outside, and
+    ``capacity`` says how much backlog that queue will hold."""
 
     async def handle(self, frame: object, emit: "Emit") -> None: ...
 
@@ -136,7 +137,7 @@ class Pipeline:
         self._running = True
         for index, stage in enumerate(self.stages):
             if getattr(stage, "buffered", False):
-                queue: asyncio.Queue = asyncio.Queue()
+                queue: asyncio.Queue = asyncio.Queue(self._capacity(stage))
                 self._queues[index] = queue
                 self._workers.append(asyncio.create_task(
                     self._work(index, stage, queue), name=f"{self.name}-stage-{index}"))
@@ -161,6 +162,16 @@ class Pipeline:
         self._workers.clear()
         self._queues.clear()
         self._running = False
+
+    @staticmethod
+    def _capacity(stage: Stage) -> int:
+        """How much backlog a buffered stage will hold. The default, zero,
+        holds anything; a positive number makes whoever is feeding the stage
+        wait instead, so a fast source cannot outrun a slow one."""
+        room = getattr(stage, "capacity", 0)
+        if type(room) is not int or room < 0:
+            raise ValueError("a stage's capacity must be a whole number of frames")
+        return room
 
     # -- sending ----------------------------------------------------------
 
@@ -195,7 +206,8 @@ class Pipeline:
         stage = self.stages[index]
         queue = self._queues.get(index)
         # Upstream frames run inline even into a buffered stage: an
-        # interruption that waits behind a backlog is not an interruption.
+        # interruption that waits behind a backlog is not an interruption,
+        # and with a bounded backlog it could not get through at all.
         if queue is not None and direction == DOWN:
             self._took()
             await queue.put((frame, turn))

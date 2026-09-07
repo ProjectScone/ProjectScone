@@ -276,3 +276,52 @@ async def test_two_stages_that_both_raise_on_bad_news_do_not_ping_pong():
     await pipeline.drain()
     assert pipeline.failures == 6, "the word costs one raise each, and there it ends"
     await pipeline.stop()
+
+
+async def test_a_full_buffered_stage_makes_the_sender_wait_rather_than_grow():
+    """A stage that says how much backlog it will hold pushes back on
+    whoever feeds it. Without that, a fast source outruns a slow stage
+    and the queue is the only thing that grows."""
+    release = asyncio.Event()
+    taken: list[str] = []
+
+    class Slow:
+        buffered = True
+        capacity = 1
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            taken.append(frame.text)
+            await release.wait()
+
+    pipeline = Pipeline([Slow()])
+    await pipeline.start()
+    await pipeline.push(Word("a"))
+    for _ in range(100):
+        if taken:
+            break
+        await asyncio.sleep(0)
+    assert taken == ["a"], "the stage is busy with the first frame"
+    await pipeline.push(Word("b"))
+    third = asyncio.create_task(pipeline.push(Word("c")))
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not third.done(), "one frame is waiting, so the next sender waits too"
+    release.set()
+    await asyncio.wait_for(third, 1)
+    await pipeline.drain()
+    assert taken == ["a", "b", "c"], "everything arrives, in order, once there is room"
+    await pipeline.stop()
+
+
+async def test_a_backlog_size_that_is_not_a_count_of_frames_is_refused():
+    """A capacity that cannot mean a number of frames is a mistake worth
+    saying out loud, not a queue silently left unbounded."""
+
+    class Odd:
+        buffered = True
+        capacity = -1
+
+    with pytest.raises(ValueError, match="whole number of frames"):
+        await Pipeline([Odd()]).start()
