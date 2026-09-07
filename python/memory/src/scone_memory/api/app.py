@@ -442,23 +442,6 @@ def create_app(
         )
         return fact_json(fact)
 
-    @app.get("/v1/facts/{fact_id}")
-    async def get_fact(fact_id: int, space: str = Depends(space_for)) -> dict:
-        """One fact with the relations it takes part in and the ids of the
-        episodes it rests on. Ids, not the episodes themselves: a source
-        may have been forgotten since, and GET /v1/episodes says so."""
-        fact = await engine.fact(space, fact_id)
-        return {
-            "fact": fact_json(fact),
-            "links": [link_json(link) for link in await engine.fact_links(space, fact_id)],
-            "sources": [fact.source_episode_id] if fact.source_episode_id is not None else [],
-        }
-
-    @app.post("/v1/facts/{fact_id}/links")
-    async def post_link(fact_id: int, body: LinkBody, space: str = Depends(space_for)) -> dict:
-        link = await engine.link_facts(space, fact_id, body.to_fact, body.kind,
-                                       source_episode_id=body.source_episode_id, quote=body.quote)
-        return link_json(link)
 
     @app.get("/v1/facts/audit")
     async def get_facts_audit(status: str = "active", flagged: bool = False,
@@ -491,6 +474,26 @@ def create_app(
             reason=body.reason, actor=actor, expect_revision=body.expect_revision,
         )
         return decided.model_dump()
+
+    # Parametrised fact routes come after every fixed /v1/facts/... address,
+    # so /v1/facts/audit and /v1/facts/decide are never read as an id.
+    @app.get("/v1/facts/{fact_id}")
+    async def get_fact(fact_id: int, space: str = Depends(space_for)) -> dict:
+        """One fact with the relations it takes part in and the ids of the
+        episodes it rests on. Ids, not the episodes themselves: a source
+        may have been forgotten since, and GET /v1/episodes says so."""
+        fact = await engine.fact(space, fact_id)
+        return {
+            "fact": fact_json(fact),
+            "links": [link_json(link) for link in await engine.fact_links(space, fact_id)],
+            "sources": [fact.source_episode_id] if fact.source_episode_id is not None else [],
+        }
+
+    @app.post("/v1/facts/{fact_id}/links")
+    async def post_link(fact_id: int, body: LinkBody, space: str = Depends(space_for)) -> dict:
+        link = await engine.link_facts(space, fact_id, body.to_fact, body.kind,
+                                       source_episode_id=body.source_episode_id, quote=body.quote)
+        return link_json(link)
 
     @app.post("/v1/facts/{fact_id}/approve")
     async def post_fact_approve(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:

@@ -49,6 +49,7 @@ def test_a_claim_can_extend_or_derive_from_others_and_reads_back_with_its_links(
     assert sorted(l["kind"] for l in based_read["links"]) == ["derived_from", "extends"]
     assert client.get(f"/v1/facts/{based['fact_id']}", headers=OTHER).status_code == 404, "another space sees nothing"
     assert client.get("/v1/facts/999999", headers=AUTH).status_code == 404
+    assert client.get("/v1/facts/audit", headers=AUTH).status_code == 200, "a fixed address is never read as an id"
     assert client.get("/v1/capabilities", headers=AUTH).json()["features"]["facts.links"] is True
 
 
