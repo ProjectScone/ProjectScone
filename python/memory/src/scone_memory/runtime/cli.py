@@ -352,6 +352,10 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
             acc = "no reader" if report.accuracy is None else f"accuracy {report.accuracy * 100:.1f}% ({report.correct}/{report.answered}, {report.reader})"
             print(f"{report.source:<28} {report.hops:<6} n={report.questions:<4} gold@{report.k} {report.gold_at_k * 100:5.1f}%  "
                   f"stale above gold {report.stale_above_gold * 100:5.1f}%  {acc}  {report.errors} error(s)", file=out)
+            if report.distilled is not None:
+                bridges = "no derivation pass" if report.derived is None else f"{report.derived} bridge(s) {'approved' if report.derive_approved else 'left proposed'}"
+                print(f"{'':<28} claims: {report.distilled} extracted, {bridges}; claim_gold@{report.k} {(report.claim_gold_at_k or 0) * 100:5.1f}%  "
+                      f"derived_gold@{report.k} {(report.derived_gold_at_k or 0) * 100:5.1f}%", file=out)
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
     return 0

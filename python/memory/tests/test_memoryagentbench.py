@@ -183,3 +183,29 @@ def test_the_cli_refuses_derive_without_distill(tmp_path):
     env = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
     assert main(["bench-conflicts", str(path), "--derive"], env=env, out=io.StringIO()) == 2, "the pass runs over extracted claims"
     assert main(["bench-conflicts", str(path), "--distill"], env=env, out=io.StringIO()) == 2, "no model configured"
+
+
+def test_the_cli_prints_the_claim_scores_when_the_stages_ran(monkeypatch, tmp_path):
+    from scone_memory.runtime import config
+    from scone_memory.runtime.cli import main
+
+    path = tmp_path / "mh.json"
+    path.write_text(json.dumps([{"context": "0. mark works at acme.\n1. acme is based in lisbon.\n2. juniper likes tuna.",
+                                 "questions": ["Where does mark work?"], "answers": [["lisbon"]],
+                                 "metadata": {"source": "factconsolidation_mh_6k"}}]))
+
+    def triple(s, p, o, quote):
+        return json.dumps([{"subject": s, "predicate": p, "object": o, "confidence": 0.9,
+                            "statement_type": "observation", "quote": quote}])
+
+    replies = [triple("mark", "works_at", "acme", "mark works at acme"),
+               triple("acme", "based_in", "lisbon", "acme is based in lisbon"),
+               triple("juniper", "likes", "tuna", "juniper likes tuna"),
+               json.dumps([{"subject": "mark", "predicate": "works_in", "object": "lisbon", "premises": [1, 2], "confidence": 0.7}]),
+               "[]"]
+    monkeypatch.setattr(config, "build_chat", lambda settings: FakeChat(replies))
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash", "SCONE_CHAT_URL": "http://x", "SCONE_CHAT_MODEL": "m"}
+    out = io.StringIO()
+    assert main(["bench-conflicts", str(path), "--k", "5", "--distill", "--derive", "--derive-approve"], env=env, out=out) == 0
+    text = out.getvalue()
+    assert "claims: 3 extracted, 1 bridge(s) approved" in text and "derived_gold@5 100.0%" in text, text
