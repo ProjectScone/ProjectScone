@@ -38,6 +38,14 @@ MAX_DEPTH = 8
 
 #: The tests a condition can make, and what each does to one value.
 TESTS = ("is", "has", "in", "above", "below", "at_least", "at_most", "present")
+#: The tests SQLite can make exactly. The rest narrow generously and are
+#: settled by a second pass in Python.
+EXACT = frozenset({"is", "has", "in", "present"})
+#: Anything outside this cannot be part of a number, so a value holding
+#: one is not one, whatever CAST would make of it.
+NOT_A_NUMBER = "*[^0-9.eE+-]*"
+#: SQL for each numeric test, in the same order they are named.
+COMPARISONS = {"above": ">", "below": "<", "at_least": ">=", "at_most": "<="}
 
 
 def _number(value: object, what: str) -> float:
@@ -100,6 +108,43 @@ class Condition:
     def count(self) -> int:
         return 1
 
+    def to_sql(self, column: str) -> tuple[str, list[object]]:
+        """A clause keeping at least every row `matches` would keep.
+
+        Being generous costs a row that the second pass then drops. Being
+        strict loses a memory that should have been found, and nothing
+        later can put it back, so every choice here leans the first way."""
+        here, params = self._test(column)
+        if not self.negate:
+            return here, params
+        present, key = self._exists(column, "", [])
+        if self.test in EXACT:
+            # The test is exact, so its opposite is too. The key still has
+            # to be there: absent answers nothing, either way round.
+            return f"(NOT {here} AND {present})", [*params, *key]
+        # A generous test negated would be strict. Ask only for the key.
+        return present, key
+
+    def _exists(self, column: str, check: str, params: list[object]) -> tuple[str, list[object]]:
+        return (f"EXISTS (SELECT 1 FROM json_each({column}) AS f"
+                f" WHERE f.key = ?{check})", [self.field, *params])
+
+    def _test(self, column: str) -> tuple[str, list[object]]:
+        if self.test == "present":
+            return self._exists(column, "", [])
+        if self.test == "is":
+            return self._exists(column, " AND f.value = ?", [self.value])
+        if self.test == "has":
+            return self._exists(column, " AND instr(f.value, ?) > 0", [self.value])
+        if self.test == "in":
+            slots = ", ".join("?" for _ in self.value)
+            return self._exists(column, f" AND f.value IN ({slots})", list(self.value))
+        return self._exists(
+            column,
+            f" AND f.value NOT GLOB ? AND CAST(f.value AS REAL) {COMPARISONS[self.test]} ?",
+            [NOT_A_NUMBER, self.value],
+        )
+
 
 @dataclass(frozen=True)
 class Group:
@@ -117,6 +162,17 @@ class Group:
 
     def count(self) -> int:
         return sum(part.count() for part in self.parts)
+
+    def to_sql(self, column: str) -> tuple[str, list[object]]:
+        # Generosity survives both: a superset joined by AND or by OR is
+        # still a superset, so the whole clause keeps the invariant.
+        joiner = " AND " if self.every else " OR "
+        clauses, params = [], []
+        for part in self.parts:
+            clause, values = part.to_sql(column)
+            clauses.append(clause)
+            params.extend(values)
+        return f"({joiner.join(clauses)})", params
 
 
 Filter = Union[Condition, Group]

@@ -144,3 +144,94 @@ def test_the_keys_a_filter_touches_are_available_without_walking_it():
                     {"any": [{"field": "team", "is": "eng"},
                              {"field": "priority", "at_least": 3}]}]}
     assert parse_filter(spec).fields() == {"category", "team", "priority"}
+
+
+# --- turning a filter into SQL -------------------------------------------
+
+import json
+import sqlite3
+
+CORPUS = [
+    {"category": "engineering", "priority": "5", "status": "published", "team": "eng"},
+    {"category": "engineering", "priority": "10", "status": "draft", "team": "product"},
+    {"category": "sales", "priority": "9", "status": "published", "team": "sales"},
+    {"category": "engineering", "status": "published", "team": "eng"},
+    {"category": "research", "priority": "soon", "status": "review", "team": "eng"},
+    {"category": "engineering", "priority": "-2.5", "status": "published", "team": "eng"},
+    {},
+]
+
+FILTERS = [
+    {"field": "category", "is": "engineering"},
+    {"field": "category", "has": "engine"},
+    {"field": "team", "in": ["eng", "product"]},
+    {"field": "priority", "present": True},
+    {"field": "priority", "at_least": 5},
+    {"field": "priority", "above": 5},
+    {"field": "priority", "below": 0},
+    {"field": "priority", "at_most": 9},
+    {"field": "status", "is": "draft", "not": True},
+    {"field": "priority", "at_least": 5, "not": True},
+    {"field": "category", "has": "sales", "not": True},
+    {"all": [{"field": "category", "is": "engineering"}, {"field": "priority", "at_least": 5}]},
+    {"any": [{"field": "team", "is": "sales"}, {"field": "status", "is": "review"}]},
+    {"all": [{"field": "status", "is": "published"},
+             {"any": [{"field": "priority", "above": 4}, {"field": "team", "is": "eng"}]}]},
+]
+
+EXACT = {"is", "has", "in", "present"}
+
+
+def rows_from_sql(spec):
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, metadata TEXT NOT NULL)")
+    db.executemany("INSERT INTO notes (id, metadata) VALUES (?, ?)",
+                   [(i, json.dumps(m)) for i, m in enumerate(CORPUS)])
+    clause, params = parse_filter(spec).to_sql("notes.metadata")
+    found = db.execute(f"SELECT id FROM notes WHERE {clause} ORDER BY id", params).fetchall()
+    return {row[0] for row in found}
+
+
+def rows_from_python(spec):
+    condition = parse_filter(spec)
+    return {i for i, note in enumerate(CORPUS) if condition.matches(note)}
+
+
+@pytest.mark.parametrize("spec", FILTERS, ids=range(len(FILTERS)))
+def test_the_sql_never_loses_a_memory_the_filter_would_keep(spec):
+    """The narrowing may be generous, because SQL selects candidates and
+    the filter itself decides. Generous costs a row that is then dropped.
+    The other direction loses a memory that should have been found, and
+    no later step can put it back."""
+    assert rows_from_python(spec) <= rows_from_sql(spec)
+
+
+@pytest.mark.parametrize("spec", [f for f in FILTERS if set(f) & EXACT and not f.get("not")],
+                         ids=lambda f: str(sorted(f))[:40])
+def test_a_test_sql_can_make_exactly_narrows_exactly(spec):
+    """Where SQLite can express the test, nothing is left for the second
+    pass to remove: text equality, substring, one of a list, presence."""
+    assert rows_from_sql(spec) == rows_from_python(spec)
+
+
+def test_a_number_stored_as_a_word_is_not_swept_in_by_a_loose_cast():
+    """SQLite casts 'soon' to 0.0, so a naive at_most would return it.
+    The clause has to keep it out, or a filter for low priority quietly
+    returns everything that has no number in it at all."""
+    assert 4 not in rows_from_sql({"field": "priority", "at_most": 3})
+
+
+def test_a_negated_numeric_keeps_every_candidate_for_the_second_pass():
+    """Negating a generous test would make it strict, and strict is the
+    direction that loses memories. It falls back to asking only that the
+    key is there."""
+    assert rows_from_sql({"field": "priority", "at_least": 5, "not": True}) == \
+        rows_from_sql({"field": "priority", "present": True})
+
+
+def test_a_negated_exact_test_does_not_drag_in_memories_with_no_such_key():
+    """An exact test has an exact opposite, so the clause can also say
+    the key must be there. Without that, a question about anything not a
+    draft fetches every memory that has no status at all, and the second
+    pass throws them away again."""
+    assert 6 not in rows_from_sql({"field": "status", "is": "draft", "not": True})
