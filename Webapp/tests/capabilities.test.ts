@@ -11,7 +11,9 @@ test('source browsing requires an explicit valid optional inventory capability',
   assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'episodes.list':'true'}}),/capabilit/i);
 });
 test('capability parser preserves explicit false and both native contracts', () => {
-  assert.equal(parseCapabilities(fixtures.rust).features['facts.review'], false);
+  assert.equal(parseCapabilities(fixtures.rust).features['facts.review'], true);
+  assert.equal(parseCapabilities(fixtures.rust).features['facts.exclude'], false);
+  assert.equal(parseCapabilities({...fixtures.rust, features:{...fixtures.rust.features,'facts.review':false}}).features['facts.review'], false);
   assert.equal(parseCapabilities(fixtures.python).features['facts.review'], true);
 });
 test('incomplete, mistyped and unknown-version capability contracts cannot authorize workflows', () => {

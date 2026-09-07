@@ -105,15 +105,20 @@ test('capability discovery failure is retryable without probing workflows or los
   await page.locator('.proposal').waitFor();
   assert.equal(capabilityCalls(),2);
 });
-test('Rust capabilities do not mistake a readable facts endpoint for review or exclusion support',async t=>{
-  const {page,requested}=await fixture(t,{beliefs:true,rustCapabilities:true});
+test('Rust capabilities enable individual review without implying exclusion or analytics support',async t=>{
+  const {page,decisions}=await fixture(t,{review:true,beliefs:true,rustCapabilities:true});
+  await page.getByRole('button',{name:'Beliefs',exact:true}).click();
   await page.locator('.belief').waitFor();
-  assert.equal(await page.getByRole('button',{name:/^Review/}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/^Review/}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Analytics',exact:true}).count(),0);
   await page.locator('details.actions summary').click();
   await page.getByRole('button',{name:/Close “local storage”/}).waitFor();
   assert.equal(await page.getByRole('button',{name:/Exclude “local storage”/}).count(),0);
-  assert.equal(requested.some(url=>url.includes('status=proposed')),false);
+  await page.getByRole('button',{name:/^Review/}).click();
+  await page.locator('.proposal').waitFor();
+  await page.getByRole('button',{name:'Approve',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('.proposal'));
+  assert.equal(decisions[0].path,'/v1/facts/41/approve');
 });
 test('missing or malformed capability contracts remain unknown rather than inferred',async t=>{
   for(const capabilityMode of ['missing','invalid']){
