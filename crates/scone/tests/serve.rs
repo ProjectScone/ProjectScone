@@ -712,3 +712,35 @@ async fn episodes_keep_their_source_and_date_over_http() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+/// A review page freezes the list it renders and then acts on it, so it
+/// needs the revision that list was read at. The Python server carries it
+/// beside the facts; this one did not, which left a page built against
+/// Rust unable to tell that the space had moved under it.
+#[tokio::test]
+async fn the_facts_list_carries_the_space_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+
+    let (_, before) = call(&app, "GET", "/v1/facts", Some("sk-alice"), None).await;
+    let first = before["revision"]
+        .as_i64()
+        .expect("revision beside the facts");
+
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        Some(serde_json::json!({"content": "Ana moved to Lisbon in March."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "storing an episode");
+
+    let (_, after) = call(&app, "GET", "/v1/facts", Some("sk-alice"), None).await;
+    assert!(
+        after["revision"].as_i64().unwrap() > first,
+        "a write must move the revision: {first} then {}",
+        after["revision"]
+    );
+}

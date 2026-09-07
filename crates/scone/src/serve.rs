@@ -437,16 +437,22 @@ async fn get_facts(
     headers: axum::http::HeaderMap,
     Query(query): Query<FactsQuery>,
 ) -> Response {
+    // The revision is read with the list, not in a second request: a page
+    // that freezes what it renders needs to know what it froze, and two
+    // calls can straddle a write.
     match with_engine(&state, &headers, |engine, space| {
-        engine.facts_list(space, query.all)
+        let facts = engine.facts_list(space, query.all)?;
+        let revision = engine.space_revision(space)?;
+        Ok((facts, revision))
     }) {
-        Ok(facts) => Json(serde_json::json!({
+        Ok((facts, revision)) => Json(serde_json::json!({
             "facts": facts.iter().map(|f| serde_json::json!({
                 "fact_id": f.fact_id, "subject": f.subject, "predicate": f.predicate,
                 "object": f.object, "confidence": f.confidence,
                 "valid_from": f.valid_from, "valid_until": f.valid_until,
                 "status": f.status,
             })).collect::<Vec<_>>(),
+            "revision": revision,
         }))
         .into_response(),
         Err(response) => response,
