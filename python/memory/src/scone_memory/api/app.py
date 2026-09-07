@@ -16,7 +16,7 @@ import asyncio
 import re
 
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Literal, Mapping, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -37,6 +37,16 @@ from ..core.models import Attachment, Fact, RecallItem
 INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class ConsolidateBody(BaseModel):
+    """One pass by hand: ``distill`` runs the worker's pass (extraction,
+    retention and, when configured, derivation); ``derive`` runs only the
+    derivation pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["distill", "derive"]
 
 
 class DecideBody(BaseModel):
@@ -642,6 +652,20 @@ def create_app(
             "revision": await engine.revision(space),
         }
 
+    @app.post("/v1/consolidate")
+    async def post_consolidate(body: ConsolidateBody, space: str = Depends(space_for)) -> JSONResponse:
+        """One consolidation pass by hand over this key's space."""
+        if body.scope == "derive":
+            deriver = getattr(worker, "deriver", None)
+            if deriver is None:
+                return JSONResponse({"error": "no derivation model configured (SCONE_DERIVE=1 with SCONE_CHAT_URL and SCONE_CHAT_MODEL)"}, status_code=501)
+            outcome = await deriver.derive(space, limit_groups=worker.batch)
+            return JSONResponse({"space": space, "scope": "derive", **outcome.as_payload()})
+        if worker is None:
+            return JSONResponse({"error": "no consolidation worker configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL, or SCONE_RETAIN)"}, status_code=501)
+        report = await worker.run_once(space)
+        return JSONResponse({"space": space, "scope": "distill", **report.as_payload()})
+
     @app.post("/v1/facts/decide")
     async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         """One reviewed batch, settled together: applied oldest first, and
@@ -784,6 +808,8 @@ def create_app(
             **status.model_dump(),
             "semantic_lane": lane,
             "pending_distill": pending,
+            "pending_derivation": await engine.pending_derivation(space),
+            "derivation": "on" if getattr(worker, "deriver", None) is not None else "off",
             "last_distill": last.as_payload() if last else None,
             "retention": dict(getattr(worker, "retention", None) or {}) if worker is not None else {},
         }

@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional, Sequence
 
+from .derive import Deriver
 from .distill import DistillError, Distiller
 from ..memory.engine import MemoryEngine
 from ..core.errors import SconeError
@@ -38,6 +39,12 @@ class PassReport:
     rejected_reasons: dict[str, int] = field(default_factory=dict)
     #: Episodes the retention policy forgot in this pass.
     expired: int = 0
+    #: The derivation pass, when the worker has a deriver: groups sent to
+    #: the model, inferences proposed, restated, and rejected by the gate.
+    derived_sent: int = 0
+    derived_proposed: int = 0
+    derived_restated: int = 0
+    derived_rejected: int = 0
     error: Optional[str] = None
     latency_ms: float = 0.0
 
@@ -55,13 +62,16 @@ class ConsolidationWorker:
         batch: int = 20,
         clock: Callable[[], float] = time.perf_counter,
         retention: Optional[Mapping[str, float]] = None,
+        deriver: Optional["Deriver"] = None,
     ) -> None:
         """``distiller`` None means no model: the worker then only applies
-        ``retention`` (episode kind -> days kept), which needs no model."""
-        if distiller is None and not retention:
-            raise ValueError("a worker needs a distiller, a retention policy, or both")
+        ``retention`` (episode kind -> days kept), which needs no model.
+        ``deriver`` runs the derivation pass after extraction and retention."""
+        if distiller is None and deriver is None and not retention:
+            raise ValueError("a worker needs a distiller, a deriver, a retention policy, or some of them")
         self.engine = engine
         self.distiller = distiller
+        self.deriver = deriver
         self.retention = dict(retention or {})
         self.spaces = list(spaces)
         self.interval_s = interval_s
@@ -108,6 +118,15 @@ class ConsolidationWorker:
                 report.expired = len((await self.engine.expire(space, self.retention, limit=self.batch)).forgotten)
             except SconeError as e:
                 report.error = f"{type(e).__name__}: {e}"
+        if self.deriver is not None and report.error is None:
+            try:
+                outcome = await self.deriver.derive(space, limit_groups=self.batch)
+                report.derived_sent, report.derived_proposed = outcome.sent, len(outcome.proposed)
+                report.derived_restated, report.derived_rejected = outcome.restated, len(outcome.rejected)
+            except SconeError as e:
+                report.error = f"{type(e).__name__}: {e}"
+            except Exception as e:  # noqa: BLE001 - same rule as extraction: record, never die
+                report.error = type(e).__name__
         report.latency_ms = round((self.clock() - started) * 1000, 3)
         self.last[space] = report
         self.passes += 1

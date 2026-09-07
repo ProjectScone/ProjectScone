@@ -32,6 +32,7 @@
     SCONE_DISTILL_INTERVAL_S           seconds between consolidation passes (default 30)
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
+    SCONE_DERIVE       1 | 0          run the derivation pass after extraction (default 0; needs the chat model)
                                        directly; unset = every extraction is proposed for review
     SCONE_MCP_PROPOSE_BELOW            confidence below which a fact submitted over MCP is parked for
                                        review; unset = every submitted fact is a ledger claim, which
@@ -97,6 +98,7 @@ class Settings:
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
+    derive: bool = False
     contextual_embeddings: bool = False
     demote_restated: bool = False
     similarity_floor: Optional[float] = None
@@ -162,6 +164,7 @@ class Settings:
             chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
+            derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             demote_restated=env.get("SCONE_DEMOTE_RESTATED") == "1",
@@ -377,8 +380,23 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
         if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
             raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
         distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
+    deriver = None
+    if chat is not None and settings.derive:
+        from ..ingestion.derive import Deriver
+
+        deriver = Deriver(engine, chat)
     return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
-                               batch=settings.distill_batch, retention=settings.retention)
+                               batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
+
+
+def parse_flag(name: str, raw: Optional[str]) -> bool:
+    """An on/off setting: 1, true, yes, on; 0, false, no, off, or unset."""
+    value = (raw or "").strip().lower()
+    if value in ("", "0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    raise InvalidInput(f"{name} must be 1 or 0, got {raw!r}")
 
 
 def parse_retention(raw: str) -> dict[str, float]:

@@ -166,6 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--console", action="store_true", help="serve the packaged React workspace (no keys embedded)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
     p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("derive", help="one derivation pass: propose claims that follow from the claims held, with their premises")
+    p.add_argument("--limit", type=int, default=50, help="groups sent to the model in this pass")
     p = sub.add_parser("bench", help="measure retrieval on a LongMemEval-style file with the Rust harness's definitions")
     p.add_argument("dataset", help="path to longmemeval_s.json or a same-shaped file")
     p.add_argument("--k", default="5,10,15", help="comma-separated k values (default 5,10,15)")
@@ -633,6 +635,22 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(fact_line(f), file=out)
             for line in profile.dynamic:
                 print(f"- {line}", file=out)
+        return 0
+
+    if args.command == "derive":
+        from . import config as runtime_config
+        from ..ingestion.derive import Deriver
+
+        chat = runtime_config.build_chat(settings)
+        if chat is None:
+            print("error: no consolidation model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)", file=sys.stderr)
+            return 2
+        outcome = await Deriver(engine, chat).derive(space, limit_groups=args.limit)
+        if args.json:
+            emit({"space": space, **outcome.as_payload()})
+        else:
+            print(f"derived over {outcome.sent} of {outcome.groups} group(s): {len(outcome.proposed)} proposed, "
+                  f"{outcome.restated} restated, {len(outcome.rejected)} rejected", file=out)
         return 0
 
     if args.command == "distill":
