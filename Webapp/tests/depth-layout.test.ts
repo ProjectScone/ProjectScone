@@ -3,6 +3,24 @@ import assert from 'node:assert/strict';
 import { layoutDepth, projectPoint, rotatePoint, type Vec3 } from '../src/playground/depth-layout.ts';
 import type { EvidenceNode, EvidenceEdge } from '../src/types.ts';
 import { depthPage } from '../src/playground/depth-page.ts';
+import { owners } from '../src/playground/graph-layout.ts';
+
+test('later depth pages retain session clusters when their source paths are off-page',()=>{
+  const sessions:EvidenceNode[]=['a','b'].map(id=>({id,kind:'session',label:id}));
+  const records:EvidenceNode[]=Array.from({length:1250},(_,i)=>({id:`t${String(i).padStart(4,'0')}`,kind:'turn',label:'Turn'}));
+  const nodes=[...sessions,...records];
+  const edges:EvidenceEdge[]=records.map((n,i)=>({source:i%2?'a':'b',target:n.id,kind:'has'}));
+  const page=depthPage(nodes,edges,1),ownership=owners(nodes,edges);
+  assert.equal(page.edges.length,0);
+  assert.ok(page.nodes.every(n=>n.kind!=='session'));
+  const points=layoutDepth(page.nodes,page.edges,'constellation',ownership);
+  const center=(owner:string)=>{
+    const members=page.nodes.filter(n=>ownership.get(n.id)===owner).map(n=>points.get(n.id)!);
+    return members.reduce((sum,p)=>({x:sum.x+p.x/members.length,y:sum.y+p.y/members.length,z:sum.z+p.z/members.length}),{x:0,y:0,z:0});
+  };
+  const a=center('a'),b=center('b');
+  assert.ok(Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)>200,'Known session clusters must remain separated.');
+});
 
 test('large depth pages bound nodes and links and disclose every omitted link',()=>{
   const nodes:EvidenceNode[]=Array.from({length:1250},(_,i)=>({id:String(i).padStart(4,'0'),kind:'claim',label:'Claim'}));

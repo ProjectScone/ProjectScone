@@ -36,7 +36,8 @@ function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,o
   const mode=layout==='growth'?'constellation':layout;
   // Ignore content-only refreshes: identical topology must not restart layout.
   const topology=useMemo(()=>JSON.stringify([nodes.map(n=>[n.id,n.kind]).sort(),edges.map(e=>[e.source,e.target,e.kind]).sort()]),[nodes,edges]);
-  const world=useMemo(()=>layoutDepth(nodes,edges,mode),[topology,mode]);
+  const ownershipKey=JSON.stringify(nodes.map(n=>[n.id,ownership.get(n.id)]).sort());
+  const world=useMemo(()=>layoutDepth(nodes,edges,mode,ownership),[topology,mode,ownershipKey]);
   const unassigned=nodes.filter(n=>n.kind!=='session'&&!ownership.has(n.id)).length;
   const reset=()=>{motion.current={yaw:0,pitch:0,x:0,y:0};setOrbit(initialOrbit);setZoom(1);setPan({x:0,y:0});};
   const rotate=(yaw:number,pitch:number)=>setOrbit(o=>({yaw:o.yaw+yaw,pitch:Math.max(-1.45,Math.min(1.45,o.pitch+pitch))}));

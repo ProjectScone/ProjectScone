@@ -29,9 +29,9 @@ function sphere(index: number, count: number, radius: number): Vec3 {
   return {x:Math.cos(angle)*ring*radius,y:y*radius,z:Math.sin(angle)*ring*radius};
 }
 
-export function layoutDepth(nodes: EvidenceNode[], edges: EvidenceEdge[], mode: DepthLayout): Map<string,Vec3> {
+export function layoutDepth(nodes: EvidenceNode[], edges: EvidenceEdge[], mode: DepthLayout, ownership: ReadonlyMap<string,string> = owners(nodes,edges)): Map<string,Vec3> {
   const ordered=[...nodes].sort((a,b)=>a.id.localeCompare(b.id));
-  const ownership=owners(ordered,edges), lanes=[...new Set(ordered.map(n=>ownership.get(n.id)||'unattributed'))].sort();
+  const lanes=[...new Set(ordered.map(n=>ownership.get(n.id)||'unattributed'))].sort();
   const positions=new Map<string,Vec3>();
   for(const [lane,owner] of lanes.entries()){
     const members=ordered.filter(n=>(ownership.get(n.id)||'unattributed')===owner);
