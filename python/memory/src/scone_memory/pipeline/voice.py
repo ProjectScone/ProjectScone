@@ -121,17 +121,19 @@ class RecognizerStage:
         self._task = asyncio.create_task(self._read(), name="voice-recognizer")
 
     async def stop(self) -> None:
+        # Cancelled rather than sent a last marker. A marker needs room in
+        # a queue that may be full of audio nobody is reading, and a call
+        # has to be able to end even then.
         task, self._task = self._task, None
         if task is None:
             return
-        await self._audio.put(None)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
     async def _chunks(self):
-        while (chunk := await self._audio.get()) is not None:
-            yield chunk
+        while True:
+            yield await self._audio.get()
 
     async def _read(self) -> None:
         try:

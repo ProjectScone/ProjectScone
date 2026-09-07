@@ -278,3 +278,31 @@ async def test_a_model_that_gives_up_does_not_end_the_call():
 
     assert mouth.spoken == ["still here."]
     await pipeline.stop()
+
+
+async def test_a_call_can_be_hung_up_with_the_ear_still_backed_up():
+    """Stopping put a last marker in the recognizer's queue and waited
+    for room. A queue already full of audio nobody is reading gives no
+    room, and the call could not be ended at all."""
+
+    class Deaf:
+        """Never reads the audio it is handed, so the backlog fills."""
+
+        def transcribe(self, audio):
+            async def nothing():
+                await asyncio.Event().wait()
+                yield  # pragma: no cover - unreachable, and makes this a generator
+
+            return nothing()
+
+        async def aclose(self):
+            pass
+
+    far = FarEnd()
+    ear = RecognizerStage(Deaf(), backlog=2)
+    pipeline = Pipeline([CallerStage(far), ear, ModelStage(Mind([])), SynthesizerStage(Mouth())])
+    await pipeline.start()
+    for _ in range(6):
+        await far.says()
+    await until(lambda: ear._audio.full(), "the ear to back up")
+    await asyncio.wait_for(pipeline.stop(), 2)
