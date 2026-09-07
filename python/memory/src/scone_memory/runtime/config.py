@@ -37,7 +37,8 @@
                                        review; unset = every submitted fact is a ledger claim, which
                                        is what the Rust server does without --propose-below
 
-    SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
+    SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
+                                               read | write | review | full (the default)
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
     SCONE_RELOAD_PAGES=1 (alias SCONE_UI_DEV=1)  re-read console.html and playground.html per request, ETag from
@@ -104,6 +105,8 @@ class Settings:
     events_max_age_days: Optional[float] = None
     events_max: int = 10_000
     keys: Mapping[str, str] = field(default_factory=dict)
+    #: Key -> role; a key not listed here is full.
+    roles: Mapping[str, str] = field(default_factory=dict)
     host: str = "127.0.0.1"
     port: int = 7437
     reload_pages: bool = False
@@ -167,7 +170,8 @@ class Settings:
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
             events_max=int(env.get("SCONE_EVENTS_MAX", "10000")),
-            keys=parse_keys(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY")),
+            keys=parse_key_roles(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY"))[0],
+            roles=parse_key_roles(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY"))[1],
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
@@ -180,24 +184,43 @@ class Settings:
         )
 
 
-def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
-    """``"k1:space-a,k2:space-b"`` to ``{"k1": "space-a", "k2": "space-b"}``.
-    A key that appears twice is a configuration error, not a last-wins."""
+#: What a key may do. read: reads only. write: adds, links and forgets, but
+#: never decides. review: decides (approve, decline, exclude, include, batch
+#: decisions) but never adds. full: everything.
+ROLES = ("read", "write", "review", "full")
+
+
+def parse_key_roles(many: Optional[str], one: Optional[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """``"k1:space-a:read,k2:space-b"`` to ``({"k1": "space-a", "k2": "space-b"},
+    {"k1": "read", "k2": "full"})``. A key that appears twice is a
+    configuration error, not a last-wins; a role outside ROLES is refused."""
     keys: dict[str, str] = {}
+    roles: dict[str, str] = {}
     if many:
         for entry in many.split(","):
             entry = entry.strip()
             if not entry:
                 continue
-            key, sep, space = entry.partition(":")
-            if not sep or not key.strip() or not space.strip():
-                raise InvalidInput(f"SCONE_API_KEYS entry must be key:space, got {entry!r}")
-            if key.strip() in keys:
-                raise InvalidInput(f"SCONE_API_KEYS names key {key.strip()!r} twice")
-            keys[key.strip()] = space.strip()
+            parts = [part.strip() for part in entry.split(":")]
+            if len(parts) not in (2, 3) or not all(parts):
+                raise InvalidInput(f"SCONE_API_KEYS entry must be key:space or key:space:role, got {entry!r}")
+            key, space = parts[0], parts[1]
+            role = parts[2] if len(parts) == 3 else "full"
+            if role not in ROLES:
+                raise InvalidInput(f"SCONE_API_KEYS role must be one of {ROLES}, got {role!r}")
+            if key in keys:
+                raise InvalidInput(f"SCONE_API_KEYS names key {key!r} twice")
+            keys[key] = space
+            roles[key] = role
     elif one:
         keys[one.strip()] = "default"
-    return keys
+        roles[one.strip()] = "full"
+    return keys, roles
+
+
+def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
+    """The key -> space half of parse_key_roles, for callers that only want spaces."""
+    return parse_key_roles(many, one)[0]
 
 
 def build_embedder(settings: Settings):

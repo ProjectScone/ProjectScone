@@ -30,7 +30,7 @@ from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
-from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json
+from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -75,7 +75,7 @@ class OwnedSession:
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
-                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4):
+                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -227,6 +227,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     app.state.begin_conversation_shutdown = begin_shutdown
     app.state.worker = worker
 
+    roles = dict(roles or {})
+
     def space_for(request: Request):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
@@ -234,6 +236,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 if hmac.compare_digest(token.encode(), key.encode()):
                     if shutting_down and request.method == "POST":
                         raise HTTPException(503, "conversation service is shutting down")
+                    if not permitted(roles.get(key, "full"), request.method, request.url.path):
+                        raise HTTPException(403, f"key role {roles.get(key)} cannot write")
                     return space
         raise HTTPException(401, "valid bearer key required")
 
@@ -771,6 +775,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if space is None:
             await refuse("unknown key")
             return
+        if not permitted(roles.get(key, "full"), "POST", "/v1/conversations"):
+            await refuse(f"key role {roles.get(key)} cannot start a session")
+            return
         if shutting_down:
             await refuse("conversation service is shutting down")
             return
@@ -853,7 +860,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     # The mounted app answers /v1/status, so it must know the worker; its own
     # lifespan never runs under a mount, so ownership stays with this one.
     memory_app = create_app(engine, keys, console=False, conversations=True, worker=worker,
-                            ingest_concurrency=ingest_concurrency)
+                            ingest_concurrency=ingest_concurrency, roles=roles)
     app.state.ingest_lane_width = memory_app.state.ingest_lane_width
     app.mount("/", memory_app)
     return app

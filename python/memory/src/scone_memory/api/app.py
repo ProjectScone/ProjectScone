@@ -95,6 +95,27 @@ class FactBody(BaseModel):
     derived_from: list[int] = Field(default_factory=list)
 
 
+#: What each role may do, by request. Reads are open to every role; the
+#: decisions of review belong to review and full; every other write belongs
+#: to write and full. A key with no role recorded is full.
+_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/v1/facts/decide")
+
+
+def _is_decision(path: str) -> bool:
+    return path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+
+
+def permitted(role: str, method: str, path: str) -> bool:
+    if method in ("GET", "HEAD", "OPTIONS") or role == "full":
+        return True
+    return role == ("review" if _is_decision(path) else "write")
+
+
+class Forbidden(Exception):
+    """The key is known and scoped to this space, but its role does not
+    allow this request. Maps to HTTP 403."""
+
+
 #: Records one batch request may carry. A batch is bounded work, not an import.
 MAX_BATCH_RECORDS = 500
 
@@ -162,6 +183,7 @@ def create_app(
     reload_pages: bool = False,
     conversations: bool = False,
     ingest_concurrency: int = 4,
+    roles: Optional[Mapping[str, str]] = None,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
@@ -173,7 +195,9 @@ def create_app(
     says this app is mounted under a conversation service on the same
     origin, so the capability manifest may advertise it. ``ingest_concurrency``
     is how many writes may be embedding at once; one more is answered 429
-    with Retry-After instead of queued without limit. Reads are not gated."""
+    with Retry-After instead of queued without limit. Reads are not gated.
+    ``roles`` maps a key to read | write | review | full (see ``permitted``);
+    a key not in it is full."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -187,6 +211,7 @@ def create_app(
     if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
+    app.state.roles = dict(roles or {})
     app.state.ingest_lane_width = ingest_concurrency
     ingest_lane = asyncio.Semaphore(ingest_concurrency)
 
@@ -216,6 +241,9 @@ def create_app(
         space = app.state.keys.get(token.strip())
         if space is None:
             raise Unauthorized("unknown key")
+        role = app.state.roles.get(token.strip(), "full")
+        if not permitted(role, request.method, request.url.path):
+            raise Forbidden(f"key role {role} cannot {'decide' if _is_decision(request.url.path) else 'write'}")
         return space
 
     def actor_for(request: Request) -> str:
@@ -233,6 +261,10 @@ def create_app(
     @app.exception_handler(Unauthorized)
     async def _unauthorized(_: Request, e: Unauthorized) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=401)
+
+    @app.exception_handler(Forbidden)
+    async def _forbidden(_: Request, e: Forbidden) -> JSONResponse:
+        return JSONResponse({"error": str(e)}, status_code=403)
 
     @app.exception_handler(InvalidInput)
     async def _invalid(_: Request, e: InvalidInput) -> JSONResponse:

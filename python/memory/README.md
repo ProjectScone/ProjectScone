@@ -78,6 +78,13 @@ The HTTP surface is the same as the Rust `scone serve`, so the
 [`scone-client`](../scone-client) package (moving from `clients/python`) and
 the MCP setup work against either. The bearer key decides the space; a key can never read
 outside the space it was issued for.
+A third field gives a key a role:
+`SCONE_API_KEYS=r:default:read,w:default:write,v:default:review,f:default:full`.
+`read` only reads; `write` remembers, links and forgets but never decides a
+claim; `review` approves, declines, excludes and includes but never adds;
+`full` (the default, and always what `SCONE_API_KEY` gets) does everything.
+A refused request is a 403 naming the role. The conversation service holds
+the same rule, including the audio socket's hello.
 
 | Route | What |
 |---|---|
