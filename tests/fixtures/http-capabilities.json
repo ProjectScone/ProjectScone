@@ -13,7 +13,8 @@
       "metrics.read": false,
       "scopes.read": false,
       "status.read": true,
-      "episodes.list": true
+      "episodes.list": true,
+      "profile.read": true
     }
   },
   "python": {
