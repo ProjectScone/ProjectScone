@@ -204,3 +204,33 @@ async def test_a_stale_persona_selection_is_refused_and_receipts_keep_the_record
         receipt = (await client.get(f"/v1/conversations/{sid}")).json()["persona"]
         assert receipt == {"id": "helper", "name": "Helper", "fingerprint": current, "current": False}
         assert (await client.get("/v1/conversations/personas")).json()["personas"][0]["fingerprint"] != current
+
+
+async def test_a_retry_of_a_lost_create_replays_even_after_the_catalog_changed(tmp_path):
+    """The create's identity is its request id. A client whose first create
+    succeeded but whose response was lost must get that session back on
+    retry, even if the operator changed the persona in between; only a
+    request id with no session behind it can be refused as stale, and then
+    with a code the client can act on without guessing."""
+    engine = await engine_for()
+    first = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=catalog(HELPER), public_text_streaming=True)
+    async with client_for(first) as client:
+        old = (await client.get("/v1/conversations/personas")).json()["personas"][0]["fingerprint"]
+        created = await client.post("/v1/conversations", json={"request_id": "lost", "capture": True, "persona": "helper",
+                                                                "persona_fingerprint": old})
+        sid = created.json()["session_id"]
+    louder = {**HELPER, "speech": {"provider": "stub", "model": "mouth", "voice": "tenor"}}
+    changed = bind_catalog([Persona.model_validate(louder)], ProviderRegistry(
+        reply={("stub", "echo"): ScriptedModel}, transcription={("stub", "ears"): lambda: None},
+        speech={("stub", "mouth", "tenor"): lambda: None}))
+    second = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=changed, public_text_streaming=True)
+    async with client_for(second) as client:
+        retry = await client.post("/v1/conversations", json={"request_id": "lost", "capture": True, "persona": "helper",
+                                                              "persona_fingerprint": old})
+        assert retry.status_code == 200 and retry.json()["session_id"] == sid
+        assert retry.json()["persona"] == {"id": "helper", "name": "Helper", "fingerprint": old, "current": False}
+        fresh = await client.post("/v1/conversations", json={"request_id": "new", "capture": True, "persona": "helper",
+                                                              "persona_fingerprint": old})
+        assert fresh.status_code == 409
+        assert fresh.json()["code"] == "persona_selection_stale" and len(fresh.json()["fingerprint"]) == 16
+        assert [s["session_id"] for s in (await client.get("/v1/conversations")).json()["items"]] == [sid]

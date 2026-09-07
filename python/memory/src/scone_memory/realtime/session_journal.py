@@ -195,6 +195,13 @@ class SessionJournal:
                               persona or "", persona_fingerprint or ""))
             return self._append(space, sid, 1, request_id, signature, "create", None, "created", now)
 
+    def created(self, space: str, request_id: str) -> str | None:
+        """The session a create request already made, by its request id."""
+        check_space(space)
+        _key(request_id)
+        found = self._db.execute("SELECT session_id FROM sessions WHERE space=? AND create_key=?", (space, request_id)).fetchone()
+        return found["session_id"] if found is not None else None
+
     def get(self, space: str, session_id: str) -> dict:
         check_space(space)
         _key(session_id)

@@ -335,8 +335,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if chosen is None:
                 raise HTTPException(422, f"persona is not in this host's catalog: {body.persona}")
             if body.persona_fingerprint is not None and body.persona_fingerprint != catalog.fingerprint(body.persona):
-                raise HTTPException(409, f"persona selection is stale: {body.persona} "
-                                         f"(current fingerprint {catalog.fingerprint(body.persona)})")
+                # The create's identity is its request id: a retry of a create
+                # that already made a session replays it, whatever the catalog
+                # says now. Only a request id with nothing behind it is stale,
+                # and then with a code the client can act on without guessing.
+                if (space, body.request_id) not in creates and journal.created(space, body.request_id) is None:
+                    return JSONResponse({"error": f"persona selection is stale: {body.persona} "
+                                                  f"(current fingerprint {catalog.fingerprint(body.persona)})",
+                                         "code": "persona_selection_stale",
+                                         "fingerprint": catalog.fingerprint(body.persona)}, status_code=409)
         elif runtime_factory is None and scoped_runtime_factory is None:
             if catalog is not None and catalog.personas:
                 raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
