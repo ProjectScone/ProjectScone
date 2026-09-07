@@ -217,6 +217,7 @@ class MemoryEngine:
         #: given, so an engine with no configured blob directory keeps
         #: nothing across a restart rather than writing somewhere unasked.
         self.blobs = blobs if blobs is not None else InMemoryBlobStore()
+        self._closed = False
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
         self.clock = clock
@@ -257,6 +258,34 @@ class MemoryEngine:
         await self.vectors.ensure(self.embedder.dim)
         await self.recover()
         return self
+
+    async def close(self) -> None:
+        """Release every store this engine holds.
+
+        Only the engine knows which stores it holds, so closing is its
+        job, not the caller's: the MCP server used to close two of the
+        four by hand, and a fixture that tried ``await memory.close()``
+        found nothing to call. A store with nothing to release has no
+        close() and is skipped; requiring every backend to grow a no-op
+        would widen the wrong side of the contract. Every store is asked
+        even when one fails, and the first failure is raised afterwards,
+        so a client that cannot disconnect does not leave a file open
+        beside it. Closing twice is harmless.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        first: Optional[BaseException] = None
+        for store in (self.documents, self.vectors, self.events, self.blobs):
+            closer = getattr(store, "close", None)
+            if store is None or not callable(closer):
+                continue
+            try:
+                await closer()
+            except Exception as exc:  # noqa: BLE001 - every store must still be asked
+                first = first or exc
+        if first is not None:
+            raise first
 
     async def recover(self) -> RecoveryReport:
         """Finish or forget what a crash interrupted. A remember marks its

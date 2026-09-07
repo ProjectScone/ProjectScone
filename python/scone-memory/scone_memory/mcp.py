@@ -414,9 +414,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def close_stores(engine: MemoryEngine) -> None:
-    for store in (engine.documents, engine.vectors):
-        if hasattr(store, "close"):
-            await store.close()
+    """Kept for callers that import it; the engine closes its own stores
+    now, all four of them rather than the two this used to reach."""
+    await engine.close()
 
 
 async def serve(settings: Settings, space: str) -> None:
