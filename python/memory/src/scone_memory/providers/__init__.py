@@ -1,1 +1,1 @@
-"""Outbound clients: chat models now, voice adapters later."""
+"""Outbound clients; optional speech adapters live in providers.speech."""

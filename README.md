@@ -35,6 +35,20 @@ Stored claims, including model extractions, are not independently verified truth
 
 ## Product direction and completion roadmap
 
+### Direct speech providers
+
+The native Python real-time pipeline has direct `CartesiaSpeech` and
+`ElevenLabsSpeech` adapters in `scone_memory.providers.speech`. Install the
+`speech` extra to use them. Each requires explicit `api_key`, `model`, and `voice`
+arguments; there is no default account, silent provider fallback or automatic
+retry. They stream bounded signed 16-bit PCM audio through Scone's own audio
+protocol, without a Pipecat runtime dependency. Close interrupted iterators and
+call `aclose()` on the adapter when its session ends. Provider credentials belong
+on the server, never in browser configuration. Live provider billing and account
+availability are not established by the isolated adapter tests.
+
+### Roadmap
+
 ProjectScone is building an open-source persistent-memory and real-time agent
 platform, informed by Supermemory and Pipecat. Native Rust and Python memory
 libraries, CLIs, HTTP and MCP servers are available; live capture and the console
