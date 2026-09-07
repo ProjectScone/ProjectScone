@@ -114,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quote", help="an exact substring of that episode supporting the relation")
     p = sub.add_parser("links", help="show the relations a fact takes part in, from either end")
     p.add_argument("fact_id", type=int)
+    p = sub.add_parser("expire", help="forget episodes older than a retention policy (oldest first, bounded); facts never expire")
+    p.add_argument("--keep", action="append", default=[], metavar="KIND=DAYS", required=True,
+                   help="keep this kind for this many days by the episode's own time (repeatable)")
+    p.add_argument("--limit", type=int, default=100, help="at most this many in one pass")
+    p.add_argument("--dry-run", action="store_true", help="report what would go and forget nothing")
 
     p = sub.add_parser("close", help="close a fact with a reason: it stopped holding")
     p.add_argument("fact_id", type=int)
@@ -483,6 +488,18 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         link = await engine.link_facts(space, args.from_fact, args.to_fact, args.kind,
                                        source_episode_id=args.source, quote=args.quote)
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
+        return 0
+
+    if args.command == "expire":
+        from .config import parse_retention
+
+        report = await engine.expire(space, parse_retention(",".join(args.keep)), limit=args.limit, dry_run=args.dry_run)
+        if args.json:
+            emit(report.model_dump())
+        elif args.dry_run:
+            print(f"would forget {report.remaining} episode(s) under {report.policy}", file=out)
+        else:
+            print(f"forgot {len(report.forgotten)} episode(s) under {report.policy}; {report.remaining} left for the next pass", file=out)
         return 0
 
     if args.command == "links":

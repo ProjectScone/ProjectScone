@@ -123,7 +123,8 @@ not needed for this: with `SCONE_RETAIN` and no `SCONE_CHAT_*`, the worker
 runs retention alone and `/v1/status` says `semantic_lane: manual` with the
 policy under `retention`. Facts never expire; the claims that cited a forgotten
 episode stand, as with any forget. `MemoryEngine.expire(space, policy,
-limit=, dry_run=)` is the same pass by hand.
+limit=, dry_run=)` is the same pass by hand, and so is `scone-memory expire
+--keep conversation=30 [--keep note=365] [--limit N] [--dry-run]`.
 
 ## What recall returns
 

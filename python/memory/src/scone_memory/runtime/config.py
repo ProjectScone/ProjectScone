@@ -172,7 +172,7 @@ class Settings:
             port=int(env.get("SCONE_PORT", "7437")),
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
             ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
-            retention=_retention(env.get("SCONE_RETAIN", "")),
+            retention=parse_retention(env.get("SCONE_RETAIN", "")),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
@@ -358,7 +358,7 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
                                batch=settings.distill_batch, retention=settings.retention)
 
 
-def _retention(raw: str) -> dict[str, float]:
+def parse_retention(raw: str) -> dict[str, float]:
     """SCONE_RETAIN: "kind=days,kind=days"; kinds and days are checked the
     way the engine checks them, so a wrong policy stops the server."""
     from ..memory.engine import retention_policy

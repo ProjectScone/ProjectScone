@@ -494,3 +494,28 @@ def test_cli_import_skips_forgotten_content_unless_resurrected(tmp_path):
     assert code == 0 and json.loads(text)["episodes"] == 0 and json.loads(text)["tombstoned"] == 1
     code, text = run("import", "--resurrect", "--json", stdin=dump)
     assert code == 0 and json.loads(text)["episodes"] == 1 and json.loads(text)["tombstoned"] == 0
+
+
+def test_cli_expire_previews_then_applies_a_policy(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", "--kind", "conversation", "--created-at", "2020-01-01", stdin="an old chat turn")
+    run("remember", "--kind", "conversation", stdin="a fresh chat turn")
+    run("remember", "--kind", "note", "--created-at", "2020-01-01", stdin="an old note")
+    code, text = run("expire", "--keep", "conversation=30", "--dry-run", "--json")
+    assert code == 0 and json.loads(text)["remaining"] == 1 and json.loads(text)["forgotten"] == []
+    assert run("recall", "old chat", "--json")[1].count('"episode_id"') >= 1, "a dry run forgets nothing"
+    code, text = run("expire", "--keep", "conversation=30", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == [1] and json.loads(text)["receipts"][0]["forgotten_at"]
+    code, text = run("expire", "--keep", "conversation=30", "--keep", "note=30", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == [3], "every --keep counts"
+    code, text = run("expire", "--keep", "conversation=30", "--keep", "note=30")
+    assert code == 0 and "forgot 0" in text
+    assert run("expire", "--keep", "poem=30")[0] == 2
+    with pytest.raises(SystemExit):
+        run("expire")  # a policy is required; nothing expires by default
