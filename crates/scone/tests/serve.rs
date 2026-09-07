@@ -612,7 +612,34 @@ async fn status_reports_space_and_lane() {
 #[tokio::test]
 async fn profile_endpoint_serves_identity_and_activity() {
     let dir = tempfile::tempdir().unwrap();
-    let app = app(dir.path());
+    // One claim taught by its own episode, so the profile has provenance to show.
+    let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let space = scone_core::auth::resolve(&mut engine, "alice", true).unwrap();
+    let (taught, _) = engine
+        .import_episode(&space, "note", "alice moved to lisbon", None, None)
+        .unwrap();
+    engine
+        .apply_facts(
+            &space,
+            taught,
+            &[scone_core::llm::ExtractedFact {
+                subject: "alice".into(),
+                predicate: "moved_to".into(),
+                object: "lisbon".into(),
+                confidence: 0.9,
+            }],
+        )
+        .unwrap();
+    let app = router(
+        engine,
+        ServeConfig {
+            keys: vec![SpaceKey {
+                key: "sk-alice".into(),
+                space: "alice".into(),
+                role: Role::Full,
+            }],
+        },
+    );
     let (_, added) = call(
         &app,
         "POST",
@@ -628,7 +655,18 @@ async fn profile_endpoint_serves_identity_and_activity() {
         body["dynamic"][0].as_str().unwrap().contains("ships rust"),
         "{body}"
     );
-    assert!(body["static_facts"].as_array().is_some());
+    // A profile claim carries what the ledger carries: validity, status and
+    // the episodes it came from, the same keys as GET /v1/facts.
+    let claim = &body["static_facts"][0];
+    assert_eq!(claim["object"], "lisbon", "{body}");
+    for key in ["valid_from", "valid_until", "status", "sources"] {
+        assert!(
+            claim.get(key).is_some(),
+            "profile claim lacks {key}: {claim}"
+        );
+    }
+    assert_eq!(claim["status"], "active");
+    assert_eq!(claim["sources"], serde_json::json!([taught]));
     // Recent activity carries its evidence, in the shape both engines share.
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/fixtures/profile-recent.json")).unwrap();

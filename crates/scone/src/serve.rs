@@ -678,11 +678,23 @@ async fn post_fact_close(
 }
 
 async fn get_profile(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    match with_engine(&state, &headers, |engine, space| engine.profile(space, 8)) {
-        Ok(profile) => Json(serde_json::json!({
-            "static_facts": profile.static_facts.iter().map(|f| serde_json::json!({
+    match with_engine(&state, &headers, |engine, space| {
+        let profile = engine.profile(space, 8)?;
+        // The same provenance GET /v1/facts carries, so a profile claim can
+        // be opened at its source rather than taken on the server's word.
+        let sources = profile
+            .static_facts
+            .iter()
+            .map(|f| engine.fact_sources(f.fact_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((profile, sources))
+    }) {
+        Ok((profile, sources)) => Json(serde_json::json!({
+            "static_facts": profile.static_facts.iter().zip(sources).map(|(f, sources)| serde_json::json!({
                 "fact_id": f.fact_id, "subject": f.subject, "predicate": f.predicate,
                 "object": f.object, "confidence": f.confidence,
+                "valid_from": f.valid_from, "valid_until": f.valid_until,
+                "status": f.status, "sources": sources,
             })).collect::<Vec<_>>(),
             "dynamic": profile.dynamic,
             "recent": profile.recent.iter().map(|r| serde_json::json!({

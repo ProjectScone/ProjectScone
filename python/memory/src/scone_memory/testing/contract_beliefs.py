@@ -187,6 +187,7 @@ __all__ = [
     "test_an_extension_keeps_both_facts_and_links_them",
     "test_a_derivation_names_its_premises_and_is_labeled_inferred",
     "test_links_refuse_self_reference_unknown_kinds_and_dependency_cycles",
+    "test_a_profile_holds_only_claims_that_hold_now_in_this_space",
     "test_a_link_carries_its_evidence_and_outlives_a_forgotten_source",
     "test_a_proposed_derivation_is_linked_but_answers_nothing_until_approved",
 ]
@@ -290,3 +291,23 @@ async def test_a_proposed_derivation_is_linked_but_answers_nothing_until_approve
     approved = await engine.approve("default", second.fact_id)
     assert approved.status == "active" and approved.fact_id in {f.fact_id for f in await engine.facts("default")}
     assert [l.to_fact for l in await engine.fact_links("default", approved.fact_id)] == [works.fact_id]
+
+
+async def test_a_profile_holds_only_claims_that_hold_now_in_this_space(engine):
+    """Eligibility is time and space: a claim not yet valid, one a person
+    excluded, and one of another space stay out of static_facts; a
+    forgotten episode leaves recent, and the claims that cited it stand."""
+    holds = await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2020-01-01")
+    await engine.assert_fact("default", "mark", "moves_to", "Lisbon", valid_from="2999-01-01")
+    await engine.assert_fact("other", "mark", "works_at", "Acme")
+    hidden = await engine.assert_fact("default", "mark", "drinks", "matcha")
+    await engine.exclude("default", hidden.fact_id, "not for the profile")
+    episode = await engine.remember("default", "a note that will be forgotten")
+    await engine.remember("other", "someone else's note")
+    profile = await engine.profile("default")
+    assert [f.fact_id for f in profile.static_facts] == [holds.fact_id], "not yet valid, excluded and other-space claims stay out"
+    assert [r.episode_id for r in profile.recent] == [episode.episode_id], "another space's episodes stay out"
+    await engine.forget("default", episode.episode_id)
+    after = await engine.profile("default")
+    assert after.recent == [] and after.dynamic == [], "a forgotten episode leaves recent"
+    assert [f.fact_id for f in after.static_facts] == [holds.fact_id], "the claims stand"

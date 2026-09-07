@@ -218,13 +218,14 @@ async def test_profile_is_identity_plus_recent_activity(engine):
     await engine.assert_fact("default", "mark", "name", "ProjectScone contributors")
     await engine.remember("default", "older note", created_at="2024-01-01")
     await engine.remember("default", "newer note", created_at="2024-02-01")
+    await engine.remember("default", "backfilled note", created_at="2023-06-01")
     profile = await engine.profile("default")
     assert [f.object for f in profile.static_facts] == ["ProjectScone contributors"]
-    assert profile.dynamic == ["newer note", "older note"]
+    assert profile.dynamic == ["newer note", "older note", "backfilled note"], "recent is by the episode's own time, so a backfill sorts where it happened"
     assert [r.excerpt for r in profile.recent] == profile.dynamic, "recent is dynamic with its evidence"
-    newest, oldest = profile.recent
-    assert newest.episode_id > oldest.episode_id
-    assert [r.created_at[:10] for r in profile.recent] == ["2024-02-01", "2024-01-01"], "each carries its episode's timestamp"
+    newest, oldest, backfilled = profile.recent
+    assert backfilled.episode_id > newest.episode_id > oldest.episode_id, "ids say when it was added; order says when it happened"
+    assert [r.created_at[:10] for r in profile.recent] == ["2024-02-01", "2024-01-01", "2023-06-01"], "each carries its episode's timestamp"
     assert (await engine.documents.get_episode("default", newest.episode_id)).content == "newer note"
 
 

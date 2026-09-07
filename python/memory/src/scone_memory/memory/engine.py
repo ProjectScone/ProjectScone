@@ -1683,7 +1683,10 @@ class MemoryEngine:
     async def profile(self, space: str, limit: int = 10) -> Profile:
         check_space(space)
         limit = max(1, min(limit, 50))
-        active = [f for f in await self.documents.list_facts(space, include_closed=False) if f.status == "active" and not f.excluded]
+        now = self.clock()
+        active = [f for f in await self.documents.list_facts(space, include_closed=False)
+                  if f.status == "active" and not f.excluded
+                  and f.valid_from <= now and (f.valid_until is None or f.valid_until > now)]
         active.sort(key=lambda f: (-f.confidence, f.fact_id))
         recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
                   for e in await self.documents.recent_episodes(space, limit)]
