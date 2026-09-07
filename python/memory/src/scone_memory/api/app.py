@@ -29,6 +29,7 @@ from contextlib import asynccontextmanager
 from ..observability import metrics
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
+from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
 
 
@@ -624,7 +625,7 @@ def create_app(
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
-            conditions=parse_conditions(conditions),
+            conditions=read_conditions(conditions),
         )
         return {
             "event_id": result.event_id,
@@ -912,30 +913,6 @@ def parse_where(text: Optional[str]) -> dict[str, str]:
             raise InvalidInput(f"where entries are key:value, got {entry!r}")
         where[key.strip()] = value.strip()
     return where
-
-
-#: A filter arrives as JSON in a query string. Long before this it has
-#: stopped being a question somebody asked.
-MAX_CONDITIONS_TEXT = 8000
-
-
-def parse_conditions(text: Optional[str]) -> Optional[dict]:
-    """The metadata filter from the query string, or None.
-
-    Unreadable is refused rather than dropped. Ignoring a filter answers
-    from everything, which is the one outcome a caller who narrowed a
-    search must never be handed."""
-    if text is None or not text.strip():
-        return None
-    if len(text) > MAX_CONDITIONS_TEXT:
-        raise InvalidInput(f"conditions is too long: at most {MAX_CONDITIONS_TEXT} characters")
-    try:
-        parsed = json.loads(text)
-    except ValueError as exc:
-        raise InvalidInput(f"conditions must be a JSON object: {exc}") from None
-    if not isinstance(parsed, dict):
-        raise InvalidInput("conditions must be a JSON object, a mapping naming a field, or all, or any")
-    return parsed
 
 
 def item_json(item: RecallItem) -> dict:

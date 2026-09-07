@@ -30,6 +30,7 @@ from typing import Mapping, Optional, Sequence
 from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, SconeError
+from ..retrieval.filters import read_conditions
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -78,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--as-of")
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--where", action="append", default=[], help="key=value scope filter, repeatable")
+    p.add_argument("--conditions", help='metadata filter as JSON, e.g. {"field": "status", "is": "published"}')
     p.add_argument("--history", action="store_true", help="also show the closed facts that preceded the matched ones")
     p.add_argument("--kind", help="only episodes of this kind (note, file, conversation, ...)")
     p.add_argument("--source-prefix", help="only episodes whose source starts with this text (literal)")
@@ -464,6 +466,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
+            conditions=read_conditions(args.conditions),
         )
         if args.json:
             emit(result.model_dump() | {"context_reduction": result.context_reduction})

@@ -24,6 +24,7 @@ test rather than being compared as letters.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -176,6 +177,31 @@ class Group:
 
 
 Filter = Union[Condition, Group]
+
+
+#: A filter carried as text, in a query string or on a command line.
+#: Longer than this it stopped being a question somebody asked.
+MAX_TEXT = 8000
+
+
+def read_conditions(text: Optional[str]) -> Optional[dict]:
+    """A filter written as JSON text, or None when there is none.
+
+    Unreadable is refused rather than dropped, wherever it came from. A
+    filter that is quietly ignored answers from everything, and the
+    caller cannot tell that from a genuinely wide result: they asked to
+    see one team and got the whole space back, looking like an answer."""
+    if text is None or not text.strip():
+        return None
+    if len(text) > MAX_TEXT:
+        raise InvalidInput(f"conditions is too long: at most {MAX_TEXT} characters")
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise InvalidInput(f"conditions must be a JSON object: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise InvalidInput("conditions must be a JSON object, a mapping naming a field, or all, or any")
+    return parsed
 
 
 def parse_filter(spec: object) -> Filter:
