@@ -52,7 +52,7 @@ resource-heavy benchmarks with anyone already using the machine.
 ## Native Python checks
 
 ```sh
-cd python/scone-memory
+cd python/memory
 python -m venv .venv
 .venv/bin/python -m pip install -e '.[test,qdrant]'
 .venv/bin/python -m pytest -q
