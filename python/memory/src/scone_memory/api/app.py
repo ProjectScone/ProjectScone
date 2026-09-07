@@ -340,6 +340,7 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
+            "jobs.read": callable(getattr(engine.documents, "create_job", None)),
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
@@ -512,9 +513,13 @@ def create_app(
         return {"items": [a.model_dump() for a in added], "counts": counts, "job": job_json(job)}
 
     @app.get("/v1/jobs")
-    async def get_jobs(limit: int = 20, space: str = Depends(space_for)) -> dict:
-        """Recent batches, newest first."""
-        return {"jobs": [job_json(job) for job in await engine.jobs(space, limit)]}
+    async def get_jobs(limit: int = 20, before: Optional[str] = None, space: str = Depends(space_for)) -> dict:
+        """Recent batches, newest first. ``next`` names the cursor for the
+        page after this one, or is null when there is nothing older, so a
+        reader can tell a short page from the end of the list."""
+        found = await engine.jobs(space, limit, before)
+        more = len(found) == limit and bool(await engine.jobs(space, 1, found[-1].job_id)) if found else False
+        return {"jobs": [job_json(job) for job in found], "next": found[-1].job_id if more else None}
 
     @app.get("/v1/jobs/{job_id}")
     async def get_job(job_id: str, space: str = Depends(space_for)) -> dict:

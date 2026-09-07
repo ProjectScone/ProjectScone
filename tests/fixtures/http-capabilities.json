@@ -33,7 +33,8 @@
       "status.read": true,
       "episodes.attachments": true,
       "episodes.list": true,
-      "facts.links": true
+      "facts.links": true,
+      "jobs.read": true
     }
   }
 }

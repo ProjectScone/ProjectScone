@@ -856,11 +856,20 @@ class MemoryEngine:
             raise NotFound(f"job {job_id!r} in {space!r}")
         return found
 
-    async def jobs(self, space: str, limit: int = 20) -> list["IngestJob"]:
-        """Recent batches, newest first."""
+    #: The most batches one page may carry.
+    MAX_JOBS_PAGE = 100
+
+    async def jobs(self, space: str, limit: int = 20, before: Optional[str] = None) -> list["IngestJob"]:
+        """Recent batches, newest first. ``before`` continues from the last
+        job of a previous page; a cursor naming no job is refused rather
+        than quietly returning the newest page again."""
         check_space(space)
         self._keeps_jobs()
-        return await self.documents.list_jobs(space, max(1, min(limit, 100)))
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.MAX_JOBS_PAGE:
+            raise InvalidInput(f"limit must be an integer from 1 through {self.MAX_JOBS_PAGE}")
+        if before is not None and await self.documents.get_job(space, before) is None:
+            raise NotFound(f"job {before!r} in {space!r}")
+        return await self.documents.list_jobs(space, limit, before)
 
     async def cancel_job(self, space: str, job_id: str) -> "IngestJob":
         """Stop expecting more of this batch. What has already been read

@@ -108,3 +108,30 @@ def test_the_cli_shows_jobs_and_cancels_one(tmp_path):
     listing = io.StringIO()
     assert main(["jobs"], env=env, out=listing) == 0
     assert "no ingest jobs" in listing.getvalue()
+
+
+def test_the_manifest_says_whether_this_store_keeps_jobs(client):
+    """Codex must not have to infer support from an implementation name or
+    a failed probe: the manifest says it, from what the store can do."""
+    features = client.get("/v1/capabilities", headers=bearer("writer")).json()["features"]
+    assert features["jobs.read"] is True
+    assert client.get("/v1/jobs", headers=bearer("writer")).status_code == 200
+
+
+def test_older_batches_can_be_paged_rather_than_silently_left_out(client):
+    made = [batch(client, f"note {i}").json()["job"]["job_id"] for i in range(5)]
+    newest_first = list(reversed(made))
+
+    first = client.get("/v1/jobs?limit=2", headers=bearer("writer")).json()
+    assert [j["job_id"] for j in first["jobs"]] == newest_first[:2]
+    assert first["next"] == newest_first[1], "the cursor names where to carry on"
+
+    second = client.get(f"/v1/jobs?limit=2&before={first['next']}", headers=bearer("writer")).json()
+    assert [j["job_id"] for j in second["jobs"]] == newest_first[2:4]
+
+    last = client.get(f"/v1/jobs?limit=2&before={second['next']}", headers=bearer("writer")).json()
+    assert [j["job_id"] for j in last["jobs"]] == newest_first[4:]
+    assert last["next"] is None, "and says plainly when there is no more"
+
+    assert client.get("/v1/jobs?limit=500", headers=bearer("writer")).status_code == 422, "the page is bounded"
+    assert client.get("/v1/jobs?before=no-such-job", headers=bearer("writer")).status_code == 404

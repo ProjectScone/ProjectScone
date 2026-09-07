@@ -233,8 +233,9 @@ class DocumentStore(Protocol):
     async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
         """The job this request already made, so a retry is not a second one."""
         ...
-    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
-        """Newest first."""
+    async def list_jobs(self, space: str, limit: int, before: Optional[str] = None) -> list[IngestJob]:
+        """Newest first. ``before`` names the last job of the previous page,
+        so a caller can walk back through older batches."""
         ...
     async def update_job(self, job: IngestJob) -> None: ...
     async def mark_failed(self, space: str, episode_id: int, error: str, when: str) -> int:

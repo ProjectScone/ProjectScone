@@ -100,9 +100,12 @@ class InMemoryDocumentStore:
     async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
         return next((j for (s, _), j in self._jobs.items() if s == space and j.request_id == request_id), None)
 
-    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
+    async def list_jobs(self, space: str, limit: int, before: Optional[str] = None) -> list[IngestJob]:
         mine = [(key, job) for key, job in self._jobs.items() if key[0] == space]
         ordered = sorted(mine, key=lambda pair: (pair[1].created_at, self._job_seq[pair[0]]), reverse=True)
+        if before is not None:
+            at = next((i for i, (_, job) in enumerate(ordered) if job.job_id == before), None)
+            ordered = ordered[at + 1:] if at is not None else []
         return [job for _, job in ordered][:limit]
 
     async def update_job(self, job: IngestJob) -> None:

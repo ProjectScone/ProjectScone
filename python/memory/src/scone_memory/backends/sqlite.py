@@ -565,10 +565,18 @@ class SqliteDocumentStore:
             "SELECT * FROM ingest_jobs WHERE space = ? AND request_id = ?", (space, request_id)).fetchone()
         return self._job(space, row) if row else None
 
-    async def list_jobs(self, space: str, limit: int) -> list[IngestJob]:
-        rows = self.conn.execute(
-            "SELECT * FROM ingest_jobs WHERE space = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (space, limit)).fetchall()
+    async def list_jobs(self, space: str, limit: int, before: Optional[str] = None) -> list[IngestJob]:
+        order = "ORDER BY created_at DESC, rowid DESC"
+        if before is None:
+            rows = self.conn.execute(
+                f"SELECT * FROM ingest_jobs WHERE space = ? {order} LIMIT ?", (space, limit)).fetchall()
+        else:
+            # Everything older than the named job, by the same order the
+            # page was built with, so a cursor cannot skip or repeat a row.
+            rows = self.conn.execute(
+                "SELECT * FROM ingest_jobs WHERE space = ? AND (created_at, rowid) <"
+                " (SELECT created_at, rowid FROM ingest_jobs WHERE space = ? AND job_id = ?)"
+                f" {order} LIMIT ?", (space, space, before, limit)).fetchall()
         return [self._job(space, row) for row in rows]
 
     async def update_job(self, job: IngestJob) -> None:
