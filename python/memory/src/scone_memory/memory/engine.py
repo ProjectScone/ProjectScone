@@ -257,6 +257,8 @@ class MemoryEngine:
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
         self.clock = clock
+        #: (space, premise ids) of every group a derivation pass has sent.
+        self._derive_seen: set[tuple[str, frozenset[int]]] = set()
         #: Evidence sink. None means no evidence is kept, and no metric
         #: can be computed; that absence is reported, never filled in.
         self.events = events
@@ -1770,6 +1772,14 @@ class MemoryEngine:
         check_space(space)
         return dict(sorted((await self.documents.counts(space)).tags.items()))
 
+    async def pending_derivation(self, space: str) -> int:
+        """Groups of active claims a derivation pass has not seen at their
+        current membership. In memory only: a new process starts at zero
+        seen, sends every group once, and restates rather than repeats."""
+        check_space(space)
+        return sum(1 for g in derivation_groups(await self.facts(space))
+                   if (space, frozenset(f.fact_id for f in g)) not in self._derive_seen)
+
     async def pending_distillation(self, space: str) -> int:
         """Episodes no claim cites yet. The same definition the distiller
         and memory_pending use, so the three surfaces agree."""
@@ -2125,3 +2135,36 @@ def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> s
             raise InvalidInput("dedup_key must be 1..=256 chars")
         return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
     return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()
+
+
+def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
+    """Claims grouped by subject, joined one hop through shared names: a
+    claim whose object is another claim's subject puts both subjects in one
+    group, so "mark works_at acme" and "acme based_in lisbon" meet. Pure;
+    order is by the smallest fact id in each group."""
+    parent: dict[str, str] = {}
+
+    def key(name: str) -> str:
+        return name.strip().casefold()
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    subjects = {key(f.subject) for f in facts}
+    for f in facts:
+        find(key(f.subject))
+        if key(f.object) in subjects:
+            union(key(f.subject), key(f.object))
+    grouped: dict[str, list[Fact]] = {}
+    for f in facts:
+        grouped.setdefault(find(key(f.subject)), []).append(f)
+    return sorted((sorted(g, key=lambda f: f.fact_id) for g in grouped.values()), key=lambda g: g[0].fact_id)
