@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
-from ..memory.engine import MemoryEngine
+from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..core.models import Attachment, Fact, RecallItem
 
@@ -91,6 +91,16 @@ class FactBody(BaseModel):
     # A fact this one adds detail to, and the ledger facts it was inferred from.
     extends: Optional[int] = None
     derived_from: list[int] = Field(default_factory=list)
+
+
+#: Records one batch request may carry. A batch is bounded work, not an import.
+MAX_BATCH_RECORDS = 500
+
+
+class BatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    records: list[EpisodeBody] = Field(min_length=1, max_length=MAX_BATCH_RECORDS)
 
 
 class LinkBody(BaseModel):
@@ -366,6 +376,24 @@ def create_app(
             replace=body.replace,
         )
         return added.model_dump()
+
+    @app.post("/v1/episodes/batch")
+    async def post_episodes(body: BatchBody, space: str = Depends(space_for)) -> dict:
+        """One bounded request, one outcome per record in the order sent;
+        the batch lands whole or not at all. Replacement is one record at
+        a time, because it forgets before it stores."""
+        if any(r.replace for r in body.records):
+            raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
+        records = [
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            for r in body.records
+        ]
+        added = await engine.remember_many(space, records)
+        for record, item in zip(body.records, added):
+            for attachment_id in dict.fromkeys(record.attachment_ids):
+                await engine.blobs.link(space, attachment_id, item.episode_id)
+        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
+        return {"items": [a.model_dump() for a in added], "counts": counts}
 
     @app.get("/v1/episodes")
     async def get_episodes(ids: str, space: str = Depends(space_for)) -> dict:

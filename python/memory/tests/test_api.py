@@ -429,3 +429,32 @@ def test_a_keyed_episode_reports_duplicate_or_updated_over_http(client):
     plain = client.post("/v1/episodes", json={"content": "no key, no replace"}, headers=h).json()
     assert plain["outcome"] == "accepted"
     assert client.post("/v1/episodes", json={"content": "x", "replace": True}, headers=h).status_code == 422, "replace needs a key"
+
+
+def test_a_batch_of_episodes_answers_per_item_and_lands_whole_or_not_at_all(client):
+    """G14: one bounded request, one outcome per item in the order sent,
+    and either every record lands or none does."""
+    h = auth()
+    body = {"records": [
+        {"content": "first note of the batch", "tags": ["batch"]},
+        {"content": "second note, keyed", "dedup_key": "doc:two"},
+        {"content": "first note of the batch"},
+    ]}
+    r = client.post("/v1/episodes/batch", json=body, headers=h)
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [i["outcome"] for i in items] == ["accepted", "accepted", "duplicate"]
+    assert items[2]["episode_id"] == items[0]["episode_id"]
+    assert r.json()["counts"] == {"accepted": 2, "duplicate": 1, "updated": 0}
+    again = client.post("/v1/episodes/batch", json={"records": [{"content": "changed text", "dedup_key": "doc:two"}]}, headers=h).json()
+    assert again["items"][0]["outcome"] == "duplicate" and again["items"][0]["episode_id"] == items[1]["episode_id"]
+
+    before = client.get("/v1/status", headers=h).json()["episodes"]
+    broken = client.post("/v1/episodes/batch", json={"records": [{"content": "lands?"}, {"content": "   "}]}, headers=h)
+    assert broken.status_code == 422
+    assert client.get("/v1/status", headers=h).json()["episodes"] == before, "a bad record fails the whole batch"
+    assert client.post("/v1/episodes/batch", json={"records": []}, headers=h).status_code == 422
+    too_many = {"records": [{"content": f"note {i}"} for i in range(501)]}
+    assert client.post("/v1/episodes/batch", json=too_many, headers=h).status_code == 422
+    assert client.post("/v1/episodes/batch", json={"records": [{"content": "x", "bogus": 1}]}, headers=h).status_code == 422
+    assert client.post("/v1/episodes/batch", json=body).status_code == 401
