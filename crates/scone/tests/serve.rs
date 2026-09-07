@@ -1448,3 +1448,39 @@ async fn a_space_is_deleted_by_its_own_full_key_after_a_preview_and_confirmation
     let (status, _) = call(&app, "GET", "/v1/status", Some("sk-other"), None).await;
     assert_eq!(status, StatusCode::OK, "the neighbour is untouched");
 }
+
+/// A scoped key's status must not carry another space's backlog: the
+/// count is the caller's work, not the store's.
+#[tokio::test]
+async fn the_status_backlog_belongs_to_the_key_and_not_to_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    let note = |text: &str| Some(serde_json::json!({"content": text}));
+    for text in ["bob one", "bob two"] {
+        let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-bob"), note(text)).await;
+        assert!(status.is_success());
+    }
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("sk-alice"),
+        note("alice one"),
+    )
+    .await;
+    assert!(status.is_success());
+
+    let (status, body) = call(&app, "GET", "/v1/status", Some("sk-alice"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["pending_distill"], 1,
+        "alice waits on her own episode only: {body}"
+    );
+    assert_eq!(body["failed_distill"], 0);
+    let (_, theirs) = call(&app, "GET", "/v1/status", Some("sk-bob"), None).await;
+    assert_eq!(theirs["pending_distill"], 2);
+    assert!(
+        body["model"].is_null(),
+        "no model is configured here, and the status says so plainly"
+    );
+}

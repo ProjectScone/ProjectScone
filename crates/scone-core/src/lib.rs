@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
+pub use distill::{ApplyReport, Backlog, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome, ScanReport};
 pub use links::{FactLinkItem, LINK_KINDS};
@@ -67,6 +67,8 @@ pub struct StatusReport {
     pub embedder_id: String,
     pub embedder_dim: usize,
     pub index_dirty: bool,
+    /// The whole store's queue, for the operator running it. A scoped
+    /// caller gets `Engine::distill_backlog` instead.
     pub pending_distill: i64,
     pub failed_distill: i64,
     pub llm_id: Option<String>,

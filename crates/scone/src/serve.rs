@@ -822,13 +822,20 @@ async fn get_status(State(state): State<AppState>, headers: axum::http::HeaderMa
     match with_engine(&state, &headers, |engine, space| {
         let report = engine.status()?;
         let mine = report.spaces.iter().find(|s| s.name == space.name());
+        // The backlog is this space's, never the store's: a key names one
+        // space, and how much work another space has is not its business.
+        let backlog = engine.distill_backlog(space)?;
         Ok(serde_json::json!({
             "space": space.name(),
             "episodes": mine.map(|s| s.episodes).unwrap_or(0),
             "chunks": mine.map(|s| s.chunks).unwrap_or(0),
             "revision": mine.map(|s| s.revision).unwrap_or(0),
             "semantic_lane": if report.llm_id.is_some() { "active" } else { "paused" },
-            "pending_distill": report.pending_distill,
+            "pending_distill": backlog.pending,
+            "failed_distill": backlog.failed,
+            // Which model is configured, so "active" can be read as the
+            // configuration it is rather than as proof a worker is running.
+            "model": report.llm_id,
         }))
     }) {
         Ok(value) => Json(value).into_response(),

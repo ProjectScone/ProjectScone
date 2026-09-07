@@ -66,6 +66,15 @@ fn resolve_entity(tx: &Transaction, name: &str) -> Result<i64> {
     )?)
 }
 
+/// One space's share of the extraction queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backlog {
+    /// Episodes waiting to be read.
+    pub pending: i64,
+    /// Episodes the extractor gave up on, kept for a person to see.
+    pub failed: i64,
+}
+
 impl Engine {
     /// Drain up to `limit` pending episodes of this space through the LLM.
     ///
@@ -533,6 +542,20 @@ impl Engine {
 impl Engine {
     /// Episodes awaiting distillation, for agent-driven extraction
     /// (subscription-native path: the host agent is the model).
+    /// What one space still owes the extractor. A key names a space, so
+    /// this is what a scoped caller may be told; `Engine::status` counts
+    /// the whole store for the operator who owns it.
+    pub fn distill_backlog(&self, space: &ScopedSpace) -> Result<Backlog> {
+        let (pending, failed) = self.conn.query_row(
+            "SELECT coalesce(sum(q.state = 'pending'), 0), coalesce(sum(q.state = 'failed'), 0)
+             FROM distill_queue q JOIN episodes e ON e.id = q.episode_id
+             WHERE e.space_id = ?1",
+            rusqlite::params![space.id()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(Backlog { pending, failed })
+    }
+
     pub fn pending_episodes(
         &self,
         space: &ScopedSpace,
