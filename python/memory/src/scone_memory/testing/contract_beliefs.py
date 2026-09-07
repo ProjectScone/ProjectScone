@@ -184,4 +184,130 @@ __all__ = [
     "test_origin_survives_export_and_import",
     "test_a_quoted_claim_is_checked_against_its_source",
     "test_history_returns_the_chain_behind_a_matched_claim",
+    "test_an_extension_keeps_both_facts_and_links_them",
+    "test_a_derivation_names_its_premises_and_is_labeled_inferred",
+    "test_links_refuse_self_reference_unknown_kinds_and_dependency_cycles",
+    "test_a_profile_holds_only_claims_that_hold_now_in_this_space",
+    "test_a_link_carries_its_evidence_and_outlives_a_forgotten_source",
+    "test_a_proposed_derivation_is_linked_but_answers_nothing_until_approved",
 ]
+
+
+async def test_an_extension_keeps_both_facts_and_links_them(engine):
+    base = await engine.assert_fact("default", "mark", "lives_in", "Portugal", valid_from="2024-01-01")
+    detail = await engine.assert_fact("default", "mark", "lives_in_city", "Lisbon", valid_from="2024-02-01", extends=base.fact_id)
+    facts = {f.fact_id: f for f in await engine.facts("default")}
+    assert facts[base.fact_id].status == "active" and facts[detail.fact_id].status == "active"
+    links = await engine.fact_links("default", base.fact_id)
+    assert [(link.from_fact, link.to_fact, link.kind) for link in links] == [(detail.fact_id, base.fact_id, "extends")]
+    assert (await engine.fact_links("default", detail.fact_id)) == links, "a link reads the same from either end"
+    # An extension cannot supersede what it extends: that is an update.
+    with pytest.raises(InvalidInput):
+        await engine.assert_fact("default", "mark", "lives_in", "Spain", valid_from="2025-01-01", extends=base.fact_id)
+    assert (await engine.facts("default", include_closed=True)) == sorted(facts.values(), key=lambda f: f.fact_id), "a refused extension changes nothing"
+    with pytest.raises(NotFound):
+        await engine.assert_fact("default", "mark", "drinks", "tea", extends=999_999)
+    elsewhere = await engine.assert_fact("other", "x", "y", "z")
+    with pytest.raises(NotFound):
+        await engine.assert_fact("default", "mark", "drinks", "tea", extends=elsewhere.fact_id)
+
+
+async def test_a_derivation_names_its_premises_and_is_labeled_inferred(engine):
+    works = await engine.assert_fact("default", "mark", "works_at", "Acme")
+    based = await engine.assert_fact("default", "Acme", "based_in", "Lisbon")
+    derived = await engine.assert_fact("default", "mark", "works_in", "Lisbon", derived_from=[works.fact_id, based.fact_id])
+    assert derived.origin == "inferred"
+    links = await engine.fact_links("default", derived.fact_id)
+    assert sorted((l.from_fact, l.to_fact, l.kind) for l in links) == sorted(
+        [(derived.fact_id, works.fact_id, "derived_from"), (derived.fact_id, based.fact_id, "derived_from")])
+    again = await engine.assert_fact("default", "mark", "works_in", "Lisbon", derived_from=[works.fact_id, based.fact_id])
+    assert again.fact_id == derived.fact_id and len(await engine.fact_links("default", derived.fact_id)) == 2, "restated, not relinked"
+    # A proposal is not truth yet, so nothing can be derived from it.
+    parked = await engine.assert_fact("default", "mark", "likes", "tea", proposed=True)
+    with pytest.raises(InvalidInput):
+        await engine.assert_fact("default", "mark", "drinks", "tea", derived_from=[parked.fact_id])
+    # A derivation is inferred by definition; claiming it was extracted is refused.
+    with pytest.raises(InvalidInput):
+        await engine.assert_fact("default", "mark", "commutes_to", "Lisbon", derived_from=[works.fact_id], origin="extracted")
+    with pytest.raises(NotFound):
+        await engine.assert_fact("default", "mark", "commutes_to", "Lisbon", derived_from=[999_999])
+
+
+async def test_links_refuse_self_reference_unknown_kinds_and_dependency_cycles(engine):
+    a = await engine.assert_fact("default", "a", "is", "1")
+    b = await engine.assert_fact("default", "b", "is", "2")
+    c = await engine.assert_fact("default", "c", "is", "3")
+    link = await engine.link_facts("default", a.fact_id, b.fact_id, "supports")
+    assert (link.from_fact, link.to_fact, link.kind) == (a.fact_id, b.fact_id, "supports")
+    settled = await engine.revision("default")
+    assert (await engine.link_facts("default", a.fact_id, b.fact_id, "supports")).link_id == link.link_id, "the same link twice is one link"
+    assert await engine.revision("default") == settled, "and it moves nothing"
+    with pytest.raises(InvalidInput):
+        await engine.link_facts("default", a.fact_id, a.fact_id, "supports")
+    with pytest.raises(InvalidInput):
+        await engine.link_facts("default", a.fact_id, b.fact_id, "resembles")
+    await engine.link_facts("default", b.fact_id, c.fact_id, "derived_from")
+    await engine.link_facts("default", c.fact_id, a.fact_id, "derived_from")
+    with pytest.raises(InvalidInput):
+        await engine.link_facts("default", a.fact_id, b.fact_id, "derived_from")  # a -> b -> c -> a
+    with pytest.raises(InvalidInput):
+        await engine.link_facts("default", a.fact_id, b.fact_id, "extends")  # extension is a dependency too
+    await engine.link_facts("default", a.fact_id, b.fact_id, "contradicts")  # not a dependency, so no cycle
+    elsewhere = await engine.assert_fact("other", "x", "y", "z")
+    with pytest.raises(NotFound):
+        await engine.link_facts("default", a.fact_id, elsewhere.fact_id, "supports")
+
+
+async def test_a_link_carries_its_evidence_and_outlives_a_forgotten_source(engine):
+    source = await engine.remember("default", "Acme is headquartered in Lisbon, near the river.")
+    a = await engine.assert_fact("default", "mark", "works_at", "Acme")
+    b = await engine.assert_fact("default", "Acme", "based_in", "Lisbon")
+    with pytest.raises(InvalidInput):
+        await engine.link_facts("default", a.fact_id, b.fact_id, "supports", source_episode_id=source.episode_id, quote="in Porto")
+    link = await engine.link_facts("default", a.fact_id, b.fact_id, "supports",
+                                   source_episode_id=source.episode_id, quote="headquartered in Lisbon")
+    assert (link.source_episode_id, link.quote) == (source.episode_id, "headquartered in Lisbon")
+    await engine.forget("default", source.episode_id)
+    [kept] = await engine.fact_links("default", a.fact_id)
+    assert kept.source_episode_id == source.episode_id, "the link records what supported it; its source being gone is the audit's business"
+
+
+async def test_a_proposed_derivation_is_linked_but_answers_nothing_until_approved(engine):
+    """Inference is not approved truth. A derived claim parked for review
+    keeps its premises on record from the start, holds nothing while
+    proposed, and never held if declined; approval is what admits it."""
+    works = await engine.assert_fact("default", "mark", "works_at", "Acme")
+    based = await engine.assert_fact("default", "Acme", "based_in", "Lisbon")
+    guess = await engine.assert_fact("default", "mark", "works_in", "Lisbon", derived_from=[works.fact_id, based.fact_id], proposed=True)
+    assert guess.status == "proposed" and guess.origin == "inferred"
+    assert [l.kind for l in await engine.fact_links("default", guess.fact_id)] == ["derived_from", "derived_from"]
+    assert guess.fact_id not in {f.fact_id for f in await engine.facts("default")}
+    assert not guess.holds_at("2030-01-01T00:00:00Z"), "premises being held proves nothing about the inference"
+    declined = await engine.decline("default", guess.fact_id, "does not follow")
+    assert declined.status == "declined" and len(await engine.fact_links("default", guess.fact_id)) == 2, "the record of the attempt stays"
+    with pytest.raises(InvalidInput):
+        await engine.assert_fact("default", "mark", "commutes_to", "Lisbon", derived_from=[guess.fact_id])
+    second = await engine.assert_fact("default", "mark", "lives_near", "Acme", derived_from=[works.fact_id], proposed=True)
+    approved = await engine.approve("default", second.fact_id)
+    assert approved.status == "active" and approved.fact_id in {f.fact_id for f in await engine.facts("default")}
+    assert [l.to_fact for l in await engine.fact_links("default", approved.fact_id)] == [works.fact_id]
+
+
+async def test_a_profile_holds_only_claims_that_hold_now_in_this_space(engine):
+    """Eligibility is time and space: a claim not yet valid, one a person
+    excluded, and one of another space stay out of static_facts; a
+    forgotten episode leaves recent, and the claims that cited it stand."""
+    holds = await engine.assert_fact("default", "mark", "lives_in", "Austin", valid_from="2020-01-01")
+    await engine.assert_fact("default", "mark", "moves_to", "Lisbon", valid_from="2999-01-01")
+    await engine.assert_fact("other", "mark", "works_at", "Acme")
+    hidden = await engine.assert_fact("default", "mark", "drinks", "matcha")
+    await engine.exclude("default", hidden.fact_id, "not for the profile")
+    episode = await engine.remember("default", "a note that will be forgotten")
+    await engine.remember("other", "someone else's note")
+    profile = await engine.profile("default")
+    assert [f.fact_id for f in profile.static_facts] == [holds.fact_id], "not yet valid, excluded and other-space claims stay out"
+    assert [r.episode_id for r in profile.recent] == [episode.episode_id], "another space's episodes stay out"
+    await engine.forget("default", episode.episode_id)
+    after = await engine.profile("default")
+    assert after.recent == [] and after.dynamic == [], "a forgotten episode leaves recent"
+    assert [f.fact_id for f in after.static_facts] == [holds.fact_id], "the claims stand"

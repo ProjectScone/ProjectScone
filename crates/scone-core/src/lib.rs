@@ -12,11 +12,13 @@ mod error;
 pub mod evidence;
 pub mod index;
 mod ingest;
+pub mod links;
 pub mod llm;
 mod portability;
 pub mod profile;
 mod recall;
 pub mod rerank;
+pub mod spaces;
 mod tags;
 pub mod temporal;
 pub mod timeparse;
@@ -25,12 +27,14 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-pub use distill::{ApplyReport, DistillReport, ProvenanceItem};
+pub use distill::{ApplyReport, Backlog, DistillReport, ProvenanceItem};
 pub use error::{Result, SconeError};
 pub use ingest::{IngestInput, IngestOutcome, ScanReport};
+pub use links::{FactLinkItem, LINK_KINDS};
 pub use portability::ImportReport;
-pub use profile::Profile;
+pub use profile::{Profile, RecentActivity};
 pub use recall::{ContextPack, FactItem, RecallItem, RecallOpts, decompose, order_items};
+pub use spaces::SpaceReceipt;
 
 #[derive(Debug)]
 pub struct DoctorReport {
@@ -63,6 +67,8 @@ pub struct StatusReport {
     pub embedder_id: String,
     pub embedder_dim: usize,
     pub index_dirty: bool,
+    /// The whole store's queue, for the operator running it. A scoped
+    /// caller gets `Engine::distill_backlog` instead.
     pub pending_distill: i64,
     pub failed_distill: i64,
     pub llm_id: Option<String>,

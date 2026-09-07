@@ -30,9 +30,14 @@ async def test_same_content_is_deduplicated(engine):
 
 
 async def test_spaces_do_not_leak(engine):
-    await engine.remember("alpha", "the password hint is bluebird")
+    await engine.remember("alpha", "the password hint is bluebird", tags=["secret"], metadata={"user_id": "alice"})
     result = await engine.recall("beta", "password hint bluebird")
     assert result.items == []
+    # Metadata grants no access: a filter that matches only in another
+    # space finds nothing there, whichever way it narrows.
+    assert (await engine.recall("beta", "password hint bluebird", where={"user_id": "alice"})).items == []
+    assert (await engine.recall("beta", "password hint bluebird", tags=["secret"])).items == []
+    assert (await engine.recall("alpha", "password hint bluebird", where={"user_id": "alice"})).items != [], "and the same filter works at home"
 
 
 async def test_as_of_hides_what_happened_later(engine):
@@ -218,9 +223,15 @@ async def test_profile_is_identity_plus_recent_activity(engine):
     await engine.assert_fact("default", "mark", "name", "ProjectScone contributors")
     await engine.remember("default", "older note", created_at="2024-01-01")
     await engine.remember("default", "newer note", created_at="2024-02-01")
+    await engine.remember("default", "backfilled note", created_at="2023-06-01")
     profile = await engine.profile("default")
     assert [f.object for f in profile.static_facts] == ["ProjectScone contributors"]
-    assert profile.dynamic == ["newer note", "older note"]
+    assert profile.dynamic == ["newer note", "older note", "backfilled note"], "recent is by the episode's own time, so a backfill sorts where it happened"
+    assert [r.excerpt for r in profile.recent] == profile.dynamic, "recent is dynamic with its evidence"
+    newest, oldest, backfilled = profile.recent
+    assert backfilled.episode_id > newest.episode_id > oldest.episode_id, "ids say when it was added; order says when it happened"
+    assert [r.created_at[:10] for r in profile.recent] == ["2024-02-01", "2024-01-01", "2023-06-01"], "each carries its episode's timestamp"
+    assert (await engine.documents.get_episode("default", newest.episode_id)).content == "newer note"
 
 
 @pytest.mark.parametrize("arrival", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)])
@@ -273,6 +284,10 @@ async def test_backfill_truncates_manual_interval_without_rewriting_reason(engin
 
 
 __all__ = [
+    "test_forgetting_returns_a_receipt_and_leaves_claims_standing",
+    "test_a_keyed_record_can_be_replaced_and_says_when_it_was_not",
+    "test_a_forgotten_episode_id_is_never_given_to_another_episode",
+    "test_a_forgotten_episode_is_known_to_have_existed",
     "test_backfilled_fact_splits_a_previously_closed_interval",
     "test_backfill_preserves_a_manual_closure_and_gap",
     "test_backfill_truncates_manual_interval_without_rewriting_reason",
@@ -297,4 +312,194 @@ __all__ = [
     "test_close_fact_keeps_the_reason",
     "test_recall_returns_facts_that_hold_at_the_time_asked",
     "test_profile_is_identity_plus_recent_activity",
+    "test_deleting_a_space_removes_everything_and_keeps_it_gone",
 ]
+
+
+async def test_forgetting_returns_a_receipt_and_leaves_claims_standing(engine):
+    """Forgetting an episode says what went with it and what stayed: its
+    chunks and vectors go; an attachment goes only when no other episode
+    still carries it; the claims and links that cited it stand, with their
+    source ids intact, because a source being gone is a fact about the
+    evidence, not about the claim. The impact preview says the same
+    without removing anything."""
+    from ..core.errors import NotFound
+
+    shared = await engine.attach("default", b"shared bytes", "text/plain")
+    alone = await engine.attach("default", b"alone bytes", "text/plain")
+    first = await engine.remember("default", "Acme is headquartered in Lisbon, near the river.",
+                                  attachment_ids=[shared.attachment_id, alone.attachment_id])
+    second = await engine.remember("default", "Another note that also carries the shared file.",
+                                   attachment_ids=[shared.attachment_id])
+    cited = await engine.assert_fact("default", "acme", "based_in", "lisbon", source_episode_id=first.episode_id, quote="headquartered in Lisbon")
+    other = await engine.assert_fact("default", "mark", "works_at", "acme")
+    link = await engine.link_facts("default", other.fact_id, cited.fact_id, "supports",
+                                   source_episode_id=first.episode_id, quote="near the river")
+
+    preview = await engine.impact("default", first.episode_id)
+    assert preview.episode_id == first.episode_id and preview.chunks == first.chunks
+    assert (preview.attachments_released, preview.attachments_kept) == ([alone.attachment_id], [shared.attachment_id])
+    assert (preview.facts_citing, preview.links_citing) == ([cited.fact_id], [link.link_id])
+    assert (await engine.episode("default", first.episode_id)).episode_id == first.episode_id, "a preview removes nothing"
+    assert (await engine.attachment("default", alone.attachment_id))[0].attachment_id == alone.attachment_id
+
+    receipt = await engine.forget("default", first.episode_id)
+    assert receipt.forgotten_at is not None
+    assert receipt.model_copy(update={"forgotten_at": None}) == preview, "the receipt is the preview, done, and dated"
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.episode_id)
+    with pytest.raises(NotFound):
+        await engine.attachment("default", alone.attachment_id)
+    assert (await engine.attachment("default", shared.attachment_id))[1] == b"shared bytes"
+    assert [a.attachment_id for a in (await engine.episode("default", second.episode_id)).attachments] == [shared.attachment_id]
+    standing = await engine.fact("default", cited.fact_id)
+    assert standing.status == "active" and standing.source_episode_id == first.episode_id, "the claim stands; its source id says what it rested on"
+    [kept] = await engine.fact_links("default", other.fact_id)
+    assert kept.source_episode_id == first.episode_id
+    with pytest.raises(NotFound):
+        await engine.impact("default", first.episode_id)
+
+
+async def test_a_keyed_record_can_be_replaced_and_says_when_it_was_not(engine):
+    """A dedup_key names a record across writes. Re-sending it with changed
+    content is an update: the old episode is forgotten (receipt and all),
+    the new one stored, and every answer says which happened. A plain
+    keyed write of changed content is not silently dropped any more: it is
+    reported as a duplicate, so the caller knows its update did not land."""
+    from ..core.errors import InvalidInput, NotFound
+    from .. import Record
+
+    with pytest.raises(InvalidInput):
+        await engine.replace("default", Record("no key here"))
+    first = await engine.replace("default", Record("The office is in Lisbon.", dedup_key="doc:office"))
+    assert first.outcome == "accepted" and first.replaced is None
+    same = await engine.replace("default", Record("The office is in Lisbon.", dedup_key="doc:office"))
+    assert same.outcome == "duplicate" and same.added.episode_id == first.added.episode_id and same.replaced is None
+    cited = await engine.assert_fact("default", "office", "located_in", "lisbon", source_episode_id=first.added.episode_id, quote="in Lisbon")
+
+    [dropped] = await engine.remember_many("default", [Record("The office moved to Porto.", dedup_key="doc:office")])
+    assert dropped.outcome == "duplicate" and dropped.episode_id == first.added.episode_id, "a keyed write without replace says the update did not land"
+    assert (await engine.episode("default", first.added.episode_id)).content == "The office is in Lisbon."
+
+    updated = await engine.replace("default", Record("The office moved to Porto.", dedup_key="doc:office"))
+    assert updated.outcome == "updated" and updated.added.episode_id != first.added.episode_id
+    assert updated.replaced is not None and updated.replaced.episode_id == first.added.episode_id and updated.replaced.chunks >= 1
+    assert updated.replaced.facts_citing == [cited.fact_id]
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.added.episode_id)
+    assert (await engine.episode("default", updated.added.episode_id)).content == "The office moved to Porto."
+    found = await engine.recall("default", "office Porto", limit=5)
+    assert [i.episode_id for i in found.items] == [updated.added.episode_id]
+    standing = await engine.fact("default", cited.fact_id)
+    assert standing.status == "active" and standing.source_episode_id == first.added.episode_id
+    [again] = await engine.remember_many("default", [Record("The office moved to Porto.", dedup_key="doc:office")])
+    assert again.outcome == "duplicate" and again.episode_id == updated.added.episode_id, "the key now names the new record"
+
+
+async def test_a_forgotten_episode_id_is_never_given_to_another_episode(engine):
+    """A claim keeps the id of the source it rested on after that source
+    is forgotten. If the store handed that id to the next episode, the
+    claim would silently rest on text it never came from."""
+    from ..core.errors import NotFound
+
+    first = await engine.remember("default", "the first note, soon forgotten")
+    await engine.forget("default", first.episode_id)
+    second = await engine.remember("default", "the note that comes after")
+    assert second.episode_id != first.episode_id, "an id is used once"
+    with pytest.raises(NotFound):
+        await engine.episode("default", first.episode_id)
+
+
+async def test_a_forgotten_episode_is_known_to_have_existed(engine):
+    """Forgetting leaves a tombstone: the id answers Gone with the date,
+    not NotFound; the same text remembered again is a new record, because
+    forgetting was a decision; and an archive that carries the forgotten
+    content is skipped on import unless the caller resurrects it, in which
+    case the tombstone still stands beside the new record."""
+    from ..core.errors import Gone
+    from .. import Record
+
+    first = await engine.remember("default", "a note that will be forgotten")
+    dump = [record async for record in engine.export("default")]
+    receipt = await engine.forget("default", first.episode_id)
+    assert receipt.forgotten_at is not None
+    with pytest.raises(Gone) as gone:
+        await engine.episode("default", first.episode_id)
+    assert gone.value.forgotten_at == receipt.forgotten_at
+    with pytest.raises(Gone):
+        await engine.impact("default", first.episode_id)
+    with pytest.raises(Gone):
+        await engine.forget("default", first.episode_id)
+    stone = await engine.tombstone("default", first.episode_id)
+    assert stone.episode_id == first.episode_id and stone.forgotten_at == receipt.forgotten_at
+
+    again = await engine.remember("default", "a note that will be forgotten")
+    assert again.outcome == "accepted" and again.episode_id != first.episode_id, "remembered again is a new decision"
+    await engine.forget("default", again.episode_id)
+
+    skipped = await engine.import_records("default", dump)
+    assert (skipped.episodes, skipped.tombstoned) == (0, 1), "the archive carries what was forgotten here"
+    assert await engine.documents.episode_by_hash("default", dump[0]["content_hash"]) is None
+    back = await engine.import_records("default", dump, resurrect=True)
+    assert (back.episodes, back.tombstoned) == (1, 0)
+    assert (await engine.tombstone("default", first.episode_id)).forgotten_at == receipt.forgotten_at, "resurrection does not erase the decision"
+    with pytest.raises(pytest.raises(Gone).expected_exception if False else Gone):
+        await engine.episode("default", first.episode_id)
+    assert await engine.tombstone("default", 999_999) is None
+
+
+async def test_deleting_a_space_removes_everything_and_keeps_it_gone(engine):
+    """Deleting a space is the deed forgetting is for one episode: the
+    holds go (bytes only when no other space holds them), then vectors,
+    chunks, episodes, links, claims, events, tombstones and the revision.
+    The preview says the same with nothing removed. Afterwards the space
+    refuses writes, so a key left in config cannot re-create what was
+    erased, and the neighbouring space is untouched."""
+    from ..core.errors import NotFound
+
+    shared = await engine.attach("default", b"shared across spaces", "text/plain")
+    alone = await engine.attach("default", b"only here", "text/plain")
+    also = await engine.attach("other", b"shared across spaces", "text/plain")
+    assert also.attachment_id == shared.attachment_id, "one digest, two holds"
+    first = await engine.remember("default", "Acme is headquartered in Lisbon.",
+                                  attachment_ids=[shared.attachment_id, alone.attachment_id])
+    second = await engine.remember("default", "Acme moved its office in March.")
+    doomed = await engine.remember("default", "A note forgotten before the space goes.")
+    await engine.forget("default", doomed.episode_id)
+    cited = await engine.assert_fact("default", "acme", "based_in", "lisbon", source_episode_id=first.episode_id, quote="headquartered in Lisbon")
+    other = await engine.assert_fact("default", "mark", "works_at", "acme")
+    await engine.link_facts("default", other.fact_id, cited.fact_id, "supports")
+    neighbour = await engine.remember("other", "The neighbour keeps its own note.", attachment_ids=[also.attachment_id])
+    kept_fact = await engine.assert_fact("other", "neighbour", "keeps", "its note")
+
+    preview = await engine.space_impact("default")
+    assert (preview.space, preview.episodes, preview.facts, preview.links, preview.tombstones) == ("default", 2, 2, 1, 1)
+    assert preview.chunks == first.chunks + second.chunks
+    assert (preview.attachments_released, preview.attachments_kept) == ([alone.attachment_id], [shared.attachment_id])
+    assert preview.events > 0 and preview.deleted_at is None
+    assert (await engine.status("default")).episodes == 2, "a preview removes nothing"
+
+    receipt = await engine.delete_space("default")
+    assert receipt.model_dump(exclude={"deleted_at"}) == preview.model_dump(exclude={"deleted_at"})
+    assert receipt.deleted_at is not None
+    assert await engine.space_deleted("default") == receipt.deleted_at
+    assert await engine.events.query("default", limit=1000) == [], "the event trail went with the space"
+    assert (await engine.recall("default", "Acme Lisbon")).items == []
+    assert await engine.documents.list_facts("default", include_closed=True) == []
+    assert await engine.documents.list_tombstones("default") == []
+    counts = await engine.documents.counts("default")
+    assert (counts.episodes, counts.chunks) == (0, 0)
+    assert await engine.blobs.held("default") == []
+    ids = getattr(engine.vectors, "ids", None)
+    if ids is not None:
+        assert await ids("default") == [], "no vector outlives its space"
+    with pytest.raises(NotFound):
+        await engine.attachment("default", alone.attachment_id)
+    with pytest.raises(NotFound):
+        await engine.remember("default", "nothing goes into a deleted space")
+    with pytest.raises(NotFound):
+        await engine.delete_space("default")
+    # The neighbour is untouched, including the bytes it shares.
+    assert [i.episode_id for i in (await engine.recall("other", "neighbour note")).items] == [neighbour.episode_id]
+    assert (await engine.attachment("other", also.attachment_id))[1] == b"shared across spaces"
+    assert [f.fact_id for f in await engine.facts("other")] == [kept_fact.fact_id]

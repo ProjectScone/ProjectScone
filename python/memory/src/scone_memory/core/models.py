@@ -139,6 +139,112 @@ class Fact(BaseModel):
         return self.valid_until is None or parse_rfc3339(self.valid_until) > t
 
 
+LinkKind = Literal["extends", "derived_from", "contradicts", "supports"]
+LINK_KINDS: tuple[str, ...] = ("extends", "derived_from", "contradicts", "supports")
+#: The kinds that make one fact depend on another; a cycle among them is refused.
+DEPENDENCY_KINDS: tuple[str, ...] = ("extends", "derived_from")
+
+
+class FactLink(BaseModel):
+    """A typed relation between two facts of one space, and the evidence it
+    rests on. ``from_fact`` is the one making the claim about ``to_fact``:
+    an extension extends, a derivation is derived from, and so on."""
+
+    link_id: int
+    space: str
+    from_fact: int
+    to_fact: int
+    kind: LinkKind
+    created_at: str
+    source_episode_id: Optional[int] = None
+    quote: Optional[str] = None
+
+
+class Tombstone(BaseModel):
+    """The record that an episode existed and was forgotten on purpose:
+    its id, the identity of its content, and when. It outlives the episode
+    so the id keeps meaning something and the decision is not undone by
+    accident."""
+
+    space: str
+    episode_id: int
+    content_hash: str
+    forgotten_at: str
+    reason: Optional[str] = None
+
+
+class SpaceReceipt(BaseModel):
+    """What deleting a space takes with it, the same shape for the preview
+    and the deed: episodes with their chunks and vectors, claims and the
+    links between them, the tombstones of what was already forgotten, the
+    event trail, and the attachment holds (bytes go only when no other
+    space holds them). ``deleted_at`` is set once the deed is done."""
+
+    model_config = ConfigDict(frozen=True)
+
+    space: str
+    episodes: int
+    chunks: int
+    facts: int
+    links: int
+    tombstones: int
+    events: int
+    attachments_released: list[str] = Field(default_factory=list)
+    attachments_kept: list[str] = Field(default_factory=list)
+    deleted_at: Optional[str] = None
+
+
+class ForgetReceipt(BaseModel):
+    """What forgetting an episode takes with it and what it leaves. The
+    same shape answers the preview and the deed: chunks (and their
+    vectors) go; an attachment is released only when no other episode of
+    the space still carries it; the claims and links that cited the
+    episode stand, with their source ids intact."""
+
+    episode_id: int
+    chunks: int
+    attachments_released: list[str] = Field(default_factory=list)
+    attachments_kept: list[str] = Field(default_factory=list)
+    facts_citing: list[int] = Field(default_factory=list)
+    links_citing: list[int] = Field(default_factory=list)
+    #: Set once the deed is done; a preview has none.
+    forgotten_at: Optional[str] = None
+
+
+class DoctorReport(BaseModel):
+    """What references what across a space's stores, read only. A list is
+    the ids found dangling; None means that store could not be walked and
+    the name is in not_inspected, so silence is never mistaken for health."""
+
+    space: str
+    episodes: int = 0
+    chunks: int = 0
+    facts: int = 0
+    links: int = 0
+    tombstones: Optional[int] = None
+    chunks_without_episode: Optional[list[int]] = None
+    vectors_without_chunk: Optional[list[int]] = None
+    facts_citing_forgotten: list[int] = Field(default_factory=list)
+    facts_citing_unknown: list[int] = Field(default_factory=list)
+    links_with_missing_ends: list[int] = Field(default_factory=list)
+    attachments_unlinked: Optional[list[str]] = None
+    not_inspected: list[str] = Field(default_factory=list)
+    healthy: bool = True
+
+
+class ExpiryReport(BaseModel):
+    """What one retention pass did in a space: the policy it applied, the
+    episodes it forgot (oldest first, up to the pass's limit) with their
+    receipts, and how many eligible episodes it left for the next pass."""
+
+    space: str
+    policy: dict[str, float]
+    forgotten: list[int] = Field(default_factory=list)
+    receipts: list[ForgetReceipt] = Field(default_factory=list)
+    remaining: int = 0
+    dry_run: bool = False
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int
@@ -187,9 +293,17 @@ class RecallResult(BaseModel):
 
 
 class Added(BaseModel):
+    """What one remembered record became. ``outcome`` says it plainly:
+    accepted (stored), duplicate (a record with this identity was already
+    there and the write changed nothing, whether or not its text differed),
+    or updated (a keyed record was replaced; ``replaced`` is the receipt
+    for the episode that went)."""
+
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
+    outcome: Literal["accepted", "duplicate", "updated"] = "accepted"
+    replaced: Optional[ForgetReceipt] = None
 
 
 class Status(BaseModel):

@@ -113,6 +113,15 @@ enum Cmd {
     },
     /// List tags in this space with usage counts
     Tags,
+    /// Delete everything this space holds; --dry-run previews the receipt
+    DeleteSpace {
+        /// Repeat the space name to do it
+        #[arg(long, value_name = "SPACE")]
+        confirm: Option<String>,
+        /// Show what would go, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the space's profile: identity facts and recent activity
     Profile {
         #[arg(long, default_value_t = 8)]
@@ -222,6 +231,19 @@ enum FactsCmd {
     },
     /// Show which episodes taught us a fact
     Why { id: i64 },
+    /// Relate one fact to another: <from> extends | derived_from |
+    /// contradicts | supports <to>, with the episode and quote it rests on
+    Link {
+        from: i64,
+        to: i64,
+        kind: String,
+        #[arg(long)]
+        source: Option<i64>,
+        #[arg(long)]
+        quote: Option<String>,
+    },
+    /// Show the relations a fact takes part in, from either end
+    Links { id: i64 },
     /// Close a fact by hand with a reason (never deletes)
     Close {
         id: i64,
@@ -349,6 +371,13 @@ fn make_embedder(
             Err("this build lacks the local-embed feature; use --embedder hash".into())
         }
     }
+}
+
+fn space_line(receipt: &scone_core::SpaceReceipt) -> String {
+    format!(
+        "{} episodes, {} chunks, {} claims, {} links, {} events",
+        receipt.episodes, receipt.chunks, receipt.facts, receipt.links, receipt.events
+    )
 }
 
 fn main() {
@@ -618,6 +647,22 @@ fn run() -> Result<(), String> {
                 println!("empty profile: nothing stored in this space yet");
             }
         }
+        Cmd::DeleteSpace { confirm, dry_run } => {
+            let space = auth::resolve(&mut engine, &cli.space, true).map_err(|e| e.to_string())?;
+            if *dry_run {
+                let receipt = engine.space_impact(&space).map_err(|e| e.to_string())?;
+                println!("would delete space {}: {}", cli.space, space_line(&receipt));
+            } else {
+                if confirm.as_deref() != Some(cli.space.as_str()) {
+                    return Err(format!(
+                        "refusing: --confirm must repeat the space name {:?}; nothing was deleted",
+                        cli.space
+                    ));
+                }
+                let receipt = engine.delete_space(&space).map_err(|e| e.to_string())?;
+                println!("deleted space {}: {}", cli.space, space_line(&receipt));
+            }
+        }
         Cmd::Status => {
             let report = engine.status().map_err(|e| e.to_string())?;
             if report.read_only {
@@ -751,6 +796,38 @@ fn run() -> Result<(), String> {
                             p.kind,
                             p.source.as_deref().unwrap_or("note"),
                             p.created_at
+                        );
+                    }
+                }
+                FactsCmd::Link {
+                    from,
+                    to,
+                    kind,
+                    source,
+                    quote,
+                } => {
+                    let link = engine
+                        .link_facts(&space, *from, *to, kind, *source, quote.as_deref())
+                        .map_err(|e| e.to_string())?;
+                    println!(
+                        "link {}: fact {} {} fact {}",
+                        link.link_id,
+                        link.from_fact,
+                        link.kind.replace('_', " "),
+                        link.to_fact
+                    );
+                }
+                FactsCmd::Links { id } => {
+                    for link in engine.fact_links(&space, *id).map_err(|e| e.to_string())? {
+                        println!(
+                            "link {}: fact {} {} fact {}{}",
+                            link.link_id,
+                            link.from_fact,
+                            link.kind.replace('_', " "),
+                            link.to_fact,
+                            link.source_episode_id
+                                .map(|e| format!(" (episode {e})"))
+                                .unwrap_or_default()
                         );
                     }
                 }
@@ -1023,6 +1100,7 @@ fn run() -> Result<(), String> {
                     keys: vec![scone::serve::SpaceKey {
                         key: key.clone(),
                         space: space.clone(),
+                        role: scone::serve::Role::Full,
                     }],
                 },
                 &key,
@@ -1058,20 +1136,8 @@ fn run() -> Result<(), String> {
             let server = table
                 .get("server")
                 .ok_or("config.toml needs a [server] section")?;
-            let keys: Vec<scone::serve::SpaceKey> = server
-                .get("keys")
-                .and_then(|k| k.as_array())
-                .map(|rows| {
-                    rows.iter()
-                        .filter_map(|row| {
-                            Some(scone::serve::SpaceKey {
-                                key: row.get("key")?.as_str()?.to_owned(),
-                                space: row.get("space")?.as_str()?.to_owned(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let keys =
+                scone::serve::keys_from_config(server).map_err(|e| format!("config.toml: {e}"))?;
             if keys.is_empty() {
                 return Err(
                     "refusing to serve with zero API keys — add [[server.keys]]                      entries (key, space) to config.toml"

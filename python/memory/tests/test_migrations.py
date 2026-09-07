@@ -7,6 +7,7 @@ second adds the inflight table for crash recovery."""
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 
 import pytest
@@ -24,8 +25,10 @@ def write_v5_file(path):
     steps must leave all of them exactly as they were."""
     conn = sqlite3.connect(path)
     v5_schema = SCHEMA.replace(", superseded_by INTEGER, quote TEXT);", ", superseded_by INTEGER);")
-    v5_schema = "\n".join(line for line in v5_schema.splitlines() if "inflight" not in line)
-    assert "quote" not in v5_schema and "inflight" not in v5_schema, "the v5 shape must not carry the new parts"
+    v5_schema = re.sub(r"CREATE TABLE IF NOT EXISTS fact_links \(.*?\);\n", "", v5_schema, flags=re.S)
+    v5_schema = re.sub(r"CREATE TABLE IF NOT EXISTS tombstones \(.*?\);\n", "", v5_schema, flags=re.S)
+    v5_schema = "\n".join(line for line in v5_schema.splitlines() if "inflight" not in line and "fact_links" not in line and "tombstones" not in line)
+    assert "quote" not in v5_schema and "inflight" not in v5_schema and "fact_links" not in v5_schema and "tombstones" not in v5_schema, "the v5 shape must not carry the new parts"
     conn.executescript(v5_schema)
     conn.executescript(SqliteEventLog.SCHEMA)  # the live file holds its event log in the same database
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')")
@@ -66,11 +69,14 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     write_v5_file(path)
     before = snapshot(path)
 
-    store = SqliteDocumentStore(path)  # opening applies both steps, 5 -> 6 -> 7
-    assert schema_version(store.conn) == SCHEMA_VERSION == 7
+    store = SqliteDocumentStore(path)  # opening applies every step, 5 -> 6 -> 7 -> 8 -> 9 -> 10
+    assert schema_version(store.conn) == SCHEMA_VERSION == 10
     cols = [r[1] for r in store.conn.execute("PRAGMA table_info(facts)")]
     assert "quote" in cols
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'inflight'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'fact_links'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'tombstones'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'erased_spaces'").fetchone()[0] == 1
     after = snapshot(path)
     assert after["episodes"] == before["episodes"], "episode rows and ids untouched"
     assert after["facts"] == before["facts"], "fact rows, ids, statuses, reasons untouched"
@@ -86,6 +92,9 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     assert second.exists(), "and another before the second step"
     assert sqlite3.connect(second).execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
     assert snapshot(second) == before, "the v6 copy holds the same rows, one step further along"
+    third = tmp_path / "live.db.v7.bak"
+    assert third.exists() and snapshot(third) == before, "and one before the third"
+    assert sqlite3.connect(third).execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
 
     # The upgraded store works: it reads the old rows and writes the new column.
     import asyncio
@@ -93,7 +102,11 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     facts = asyncio.run(store.list_facts("default", include_closed=True))
     assert sorted(f.fact_id for f in facts) == [2, 3] and all(f.quote is None for f in facts)
     again = SqliteDocumentStore(path)  # reopening does nothing further
-    assert schema_version(again.conn) == 7 and not (tmp_path / "live.db.v7.bak").exists()
+    fourth = tmp_path / "live.db.v8.bak"
+    assert fourth.exists() and snapshot(fourth) == before, "and one before the fourth"
+    fifth = tmp_path / "live.db.v9.bak"
+    assert fifth.exists() and snapshot(fifth) == before, "and one before the fifth"
+    assert schema_version(again.conn) == 10 and not (tmp_path / "live.db.v10.bak").exists()
 
 
 def test_the_step_is_atomic(tmp_path, monkeypatch):
@@ -133,10 +146,10 @@ def test_two_openers_racing_on_a_v5_file_apply_the_step_once(tmp_path):
         t.start()
     for t in threads:
         t.join(timeout=30)
-    assert all(v == 7 for v in results.values()), results
+    assert all(v == SCHEMA_VERSION for v in results.values()), results
     probe = sqlite3.connect(path)
     assert [r[1] for r in probe.execute("PRAGMA table_info(facts)")].count("quote") == 1, "the column was added exactly once"
-    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
+    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
 
 
 def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
@@ -147,15 +160,15 @@ def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
     path = tmp_path / "live.db"
     write_v5_file(path)
     first = SqliteDocumentStore(path)  # applies both steps
-    assert schema_version(first.conn) == 7
+    assert schema_version(first.conn) == SCHEMA_VERSION
     stale = sqlite3.connect(path)
     stale.row_factory = sqlite3.Row
     mod.apply_step(stale, 5, path)  # a caller that still believed the file was v5
-    assert schema_version(stale) == 7 and [r[1] for r in stale.execute("PRAGMA table_info(facts)")].count("quote") == 1
+    assert schema_version(stale) == SCHEMA_VERSION and [r[1] for r in stale.execute("PRAGMA table_info(facts)")].count("quote") == 1
 
 
 def test_other_versions_are_still_refused_not_rewritten(tmp_path):
-    for version in ("2", "4", "8"):
+    for version in ("2", "4", "11"):  # 11 stands for a build newer than this one
         path = tmp_path / f"v{version}.db"
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)
@@ -234,4 +247,4 @@ def test_an_opener_retries_the_wal_switch_while_another_connection_is_writing(tm
     threading.Thread(target=release).start()
     store = SqliteDocumentStore(path)
     assert store.conn.execute("PRAGMA journal_mode").fetchall()[0][0] == "wal"
-    assert schema_version(store.conn) == 7
+    assert schema_version(store.conn) == SCHEMA_VERSION

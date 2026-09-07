@@ -10,6 +10,8 @@ network.
 
 from __future__ import annotations
 
+import json
+
 from typing import Optional, Protocol, Sequence, runtime_checkable
 
 from ..core.errors import SconeError
@@ -97,6 +99,82 @@ class OpenAICompatibleChat:
         if response.status_code >= 400:
             raise ChatError(f"chat server returned {response.status_code}: {response.text[:200]}")
         return _content_of(response)
+
+
+class OpenAICompatibleTextModel:
+    """The same endpoint as a native ``TextModel`` for conversations: the
+    reply streams as public deltas and ends with an explicit completion.
+
+    A server that ignores ``stream`` still answers with one message, which
+    is delivered as one delta. A stream that ends without a completion, an
+    error status, or a line that is not a chunk is a ChatError, so a turn
+    fails visibly rather than completing on half a reply. One instance
+    serves one turn; sessions call the factory per turn and aclose after.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: Optional[str] = None,
+        temperature: float = 0.0,
+        think: Optional[bool] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        transport: object | None = None,
+    ) -> None:
+        try:
+            import httpx
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("OpenAICompatibleTextModel needs httpx: pip install 'scone-memory[remote-embed]'") from e
+        self._chat = OpenAICompatibleChat(base_url, model, api_key=api_key, temperature=temperature,
+                                          think=think, timeout=timeout, transport=transport)
+        self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
+        self._httpx = httpx
+
+    async def respond(self, messages: list[dict[str, str]]):
+        from ..realtime.events import ReplyCompleted, TextDelta
+
+        body = {"model": self._chat.model, "messages": list(messages), "temperature": self._chat.temperature, "stream": True}
+        if self._chat.think is not None:
+            body["think"] = self._chat.think
+        try:
+            async with self._client.stream("POST", f"{self._chat.base_url}/chat/completions", json=body,
+                                           headers=self._chat._headers()) as response:
+                if response.status_code >= 400:
+                    raise ChatError(f"chat server returned {response.status_code}")
+                if not response.headers.get("content-type", "").startswith("text/event-stream"):
+                    await response.aread()
+                    text = _content_of(response)
+                    if text:
+                        yield TextDelta(text)
+                    yield ReplyCompleted()
+                    return
+                completed = False
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue  # comments and blank lines keep the stream alive
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        completed = True
+                        break
+                    try:
+                        choice = json.loads(data)["choices"][0]
+                        text = (choice.get("delta") or {}).get("content")
+                    except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
+                        raise ChatError(f"malformed chat stream chunk: {type(e).__name__}") from e
+                    if text:
+                        yield TextDelta(text)
+                    if choice.get("finish_reason") == "stop":
+                        completed = True
+                        break
+        except self._httpx.HTTPError as e:
+            raise ChatError(f"chat server unreachable: {type(e).__name__}") from e
+        if not completed:
+            raise ChatError("chat stream ended without completing the reply")
+        yield ReplyCompleted()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 def _content_of(response: object) -> str:

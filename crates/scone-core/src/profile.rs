@@ -6,23 +6,42 @@ use crate::auth::ScopedSpace;
 use crate::error::Result;
 use crate::{Engine, FactItem};
 
+/// One `dynamic` excerpt with the episode it was cut from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentActivity {
+    pub episode_id: i64,
+    pub excerpt: String,
+    pub created_at: String,
+}
+
 #[derive(Debug)]
 pub struct Profile {
     /// Durable identity: active facts, strongest first.
     pub static_facts: Vec<FactItem>,
-    /// Recent activity: newest episode excerpts, newest first.
+    /// Recent activity: episode excerpts, most recent by the episode's own
+    /// time first (a backfill sorts where it happened), then newest id.
     pub dynamic: Vec<String>,
+    /// `dynamic` with its evidence: same order, same excerpts, newest
+    /// first. The shape both engines share (tests/fixtures/profile-recent.json).
+    pub recent: Vec<RecentActivity>,
 }
 
 impl Engine {
     pub fn profile(&mut self, space: &ScopedSpace, limit: usize) -> Result<Profile> {
         let limit = limit.clamp(1, 50) as i64;
+        // Eligibility is time as well as status: a claim whose validity has
+        // not begun, or has ended, is not who the space is about right now.
+        // "Now" is the ledger's own clock, the one that stamped valid_from,
+        // so the two never disagree on shape or zone.
         let static_facts = {
             let mut stmt = self.conn.prepare(
                 "SELECT f.id, en.canonical, f.predicate, f.object, f.confidence,
                         f.valid_from, f.valid_until, f.status
                  FROM facts f JOIN entities en ON en.id = f.subject_entity
                  WHERE f.space_id = ?1 AND f.status = 'active'
+                   AND f.valid_from <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                   AND (f.valid_until IS NULL
+                        OR f.valid_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                  ORDER BY f.access_count DESC, f.confidence DESC, f.id
                  LIMIT ?2",
             )?;
@@ -40,19 +59,25 @@ impl Engine {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        let dynamic = {
+        let recent = {
             let mut stmt = self.conn.prepare(
-                "SELECT substr(content, 1, 200) FROM episodes
-                 WHERE space_id = ?1 ORDER BY id DESC LIMIT ?2",
+                "SELECT id, substr(content, 1, 200), created_at FROM episodes
+                 WHERE space_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![space.id(), limit], |r| {
-                r.get::<_, String>(0)
+                Ok(RecentActivity {
+                    episode_id: r.get(0)?,
+                    excerpt: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let dynamic = recent.iter().map(|r| r.excerpt.clone()).collect();
         Ok(Profile {
             static_facts,
             dynamic,
+            recent,
         })
     }
 }

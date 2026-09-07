@@ -15,6 +15,8 @@ into a data pipeline step.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import argparse
 import hashlib
 import pathlib
@@ -65,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--created-at", help="when it happened, RFC 3339 or YYYY-MM-DD")
     p.add_argument("--meta", action="append", default=[], help="key=value scope, repeatable")
+    p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
+    p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
@@ -83,8 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
 
-    p = sub.add_parser("forget", help="delete an episode")
+    p = sub.add_parser("delete-space", help="delete everything the space holds; --dry-run previews the receipt")
+    p.add_argument("--confirm", metavar="SPACE", help="repeat the space name to do it")
+    p.add_argument("--dry-run", action="store_true", help="show what would go, and remove nothing")
+    p = sub.add_parser("forget", help="delete an episode; the receipt says what went and what stayed")
     p.add_argument("episode_id", type=int)
+    p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -100,6 +108,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confidence", type=float, default=1.0)
     p.add_argument("--origin", choices=["stated", "extracted", "inferred"], default="stated")
     p.add_argument("--propose", action="store_true", help="park it for review instead of entering the ledger")
+    p.add_argument("--extends", type=int, metavar="FACT_ID", help="a fact this one adds detail to; both stay as they are")
+    p.add_argument("--derived-from", type=int, action="append", default=[], metavar="FACT_ID",
+                   help="a ledger fact this one was inferred from (repeatable); the claim is stored as inferred")
+    p = sub.add_parser("link", help="relate one fact to another: FROM extends | derived_from | contradicts | supports TO")
+    p.add_argument("from_fact", type=int)
+    p.add_argument("to_fact", type=int)
+    p.add_argument("kind", choices=["extends", "derived_from", "contradicts", "supports"])
+    p.add_argument("--source", type=int, metavar="EPISODE_ID", help="the episode the relation rests on")
+    p.add_argument("--quote", help="an exact substring of that episode supporting the relation")
+    p = sub.add_parser("links", help="show the relations a fact takes part in, from either end")
+    p.add_argument("fact_id", type=int)
+    sub.add_parser("doctor", help="what references what across the stores, read only: orphans by id, nothing repaired")
+    p = sub.add_parser("expire", help="forget episodes older than a retention policy (oldest first, bounded); facts never expire")
+    p.add_argument("--keep", action="append", default=[], metavar="KIND=DAYS", required=True,
+                   help="keep this kind for this many days by the episode's own time (repeatable)")
+    p.add_argument("--limit", type=int, default=100, help="at most this many in one pass")
+    p.add_argument("--dry-run", action="store_true", help="report what would go and forget nothing")
 
     p = sub.add_parser("close", help="close a fact with a reason: it stopped holding")
     p.add_argument("fact_id", type=int)
@@ -129,7 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("export", help="dump the space as JSON lines to stdout")
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
-    sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT)")
+    p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
+    sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT; "
+                                "SCONE_CONVERSATIONS_JOURNAL composes the conversation service on the same origin; "
+                                "SCONE_CONVERSATIONS_PERSONAS + SCONE_CONVERSATIONS_REGISTRY add a persona catalog)")
     p = sub.add_parser("serve-conversations", help="run the optional authenticated conversation service")
     p.add_argument("--journal", required=True, help="separate conversation SQLite database; parent must exist")
     runtime = p.add_mutually_exclusive_group(required=True)
@@ -138,6 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--console", action="store_true", help="serve the packaged React workspace (no keys embedded)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
     p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("derive", help="one derivation pass: propose claims that follow from the claims held, with their premises")
+    p.add_argument("--limit", type=int, default=50, help="groups sent to the model in this pass")
     p = sub.add_parser("bench", help="measure retrieval on a LongMemEval-style file with the Rust harness's definitions")
     p.add_argument("dataset", help="path to longmemeval_s.json or a same-shaped file")
     p.add_argument("--k", default="5,10,15", help="comma-separated k values (default 5,10,15)")
@@ -159,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--questions", type=int, help="only the first N questions of each item")
     p.add_argument("--reader", action="store_true",
                    help="answer with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL); without it only retrieval is measured")
+    p.add_argument("--distill", action="store_true",
+                   help="E36: extract claims from every statement with the configured chat model and approve them for the run")
+    p.add_argument("--derive", action="store_true", help="E36: after --distill, one derivation pass; bridges stay proposed")
+    p.add_argument("--derive-approve", action="store_true", help="E36: approve the derivation pass's bridges to measure the ceiling")
     p.add_argument("--out", help="write every item's report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -174,6 +208,22 @@ def read_source(path: str, stdin) -> str:
         return stdin.read()
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def space_line(receipt) -> str:
+    return (f"{receipt.episodes} episodes, {receipt.chunks} chunks, {receipt.facts} claims, {receipt.links} links, "
+            f"{receipt.tombstones} tombstones, {receipt.events} events; attachments released "
+            f"{len(receipt.attachments_released)}, kept {len(receipt.attachments_kept)}")
+
+
+def receipt_line(r) -> str:
+    return (f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, "
+            f"{len(r.facts_citing)} claim(s) and {len(r.links_citing)} link(s) cite it and stand")
+
+
+def link_line(link) -> str:
+    where = f"  (episode {link.source_episode_id})" if link.source_episode_id is not None else ""
+    return f"link #{link.link_id}: #{link.from_fact} {link.kind.replace('_', ' ')} #{link.to_fact}{where}"
 
 
 def fact_line(f) -> str:
@@ -269,6 +319,13 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         print("error: --reader needs SCONE_CHAT_URL and SCONE_CHAT_MODEL", file=sys.stderr)
         return 2
     reader_name = f"{settings.chat_model} at {settings.chat_url}" if reader is not None else None
+    model = build_chat(settings) if args.distill else None
+    if args.distill and model is None:
+        print("error: --distill needs SCONE_CHAT_URL and SCONE_CHAT_MODEL", file=sys.stderr)
+        return 2
+    if (args.derive or args.derive_approve) and not args.distill:
+        print("error: --derive needs --distill (the pass runs over extracted claims)", file=sys.stderr)
+        return 2
 
     async def make():
         return await build_in_process_engine(settings, embedder)
@@ -282,7 +339,10 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         if not args.json:
             print(f"{item.source}: {len(item.facts)} facts, {len(item.questions)} questions", file=sys.stderr)
         report = await run_conflict_resolution(make, item, reader=reader, reader_name=reader_name, k=args.k,
-                                               questions=args.questions, progress=progress)
+                                               questions=args.questions, progress=progress,
+                                              model=model, model_name=f"{settings.chat_model} at {settings.chat_url}" if model is not None else None,
+                                              distill=args.distill, derive=args.derive or args.derive_approve,
+                                              derive_approve=args.derive_approve)
         if not args.json:
             print("", file=sys.stderr)
         reports.append(report)
@@ -292,6 +352,10 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
             acc = "no reader" if report.accuracy is None else f"accuracy {report.accuracy * 100:.1f}% ({report.correct}/{report.answered}, {report.reader})"
             print(f"{report.source:<28} {report.hops:<6} n={report.questions:<4} gold@{report.k} {report.gold_at_k * 100:5.1f}%  "
                   f"stale above gold {report.stale_above_gold * 100:5.1f}%  {acc}  {report.errors} error(s)", file=out)
+            if report.distilled is not None:
+                bridges = "no derivation pass" if report.derived is None else f"{report.derived} bridge(s) {'approved' if report.derive_approved else 'left proposed'}"
+                print(f"{'':<28} claims: {report.distilled} extracted, {bridges}; claim_gold@{report.k} {(report.claim_gold_at_k or 0) * 100:5.1f}%  "
+                      f"derived_gold@{report.k} {(report.derived_gold_at_k or 0) * 100:5.1f}%", file=out)
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
     return 0
@@ -358,6 +422,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
+                    dedup_key=args.dedup_key, replace=args.replace,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -371,9 +436,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             for a in added:
                 emit(a.model_dump() | ({"attachments": [attachment.model_dump()]} if attachment else {}))
         else:
-            fresh = sum(1 for a in added if not a.deduplicated)
-            dup = len(added) - fresh
-            print(f"remembered {fresh} episode(s)" + (f", {dup} already known" if dup else ""), file=out)
+            fresh = sum(1 for a in added if a.outcome == "accepted")
+            updated = sum(1 for a in added if a.outcome == "updated")
+            dup = len(added) - fresh - updated
+            print(f"remembered {fresh} episode(s)" + (f", {updated} replaced" if updated else "")
+                  + (f", {dup} already known" if dup else ""), file=out)
             if attachment:
                 print(f"original image linked: {attachment.attachment_id} ({attachment.bytes} bytes)", file=out)
         return 0
@@ -420,9 +487,25 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print("no attachments", file=out)
         return 0
 
+    if args.command == "delete-space":
+        if args.dry_run:
+            receipt = await engine.space_impact(space)
+            emit(receipt.model_dump()) if args.json else print(f"would delete space {space}: {space_line(receipt)}", file=out)
+            return 0
+        if args.confirm != space:
+            print(f"refusing: --confirm must repeat the space name {space!r}; nothing was deleted", file=out)
+            return 2
+        receipt = await engine.delete_space(space)
+        emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
+        return 0
+
     if args.command == "forget":
-        await engine.forget(space, args.episode_id)
-        emit({"forgotten": args.episode_id}) if args.json else print(f"forgot episode {args.episode_id}", file=out)
+        if args.dry_run:
+            receipt = await engine.impact(space, args.episode_id)
+            emit(receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(receipt)}", file=out)
+            return 0
+        receipt = await engine.forget(space, args.episode_id)
+        emit({"forgotten": args.episode_id, **receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(receipt)}", file=out)
         return 0
 
     if args.command == "facts":
@@ -440,13 +523,57 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "assert":
         fact = await engine.assert_fact(
             space, args.subject, args.predicate, args.object, valid_from=args.valid_from, confidence=args.confidence,
-            origin=args.origin, proposed=args.propose,
+            origin=args.origin, proposed=args.propose, extends=args.extends, derived_from=args.derived_from,
         )
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
         return 0
 
+    if args.command == "link":
+        link = await engine.link_facts(space, args.from_fact, args.to_fact, args.kind,
+                                       source_episode_id=args.source, quote=args.quote)
+        emit(link.model_dump()) if args.json else print(link_line(link), file=out)
+        return 0
+
+    if args.command == "doctor":
+        report = await engine.doctor(space)
+        if args.json:
+            emit(report.model_dump())
+        else:
+            print(("healthy" if report.healthy else "orphans found") + f": {report.episodes} episode(s), {report.chunks} chunk(s), "
+                  f"{report.facts} fact(s), {report.links} link(s), {report.tombstones} tombstone(s)", file=out)
+            for name in ("chunks_without_episode", "vectors_without_chunk", "facts_citing_forgotten", "facts_citing_unknown",
+                         "links_with_missing_ends", "attachments_unlinked"):
+                found = getattr(report, name)
+                if found:
+                    print(f"  {name}: {', '.join(str(i) for i in found)}", file=out)
+            if report.not_inspected:
+                print(f"  not inspected: {', '.join(report.not_inspected)}", file=out)
+        return 0
+
+    if args.command == "expire":
+        from .config import parse_retention
+
+        report = await engine.expire(space, parse_retention(",".join(args.keep)), limit=args.limit, dry_run=args.dry_run)
+        if args.json:
+            emit(report.model_dump())
+        elif args.dry_run:
+            print(f"would forget {report.remaining} episode(s) under {report.policy}", file=out)
+        else:
+            print(f"forgot {len(report.forgotten)} episode(s) under {report.policy}; {report.remaining} left for the next pass", file=out)
+        return 0
+
+    if args.command == "links":
+        links = await engine.fact_links(space, args.fact_id)
+        if args.json:
+            emit([link.model_dump() for link in links])
+        elif not links:
+            print("no links", file=out)
+        else:
+            for link in links:
+                print(link_line(link), file=out)
+        return 0
+
     if args.command == "audit-grounding":
-        from dataclasses import asdict
 
         from ..observability.audit import audit_grounding
 
@@ -519,12 +646,29 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "profile":
         profile = await engine.profile(space)
         if args.json:
-            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic})
+            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic,
+                  "recent": [asdict(r) for r in profile.recent]})
         else:
             for f in profile.static_facts:
                 print(fact_line(f), file=out)
             for line in profile.dynamic:
                 print(f"- {line}", file=out)
+        return 0
+
+    if args.command == "derive":
+        from . import config as runtime_config
+        from ..ingestion.derive import Deriver
+
+        chat = runtime_config.build_chat(settings)
+        if chat is None:
+            print("error: no consolidation model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)", file=sys.stderr)
+            return 2
+        outcome = await Deriver(engine, chat).derive(space, limit_groups=args.limit)
+        if args.json:
+            emit({"space": space, **outcome.as_payload()})
+        else:
+            print(f"derived over {outcome.sent} of {outcome.groups} group(s): {len(outcome.proposed)} proposed, "
+                  f"{outcome.restated} restated, {len(outcome.rejected)} rejected", file=out)
         return 0
 
     if args.command == "distill":
@@ -551,10 +695,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "import":
         raw = read_source(args.file, stdin)
-        summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()])
+        summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()],
+                                              resurrect=args.resurrect)
         emit(summary.__dict__) if args.json else print(
             f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
-            f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)", file=out
+            f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)"
+            + (f"; forgotten here and left so: {summary.tombstoned}" if summary.tombstoned else ""), file=out
         )
         return 0
 

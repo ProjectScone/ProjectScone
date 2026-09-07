@@ -30,6 +30,24 @@ class BlobStore(Protocol):
     async def get(self, space: str, attachment_id: str) -> tuple[Attachment, bytes]: ...
     async def link(self, space: str, attachment_id: str, episode_id: int) -> None: ...
     async def for_episode(self, space: str, episode_id: int) -> list[Attachment]: ...
+    async def held(self, space: str) -> list[str]:
+        """Every attachment id the space holds, linked or not."""
+        ...
+    async def linked(self, space: str) -> set[str]:
+        """The attachment ids some episode of the space carries."""
+        ...
+    async def released_by(self, space: str, episode_id: int) -> list[str]:
+        """The attachment ids no other episode of the space carries."""
+        ...
+    async def unlink(self, space: str, episode_id: int) -> list[str]:
+        """Drop the episode's references; release the space's hold on what
+        nothing else there carries, and the bytes when no space holds them."""
+        ...
+    async def release_space(self, space: str, *, preview: bool = False) -> tuple[list[str], list[str]]:
+        """(released, kept): the attachment ids whose bytes go with the
+        space's holds, and those another space still holds. Removes the
+        holds and the orphaned bytes unless ``preview``."""
+        ...
 
 
 class InMemoryBlobStore:
@@ -68,6 +86,40 @@ class InMemoryBlobStore:
 
     async def for_episode(self, space: str, episode_id: int) -> list[Attachment]:
         return [self._held[(space, i)] for i in self._links.get((space, episode_id), [])]
+
+    async def held(self, space: str) -> list[str]:
+        return sorted(i for (s, i) in self._held if s == space)
+
+    async def linked(self, space: str) -> set[str]:
+        return {i for (s, _), ids in self._links.items() if s == space for i in ids}
+
+    async def released_by(self, space: str, episode_id: int) -> list[str]:
+        mine = self._links.get((space, episode_id), [])
+        elsewhere = {i for (s, e), ids in self._links.items() if s == space and e != episode_id for i in ids}
+        return [i for i in mine if i not in elsewhere]
+
+    async def release_space(self, space: str, *, preview: bool = False) -> tuple[list[str], list[str]]:
+        mine = sorted(i for (s, i) in self._held if s == space)
+        elsewhere = {i for (s, i) in self._held if s != space}
+        released = [i for i in mine if i not in elsewhere]
+        kept = [i for i in mine if i in elsewhere]
+        if not preview:
+            for key in [k for k in self._links if k[0] == space]:
+                del self._links[key]
+            for attachment_id in mine:
+                self._held.pop((space, attachment_id), None)
+            for attachment_id in released:
+                self._bytes.pop(attachment_id, None)
+        return released, kept
+
+    async def unlink(self, space: str, episode_id: int) -> list[str]:
+        released = await self.released_by(space, episode_id)
+        self._links.pop((space, episode_id), None)
+        for attachment_id in released:
+            self._held.pop((space, attachment_id), None)
+            if not any(i == attachment_id for (_, i) in self._held):
+                self._bytes.pop(attachment_id, None)
+        return released
 
 
 class FileBlobStore:
@@ -138,6 +190,65 @@ class FileBlobStore:
             if held.exists():
                 found.append(Attachment(**json.loads(held.read_text())))
         return found
+
+    async def held(self, space: str) -> list[str]:
+        folder = self.root / "spaces" / space / "attachments"
+        return sorted(p.stem for p in folder.glob("*.json")) if folder.exists() else []
+
+    async def linked(self, space: str) -> set[str]:
+        folder = self.root / "spaces" / space / "episodes"
+        out: set[str] = set()
+        if folder.exists():
+            for path in folder.glob("*.json"):
+                out.update(json.loads(path.read_text()))
+        return out
+
+    async def released_by(self, space: str, episode_id: int) -> list[str]:
+        path = self._links(space, episode_id)
+        if not path.exists():
+            return []
+        mine: list[str] = json.loads(path.read_text())
+        elsewhere: set[str] = set()
+        for other in path.parent.glob("*.json"):
+            if other != path:
+                elsewhere.update(json.loads(other.read_text()))
+        return [i for i in mine if i not in elsewhere]
+
+    async def release_space(self, space: str, *, preview: bool = False) -> tuple[list[str], list[str]]:
+        mine = await self.held(space)
+        spaces = self.root / "spaces"
+
+        def held_elsewhere(attachment_id: str) -> bool:
+            return any(p.parent.parent.name != space for p in spaces.glob(f"*/attachments/{attachment_id}.json"))
+
+        released = [i for i in mine if not held_elsewhere(i)]
+        kept = [i for i in mine if held_elsewhere(i)]
+        if not preview:
+            import shutil
+
+            shutil.rmtree(spaces / space, ignore_errors=True)
+            for attachment_id in released:
+                blob = self._blob(attachment_id)
+                if blob.exists():
+                    blob.unlink()
+        return released, kept
+
+    async def unlink(self, space: str, episode_id: int) -> list[str]:
+        released = await self.released_by(space, episode_id)
+        path = self._links(space, episode_id)
+        if path.exists():
+            path.unlink()
+        for attachment_id in released:
+            held = self._held(space, attachment_id)
+            if held.exists():
+                held.unlink()
+            # The bytes serve every space that stored them; they go only
+            # when no space holds them any more.
+            if not any((self.root / "spaces").glob(f"*/attachments/{attachment_id}.json")):
+                blob = self._blob(attachment_id)
+                if blob.exists():
+                    blob.unlink()
+        return released
 
 
 def attachments_of(ids: Sequence[str]) -> list[str]:

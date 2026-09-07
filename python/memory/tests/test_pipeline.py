@@ -108,7 +108,7 @@ def test_cli_round_trip_through_sqlite(tmp_path):
     env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "second.db")}
     out = io.StringIO()
     assert cli.main(["import", "--json"], env=env2, stdin=io.StringIO(dump), out=out) == 0
-    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0}
+    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0, "links": 0, "links_skipped": 0, "tombstoned": 0}
     out = io.StringIO()
     cli.main(["status", "--json"], env=env2, stdin=io.StringIO(), out=out)
     assert json.loads(out.getvalue())["episodes"] == 1
@@ -409,3 +409,113 @@ def test_cli_recall_narrowing_flags(tmp_path):
     assert got("--source-prefix", "session-") == [3]
     assert got("--until", "2024-01-31") == [1]
     assert got("--since", "2024-03-01") == [3]
+
+
+def test_cli_links_facts_and_reads_them_back(tmp_path, capsys):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    _, text = run("remember", stdin="Acme is headquartered in Lisbon, near the river.")
+    _, works = run("assert", "mark", "works_at", "Acme", "--json")
+    _, based = run("assert", "Acme", "based_in", "Lisbon", "--json")
+    works_id, based_id = json.loads(works)["fact_id"], json.loads(based)["fact_id"]
+    code, text = run("assert", "mark", "works_in", "Lisbon", "--derived-from", str(works_id), "--derived-from", str(based_id), "--json")
+    derived = json.loads(text)
+    assert code == 0 and derived["origin"] == "inferred"
+    code, text = run("assert", "Acme", "office_near", "the river", "--extends", str(based_id), "--json")
+    assert code == 0 and json.loads(text)["status"] == "active"
+    code, text = run("link", str(works_id), str(based_id), "supports", "--source", "1", "--quote", "headquartered in Lisbon")
+    assert code == 0 and f"#{works_id} supports #{based_id}" in text and "episode 1" in text
+    code, text = run("links", str(based_id))
+    assert code == 0
+    assert f"#{derived['fact_id']} derived from #{based_id}" in text and f"#{works_id} supports #{based_id}" in text
+    assert f"office_near" not in text and "extends" in text, "a link line names facts by id and kind, not by restating them"
+    code, text = run("link", str(works_id), str(works_id), "supports")
+    assert code == 2 and "itself" in capsys.readouterr().err
+    code, text = run("links", str(based_id), "--json")
+    assert code == 0 and sorted(l["kind"] for l in json.loads(text)) == ["derived_from", "extends", "supports"]
+
+
+def test_cli_forget_previews_with_dry_run_and_reports_a_receipt(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", stdin="Acme is headquartered in Lisbon.")
+    _, text = run("assert", "acme", "based_in", "lisbon", "--json")
+    code, text = run("forget", "1", "--dry-run", "--json")
+    assert code == 0 and json.loads(text)["chunks"] >= 1 and json.loads(text)["facts_citing"] == []
+    assert run("recall", "lisbon", "--json")[1].count("episode_id") >= 1, "a dry run removes nothing"
+    code, text = run("forget", "1", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == 1 and json.loads(text)["chunks"] >= 1
+    code, text = run("forget", "1", "--dry-run")
+    assert code == 2
+
+
+def test_cli_remember_takes_a_key_and_replaces_on_request(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    code, text = run("remember", "--key", "doc:office", "--json", stdin="The office is in Lisbon.")
+    assert code == 0 and json.loads(text)["outcome"] == "accepted"
+    code, text = run("remember", "--key", "doc:office", "--json", stdin="The office moved to Porto.")
+    assert code == 0 and json.loads(text)["outcome"] == "duplicate"
+    code, text = run("remember", "--key", "doc:office", "--replace", "--json", stdin="The office moved to Porto.")
+    payload = json.loads(text)
+    assert code == 0 and payload["outcome"] == "updated" and payload["replaced"]["episode_id"] == 1
+    assert run("recall", "Porto", "--json")[1].count('"episode_id"') >= 1
+    code, text = run("remember", "--replace", stdin="no key")
+    assert code == 2
+
+
+def test_cli_import_skips_forgotten_content_unless_resurrected(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", stdin="a note to export and forget")
+    _, dump = run("export")
+    run("forget", "1")
+    code, text = run("import", "--json", stdin=dump)
+    assert code == 0 and json.loads(text)["episodes"] == 0 and json.loads(text)["tombstoned"] == 1
+    code, text = run("import", "--resurrect", "--json", stdin=dump)
+    assert code == 0 and json.loads(text)["episodes"] == 1 and json.loads(text)["tombstoned"] == 0
+
+
+def test_cli_expire_previews_then_applies_a_policy(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", "--kind", "conversation", "--created-at", "2020-01-01", stdin="an old chat turn")
+    run("remember", "--kind", "conversation", stdin="a fresh chat turn")
+    run("remember", "--kind", "note", "--created-at", "2020-01-01", stdin="an old note")
+    code, text = run("expire", "--keep", "conversation=30", "--dry-run", "--json")
+    assert code == 0 and json.loads(text)["remaining"] == 1 and json.loads(text)["forgotten"] == []
+    assert run("recall", "old chat", "--json")[1].count('"episode_id"') >= 1, "a dry run forgets nothing"
+    code, text = run("expire", "--keep", "conversation=30", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == [1] and json.loads(text)["receipts"][0]["forgotten_at"]
+    code, text = run("expire", "--keep", "conversation=30", "--keep", "note=30", "--json")
+    assert code == 0 and json.loads(text)["forgotten"] == [3], "every --keep counts"
+    code, text = run("expire", "--keep", "conversation=30", "--keep", "note=30")
+    assert code == 0 and "forgot 0" in text
+    assert run("expire", "--keep", "poem=30")[0] == 2
+    with pytest.raises(SystemExit):
+        run("expire")  # a policy is required; nothing expires by default

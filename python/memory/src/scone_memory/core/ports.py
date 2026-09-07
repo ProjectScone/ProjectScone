@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Chunk, Episode, Fact
+from .models import Chunk, Episode, Fact, FactLink, Tombstone
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,26 @@ class NewFact:
 
 
 @dataclass(frozen=True)
+class NewTombstone:
+    space: str
+    episode_id: int
+    content_hash: str
+    forgotten_at: str
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NewFactLink:
+    space: str
+    from_fact: int
+    to_fact: int
+    kind: str
+    created_at: str
+    source_episode_id: Optional[int] = None
+    quote: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class TextFilter:
     """What the lexical lane may return. ``as_of`` excludes anything
     that happened after that instant; ``tags`` must all be present."""
@@ -86,6 +106,18 @@ class SpaceCounts:
     chunks: int = 0
     bytes: int = 0
     tags: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DeletedSpace:
+    """What a document store removed for ``delete_space``: the chunk ids
+    (so the vector index can follow) and the counts for the receipt."""
+
+    chunk_ids: tuple[int, ...]
+    episodes: int
+    facts: int
+    links: int
+    tombstones: int
 
 
 @runtime_checkable
@@ -154,12 +186,34 @@ class DocumentStore(Protocol):
     async def update_fact(self, fact: Fact) -> None: ...
     async def get_fact(self, space: str, fact_id: int) -> Optional[Fact]: ...
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]: ...
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        """Remember that an episode existed and was forgotten; the same
+        (space, episode_id) recorded again returns the first record."""
+        ...
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]: ...
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]: ...
+    async def list_tombstones(self, space: str) -> list[Tombstone]: ...
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        """Store a link; the same (space, from, to, kind) stored again returns
+        the stored link unchanged, so linking is idempotent everywhere."""
+        ...
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        """Every link naming the fact at either end, oldest first."""
+        ...
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         """Every fact, any status, with this subject and predicate."""
         ...
 
     async def bump_revision(self, space: str) -> int: ...
     async def revision(self, space: str) -> int: ...
+    async def delete_space(self, space: str, deleted_at: str) -> DeletedSpace:
+        """Remove every record of the space (chunks, episodes, links,
+        facts, tombstones, inflight marks, the revision row) and mark it
+        deleted at ``deleted_at``; atomic where the store can be."""
+        ...
+    async def space_deleted(self, space: str) -> Optional[str]:
+        """When the space was deleted, or None while it lives."""
+        ...
 
 
 @runtime_checkable
@@ -239,6 +293,9 @@ class EventLog(Protocol):
         ...
 
     async def get(self, space: str, event_id: int) -> Optional[Event]: ...
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        """How many events the space holds; remove them unless ``preview``."""
+        ...
     async def query(
         self,
         space: str,

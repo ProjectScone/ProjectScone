@@ -19,16 +19,23 @@ from pathlib import Path
 import stat
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
+from starlette.websockets import WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
-from .app import PLAYGROUND, create_app, episode_json
+from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
+from ..realtime.catalog import PersonaCatalog
+from ..realtime.websocket import WebSocketAudioTransport
+
+# What a host without a catalog reports: the revision of an empty one.
+_EMPTY_REVISION = PersonaCatalog((), {}).revision
 from .text_stream import MAX_BYTES, MAX_CHUNKS, TextWindow, sse
 
 
@@ -40,6 +47,12 @@ class Command(BaseModel):
 class Create(Command):
     capture: bool
     recall_scope: dict[str, object] = Field(default_factory=dict)
+    # A voice session waits for its audio socket instead of taking text turns.
+    mode: Literal["text", "voice"] = "text"
+    # A catalog id; fixed for the session's life and echoed in its receipts.
+    persona: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    # The configuration the client displayed; a mismatch refuses the session.
+    persona_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
 
 
 class Stop(Command):
@@ -61,7 +74,8 @@ class OwnedSession:
 
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
-                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False):
+                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
+                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -74,6 +88,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     the native runtime. When configured it takes precedence for every new session.
     public_text_streaming=True requires every runtime to accept an async on_text
     reply keyword delivering public chunks. Defaults off for custom runtimes.
+    worker is a ConsolidationWorker started once the journal is owned and
+    stopped with the service; a mounted memory app's own lifespan never runs,
+    so the service must carry it. reload_pages re-reads the shell per request.
+    catalog is a bound PersonaCatalog: sessions may name one of its personas at
+    creation and then run that persona's native text runtime. A host with a
+    catalog and no bare runtime requires the choice; nothing is chosen for it.
+    A voice session names a persona and is spoken to over its audio socket.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -87,7 +108,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("runtime_factory must be callable or None")
     if scoped_runtime_factory is not None and not callable(scoped_runtime_factory):
         raise ValueError("scoped_runtime_factory must be callable or None")
-    if type(public_text_streaming) is not bool or (public_text_streaming and runtime_factory is None and scoped_runtime_factory is None):
+    if catalog is not None and not hasattr(catalog, "public"):
+        raise ValueError("catalog must be a bound PersonaCatalog or None")
+    # A catalog's sessions run the native text runtime, which streams.
+    configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
+    if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
     creates: dict[tuple[str, str], str] = {}
@@ -155,10 +180,17 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                     if not page["has_more"]:
                         break
                     after = page["next_after"]
+            if worker is not None:
+                worker.start()
             yield
         finally:
             begin_shutdown()
             cleanup_errors = []
+            if worker is not None:
+                try:
+                    await worker.stop()
+                except Exception as error:
+                    cleanup_errors.append(error)
             try:
                 if journal is not None:
                     for (space, sid), entry in owned.items():
@@ -193,14 +225,22 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     # Hosts must notify before draining HTTP tasks, not only at lifespan end:
     # an idle SSE response is itself one of the tasks they would wait for.
     app.state.begin_conversation_shutdown = begin_shutdown
+    app.state.worker = worker
 
-    def space_for(request: Request):
+    roles = dict(roles or {})
+
+    async def space_for(request: Request):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
             for key, space in keys.items():
                 if hmac.compare_digest(token.encode(), key.encode()):
                     if shutting_down and request.method == "POST":
                         raise HTTPException(503, "conversation service is shutting down")
+                    if not permitted(roles.get(key, "full"), request.method, request.url.path):
+                        raise HTTPException(403, f"key role {roles.get(key)} cannot write")
+                    # A deleted space's key answers 404 here as on the memory routes.
+                    if await engine.space_deleted(space) is not None:
+                        raise HTTPException(404, f"space {space!r} was deleted")
                     return space
         raise HTTPException(401, "valid bearer key required")
 
@@ -241,8 +281,20 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def conflict(_request, error):
         return JSONResponse({"error": "conversation revision or command conflict", "revision": error.revision}, status_code=409)
 
+    def describe(session):
+        """A session receipt names its persona from this process's catalog and
+        keeps the configuration recorded at creation: an id the catalog no
+        longer has gets no name, and a changed configuration is not current."""
+        chosen = session.get("persona")
+        recorded = session.pop("persona_fingerprint", None)
+        now = catalog.fingerprint(chosen) if catalog is not None and chosen else None
+        session["persona"] = ({"id": chosen, "name": catalog.name(chosen) if catalog is not None else None,
+                               "fingerprint": recorded, "current": recorded is not None and recorded == now}
+                              if chosen else None)
+        return session
+
     def inspect(space, sid):
-        result = journal.get(space, sid)
+        result = describe(journal.get(space, sid))
         entry = owned.get((space, sid))
         result["active_request_id"] = entry.active_id if entry else None
         result["latest_request_id"] = journal.latest_turn_id(space, sid)
@@ -250,9 +302,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
-        return {"schema_version": 1, "text_configured": runtime_factory is not None or scoped_runtime_factory is not None,
-                "recall_scope": scoped_runtime_factory is not None,
-                "voice": False, "video": False, "streaming": public_text_streaming,
+        return {"schema_version": 1,
+                "text_configured": runtime_factory is not None or scoped_runtime_factory is not None or bool(catalog and catalog.personas),
+                "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
+                "personas": len(catalog.personas) if catalog is not None else 0,
+                "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
                 "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
                                   "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
@@ -261,9 +315,19 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "transcript_pagination": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
 
+    @app.get("/v1/conversations/personas")
+    async def personas(space=Depends(space_for)):
+        """The choices this host can run, for a client to pick from. Never the
+        instructions, and nothing the registry closed over."""
+        return {"schema_version": 1, "revision": catalog.revision if catalog is not None else _EMPTY_REVISION,
+                "personas": catalog.public(voice=True) if catalog is not None else []}
+
     @app.get("/v1/conversations")
     async def sessions(after: str = "", limit: int = 100, space=Depends(space_for)):
-        return journal.sessions(space, after=after, limit=limit)
+        page = journal.sessions(space, after=after, limit=limit)
+        for item in page["items"]:
+            describe(item)
+        return page
 
     @app.post("/v1/conversations")
     async def create(body: Create, space=Depends(space_for)):
@@ -272,28 +336,57 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if not body.capture:
             raise HTTPException(422, "this runtime requires explicit transcript capture consent")
         scope = RecallScope.from_mapping(body.recall_scope)
-        if runtime_factory is None and scoped_runtime_factory is None:
-            raise HTTPException(503, "text conversation runtime is not configured")
-        if scope.as_dict() and scoped_runtime_factory is None:
-            raise HTTPException(422, "this runtime does not support session recall constraints")
         key = (space, body.request_id)
+        # Identity first, judgement second. A retry of a create that already
+        # made a session replays it whatever this process's catalog says now:
+        # the persona may be gone or changed, and the session still exists.
         if key in creates:
             # Deleted sessions keep a process-local retry tombstone. Check it
             # before journal.create can insert a new row for the deleted key.
             current = inspect(space, creates[key])
-            journal.create(space, body.request_id, recall_scope=scope.as_dict())
+            journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona)
             return current
+        already = journal.created(space, body.request_id)
+        if already is not None:
+            journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona)
+            return inspect(space, already)
+        chosen = None
+        if body.persona is not None:
+            chosen = catalog.get(body.persona) if catalog is not None else None
+            if chosen is None:
+                raise HTTPException(422, f"persona is not in this host's catalog: {body.persona}")
+            if body.persona_fingerprint is not None and body.persona_fingerprint != catalog.fingerprint(body.persona):
+                # Nothing is behind this request id (checked above), so the
+                # refusal proves no write, with a code the client can act on.
+                return JSONResponse({"error": f"persona selection is stale: {body.persona} "
+                                              f"(current fingerprint {catalog.fingerprint(body.persona)})",
+                                     "code": "persona_selection_stale",
+                                     "fingerprint": catalog.fingerprint(body.persona)}, status_code=409)
+        elif runtime_factory is None and scoped_runtime_factory is None:
+            if catalog is not None and catalog.personas:
+                raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
+            raise HTTPException(503, "text conversation runtime is not configured")
+        if scope.as_dict() and scoped_runtime_factory is None and chosen is None:
+            raise HTTPException(422, "this runtime does not support session recall constraints")
+        if body.mode == "voice" and chosen is None:
+            raise HTTPException(422, "a voice session needs a persona with transcription and speech choices")
         if len(creates) >= max_sessions:
             raise HTTPException(429, "conversation process capacity reached")
-        receipt = journal.create(space, body.request_id, recall_scope=scope.as_dict())
+        receipt = journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona,
+                                 persona_fingerprint=catalog.fingerprint(body.persona) if chosen is not None else None)
         sid = receipt["session_id"]
         creates[key] = sid
         current = journal.get(space, sid)
-        if current["state"] != "created":
+        if current["state"] != "created" or body.mode == "voice":
+            # A voice session starts when its audio socket arrives.
             return inspect(space, sid)
         try:
-            runtime = (scoped_runtime_factory(space, sid, RecallScope.from_mapping(current["recall_scope"]))
-                       if scoped_runtime_factory is not None else runtime_factory(space, sid))
+            fixed = RecallScope.from_mapping(current["recall_scope"])
+            if chosen is not None:
+                runtime = chosen.text(engine, space, sid, **fixed.kwargs())
+            else:
+                runtime = (scoped_runtime_factory(space, sid, fixed)
+                           if scoped_runtime_factory is not None else runtime_factory(space, sid))
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
@@ -456,6 +549,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if shutting_down:
             raise HTTPException(503, "conversation service is shutting down")
         current = journal.get(space, sid)
+        if current["mode"] != "text":
+            raise HTTPException(409, "a voice session takes audio over its socket, not text turns")
         entry = owned.get((space, sid))
         signature = body.model_dump()
         if entry and body.request_id in entry.turns:
@@ -566,7 +661,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         # State decides, not process ownership: an ended session may still
         # have an entry in this process, and that entry cannot serve a
         # deleted turn anyway, because every read goes through the journal.
-        if current["state"] in ("created", "running", "stopping"):
+        # A voice session waiting for its socket is served by nobody, so it can go.
+        if current["state"] in ("running", "stopping") or (current["state"] == "created" and (space, sid) in owned):
             raise Conflict("stop the conversation before deleting it", current["revision"])
         # Episodes first: a receipt naming an episode that is gone reads
         # as forgotten, which is true, while the reverse leaves episodes
@@ -651,6 +747,101 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return False
         return True
 
+    @app.websocket("/v1/conversations/{sid}/audio")
+    async def audio(websocket: WebSocket, sid: str):
+        """A voice session's one socket. A browser cannot put a bearer header
+        on a WebSocket, so the first text frame is a hello carrying the key
+        and the PCM format; the key is never in the URL. Refusals say why,
+        naming the rule, and close with 1008 before any audio moves."""
+        await websocket.accept()
+
+        async def refuse(reason):
+            try:
+                await websocket.send_text(json.dumps({"type": "error", "reason": reason}))
+                await websocket.close(code=1008)
+            except Exception:
+                pass
+
+        hello = None
+        try:
+            async with asyncio.timeout(5):
+                first = await websocket.receive()
+            if first.get("text") is not None:
+                hello = json.loads(first["text"])
+        except (TimeoutError, WebSocketDisconnect, ValueError, RuntimeError):
+            hello = None
+        if not isinstance(hello, dict) or hello.get("type") != "hello":
+            await refuse("expected a hello control first")
+            return
+        key = hello.get("key")
+        space = keys.get(key) if isinstance(key, str) else None
+        if space is None:
+            await refuse("unknown key")
+            return
+        if not permitted(roles.get(key, "full"), "POST", "/v1/conversations"):
+            await refuse(f"key role {roles.get(key)} cannot start a session")
+            return
+        if await engine.space_deleted(space) is not None:
+            await refuse(f"space {space!r} was deleted")
+            return
+        if shutting_down:
+            await refuse("conversation service is shutting down")
+            return
+        try:
+            current = journal.get(space, sid)
+        except (NotFound, InvalidInput):
+            await refuse("unknown session")
+            return
+        if current["mode"] != "voice":
+            await refuse("not a voice session")
+            return
+        if current["state"] != "created" or (space, sid) in owned:
+            await refuse("session is not waiting for audio")
+            return
+        chosen = catalog.get(current["persona"]) if catalog is not None and current["persona"] else None
+        if chosen is None:
+            await refuse("persona is no longer available")
+            return
+        try:
+            transport = WebSocketAudioTransport(websocket, sample_rate=hello.get("sample_rate"),
+                                                channels=hello.get("channels", 1))
+        except (ValueError, TypeError):
+            await refuse("unsupported audio format")
+            return
+        try:
+            fixed = RecallScope.from_mapping(current["recall_scope"])
+            session = chosen.voice(engine, space, sid, transport_factory=lambda: transport, capture=True, **fixed.kwargs())
+            journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
+        except Exception:
+            await refuse("voice session failed to initialize")
+            return
+        owned[(space, sid)] = OwnedSession(session)
+        await websocket.send_text(json.dumps({"type": "ready", "session_id": sid}))
+        try:
+            await session.run()
+        except asyncio.CancelledError:
+            # The host closed it (stop or shutdown), which the journal already
+            # records; only a cancelled handler task must keep propagating.
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            pass  # the journal says failed below; the transport told the client what it could
+        finally:
+            try:
+                latest = journal.get(space, sid) if journal is not None else None
+                if latest is not None and latest["state"] == "running":
+                    # The session's own verdict: ended on its input's end,
+                    # interrupted when a host or this task cut it, failed
+                    # otherwise. A socket the server closed on its way down
+                    # ended the input, but the host did that, not the caller.
+                    verdict = "interrupted" if session.state == "ended" and shutting_down else session.state
+                    action = {"ended": "end", "interrupted": "interrupt"}.get(verdict, "fail")
+                    journal.transition(space, sid, f"{action}:" + uuid4().hex, action, latest["revision"])
+                    owned.pop((space, sid), None)
+            except Exception:
+                pass
+            await transport.aclose()
+
     async def finish_stop(space, sid, entry, revision):
         if not await finish_cleanup(entry):
             journal.transition(space, sid, "failure:" + uuid4().hex, "fail", revision)
@@ -664,12 +855,18 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         workspace_html = PLAYGROUND.read_text(encoding="utf-8")
 
         async def workspace_page():
-            return HTMLResponse(workspace_html, headers={
+            body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
+            return HTMLResponse(body, headers={
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
 
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
-    app.mount("/", create_app(engine, keys, console=False))
+    # The mounted app answers /v1/status, so it must know the worker; its own
+    # lifespan never runs under a mount, so ownership stays with this one.
+    memory_app = create_app(engine, keys, console=False, conversations=True, worker=worker,
+                            ingest_concurrency=ingest_concurrency, roles=roles)
+    app.state.ingest_lane_width = memory_app.state.ingest_lane_width
+    app.mount("/", memory_app)
     return app

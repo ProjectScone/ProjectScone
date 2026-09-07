@@ -37,6 +37,16 @@ class InMemoryEventLog:
         #: after the ring turned over still deduplicates.
         self._keys: dict[tuple[str, str], Event] = {}
 
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        mine = [e for e in self._events if e.space == space]
+        if not preview:
+            kept = [e for e in self._events if e.space != space]
+            self._events.clear()
+            self._events.extend(kept)
+            for key in [k for k in self._keys if k[0] == space]:
+                del self._keys[key]
+        return len(mine)
+
     async def append(self, new: NewEvent) -> Event:
         if new.dedup_key is not None:
             existing = self._keys.get((new.space, new.dedup_key))
@@ -108,6 +118,13 @@ class SqliteEventLog:
 
     async def close(self) -> None:
         self.conn.close()
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        n = self.conn.execute("SELECT count(*) FROM events WHERE space = ?", (space,)).fetchone()[0]
+        if not preview:
+            self.conn.execute("DELETE FROM events WHERE space = ?", (space,))
+            self.conn.commit()
+        return int(n)
 
     async def append(self, new: NewEvent) -> Event:
         payload = json.dumps(dict(new.payload), ensure_ascii=False)
@@ -218,6 +235,12 @@ class MongoEventLog:
 
     async def close(self) -> None:
         await self.client.close()
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        n = await self.events.count_documents({"space": space})
+        if not preview:
+            await self.events.delete_many({"space": space})
+        return int(n)
 
     async def append(self, new: NewEvent) -> Event:
         from pymongo.errors import DuplicateKeyError

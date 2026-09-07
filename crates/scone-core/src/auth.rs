@@ -44,14 +44,22 @@ pub fn resolve(engine: &mut Engine, name: &str, create: bool) -> Result<ScopedSp
     if create {
         conn.execute("INSERT OR IGNORE INTO spaces (name) VALUES (?1)", [name])?;
     }
-    let id = conn
-        .query_row("SELECT id FROM spaces WHERE name = ?1", [name], |r| {
-            r.get(0)
-        })
+    let (id, deleted_at): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT id, deleted_at FROM spaces WHERE name = ?1",
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => SconeError::NotFound(format!("space {name:?}")),
             other => SconeError::Db(other),
         })?;
+    // A deleted space keeps its name: nothing re-creates what was erased.
+    if let Some(when) = deleted_at {
+        return Err(SconeError::NotFound(format!(
+            "space {name:?} was deleted at {when}"
+        )));
+    }
     Ok(ScopedSpace {
         id,
         name: name.to_owned(),

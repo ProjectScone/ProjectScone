@@ -70,7 +70,7 @@ async def test_http_inventory_summaries_and_legacy_batch_are_separate(memory):
         assert page.status_code == 200
         assert page.json() == {"items": [{"episode_id": added.episode_id, "kind": "file", "source": "original.txt",
             "created_at": (await memory.episode("alpha", added.episode_id)).created_at,
-            "byte_count": len(text.encode()), "preview": text[:500], "preview_truncated": True}],
+            "byte_count": len(text.encode()), "preview": text[:500], "preview_truncated": True, "status": "pending"}],
             "has_more": False, "next_before": None}
         assert (await client.get(f"/v1/episodes?ids={added.episode_id}", headers=auth)).json()["episodes"][0]["content"] == text
         for query in ["limit=0", "limit=101", "before=0", "before=-1", "before=9223372036854775808", "kind=", "kind=unknown", "space=beta"]:
@@ -79,10 +79,12 @@ async def test_http_inventory_summaries_and_legacy_batch_are_separate(memory):
 
 async def test_custom_store_without_inventory_advertises_unavailable(memory, monkeypatch):
     monkeypatch.setattr(memory.documents, "page_episodes", None)
-    with TestClient(create_app(memory, {"a": "alpha"})) as client:
+    # The async transport, like the other tests here: a key lookup reads the
+    # store (a deleted space answers 404), and sqlite refuses another thread.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(memory, {"a": "alpha"})), base_url="http://test") as client:
         auth = {"Authorization": "Bearer a"}
-        assert client.get("/v1/capabilities", headers=auth).json()["features"]["episodes.list"] is False
-        assert client.get("/v1/sources", headers=auth).status_code == 501
+        assert (await client.get("/v1/capabilities", headers=auth)).json()["features"]["episodes.list"] is False
+        assert (await client.get("/v1/sources", headers=auth)).status_code == 501
 
 
 def test_sync_native_inventory_is_available():
@@ -123,3 +125,41 @@ async def test_sqlite_inventory_survives_reopen(tmp_path):
         assert second.has_more is False
     finally:
         await reopened.close()
+
+
+async def test_every_source_row_says_where_consolidation_left_it(memory):
+    """A source is pending until a claim cites it, cited once one does, and
+    parked when the distiller gave up on it: the word matches what the API
+    will do next, with or without a worker (a `distill` pass visits pending
+    sources too)."""
+    from types import SimpleNamespace
+
+    pending = await memory.remember("alpha", "the office is in Lisbon", kind="note")
+    cited = await memory.remember("alpha", "mark works at Acme", kind="note")
+    stuck = await memory.remember("alpha", "unreadable scan", kind="file")
+    await memory.assert_fact("alpha", "mark", "works_at", "acme", source_episode_id=cited.episode_id, quote="works at Acme")
+
+    class Distiller:
+        def parked(self, space):
+            return {stuck.episode_id: "model replied with no JSON"} if space == "alpha" else {}
+
+    worker = SimpleNamespace(distiller=Distiller(), running=True, last={}, start=lambda: None)
+
+    async def stop():
+        pass
+
+    worker.stop = stop
+    auth = {"Authorization": "Bearer a"}
+    app = create_app(memory, {"a": "alpha"}, worker=worker)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        rows = {r["episode_id"]: r for r in (await client.get("/v1/sources?limit=10", headers=auth)).json()["items"]}
+        assert rows[pending.episode_id]["status"] == "pending"
+        assert rows[cited.episode_id]["status"] == "cited"
+        assert rows[stuck.episode_id]["status"] == "parked" and rows[stuck.episode_id]["parked_reason"] == "model replied with no JSON"
+        assert "parked_reason" not in rows[pending.episode_id]
+    plain = create_app(memory, {"a": "alpha"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=plain), base_url="http://test") as client:
+        rows = {r["episode_id"]: r for r in (await client.get("/v1/sources?limit=10", headers=auth)).json()["items"]}
+        assert rows[pending.episode_id]["status"] == "pending", "a distill pass visits it even without a worker"
+        assert rows[cited.episode_id]["status"] == "cited"
+        assert rows[stuck.episode_id]["status"] == "pending", "parking is this process's distiller's knowledge; another host would try again"

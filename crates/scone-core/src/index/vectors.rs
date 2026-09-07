@@ -128,6 +128,17 @@ impl VectorIndex {
         self.save()
     }
 
+    /// Drop the vectors of `keys` that the index holds; returns how many went.
+    pub fn remove(&mut self, keys: &[u64]) -> Result<usize> {
+        let mut removed = 0;
+        for key in keys {
+            if self.index.contains(*key) {
+                removed += self.index.remove(*key).map_err(ix)?;
+            }
+        }
+        Ok(removed)
+    }
+
     fn save(&self) -> Result<()> {
         let p = self
             .path

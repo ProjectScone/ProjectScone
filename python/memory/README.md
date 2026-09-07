@@ -78,16 +78,63 @@ The HTTP surface is the same as the Rust `scone serve`, so the
 [`scone-client`](../scone-client) package (moving from `clients/python`) and
 the MCP setup work against either. The bearer key decides the space; a key can never read
 outside the space it was issued for.
+A third field gives a key a role:
+`SCONE_API_KEYS=r:default:read,w:default:write,v:default:review,f:default:full`.
+`read` only reads; `write` remembers, links and forgets but never decides a
+claim; `review` approves, declines, excludes and includes but never adds;
+`full` (the default, and always what `SCONE_API_KEY` gets) does everything.
+A refused request is a 403 naming the role. The conversation service holds
+the same rule, including the audio socket's hello.
 
 | Route | What |
 |---|---|
-| `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
-| `DELETE /v1/episodes/{id}` | forget |
+| `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?, dedup_key?, replace?}`; unknown fields are refused. The answer's `outcome` is `accepted`, `duplicate` (a record with this identity was already there and nothing changed, even if the text differed) or `updated` (`replace` with a known `dedup_key` and changed content: the old episode is forgotten, its receipt is in `replaced`, and the claims that cited it stand) |
+| `POST /v1/episodes/batch` | `{records: [episode bodies, at most 500]}`: one outcome per record in the order sent (`items`) and the counts; the batch lands whole or not at all; `replace` is one record at a time |
+| `DELETE /v1/episodes/{id}` · `GET /v1/episodes/{id}/impact` | forget, with a receipt of what went and what stayed: chunks and vectors go, an attachment is released only when no other episode of the space carries it, and the claims and links that cited the episode stand with their source ids intact; `impact` shows the same receipt and removes nothing (`scone-memory forget --dry-run`). A forgotten episode leaves a tombstone: its id answers 410 with `forgotten_at` rather than 404, the same text remembered again is a new record, and an archive carrying the forgotten content is skipped on import (`tombstoned` in the summary) unless `scone-memory import --resurrect`; the tombstone stays either way |
+| `GET /v1/spaces/{space}/impact` · `DELETE /v1/spaces/{space}?confirm={space}` | delete a whole space (`scone-memory delete-space --confirm <space>`, `--dry-run` for the preview): the preview says what would go, the deed removes it, in order, attachment holds (bytes only when no other space holds them), vectors, chunks, episodes, links, claims, events, tombstones and the revision; it needs the `full` role and the name repeated, and afterwards the key answers 404 on every route, so a key left in config cannot re-create what was erased |
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
-| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews |
+| `GET /v1/facts/{id}` · `POST /v1/facts/{id}/links` | one fact with its typed relations (`extends`, `derived_from`, `contradicts`, `supports`) and the ids of the episodes it rests on; `POST /v1/facts` takes `extends` and `derived_from` so a claim is linked as it is asserted |
+| `POST /v1/consolidate` `{scope: distill \| derive}` | one consolidation pass by hand over this key's space: `distill` runs the worker's pass (extraction, retention and, with `SCONE_DERIVE=1`, derivation), `derive` only the derivation pass, which proposes claims that follow from the claims held, each with its premises as `derived_from` links and no quote (`scone-memory derive`); 501 without a model. `GET /v1/status` carries `pending_derivation` (groups not yet sent at their current membership) and `derivation` on/off |
+| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews; the profile's `static_facts` are the claims that hold now (one not yet valid, ended, or excluded stays out) and its `recent` is `dynamic` with its evidence, one `{episode_id, excerpt, created_at}` per entry, most recent by the episode's own time first, the same rule and shape the Rust engine serves |
+| `GET /v1/doctor` | what references what across the stores, read only: chunks without an episode, vectors without a chunk, claims citing a forgotten or an unknown episode, links with a missing end, attachments no episode carries, and the tombstone count; a store that cannot be walked is named in `not_inspected` rather than reported clean; `scone-memory doctor` prints the same |
 
-Errors are `{"error": "..."}` with 401, 404 or 422.
+Errors are `{"error": "..."}` with 401, 404 or 422. Writes that embed (`POST
+/v1/episodes`, `/batch`) run at most `SCONE_INGEST_CONCURRENCY` (default 4) at
+once; one more is answered 429 `{"error", "code": "ingest_busy"}` with
+`Retry-After: 1` rather than queued without limit, and reads are never gated.
+
+## Relations between facts
+
+Supersession is written into the superseded fact. Every other relation is a
+link: `POST /v1/facts` with `extends` keeps both facts and records that the new
+one adds detail (an extension with the extended fact's own subject and predicate
+is refused, because that is an update and updates supersede); with
+`derived_from` the claim is stored as `inferred` and each premise is linked, and
+a premise that is only proposed or declined is refused, since it is not truth
+yet. `POST /v1/facts/{id}/links` adds `contradicts` and `supports` (and the other
+two) explicitly, with an optional `source_episode_id` and `quote` that must sit in
+that episode. A fact cannot link to itself, the same link twice is one link, and
+a dependency that would close a cycle is refused. A link keeps its source id
+after the episode is forgotten; nothing closes a fact because its evidence is
+gone. `GET /v1/facts/{id}` returns the fact, its links from either end, and
+source *ids*, never the sources themselves; `GET /v1/graph` draws the links
+between the claims it shows. A derived claim asserted as `proposed` is linked
+from the start but answers nothing until a person approves it.
+
+## Retention
+
+Nothing expires unless you say so. `SCONE_RETAIN="conversation=30,note=365"`
+keeps each named episode kind for that many days (by the episode's own time)
+and lets the consolidation worker forget older ones on its interval, oldest
+first, at most `SCONE_DISTILL_BATCH` per pass, each with a receipt and a
+tombstone; a wrong kind or a non-positive number stops the server. A model is
+not needed for this: with `SCONE_RETAIN` and no `SCONE_CHAT_*`, the worker
+runs retention alone and `/v1/status` says `semantic_lane: manual` with the
+policy under `retention`. Facts never expire; the claims that cited a forgotten
+episode stand, as with any forget. `MemoryEngine.expire(space, policy,
+limit=, dry_run=)` is the same pass by hand, and so is `scone-memory expire
+--keep conversation=30 [--keep note=365] [--limit N] [--dry-run]`.
 
 ## What recall returns
 
@@ -575,7 +622,12 @@ while following `next_before`.
 
 The response has `items`, `has_more` and nullable `next_before`. Each item contains
 `episode_id`, `kind`, `source`, `created_at`, `byte_count` (UTF-8 stored text),
-`preview` (at most 500 Unicode scalar values), and `preview_truncated`. A preview
+`preview` (at most 500 Unicode scalar values), `preview_truncated`, and `status`:
+`cited` (a claim rests on it), `parked` (the distiller gave up on it in this
+process; `parked_reason` says why), or `pending` (no claim cites it yet; a
+consolidation pass, the worker's or `scone-memory distill`'s, visits it). The
+Rust host uses the same words and adds `done` for a source its queue visited and
+found nothing in. A preview
 is not an original file; retrieve retained text with `GET /v1/episodes/{id}` and
 original media through the separate attachment routes. The bearer key selects
 the space; query/body fields cannot change it. Page limits are 1–100; an invalid
@@ -611,6 +663,71 @@ scone-memory serve-conversations --journal ./conversation-sessions.db --history-
 # Explicit model opt-in, from a trusted Python module on your import path:
 scone-memory serve-conversations --journal ./conversation-sessions.db --model-factory my_models:create --console
 ```
+
+The same service can ride the memory server instead of a second port. Naming
+a journal composes it onto `serve`'s origin, so `/v1/conversations/*`, the
+memory routes, the packaged pages and the consolidation worker share one
+process; leave it unset and `serve` is the memory-only server it always was:
+
+```sh
+# Composed: same keys, same store, one origin. History-only without a factory.
+SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db scone-memory serve
+SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db SCONE_CONVERSATIONS_MODEL_FACTORY=my_models:create scone-memory serve
+```
+
+A composed host can also serve a saved persona catalog. `SCONE_CONVERSATIONS_PERSONAS`
+names a JSON array of Persona documents (`scone_memory.realtime.persona.Persona`,
+schema 1: id, name, instructions, and exact reply/transcription/speech/activity
+choices); `SCONE_CONVERSATIONS_REGISTRY` names a trusted zero-argument callable
+returning the `ProviderRegistry` that admits those choices. Every persona is bound
+at startup, so a choice the registry does not register stops `serve` with exit 2
+naming the persona and the stage. Clients read `GET /v1/conversations/personas`
+(ids, names, provider/model labels, `text_ready`, `voice_ready`; never the
+instructions), pick one with `persona` on `POST /v1/conversations`, and see
+`{"id", "name", "fingerprint", "current"}` in every session receipt. The listing
+carries a `revision` and each persona a `fingerprint` of its configuration; send
+`persona_fingerprint` with the create to be refused (409) if the operator changed
+that persona since the client displayed it. With a catalog and no bare model
+factory, a session must name a persona; nothing is chosen for it. `voice_ready`
+is false for every persona until a browser audio transport exists.
+
+A registry's reply choice can be the same OpenAI-compatible endpoint the distiller
+uses: `scone_memory.providers.llm.OpenAICompatibleTextModel(base_url, model,
+api_key=..., think=...)` is a native `TextModel` that streams the reply as public
+deltas and ends with an explicit completion (a stream that ends without one, or an
+error status, fails the turn rather than completing on half a reply). One instance
+serves one turn, so register it as a factory:
+
+```python
+from scone_memory.providers.llm import OpenAICompatibleTextModel
+from scone_memory.realtime.providers import ProviderRegistry
+
+def registry():
+    reply = lambda: OpenAICompatibleTextModel("http://127.0.0.1:11434/v1", "llama3.1", think=False)
+    return ProviderRegistry(reply={("ollama", "llama3.1"): reply}, transcription={...}, speech={...})
+```
+
+Voice rides the same service. `POST /v1/conversations` with `"mode": "voice"` and
+a `persona` creates a session that waits (`created`) for its audio socket,
+`WebSocket /v1/conversations/{sid}/audio`. The first text frame is
+`{"type": "hello", "key": "<bearer>", "sample_rate": 16000, "channels": 1}` (a
+browser cannot set a bearer header on a WebSocket; the key is never in a URL);
+a bad key, session, mode, state or format gets `{"type": "error", "reason"}` and
+close 1008, and an accepted hello gets `{"type": "ready"}` while the session runs.
+Then binary frames are PCM s16le in that format both ways; outgoing frames carry a
+header (turn id length, turn id, uint32 sample rate, uint8 channels) so a
+`{"type": "clear", "turn_id"}` control can drop a turn's buffered playback on
+interruption; `{"type": "end"}` or closing the socket ends the input and the
+session (`ended`), a provider or format failure fails it, and `POST /stop` works
+while it runs. Both sides are captured to memory and read back through the
+transcript route. `GET /v1/conversations/capabilities` reports `"voice": true`
+and the catalog reports `voice_ready` on such a host.
+
+On a composed host the pages carry no baked key even with a single configured
+key (the tab asks for one), `GET /v1/capabilities` reports
+`features.conversations: true`, and `GET /v1/conversations/capabilities` says
+whether text is configured. A journal that is the memory database, or a factory
+that does not load, stops `serve` with exit status 2 before it listens.
 
 `my_models:create` must be a synchronous, zero-argument callable returning a
 **fresh native `TextModel` adapter per turn**. Importing the module executes trusted

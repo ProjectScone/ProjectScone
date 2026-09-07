@@ -182,6 +182,44 @@ fn contradiction_history_is_visible_and_explained() {
 }
 
 #[test]
+fn facts_link_relates_two_facts_and_links_reads_them_back() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["add", "--note", "mark prefers bun today"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["add", "--note", "mark prefers pnpm now"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .env("SCONE_FAKE_FACTS", FAKE_FACTS_2)
+        .args(["--llm", "fake", "distill"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["facts", "link", "2", "1", "supports"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("fact 2 supports fact 1"));
+    scone(dir.path())
+        .args(["facts", "links", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("fact 2 supports fact 1"));
+    scone(dir.path())
+        .args(["facts", "link", "1", "1", "supports"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("itself"));
+}
+
+#[test]
 fn facts_why_shows_provenance_and_close_takes_reason() {
     let dir = tempfile::tempdir().unwrap();
     scone(dir.path())
@@ -1037,4 +1075,43 @@ fn search_narrows_by_kind_source_and_date_window() {
         !window.contains("needs paint") && !window.contains("inspected"),
         "{window}"
     );
+}
+
+#[test]
+fn delete_space_needs_the_name_repeated_and_leaves_the_neighbour() {
+    let dir = tempfile::tempdir().unwrap();
+    scone(dir.path())
+        .args(["--space", "team", "add", "--note", "a note for team"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["--space", "other", "add", "--note", "a note for other"])
+        .assert()
+        .success();
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("would delete space team"))
+        .stdout(predicates::str::contains("1 episodes"));
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--confirm", "other"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--confirm"));
+    scone(dir.path())
+        .args(["--space", "team", "delete-space", "--confirm", "team"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deleted space team"));
+    scone(dir.path())
+        .args(["--space", "team", "add", "--note", "back?"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("deleted"));
+    scone(dir.path())
+        .args(["--space", "other", "profile"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("a note for other"));
 }

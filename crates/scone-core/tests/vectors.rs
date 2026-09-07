@@ -54,3 +54,28 @@ fn empty_index_searches_empty_and_wipe_clears() {
     idx.wipe().unwrap();
     assert!(idx.search(&v[0], 3).unwrap().is_empty());
 }
+
+#[test]
+fn removing_keys_drops_them_from_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let embedder = HashEmbedder::new(64);
+    let vecs = embedder.embed(&["alpha note", "beta note"]).unwrap();
+    let mut idx = VectorIndex::open(dir.path(), 64).unwrap();
+    idx.add(&[(1, &vecs[0]), (2, &vecs[1])]).unwrap();
+    assert_eq!(
+        idx.remove(&[1, 99]).unwrap(),
+        1,
+        "only keys the index holds are counted"
+    );
+    idx.flush().unwrap();
+    let hits = idx.search(&vecs[0], 5).unwrap();
+    assert_eq!(hits.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![2]);
+    let idx = VectorIndex::open(dir.path(), 64).unwrap();
+    assert!(
+        idx.search(&vecs[0], 5)
+            .unwrap()
+            .iter()
+            .all(|(k, _)| *k != 1),
+        "the removal persists"
+    );
+}

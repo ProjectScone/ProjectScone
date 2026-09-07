@@ -32,12 +32,14 @@
     SCONE_DISTILL_INTERVAL_S           seconds between consolidation passes (default 30)
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
+    SCONE_DERIVE       1 | 0          run the derivation pass after extraction (default 0; needs the chat model)
                                        directly; unset = every extraction is proposed for review
     SCONE_MCP_PROPOSE_BELOW            confidence below which a fact submitted over MCP is parked for
                                        review; unset = every submitted fact is a ledger claim, which
                                        is what the Rust server does without --propose-below
 
-    SCONE_API_KEYS    "key:space,key2:space2"   bearer keys and the space each one sees
+    SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
+                                               read | write | review | full (the default)
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
     SCONE_RELOAD_PAGES=1 (alias SCONE_UI_DEV=1)  re-read console.html and playground.html per request, ETag from
@@ -96,6 +98,7 @@ class Settings:
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
+    derive: bool = False
     contextual_embeddings: bool = False
     demote_restated: bool = False
     similarity_floor: Optional[float] = None
@@ -104,9 +107,24 @@ class Settings:
     events_max_age_days: Optional[float] = None
     events_max: int = 10_000
     keys: Mapping[str, str] = field(default_factory=dict)
+    #: Key -> role; a key not listed here is full.
+    roles: Mapping[str, str] = field(default_factory=dict)
     host: str = "127.0.0.1"
     port: int = 7437
     reload_pages: bool = False
+    #: Writes embedding at once over HTTP; one more is told to come back.
+    ingest_concurrency: int = 4
+    #: Episode kinds to the days they are kept; empty means nothing expires.
+    retention: Mapping[str, float] = field(default_factory=dict)
+    # Naming a journal composes the conversation service onto the memory
+    # origin under `serve`; the factory is the same trusted module:callable
+    # as `serve-conversations --model-factory`, absent meaning history-only.
+    conversations_journal: Optional[str] = None
+    conversations_model_factory: Optional[str] = None
+    # A persona catalog (JSON array of Persona documents) needs a registry
+    # (trusted module:callable returning a ProviderRegistry) to bind it.
+    conversations_personas: Optional[str] = None
+    conversations_registry: Optional[str] = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -146,6 +164,7 @@ class Settings:
             chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
+            derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             demote_restated=env.get("SCONE_DEMOTE_RESTATED") == "1",
@@ -154,31 +173,57 @@ class Settings:
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
             events_max=int(env.get("SCONE_EVENTS_MAX", "10000")),
-            keys=parse_keys(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY")),
+            keys=parse_key_roles(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY"))[0],
+            roles=parse_key_roles(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY"))[1],
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
             reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
+            ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
+            retention=parse_retention(env.get("SCONE_RETAIN", "")),
+            conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
+            conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
+            conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
+            conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
         )
 
 
-def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
-    """``"k1:space-a,k2:space-b"`` to ``{"k1": "space-a", "k2": "space-b"}``.
-    A key that appears twice is a configuration error, not a last-wins."""
+#: What a key may do. read: reads only. write: adds, links and forgets, but
+#: never decides. review: decides (approve, decline, exclude, include, batch
+#: decisions) but never adds. full: everything.
+ROLES = ("read", "write", "review", "full")
+
+
+def parse_key_roles(many: Optional[str], one: Optional[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """``"k1:space-a:read,k2:space-b"`` to ``({"k1": "space-a", "k2": "space-b"},
+    {"k1": "read", "k2": "full"})``. A key that appears twice is a
+    configuration error, not a last-wins; a role outside ROLES is refused."""
     keys: dict[str, str] = {}
+    roles: dict[str, str] = {}
     if many:
         for entry in many.split(","):
             entry = entry.strip()
             if not entry:
                 continue
-            key, sep, space = entry.partition(":")
-            if not sep or not key.strip() or not space.strip():
-                raise InvalidInput(f"SCONE_API_KEYS entry must be key:space, got {entry!r}")
-            if key.strip() in keys:
-                raise InvalidInput(f"SCONE_API_KEYS names key {key.strip()!r} twice")
-            keys[key.strip()] = space.strip()
+            parts = [part.strip() for part in entry.split(":")]
+            if len(parts) not in (2, 3) or not all(parts):
+                raise InvalidInput(f"SCONE_API_KEYS entry must be key:space or key:space:role, got {entry!r}")
+            key, space = parts[0], parts[1]
+            role = parts[2] if len(parts) == 3 else "full"
+            if role not in ROLES:
+                raise InvalidInput(f"SCONE_API_KEYS role must be one of {ROLES}, got {role!r}")
+            if key in keys:
+                raise InvalidInput(f"SCONE_API_KEYS names key {key!r} twice")
+            keys[key] = space
+            roles[key] = role
     elif one:
         keys[one.strip()] = "default"
-    return keys
+        roles[one.strip()] = "full"
+    return keys, roles
+
+
+def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
+    """The key -> space half of parse_key_roles, for callers that only want spaces."""
+    return parse_key_roles(many, one)[0]
 
 
 def build_embedder(settings: Settings):
@@ -321,17 +366,55 @@ def build_chat(settings: Settings):
 
 
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):
-    """A ConsolidationWorker over the configured spaces, or None."""
+    """A ConsolidationWorker over the configured spaces, or None when there
+    is neither a model to distil with nor a retention policy to apply."""
     chat = build_chat(settings)
-    if chat is None:
+    if chat is None and not settings.retention:
         return None
-    from ..ingestion.distill import Distiller
     from ..ingestion.worker import ConsolidationWorker
 
-    if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
-        raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
-    distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
-    return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s, batch=settings.distill_batch)
+    distiller = None
+    if chat is not None:
+        from ..ingestion.distill import Distiller
+
+        if settings.distill_accept_at is not None and not 0.0 <= settings.distill_accept_at <= 1.0:
+            raise InvalidInput("SCONE_DISTILL_ACCEPT_AT must be within 0..=1")
+        distiller = Distiller(engine, chat, accept_at=settings.distill_accept_at)
+    deriver = None
+    if chat is not None and settings.derive:
+        from ..ingestion.derive import Deriver
+
+        deriver = Deriver(engine, chat)
+    return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
+                               batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
+
+
+def parse_flag(name: str, raw: Optional[str]) -> bool:
+    """An on/off setting: 1, true, yes, on; 0, false, no, off, or unset."""
+    value = (raw or "").strip().lower()
+    if value in ("", "0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    raise InvalidInput(f"{name} must be 1 or 0, got {raw!r}")
+
+
+def parse_retention(raw: str) -> dict[str, float]:
+    """SCONE_RETAIN: "kind=days,kind=days"; kinds and days are checked the
+    way the engine checks them, so a wrong policy stops the server."""
+    from ..memory.engine import retention_policy
+
+    policy: dict[str, float] = {}
+    for entry in raw.split(","):
+        if not entry.strip():
+            continue
+        kind, sep, days = entry.partition("=")
+        try:
+            value = float(days) if sep else float("nan")
+        except ValueError:
+            value = float("nan")
+        policy[kind.strip()] = value
+    return retention_policy(policy)
 
 
 def build_events(settings: Settings, documents=None):

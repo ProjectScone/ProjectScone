@@ -20,7 +20,7 @@ from ..core.errors import Conflict, InvalidInput, NotFound
 from ..retrieval.recall_scope import RecallScope
 
 _APPLICATION_ID = 0x53434A31
-_VERSION = 3
+_VERSION = 4
 _KEY = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _TRANSITIONS = {
     "created": {"start": "running", "stop": "ended", "fail": "failed", "interrupt": "interrupted"},
@@ -95,6 +95,11 @@ class SessionJournal:
                         raise InvalidInput("invalid session journal tables")
                     if version < 3:
                         self._db.execute("ALTER TABLE sessions ADD COLUMN recall_scope TEXT NOT NULL DEFAULT '{}'")
+                    if version < 4:
+                        # Empty means no persona; rows from before the columns stay unbound.
+                        self._db.execute("ALTER TABLE sessions ADD COLUMN persona TEXT NOT NULL DEFAULT ''")
+                        self._db.execute("ALTER TABLE sessions ADD COLUMN persona_fingerprint TEXT NOT NULL DEFAULT ''")
+                    if version < _VERSION:
                         self._db.execute(f"PRAGMA user_version={_VERSION}")
                 elif app_id or version or objects:
                     raise InvalidInput("path is not a session journal; refusing to modify another database")
@@ -105,6 +110,8 @@ class SessionJournal:
                         state TEXT NOT NULL, revision INTEGER NOT NULL,
                         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                         recall_scope TEXT NOT NULL DEFAULT '{}',
+                        persona TEXT NOT NULL DEFAULT '',
+                        persona_fingerprint TEXT NOT NULL DEFAULT '',
                         PRIMARY KEY(space, session_id), UNIQUE(space, create_key))""")
                     self._db.execute("""CREATE TABLE session_events (
                         space TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -162,22 +169,38 @@ class SessionJournal:
                          (space, sid, revision, request_id, signature, json.dumps(receipt)))
         return receipt
 
-    def create(self, space: str, request_id: str, mode: str = "text", *, recall_scope=None) -> dict:
+    def create(self, space: str, request_id: str, mode: str = "text", *, recall_scope=None, persona=None,
+               persona_fingerprint=None) -> dict:
         check_space(space)
         _key(request_id)
         if mode not in ("text", "voice"):
             raise InvalidInput("session mode must be text or voice; runtime support is configured separately")
+        if persona is not None and (not isinstance(persona, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", persona)):
+            raise InvalidInput("persona must be a catalog id")
+        if persona_fingerprint is not None and (persona is None or not isinstance(persona_fingerprint, str)
+                                                or not re.fullmatch(r"[0-9a-f]{16}", persona_fingerprint)):
+            raise InvalidInput("persona_fingerprint must accompany a persona as 16 hex characters")
         scope = RecallScope.from_mapping(recall_scope).as_dict()
-        # Preserve replay signatures from pre-scope journals for empty scopes.
-        signature = json.dumps(["create", mode, scope] if scope else ["create", mode], sort_keys=True)
+        # Preserve replay signatures from pre-scope journals for empty scopes;
+        # a persona always signs with the scope so the two never read alike.
+        parts = ["create", mode, scope] if scope else ["create", mode]
+        signature = json.dumps([*parts, persona] if persona else parts, sort_keys=True)
         with self._transaction():
             found = self._db.execute("SELECT session_id FROM sessions WHERE space=? AND create_key=?", (space, request_id)).fetchone()
             if found is not None:
                 return self._event(space, found["session_id"], request_id, signature)
             sid, now = uuid4().hex, _now()
-            self._db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (space, sid, request_id, mode, "created", 1, now, now, json.dumps(scope, sort_keys=True)))
+            self._db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (space, sid, request_id, mode, "created", 1, now, now, json.dumps(scope, sort_keys=True),
+                              persona or "", persona_fingerprint or ""))
             return self._append(space, sid, 1, request_id, signature, "create", None, "created", now)
+
+    def created(self, space: str, request_id: str) -> str | None:
+        """The session a create request already made, by its request id."""
+        check_space(space)
+        _key(request_id)
+        found = self._db.execute("SELECT session_id FROM sessions WHERE space=? AND create_key=?", (space, request_id)).fetchone()
+        return found["session_id"] if found is not None else None
 
     def get(self, space: str, session_id: str) -> dict:
         check_space(space)
@@ -185,6 +208,8 @@ class SessionJournal:
         found = dict(self._session(space, session_id))
         del found["create_key"]
         found["recall_scope"] = json.loads(found["recall_scope"])
+        found["persona"] = found["persona"] or None
+        found["persona_fingerprint"] = found["persona_fingerprint"] or None
         return found
 
     def sessions(self, space: str, after: str = "", limit: int = 100) -> dict:
@@ -193,13 +218,15 @@ class SessionJournal:
             _key(after)
         _integer(limit, 1, 200)
         rows = self._db.execute(
-            "SELECT space, session_id, mode, state, revision, created_at, updated_at, recall_scope "
+            "SELECT space, session_id, mode, state, revision, created_at, updated_at, recall_scope, persona, persona_fingerprint "
             "FROM sessions WHERE space=? AND session_id>? ORDER BY session_id LIMIT ?",
             (space, after, limit + 1),
         ).fetchall()
         items = [dict(row) for row in rows[:limit]]
         for item in items:
             item["recall_scope"] = json.loads(item["recall_scope"])
+            item["persona"] = item["persona"] or None
+            item["persona_fingerprint"] = item["persona_fingerprint"] or None
         return {"items": items, "next_after": items[-1]["session_id"] if items else after,
                 "has_more": len(rows) > limit}
 

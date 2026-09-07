@@ -48,14 +48,14 @@ jobs:
 
   client:
     # The HTTP client is published separately and claims Python 3.9, so it
-    # is built and tested on the oldest version it claims as well as the
-    # one everything else uses. Nothing here needs a server: the tests run
+    # is built and tested on the oldest version it claims as well as 3.14.
+    # Nothing here needs a production server: the tests run
     # against a stub, and the integration ones skip when no binary exists.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.12"]
+        python: ["3.9", "3.14"]
     defaults:
       run:
         working-directory: python/scone-client

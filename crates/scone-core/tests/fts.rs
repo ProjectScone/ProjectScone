@@ -43,3 +43,26 @@ fn wipe_empties_the_index() {
     idx.wipe().unwrap();
     assert!(idx.search(1, "hello", 5).unwrap().is_empty());
 }
+
+#[test]
+fn removing_a_space_drops_its_documents_and_no_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = FtsIndex::open(dir.path()).unwrap();
+    idx.add(&[
+        (1, 10, "the borrow checker in space ten"),
+        (2, 20, "the borrow checker in space twenty"),
+    ])
+    .unwrap();
+    idx.commit().unwrap();
+    idx.remove_space(10).unwrap();
+    idx.commit().unwrap();
+    assert!(
+        idx.search(10, "borrow checker", 5).unwrap().is_empty(),
+        "space ten is gone"
+    );
+    assert_eq!(
+        idx.search(20, "borrow checker", 5).unwrap().len(),
+        1,
+        "space twenty stands"
+    );
+}

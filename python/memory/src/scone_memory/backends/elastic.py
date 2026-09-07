@@ -27,8 +27,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -105,6 +105,16 @@ def _chunk(doc: Mapping) -> Chunk:
     )
 
 
+def _tombstone(doc: Mapping) -> Tombstone:
+    return Tombstone(space=doc["space"], episode_id=int(doc["episode_id"]), content_hash=doc["content_hash"],
+                     forgotten_at=doc["forgotten_at"], reason=doc.get("reason"))
+
+
+def _fact_link(doc: Mapping) -> FactLink:
+    return FactLink(link_id=int(doc["link_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
+                    kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
+
+
 def _fact(doc: Mapping) -> Fact:
     return Fact(
         fact_id=doc["fact_id"], space=doc["space"], subject=doc["subject"], predicate=doc["predicate"], object=doc["object"],
@@ -152,6 +162,14 @@ FACT_MAPPINGS = {"properties": {
     "source_episode_id": LONG, "origin": KEYWORD, "superseded_by": LONG, "excluded_reason": {"type": "text", "index": False},
     "quote": {"type": "text", "index": False},
 }}
+FACT_LINK_MAPPINGS = {"properties": {
+    "link_id": LONG, "space": KEYWORD, "from_fact": LONG, "to_fact": LONG, "kind": KEYWORD, "created_at": KEYWORD,
+    "source_episode_id": LONG, "quote": {"type": "text", "index": False},
+}}
+ERASED_SPACE_MAPPINGS = {"properties": {"space": {"type": "keyword"}, "erased_at": {"type": "keyword"}}}
+TOMBSTONE_MAPPINGS = {"properties": {
+    "space": KEYWORD, "episode_id": LONG, "content_hash": KEYWORD, "forgotten_at": KEYWORD, "reason": {"type": "text", "index": False},
+}}
 EVENT_MAPPINGS = {"properties": {
     "event_id": LONG, "ts": KEYWORD, "space": KEYWORD, "kind": KEYWORD, "schema_version": LONG,
     "payload": {"type": "text", "index": False}, "dedup_key": KEYWORD,
@@ -185,6 +203,9 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("episodes", EPISODE_MAPPINGS)
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
+        await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
+        await self.shared.ensure_index("tombstones", TOMBSTONE_MAPPINGS)
+        await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
         await self.check_schema()
@@ -209,7 +230,7 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "meta", "counters", "vectors", "events", "inflight")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "tombstones", "meta", "counters", "vectors", "events", "inflight", "erased_spaces")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -264,6 +285,28 @@ class ElasticsearchDocumentStore:
             if len(hits) < self.PAGE:
                 return ids
             after = hits[-1]["sort"]
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        term = {"term": {"space": space}}
+        hits = await self._search("chunks", query=term, size=10_000, _source=["chunk_id"])
+        chunk_ids = tuple(sorted(int(h["chunk_id"]) for h in hits))
+
+        async def count(name: str) -> int:
+            return int((await self.client.count(index=self._idx(name), query=term))["count"])
+
+        gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
+                            links=await count("fact_links"), tombstones=await count("tombstones"))
+        for name in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight"):
+            await self.client.delete_by_query(index=self._idx(name), query=term, refresh=True)
+        await self.client.delete(index=self._idx("counters"), id=f"revision:{space}", ignore=[404])
+        await self.client.index(index=self._idx("erased_spaces"), id=space, document={"space": space, "erased_at": erased_at},
+                                refresh=self.shared.refresh)
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        if not await self.client.exists(index=self._idx("erased_spaces"), id=space):
+            return None
+        return (await self.client.get(index=self._idx("erased_spaces"), id=space))["_source"]["erased_at"]
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.get_episode(space, episode_id) is None:
@@ -413,6 +456,55 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        from elasticsearch import ConflictError
+
+        doc_id = f"{new.space}|{new.episode_id}"
+        try:
+            await self.client.index(index=self._idx("tombstones"), id=doc_id, document=dict(new.__dict__),
+                                    op_type="create", refresh=self.shared.refresh)
+        except ConflictError:
+            pass
+        return _tombstone(await self._doc("tombstones", doc_id))
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        doc = await self._doc("tombstones", f"{space}|{episode_id}")
+        return _tombstone(doc) if doc is not None else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        query = {"bool": {"filter": [{"term": {"space": space}}, {"term": {"content_hash": content_hash}}]}}
+        hits = await self._search("tombstones", query=query, size=1, sort=[{"episode_id": "desc"}])
+        return _tombstone(hits[0]) if hits else None
+
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        hits = await self._search("tombstones", query={"bool": {"filter": [{"term": {"space": space}}]}},
+                                  size=10_000, sort=[{"episode_id": "asc"}])
+        return [_tombstone(h) for h in hits]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        from elasticsearch import ConflictError
+
+        # One document id per (space, from, to, kind): a second store of the
+        # same link is a conflict, and the stored one is returned unchanged.
+        doc_id = f"{new.space}|{new.from_fact}|{new.to_fact}|{new.kind}"
+        existing = await self._doc("fact_links", doc_id)
+        if existing is None:
+            doc = {"link_id": await self.shared.next_id("fact_links"), **new.__dict__}
+            try:
+                await self.client.index(index=self._idx("fact_links"), id=doc_id, document=doc, op_type="create",
+                                        refresh=self.shared.refresh)
+                return _fact_link(doc)
+            except ConflictError:
+                existing = await self._doc("fact_links", doc_id)
+        return _fact_link(existing)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        query = {"bool": {"filter": [{"term": {"space": space}}],
+                          "should": [{"term": {"from_fact": fact_id}}, {"term": {"to_fact": fact_id}}],
+                          "minimum_should_match": 1}}
+        hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
+        return [_fact_link(h) for h in hits]
+
     async def bump_revision(self, space: str) -> int:
         return await self.shared.next_id(f"revision:{space}")
 
@@ -504,6 +596,9 @@ class ElasticsearchVectorIndex:
             return
         await self.client.delete_by_query(index=self.index, query={"terms": {"chunk_id": [int(c) for c in chunk_ids]}}, refresh=True)
 
+    async def delete_space(self, space: str) -> None:
+        await self.client.delete_by_query(index=self.index, query={"term": {"space": space}}, refresh=True)
+
     async def drop(self) -> None:
         await self.client.indices.delete(index=self.index, ignore_unavailable=True)
 
@@ -571,6 +666,13 @@ class ElasticsearchEventLog:
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
             await self.sweep()
         return Event(event_id=event_id, **new.__dict__)
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        term = {"term": {"space": space}}
+        if preview:
+            return int((await self.client.count(index=self.index, query=term))["count"])
+        response = await self.client.delete_by_query(index=self.index, query=term, refresh=True)
+        return int(response.get("deleted", 0))
 
     async def sweep(self) -> int:
         if self.max_age_days is None:

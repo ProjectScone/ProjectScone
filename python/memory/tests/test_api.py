@@ -239,6 +239,11 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         canonical = c.get("/memory")
+        for path in ("/learn", "/learn/how-it-works", "/learn/graph-memory"):
+            page = c.get(path)
+            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
+            assert "solo" not in page.text and 'id="root"' in page.text, "a public page carries no configured key"
+            assert c.head(path).status_code == 200
         for path in ("/conversations", "/conversations/session-one"):
             page = c.get(path)
             assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
@@ -253,8 +258,9 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
         features = c.get("/v1/capabilities", headers={"Authorization": "Bearer solo"}).json()["features"]
         assert not [name for name in features if name.startswith("conversations")], features
     with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
-        for path in ("/conversations", "/conversations/session-one"):
+        for path in ("/conversations", "/conversations/session-one", "/learn", "/learn/how-it-works", "/learn/graph-memory"):
             assert c.get(path).status_code == 404, path
+        assert c.get("/learn/anything-else").status_code == 404, "no catch-all"
 
 
 def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
@@ -392,3 +398,78 @@ def test_a_batch_episode_read_is_bounded(client):
     too_many = ",".join(str(n) for n in range(1, 102))
     assert client.get("/v1/episodes", params={"ids": too_many}, headers=h).status_code == 422
     assert client.get("/v1/episodes", params={"ids": ""}, headers=h).status_code == 422
+
+
+def test_forgetting_over_http_previews_then_reports_its_impact(client):
+    h = auth()
+    episode = client.post("/v1/episodes", json={"content": "Acme is headquartered in Lisbon, near the river."}, headers=h).json()
+    fact = client.post("/v1/facts", json={"subject": "acme", "predicate": "based_in", "object": "lisbon",
+                                          "source_episode_id": episode["episode_id"], "quote": "headquartered in Lisbon"}, headers=h).json()
+    preview = client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h)
+    assert preview.status_code == 200
+    assert preview.json()["facts_citing"] == [fact["fact_id"]] and preview.json()["chunks"] >= 1
+    assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 200, "a preview removes nothing"
+    gone = client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h)
+    assert gone.status_code == 200 and gone.json()["forgotten"] == episode["episode_id"] and gone.json()["forgotten_at"]
+    assert {k: v for k, v in gone.json().items() if k not in ("forgotten", "forgotten_at")} == {k: v for k, v in preview.json().items() if k != "forgotten_at"}
+    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 410, "forgotten, not unknown"
+    assert client.get(f"/v1/facts/{fact['fact_id']}", headers=h).json()["fact"]["status"] == "active", "the claim stands"
+
+
+def test_a_keyed_episode_reports_duplicate_or_updated_over_http(client):
+    h = auth()
+    first = client.post("/v1/episodes", json={"content": "The office is in Lisbon.", "dedup_key": "doc:office"}, headers=h).json()
+    assert first["outcome"] == "accepted" and first["replaced"] is None
+    dropped = client.post("/v1/episodes", json={"content": "The office moved to Porto.", "dedup_key": "doc:office"}, headers=h).json()
+    assert dropped["outcome"] == "duplicate" and dropped["episode_id"] == first["episode_id"], "the client learns its update did not land"
+    updated = client.post("/v1/episodes", json={"content": "The office moved to Porto.", "dedup_key": "doc:office", "replace": True}, headers=h).json()
+    assert updated["outcome"] == "updated" and updated["episode_id"] != first["episode_id"]
+    assert updated["replaced"]["episode_id"] == first["episode_id"] and updated["replaced"]["chunks"] >= 1
+    assert client.get(f"/v1/episodes/{first['episode_id']}", headers=h).status_code == 410, "replaced is forgotten on purpose"
+    plain = client.post("/v1/episodes", json={"content": "no key, no replace"}, headers=h).json()
+    assert plain["outcome"] == "accepted"
+    assert client.post("/v1/episodes", json={"content": "x", "replace": True}, headers=h).status_code == 422, "replace needs a key"
+
+
+def test_a_batch_of_episodes_answers_per_item_and_lands_whole_or_not_at_all(client):
+    """G14: one bounded request, one outcome per item in the order sent,
+    and either every record lands or none does."""
+    h = auth()
+    body = {"records": [
+        {"content": "first note of the batch", "tags": ["batch"]},
+        {"content": "second note, keyed", "dedup_key": "doc:two"},
+        {"content": "first note of the batch"},
+    ]}
+    r = client.post("/v1/episodes/batch", json=body, headers=h)
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [i["outcome"] for i in items] == ["accepted", "accepted", "duplicate"]
+    assert items[2]["episode_id"] == items[0]["episode_id"]
+    assert r.json()["counts"] == {"accepted": 2, "duplicate": 1, "updated": 0}
+    again = client.post("/v1/episodes/batch", json={"records": [{"content": "changed text", "dedup_key": "doc:two"}]}, headers=h).json()
+    assert again["items"][0]["outcome"] == "duplicate" and again["items"][0]["episode_id"] == items[1]["episode_id"]
+
+    before = client.get("/v1/status", headers=h).json()["episodes"]
+    broken = client.post("/v1/episodes/batch", json={"records": [{"content": "lands?"}, {"content": "   "}]}, headers=h)
+    assert broken.status_code == 422
+    assert client.get("/v1/status", headers=h).json()["episodes"] == before, "a bad record fails the whole batch"
+    assert client.post("/v1/episodes/batch", json={"records": []}, headers=h).status_code == 422
+    too_many = {"records": [{"content": f"note {i}"} for i in range(501)]}
+    assert client.post("/v1/episodes/batch", json=too_many, headers=h).status_code == 422
+    assert client.post("/v1/episodes/batch", json={"records": [{"content": "x", "bogus": 1}]}, headers=h).status_code == 422
+    one_at_a_time = client.post("/v1/episodes/batch", json={"records": [{"content": "y", "dedup_key": "k", "replace": True}]}, headers=h)
+    assert one_at_a_time.status_code == 422 and "one record at a time" in one_at_a_time.text
+    assert client.post("/v1/episodes/batch", json=body).status_code == 401
+
+
+def test_a_forgotten_episode_answers_gone_with_the_date(client):
+    h = auth()
+    episode = client.post("/v1/episodes", json={"content": "soon gone"}, headers=h).json()
+    gone = client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h).json()
+    assert gone["forgotten_at"]
+    read = client.get(f"/v1/episodes/{episode['episode_id']}", headers=h)
+    assert read.status_code == 410 and read.json()["forgotten_at"] == gone["forgotten_at"] and "forgotten" in read.json()["error"]
+    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 410
+    assert client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 410
+    assert client.get("/v1/episodes/999999", headers=h).status_code == 404, "never existed is still 404"
+    assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=auth("key-b")).status_code == 404, "another space learns nothing"

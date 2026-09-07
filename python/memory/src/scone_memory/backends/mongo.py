@@ -13,8 +13,8 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
@@ -53,6 +53,16 @@ def _chunk(doc: Mapping) -> Chunk:
     )
 
 
+def _tombstone(doc: Mapping) -> Tombstone:
+    return Tombstone(space=doc["space"], episode_id=int(doc["episode_id"]), content_hash=doc["content_hash"],
+                     forgotten_at=doc["forgotten_at"], reason=doc.get("reason"))
+
+
+def _fact_link(doc: Mapping) -> FactLink:
+    return FactLink(link_id=int(doc["_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
+                    kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
+
+
 def _fact(doc: Mapping) -> Fact:
     return Fact(
         fact_id=doc["_id"],
@@ -86,6 +96,8 @@ class MongoDocumentStore:
         self.episodes = self.db["episodes"]
         self.chunks = self.db["chunks"]
         self.facts = self.db["facts"]
+        self.fact_links = self.db["fact_links"]
+        self.tombstones = self.db["tombstones"]
         self.counters = self.db["counters"]
         self.revisions = self.db["revisions"]
         self.meta = self.db["meta"]
@@ -98,6 +110,10 @@ class MongoDocumentStore:
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
+        await self.fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
+        await self.fact_links.create_index([("space", 1), ("to_fact", 1)])
+        await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
+        await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
         await self.check_schema()
         return self
@@ -155,6 +171,25 @@ class MongoDocumentStore:
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
         doc = await self.episodes.find_one({"_id": episode_id, "space": space})
         return _episode(doc) if doc else None
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        chunk_ids = tuple(sorted([doc["_id"] async for doc in self.chunks.find({"space": space}, {"_id": 1})]))
+        gone = DeletedSpace(
+            chunk_ids=chunk_ids,
+            episodes=await self.episodes.count_documents({"space": space}),
+            facts=await self.facts.count_documents({"space": space}),
+            links=await self.fact_links.count_documents({"space": space}),
+            tombstones=await self.tombstones.count_documents({"space": space}),
+        )
+        for collection in (self.chunks, self.episodes, self.fact_links, self.facts, self.tombstones, self.inflight_marks):
+            await collection.delete_many({"space": space})
+        await self.revisions.delete_one({"_id": space})
+        await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        doc = await self.db["erased_spaces"].find_one({"_id": space})
+        return doc["erased_at"] if doc else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.episodes.find_one({"_id": episode_id, "space": space}) is None:
@@ -290,6 +325,44 @@ class MongoDocumentStore:
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         cursor = self.facts.find({"space": space, "subject": subject, "predicate": predicate}).sort("_id", 1)
         return [_fact(doc) async for doc in cursor]
+
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        from pymongo.errors import DuplicateKeyError
+
+        try:
+            await self.tombstones.insert_one(dict(new.__dict__))
+        except DuplicateKeyError:
+            pass
+        return _tombstone(await self.tombstones.find_one({"space": new.space, "episode_id": new.episode_id}))
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        doc = await self.tombstones.find_one({"space": space, "episode_id": episode_id})
+        return _tombstone(doc) if doc else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        doc = await self.tombstones.find_one({"space": space, "content_hash": content_hash}, sort=[("episode_id", -1)])
+        return _tombstone(doc) if doc else None
+
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        return [_tombstone(doc) async for doc in self.tombstones.find({"space": space}).sort("episode_id", 1)]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        from pymongo.errors import DuplicateKeyError
+
+        key = {"space": new.space, "from_fact": new.from_fact, "to_fact": new.to_fact, "kind": new.kind}
+        existing = await self.fact_links.find_one(key)
+        if existing is None:
+            doc = {"_id": await self._next_id("fact_links"), **new.__dict__}
+            try:
+                await self.fact_links.insert_one(doc)
+                return _fact_link(doc)
+            except DuplicateKeyError:
+                existing = await self.fact_links.find_one(key)
+        return _fact_link(existing)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        cursor = self.fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
+        return [_fact_link(doc) async for doc in cursor]
 
     async def bump_revision(self, space: str) -> int:
         doc = await self.revisions.find_one_and_update(

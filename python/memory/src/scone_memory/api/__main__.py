@@ -12,6 +12,63 @@ from ..runtime.config import Settings, build_engine, build_worker
 from .app import create_app
 
 
+def build_app(settings: Settings, engine):
+    """The app ``serve`` runs: the memory API alone, or the conversation
+    service composed over it on the same origin when the settings name a
+    journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
+    or model factory the operator got wrong, before anything is served."""
+    worker = build_worker(engine, settings, settings.keys.values())
+    if not settings.conversations_journal:
+        # One configured key means one space; bake it so the console opens
+        # without a prompt. Several keys: the console asks which.
+        only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
+        return create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages,
+                          ingest_concurrency=settings.ingest_concurrency, roles=settings.roles)
+    from .conversation_server import journal_path, load_model_factory
+    from .conversations import create_conversation_app
+
+    journal = journal_path(settings, settings.conversations_journal)
+    catalog = None
+    if settings.conversations_personas:
+        if not settings.conversations_registry:
+            raise ValueError("SCONE_CONVERSATIONS_REGISTRY is required with a persona catalog")
+        from ..realtime.catalog import bind_catalog, load_personas
+        from ..realtime.providers import ProviderRegistry
+
+        # The same trust rule as a model factory; this one is called once,
+        # here, and may close over the operator's provider credentials.
+        registry = load_model_factory(settings.conversations_registry)()
+        if not isinstance(registry, ProviderRegistry):
+            raise ValueError("SCONE_CONVERSATIONS_REGISTRY must return a ProviderRegistry")
+        catalog = bind_catalog(load_personas(settings.conversations_personas), registry)
+    scoped = None
+    if settings.conversations_model_factory:
+        factory = load_model_factory(settings.conversations_model_factory)
+        from ..realtime.text import TextConversation
+
+        def scoped(space, sid, scope):
+            return TextConversation(engine, space, sid, factory, **scope.kwargs())
+    # The composed shell never carries a key: the tab asks for one.
+    return create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
+                                   console=True, public_text_streaming=scoped is not None or catalog is not None,
+                                   worker=worker, reload_pages=settings.reload_pages, catalog=catalog,
+                                   ingest_concurrency=settings.ingest_concurrency, roles=settings.roles)
+
+
+def build_server(settings: Settings, app):
+    """The uvicorn server for ``app``. A composed host must tell the
+    conversation service to end its open streams before uvicorn waits for
+    open responses, or a reader holding a stream holds shutdown; the
+    memory-only app has no streams to end."""
+    import uvicorn
+
+    if settings.conversations_journal:
+        from .conversation_server import create_server
+
+        return create_server(app, host=settings.host, port=settings.port)
+    return uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, log_level="warning"))
+
+
 def main(settings: Optional[Settings] = None) -> None:
     settings = settings or Settings.from_env()
     if not settings.keys:
@@ -29,21 +86,31 @@ def main(settings: Optional[Settings] = None) -> None:
         # made every Mongo request fail with "Cannot use AsyncMongoClient
         # in different event loop" (seen in the compose smoke test).
         engine = await build_engine(settings)
-        # One configured key means one space; bake it so the console opens
-        # without a prompt. Several keys: the console asks which.
-        only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
-        worker = build_worker(engine, settings, settings.keys.values())
-        app = create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages)
-        print(
-            f"scone-memory on http://{settings.host}:{settings.port} "
-            f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
-            f"spaces={sorted(set(settings.keys.values()))} "
-            + (f"consolidation={settings.chat_model} every {settings.distill_interval_s:g}s" if worker else "consolidation=off"),
-            file=sys.stderr,
-        )
-        await uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, log_level="warning")).serve()
+        try:
+            try:
+                app = build_app(settings, engine)
+            except (ValueError, OSError, ImportError, AttributeError, TypeError) as error:
+                print(f"refusing to serve: {error}", file=sys.stderr)
+                sys.exit(2)
+            worker = app.state.worker
+            print(
+                f"scone-memory on http://{settings.host}:{settings.port} "
+                f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
+                f"spaces={sorted(set(settings.keys.values()))} "
+                + (f"consolidation={settings.chat_model} every {settings.distill_interval_s:g}s" if worker else "consolidation=off")
+                + (f" conversations={settings.conversations_journal}" if settings.conversations_journal else ""),
+                file=sys.stderr,
+            )
+            await build_server(settings, app).serve()
+        finally:
+            await engine.close()
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        # uvicorn hands the interrupt back once it has stopped gracefully;
+        # that is a server's normal end, not a failure to print.
+        sys.exit(130)
 
 
 if __name__ == "__main__":

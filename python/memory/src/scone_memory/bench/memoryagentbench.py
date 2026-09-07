@@ -159,6 +159,13 @@ class QuestionResult:
     answer: Optional[str] = None
     correct: Optional[bool] = None
     error: Optional[str] = None
+    #: E36: the ledger claims recall returned, and whether one carries the
+    #: answer (claim_gold) or an inferred one does (derived_gold). None
+    #: when nothing was distilled, so there were no claims to score.
+    claims: list[int] = field(default_factory=list)
+    claim_gold_at_k: Optional[bool] = None
+    derived_gold_at_k: Optional[bool] = None
+    derived_hits: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -178,6 +185,15 @@ class ConflictReport:
     embedder: str
     started_at: str
     finished_at: str
+    #: E36 stages: the model, extractions approved, bridges proposed by
+    #: the derivation pass, whether they were approved for the run, and
+    #: the claim scores as fractions (None when nothing was distilled).
+    model: Optional[str] = None
+    distilled: Optional[int] = None
+    derived: Optional[int] = None
+    derive_approved: bool = False
+    claim_gold_at_k: Optional[float] = None
+    derived_gold_at_k: Optional[float] = None
     results: list[QuestionResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -200,10 +216,22 @@ async def run_conflict_resolution(
     k: int = 10,
     questions: Optional[int] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    model: Optional[ChatModel] = None,
+    model_name: Optional[str] = None,
+    distill: bool = False,
+    derive: bool = False,
+    derive_approve: bool = False,
 ) -> ConflictReport:
     """One item: every fact remembered in order, then each question
     recalled at limit k and, when a reader is given, answered from the
-    top k in chronological order."""
+    top k in chronological order.
+
+    E36 stages, each off by default: ``distill`` extracts claims from
+    every statement with ``model`` and approves them for the run (the
+    split has no reviewer); ``derive`` then runs one derivation pass over
+    them, leaving its bridges proposed as they would arrive in production,
+    or approved with ``derive_approve`` to measure the ceiling. Recall's
+    claims are scored beside its episodes either way."""
     import asyncio
 
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -219,6 +247,25 @@ async def run_conflict_resolution(
         )
         for i, fact in enumerate(item.facts)
     ])
+    distilled: Optional[int] = None
+    derived: Optional[int] = None
+    if model is not None and distill:
+        from ..ingestion.distill import Distiller
+
+        distilled = 0
+        for outcome in await Distiller(engine, model).distill_pending(space, limit=len(item.facts)):
+            for fact in outcome.added:
+                if fact.status == "proposed":
+                    await engine.approve(space, fact.fact_id)
+                distilled += 1
+        if derive:
+            from ..ingestion.derive import Deriver
+
+            bridges = await Deriver(engine, model).derive(space, limit_groups=len(item.facts))
+            derived = len(bridges.proposed)
+            if derive_approve:
+                for fact in bridges.proposed:
+                    await engine.approve(space, fact.fact_id)
     asked = list(item.questions)[:questions] if questions else list(item.questions)
     results: list[QuestionResult] = []
     for n, (question, answers) in enumerate(asked, 1):
@@ -230,10 +277,19 @@ async def run_conflict_resolution(
         top = [i.source or "" for i in pack.items]
         at_k, above = judge_ranking(top, gold, stale)
         result = QuestionResult(question, list(answers), gold, stale, top, at_k, above, ms)
+        if distilled is not None:
+            claims = list(pack.facts)
+            carrying = [c for c in claims if correct_answer(f"{c.subject} {c.predicate} {c.object}", answers)]
+            result.claims = [c.fact_id for c in claims]
+            result.claim_gold_at_k = bool(carrying)
+            result.derived_hits = [c.fact_id for c in carrying if c.origin == "inferred"]
+            result.derived_gold_at_k = bool(result.derived_hits)
         if reader is not None:
             # Oldest first, as the system prompt promises; the rank is not shown.
             ordered = sorted(pack.items, key=lambda i: i.created_at)
             listing = "\n".join(f"- {i.text}" for i in ordered) or "- (nothing remembered matches)"
+            if distilled is not None and pack.facts:
+                listing += "\n" + "\n".join(f"- claim: {c.subject} {c.predicate} {c.object}" for c in pack.facts)
             try:
                 result.answer = await reader.complete(READER_SYSTEM, f"Facts:\n{listing}\n\nQuestion: {question}")
                 result.correct = correct_answer(result.answer, answers)
@@ -259,5 +315,9 @@ async def run_conflict_resolution(
         accuracy=round(sum(1 for r in answered if r.correct) / len(answered), 4) if answered else None,
         errors=sum(1 for r in results if r.error), embedder=engine.embedder.id,
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        model=model_name if model is not None and distill else None,
+        distilled=distilled, derived=derived, derive_approved=bool(derive and derive_approve),
+        claim_gold_at_k=round(sum(bool(r.claim_gold_at_k) for r in results) / n, 4) if n and distilled is not None else None,
+        derived_gold_at_k=round(sum(bool(r.derived_gold_at_k) for r in results) / n, 4) if n and distilled is not None else None,
         results=results,
     )

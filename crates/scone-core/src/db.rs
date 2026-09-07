@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS spaces (
     id         INTEGER PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
     revision   INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS episodes (
     id         INTEGER PRIMARY KEY,
@@ -70,6 +71,18 @@ CREATE TABLE IF NOT EXISTS fact_provenance (
     fact_id    INTEGER NOT NULL REFERENCES facts(id),
     episode_id INTEGER NOT NULL REFERENCES episodes(id),
     UNIQUE (fact_id, episode_id)
+);
+CREATE TABLE IF NOT EXISTS fact_links (
+    id                INTEGER PRIMARY KEY,
+    space_id          INTEGER NOT NULL REFERENCES spaces(id),
+    from_fact         INTEGER NOT NULL REFERENCES facts(id),
+    to_fact           INTEGER NOT NULL REFERENCES facts(id),
+    kind              TEXT NOT NULL
+                      CHECK (kind IN ('extends','derived_from','contradicts','supports')),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    source_episode_id INTEGER,
+    quote             TEXT,
+    UNIQUE (space_id, from_fact, to_fact, kind)
 );
 CREATE TABLE IF NOT EXISTS distill_queue (
     id         INTEGER PRIMARY KEY,
@@ -221,6 +234,37 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         result?;
         conn.execute(
             "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version.as_str() < "6" {
+        // v6 adds fact_links, created above by the base schema for every
+        // file; the step only records that this build's shape is in place.
+        conn.execute(
+            "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    if version.as_str() < "7" {
+        // v7: a deleted space keeps its row, marked, so the name cannot be
+        // re-created and its key answers 404. A fresh file has the column
+        // from the base schema; an older file gains it here.
+        let has_column = conn
+            .prepare("PRAGMA table_info(spaces)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|c| c == "deleted_at");
+        if !has_column {
+            conn.execute("ALTER TABLE spaces ADD COLUMN deleted_at TEXT", [])?;
+        }
+        conn.execute(
+            "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
             [],
         )?;
     }

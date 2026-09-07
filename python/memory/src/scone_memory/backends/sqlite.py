@@ -20,8 +20,8 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """
@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS facts (
     status TEXT NOT NULL, closed_reason TEXT, source_episode_id INTEGER,
     origin TEXT NOT NULL DEFAULT 'stated', excluded_reason TEXT, superseded_by INTEGER, quote TEXT);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(space, subject, predicate);
+CREATE TABLE IF NOT EXISTS fact_links (
+    id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL, to_fact INTEGER NOT NULL,
+    kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,
+    UNIQUE(space, from_fact, to_fact, kind));
+CREATE TABLE IF NOT EXISTS tombstones (
+    space TEXT NOT NULL, episode_id INTEGER NOT NULL, content_hash TEXT NOT NULL,
+    forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id));
 CREATE TABLE IF NOT EXISTS revisions (space TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vectors (
     chunk_id INTEGER PRIMARY KEY, space TEXT NOT NULL, episode_id INTEGER NOT NULL,
@@ -59,12 +66,13 @@ CREATE INDEX IF NOT EXISTS vectors_space ON vectors(space, created_at);
 CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
 """
 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
+SCHEMA_VERSION = 10  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones; 10: deleted spaces
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -75,6 +83,16 @@ SCHEMA_VERSION = 7  # 6: facts carry quote; 7: inflight marks for crash recovery
 STEPS: dict[int, tuple[str, ...]] = {
     5: ("ALTER TABLE facts ADD COLUMN quote TEXT",),
     6: ("CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash))",),
+    7: (
+        "CREATE TABLE IF NOT EXISTS fact_links (id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL,"
+        " to_fact INTEGER NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,"
+        " UNIQUE(space, from_fact, to_fact, kind))",
+    ),
+    8: (
+        "CREATE TABLE IF NOT EXISTS tombstones (space TEXT NOT NULL, episode_id INTEGER NOT NULL, content_hash TEXT NOT NULL,"
+        " forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id))",
+    ),
+    9: ("CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL)",),
 }
 
 
@@ -127,7 +145,10 @@ def check_schema(conn: sqlite3.Connection, path: "str | Path | None" = None) -> 
     step; refuse a version with no step from it."""
     version = schema_version(conn)
     if version == SCHEMA_VERSION:
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        # Stamp a fresh file once. A stamped file is left alone: rewriting
+        # the row on every open would make a read-only command a write and
+        # move the row behind newer meta rows in the file's order.
+        conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
         conn.commit()
         return
     if version > SCHEMA_VERSION or version not in STEPS:
@@ -232,6 +253,16 @@ def _chunk(row: sqlite3.Row) -> Chunk:
     )
 
 
+def _tombstone(row: sqlite3.Row) -> Tombstone:
+    return Tombstone(space=row["space"], episode_id=row["episode_id"], content_hash=row["content_hash"],
+                     forgotten_at=row["forgotten_at"], reason=row["reason"])
+
+
+def _fact_link(row: sqlite3.Row) -> FactLink:
+    return FactLink(link_id=row["id"], space=row["space"], from_fact=row["from_fact"], to_fact=row["to_fact"],
+                    kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
+
+
 def _fact(row: sqlite3.Row) -> Fact:
     return Fact(
         fact_id=row["id"],
@@ -263,16 +294,30 @@ class SqliteDocumentStore:
         self.conn.close()
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
-        cur = self.conn.execute(
-            "INSERT INTO episodes (space, kind, content, content_hash, source, tags, metadata, created_at, ingested_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                new.space, new.kind, new.content, new.content_hash, new.source,
-                json.dumps(list(new.tags)), json.dumps(dict(new.metadata)), new.created_at, new.ingested_at,
-            ),
-        )
-        self.conn.commit()
-        return Episode(episode_id=cur.lastrowid, **new.__dict__)
+        # SQLite hands a deleted row's id to the next insert when it was the
+        # highest, and a claim that cited the forgotten episode would then
+        # rest on text it never came from. Ids come from a counter that only
+        # goes up, kept in meta and never below what the table already holds.
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute("SELECT value FROM meta WHERE key = 'next_episode_id'").fetchone()
+            highest = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM episodes").fetchone()[0]
+            episode_id = max(int(row["value"]) if row else 1, highest + 1)
+            self.conn.execute(
+                "INSERT INTO episodes (id, space, kind, content, content_hash, source, tags, metadata, created_at, ingested_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    episode_id, new.space, new.kind, new.content, new.content_hash, new.source,
+                    json.dumps(list(new.tags)), json.dumps(dict(new.metadata)), new.created_at, new.ingested_at,
+                ),
+            )
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_episode_id', ?)", (str(episode_id + 1),))
+            self.conn.execute("COMMIT")
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+            raise
+        return Episode(episode_id=episode_id, **new.__dict__)
 
     async def episode_by_hash(self, space: str, content_hash: str) -> Optional[Episode]:
         row = self.conn.execute(
@@ -431,6 +476,74 @@ class SqliteDocumentStore:
         )
         return [_fact(r) for r in rows]
 
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tombstones (space, episode_id, content_hash, forgotten_at, reason) VALUES (?, ?, ?, ?, ?)",
+            (new.space, new.episode_id, new.content_hash, new.forgotten_at, new.reason),
+        )
+        self.conn.commit()
+        return _tombstone(self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (new.space, new.episode_id)).fetchone())
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (space, episode_id)).fetchone()
+        return _tombstone(row) if row else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND content_hash = ? ORDER BY episode_id DESC", (space, content_hash)).fetchone()
+        return _tombstone(row) if row else None
+
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        return [_tombstone(r) for r in self.conn.execute("SELECT * FROM tombstones WHERE space = ? ORDER BY episode_id", (space,))]
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        """Every row of the space goes in one transaction, and the space
+        is marked deleted in the same one, so a crash leaves either the
+        whole space or none of it."""
+        conn = self.conn
+        try:
+            chunk_ids = tuple(r[0] for r in conn.execute("SELECT id FROM chunks WHERE space = ? ORDER BY id", (space,)))
+
+            def count(table: str) -> int:
+                return conn.execute(f"SELECT count(*) FROM {table} WHERE space = ?", (space,)).fetchone()[0]
+
+            gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
+                                links=count("fact_links"), tombstones=count("tombstones"))
+            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+                conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
+            conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        row = self.conn.execute("SELECT erased_at FROM erased_spaces WHERE space = ?", (space,)).fetchone()
+        return row[0] if row else None
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        """(chunk_id, episode_id) for every chunk of the space; for doctor."""
+        return [(r[0], r[1]) for r in self.conn.execute("SELECT id, episode_id FROM chunks WHERE space = ? ORDER BY id", (space,))]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new.space, new.from_fact, new.to_fact, new.kind, new.created_at, new.source_episode_id, new.quote),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM fact_links WHERE space = ? AND from_fact = ? AND to_fact = ? AND kind = ?",
+            (new.space, new.from_fact, new.to_fact, new.kind),
+        ).fetchone()
+        return _fact_link(row)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        rows = self.conn.execute(
+            "SELECT * FROM fact_links WHERE space = ? AND (from_fact = ? OR to_fact = ?) ORDER BY id", (space, fact_id, fact_id)
+        )
+        return [_fact_link(r) for r in rows]
+
     async def bump_revision(self, space: str) -> int:
         self.conn.execute(
             "INSERT INTO revisions (space, revision) VALUES (?, 1)"
@@ -517,4 +630,12 @@ class SqliteVectorIndex:
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         self.conn.executemany("DELETE FROM vectors WHERE chunk_id = ?", [(c,) for c in chunk_ids])
+        self.conn.commit()
+
+    async def ids(self, space: str) -> list[int]:
+        """Every chunk id with a vector in the space; for doctor."""
+        return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
+
+    async def delete_space(self, space: str) -> None:
+        self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
         self.conn.commit()

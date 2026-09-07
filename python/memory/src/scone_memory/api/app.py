@@ -9,10 +9,14 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
+import asyncio
+
 import re
 
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Literal, Mapping, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -22,8 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
-from ..memory.engine import MemoryEngine
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..memory.engine import Record, MemoryEngine
+from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..core.models import Attachment, Fact, RecallItem
 
 
@@ -33,6 +37,16 @@ from ..core.models import Attachment, Fact, RecallItem
 INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class ConsolidateBody(BaseModel):
+    """One pass by hand: ``distill`` runs the worker's pass (extraction,
+    retention and, when configured, derivation); ``derive`` runs only the
+    derivation pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["distill", "derive"]
 
 
 class DecideBody(BaseModel):
@@ -61,6 +75,10 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: Identity across writes; with replace, changed content under a known
+    #: key is an update instead of a reported duplicate.
+    dedup_key: Optional[str] = None
+    replace: bool = False
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -83,6 +101,68 @@ class FactBody(BaseModel):
     source_episode_id: Optional[int] = None
     origin: str = "stated"
     proposed: bool = False
+    quote: Optional[str] = None
+    # A fact this one adds detail to, and the ledger facts it was inferred from.
+    extends: Optional[int] = None
+    derived_from: list[int] = Field(default_factory=list)
+
+
+#: What each role may do, by request. Reads are open to every role; the
+#: decisions of review belong to review and full; every other write belongs
+#: to write and full. A key with no role recorded is full.
+_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/v1/facts/decide")
+
+
+def _is_decision(path: str) -> bool:
+    return path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+
+
+def _is_space_delete(method: str, path: str) -> bool:
+    return method == "DELETE" and path.startswith("/v1/spaces/")
+
+
+def permitted(role: str, method: str, path: str) -> bool:
+    if method in ("GET", "HEAD", "OPTIONS") or role == "full":
+        return True
+    if _is_space_delete(method, path):
+        return False  # a whole space goes only on the full role's word
+    return role == ("review" if _is_decision(path) else "write")
+
+
+def _refused_verb(method: str, path: str) -> str:
+    if _is_space_delete(method, path):
+        return "delete a space"
+    return "decide" if _is_decision(path) else "write"
+
+
+def _own_space(name: str, space: str) -> None:
+    """A key reaches its own space and no other; another name is as
+    unknown as a space that never existed."""
+    if name != space:
+        raise NotFound(f"space {name!r} is not this key's")
+
+
+class Forbidden(Exception):
+    """The key is known and scoped to this space, but its role does not
+    allow this request. Maps to HTTP 403."""
+
+
+#: Records one batch request may carry. A batch is bounded work, not an import.
+MAX_BATCH_RECORDS = 500
+
+
+class BatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    records: list[EpisodeBody] = Field(min_length=1, max_length=MAX_BATCH_RECORDS)
+
+
+class LinkBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to_fact: int
+    kind: str
+    source_episode_id: Optional[int] = None
     quote: Optional[str] = None
 
 
@@ -108,6 +188,8 @@ class FeedbackBody(BaseModel):
     note: Optional[str] = None
 
 
+#: The public concept pages the packaged workspace renders without a key.
+LEARN_PAGES = ("/learn", "/learn/how-it-works", "/learn/graph-memory")
 CONSOLE = Path(__file__).with_name("console.html")
 PLAYGROUND = Path(__file__).with_name("playground.html")
 MARK = Path(__file__).with_name("scone-mark.png")
@@ -130,6 +212,9 @@ def create_app(
     console_key: Optional[str] = None,
     worker=None,
     reload_pages: bool = False,
+    conversations: bool = False,
+    ingest_concurrency: int = 4,
+    roles: Optional[Mapping[str, str]] = None,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
@@ -137,7 +222,13 @@ def create_app(
     ``worker`` is a ConsolidationWorker started with the app and stopped
     with it; None means no distiller runs on this server. ``reload_pages``
     re-reads the console and playground files on every request, for
-    editing them with the server running; off in normal use."""
+    editing them with the server running; off in normal use. ``conversations``
+    says this app is mounted under a conversation service on the same
+    origin, so the capability manifest may advertise it. ``ingest_concurrency``
+    is how many writes may be embedding at once; one more is answered 429
+    with Retry-After instead of queued without limit. Reads are not gated.
+    ``roles`` maps a key to read | write | review | full (see ``permitted``);
+    a key not in it is full."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -148,11 +239,32 @@ def create_app(
             await worker.stop()
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+    if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
+        raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
+    app.state.roles = dict(roles or {})
+    app.state.ingest_lane_width = ingest_concurrency
+    ingest_lane = asyncio.Semaphore(ingest_concurrency)
+
+    class IngestBusy(Exception):
+        pass
+
+    @asynccontextmanager
+    async def ingest_slot(records: int):
+        # Backpressure, not a queue: a write that finds every slot taken is
+        # told to come back, with the number it is waiting behind.
+        if ingest_lane.locked():
+            raise IngestBusy(f"ingest is busy: {ingest_concurrency} record(s) are being embedded; try again shortly")
+        async with ingest_lane:
+            yield
+
+    @app.exception_handler(IngestBusy)
+    async def _busy(_: Request, e: IngestBusy) -> JSONResponse:
+        return JSONResponse({"error": str(e), "code": "ingest_busy"}, status_code=429, headers={"Retry-After": "1"})
     app.state.keys = dict(keys)
     app.state.worker = worker
 
-    def space_for(request: Request) -> str:
+    async def space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         if scheme.lower() != "bearer" or not token.strip():
@@ -160,6 +272,14 @@ def create_app(
         space = app.state.keys.get(token.strip())
         if space is None:
             raise Unauthorized("unknown key")
+        role = app.state.roles.get(token.strip(), "full")
+        if not permitted(role, request.method, request.url.path):
+            raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
+        # A deleted space's key answers 404 on every route: the space is
+        # gone, and a key left in config must not bring it back.
+        when = await engine.space_deleted(space)
+        if when is not None:
+            raise NotFound(f"space {space!r} was deleted at {when}")
         return space
 
     def actor_for(request: Request) -> str:
@@ -178,6 +298,10 @@ def create_app(
     async def _unauthorized(_: Request, e: Unauthorized) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=401)
 
+    @app.exception_handler(Forbidden)
+    async def _forbidden(_: Request, e: Forbidden) -> JSONResponse:
+        return JSONResponse({"error": str(e)}, status_code=403)
+
     @app.exception_handler(InvalidInput)
     async def _invalid(_: Request, e: InvalidInput) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=422)
@@ -185,6 +309,10 @@ def create_app(
     @app.exception_handler(Conflict)
     async def _moved(_: Request, e: Conflict) -> JSONResponse:
         return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
+
+    @app.exception_handler(Gone)
+    async def _gone(_: Request, e: Gone) -> JSONResponse:
+        return JSONResponse({"error": str(e), "forgotten_at": e.forgotten_at}, status_code=410)
 
     @app.exception_handler(NotFound)
     async def _missing(_: Request, e: NotFound) -> JSONResponse:
@@ -203,13 +331,18 @@ def create_app(
     @app.get("/v1/capabilities")
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
-        return {"schema_version": 1, "implementation": "python", "features": {
+        features = {
             "recall": True, "facts.read": True, "facts.review": True,
-            "facts.close": True, "facts.exclude": True, "facts.include": True,
+            "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
-        }}
+        }
+        if conversations:
+            # Present only when the service is mounted here; its own manifest
+            # at /v1/conversations/capabilities says what it can do.
+            features["conversations"] = True
+        return {"schema_version": 1, "implementation": "python", "features": features}
 
     if console:
         def render_console() -> str:
@@ -256,8 +389,24 @@ def create_app(
         # refresh or a shared link lands on the page even on a host with no
         # conversation service mounted; the page reads
         # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
+        # Each address is named: there is no catch-all that would turn a
+        # mistyped /v1 path into HTML.
         for path in ("/conversations", "/conversations/{sid}"):
             app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
+
+        def render_guide() -> str:
+            # The concept pages are public: the same bundle, with no key put
+            # into it, so anyone may read them and nothing configured leaks.
+            source = PLAYGROUND if PLAYGROUND.exists() else CONSOLE
+            return source.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
+
+        guide_html = None if reload_pages else render_guide()
+
+        async def guide_page() -> Response:
+            return page_response(guide_html if guide_html is not None else render_guide(), PLAYGROUND if PLAYGROUND.exists() else CONSOLE)
+
+        for path in LEARN_PAGES:
+            app.add_api_route(path, guide_page, methods=["GET", "HEAD"], include_in_schema=False)
 
         if PLAYGROUND.exists():
             # GET and HEAD: the console probes with HEAD to decide whether to
@@ -311,6 +460,10 @@ def create_app(
 
     @app.post("/v1/episodes")
     async def post_episode(body: EpisodeBody, space: str = Depends(space_for)) -> dict:
+        async with ingest_slot(1):
+            return await _post_episode(body, space)
+
+    async def _post_episode(body: EpisodeBody, space: str) -> dict:
         added = await engine.remember(
             space,
             body.content,
@@ -320,8 +473,29 @@ def create_app(
             created_at=body.created_at,
             metadata=body.metadata,
             attachment_ids=body.attachment_ids,
+            dedup_key=body.dedup_key,
+            replace=body.replace,
         )
         return added.model_dump()
+
+    @app.post("/v1/episodes/batch")
+    async def post_episodes(body: BatchBody, space: str = Depends(space_for)) -> dict:
+        """One bounded request, one outcome per record in the order sent;
+        the batch lands whole or not at all. Replacement is one record at
+        a time, because it forgets before it stores."""
+        if any(r.replace for r in body.records):
+            raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
+        records = [
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            for r in body.records
+        ]
+        async with ingest_slot(len(records)):
+            added = await engine.remember_many(space, records)
+        for record, item in zip(body.records, added):
+            for attachment_id in dict.fromkeys(record.attachment_ids):
+                await engine.blobs.link(space, attachment_id, item.episode_id)
+        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
+        return {"items": [a.model_dump() for a in added], "counts": counts}
 
     @app.get("/v1/episodes")
     async def get_episodes(ids: str, space: str = Depends(space_for)) -> dict:
@@ -343,19 +517,57 @@ def create_app(
         if not callable(getattr(engine.documents, "page_episodes", None)):
             return JSONResponse({"error": "this document store does not implement source inventory"}, status_code=501)
         page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind)
+        # Where consolidation left each source, in the words the API means:
+        # cited (a claim rests on it), parked (the distiller gave up on it in
+        # this process), pending (no claim cites it yet; a pass, the worker's
+        # or `distill`'s, visits it). The Rust host says the same words and
+        # adds "done" for a source its queue has visited and found nothing in.
+        cited = await engine.cited_episode_ids(space)
+        distiller = getattr(worker, "distiller", None) if worker is not None else None
+        parked = distiller.parked(space) if distiller is not None and callable(getattr(distiller, "parked", None)) else {}
+
+        def status_of(episode_id: int) -> dict:
+            if episode_id in cited:
+                return {"status": "cited"}
+            if episode_id in parked:
+                return {"status": "parked", "parked_reason": str(parked[episode_id])[:200]}
+            return {"status": "pending"}
+
         return {"items": [{"episode_id": e.episode_id, "kind": e.kind, "source": e.source,
                            "created_at": e.created_at, "byte_count": len(e.content.encode("utf-8")),
-                           "preview": e.content[:500], "preview_truncated": len(e.content) > 500}
+                           "preview": e.content[:500], "preview_truncated": len(e.content) > 500,
+                           **status_of(e.episode_id)}
                           for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
 
     @app.get("/v1/episodes/{episode_id}")
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         return episode_json(await engine.episode(space, episode_id))
 
+    @app.get("/v1/episodes/{episode_id}/impact")
+    async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """What forgetting would take and leave; removes nothing."""
+        return (await engine.impact(space, episode_id)).model_dump()
+
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
-        await engine.forget(space, episode_id)
-        return {"forgotten": episode_id}
+        receipt = await engine.forget(space, episode_id)
+        return {"forgotten": episode_id, **receipt.model_dump()}
+
+    @app.get("/v1/spaces/{name}/impact")
+    async def space_impact(name: str, space: str = Depends(space_for)) -> dict:
+        """What deleting the space would take with it; nothing is removed."""
+        _own_space(name, space)
+        return (await engine.space_impact(space)).model_dump()
+
+    @app.delete("/v1/spaces/{name}")
+    async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:
+        """Remove everything the space holds. ``confirm`` must repeat the
+        space name; afterwards this key answers 404 on every route."""
+        _own_space(name, space)
+        if confirm != name:
+            raise InvalidInput("confirm must repeat the space name; a whole space is not deleted by accident")
+        receipt = await engine.delete_space(space)
+        return {"deleted": name, **receipt.model_dump()}
 
     @app.get("/v1/recall")
     async def get_recall(
@@ -413,8 +625,11 @@ def create_app(
             origin=body.origin,
             proposed=body.proposed,
             quote=body.quote,
+            extends=body.extends,
+            derived_from=body.derived_from,
         )
         return fact_json(fact)
+
 
     @app.get("/v1/facts/audit")
     async def get_facts_audit(status: str = "active", flagged: bool = False,
@@ -424,7 +639,6 @@ def create_app(
         which is a question for a person, and the repair is exclude with a
         reason through the decision routes."""
         from collections import Counter
-        from dataclasses import asdict
 
         from ..observability.audit import audit_grounding
 
@@ -438,6 +652,20 @@ def create_app(
             "revision": await engine.revision(space),
         }
 
+    @app.post("/v1/consolidate")
+    async def post_consolidate(body: ConsolidateBody, space: str = Depends(space_for)) -> JSONResponse:
+        """One consolidation pass by hand over this key's space."""
+        if body.scope == "derive":
+            deriver = getattr(worker, "deriver", None)
+            if deriver is None:
+                return JSONResponse({"error": "no derivation model configured (SCONE_DERIVE=1 with SCONE_CHAT_URL and SCONE_CHAT_MODEL)"}, status_code=501)
+            outcome = await deriver.derive(space, limit_groups=worker.batch)
+            return JSONResponse({"space": space, "scope": "derive", **outcome.as_payload()})
+        if worker is None:
+            return JSONResponse({"error": "no consolidation worker configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL, or SCONE_RETAIN)"}, status_code=501)
+        report = await worker.run_once(space)
+        return JSONResponse({"space": space, "scope": "distill", **report.as_payload()})
+
     @app.post("/v1/facts/decide")
     async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         """One reviewed batch, settled together: applied oldest first, and
@@ -447,6 +675,26 @@ def create_app(
             reason=body.reason, actor=actor, expect_revision=body.expect_revision,
         )
         return decided.model_dump()
+
+    # Parametrised fact routes come after every fixed /v1/facts/... address,
+    # so /v1/facts/audit and /v1/facts/decide are never read as an id.
+    @app.get("/v1/facts/{fact_id}")
+    async def get_fact(fact_id: int, space: str = Depends(space_for)) -> dict:
+        """One fact with the relations it takes part in and the ids of the
+        episodes it rests on. Ids, not the episodes themselves: a source
+        may have been forgotten since, and GET /v1/episodes says so."""
+        fact = await engine.fact(space, fact_id)
+        return {
+            "fact": fact_json(fact),
+            "links": [link_json(link) for link in await engine.fact_links(space, fact_id)],
+            "sources": [fact.source_episode_id] if fact.source_episode_id is not None else [],
+        }
+
+    @app.post("/v1/facts/{fact_id}/links")
+    async def post_link(fact_id: int, body: LinkBody, space: str = Depends(space_for)) -> dict:
+        link = await engine.link_facts(space, fact_id, body.to_fact, body.kind,
+                                       source_episode_id=body.source_episode_id, quote=body.quote)
+        return link_json(link)
 
     @app.post("/v1/facts/{fact_id}/approve")
     async def post_fact_approve(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
@@ -472,7 +720,8 @@ def create_app(
     @app.get("/v1/profile")
     async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
         profile = await engine.profile(space, limit)
-        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic}
+        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
+                "recent": [asdict(r) for r in profile.recent]}
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:
@@ -533,6 +782,11 @@ def create_app(
         g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit)
         return {"evidence": engine.events.name if engine.events else "none", **g.as_dict()}
 
+    @app.get("/v1/doctor")
+    async def get_doctor(space: str = Depends(space_for)) -> dict:
+        """What references what across the stores, read only; see doctor()."""
+        return (await engine.doctor(space)).model_dump()
+
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
         return {"scopes": await engine.scopes(space)}
@@ -541,8 +795,10 @@ def create_app(
     async def get_status(space: str = Depends(space_for)) -> dict:
         status = await engine.status(space)
         pending = await engine.pending_distillation(space)
-        if worker is None:
-            lane = "manual"  # claims arrive through POST /v1/facts, MCP, or the CLI
+        # The lane is the model's work; a worker that only applies retention
+        # has no lane, and claims arrive through POST /v1/facts, MCP or the CLI.
+        if worker is None or getattr(worker, "distiller", None) is None:
+            lane = "manual"
         elif worker.running:
             lane = "active"
         else:
@@ -552,7 +808,10 @@ def create_app(
             **status.model_dump(),
             "semantic_lane": lane,
             "pending_distill": pending,
+            "pending_derivation": await engine.pending_derivation(space),
+            "derivation": "on" if getattr(worker, "deriver", None) is not None else "off",
             "last_distill": last.as_payload() if last else None,
+            "retention": dict(getattr(worker, "retention", None) or {}) if worker is not None else {},
         }
 
     return app
@@ -655,6 +914,13 @@ def event_json(event) -> dict:
         "kind": event.kind,
         "schema_version": event.schema_version,
         "payload": dict(event.payload),
+    }
+
+
+def link_json(link) -> dict:
+    return {
+        "link_id": link.link_id, "from_fact": link.from_fact, "to_fact": link.to_fact, "kind": link.kind,
+        "created_at": link.created_at, "source_episode_id": link.source_episode_id, "quote": link.quote,
     }
 
 

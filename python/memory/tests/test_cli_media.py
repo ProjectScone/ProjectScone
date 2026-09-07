@@ -89,7 +89,7 @@ def test_attachments_missing_source_never_reports_empty_success(tmp_path, capsys
     assert main(["attachments", str(episode_id + 100 if case == "missing" else episode_id),
                  "--space", "other" if case == "wrong-space" else "photos", "--json"], env=env, out=output) == 2
     assert output.getvalue() == ""
-    assert "not found" in capsys.readouterr().err
+    assert ("forgotten" if case == "forgotten" else "not found") in capsys.readouterr().err, "a forgotten source says so, never an empty success"
 
 
 @pytest.mark.parametrize("episode_id", ["0", "-1", str(2**63)])

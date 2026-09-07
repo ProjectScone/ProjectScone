@@ -19,7 +19,7 @@ from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequenc
 
 from ..retrieval import fusion
 from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..retrieval.lexical import tokenize
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
@@ -31,6 +31,14 @@ from ..core.models import (
     Episode,
     EpisodeKind,
     Fact,
+    FactLink,
+    DoctorReport,
+    ExpiryReport,
+    ForgetReceipt,
+    SpaceReceipt,
+    Tombstone,
+    DEPENDENCY_KINDS,
+    LINK_KINDS,
     RecallItem,
     RecallResult,
     Status,
@@ -46,6 +54,8 @@ from ..core.ports import (
     NewEpisode,
     NewEvent,
     NewFact,
+    NewFactLink,
+    NewTombstone,
     SourcePage,
     TextFilter,
     VectorIndex,
@@ -110,10 +120,21 @@ AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result"
 MAX_AGENT_TEXT = 65_536
 
 
+@dataclass(frozen=True)
+class RecentActivity:
+    """One ``dynamic`` excerpt with the episode it was cut from."""
+
+    episode_id: int
+    excerpt: str
+    created_at: str
+
+
 @dataclass
 class Profile:
     static_facts: list[Fact] = field(default_factory=list)
     dynamic: list[str] = field(default_factory=list)
+    #: ``dynamic`` with its evidence: same order, same excerpts, newest first.
+    recent: list[RecentActivity] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -145,6 +166,16 @@ class Record:
 
 
 @dataclass
+class Replaced:
+    """What ``replace`` did: the record as stored (or found), the outcome,
+    and the receipt for the episode that went, if one did."""
+
+    added: Added
+    outcome: str
+    replaced: Optional[ForgetReceipt] = None
+
+
+@dataclass
 class RecoveryReport:
     """What recover() found: episodes brought to a complete state, of
     which how many needed their chunks rebuilt, and marks with no
@@ -161,6 +192,11 @@ class ImportSummary:
     #: Episodes already present in the target.
     deduplicated: int = 0
     facts: int = 0
+    #: Relations stored, and those dropped or already present.
+    links: int = 0
+    links_skipped: int = 0
+    #: Episodes skipped because this space forgot that content on purpose.
+    tombstoned: int = 0
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
@@ -221,6 +257,8 @@ class MemoryEngine:
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
         self.clock = clock
+        #: (space, premise ids) of every group a derivation pass has sent.
+        self._derive_seen: set[tuple[str, frozenset[int]]] = set()
         #: Evidence sink. None means no evidence is kept, and no metric
         #: can be computed; that absence is reported, never filled in.
         self.events = events
@@ -362,14 +400,54 @@ class MemoryEngine:
         created_at: Optional[str] = None,
         metadata: Mapping[str, str] | None = None,
         attachment_ids: Sequence[str] = (),
+        dedup_key: Optional[str] = None,
+        replace: bool = False,
     ) -> Added:
-        [added] = await self.remember_many(
-            space,
-            [Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}))],
-        )
+        """One record. ``dedup_key`` names it across writes; ``replace``
+        makes a changed record under a known key an update (see
+        ``replace``) instead of a duplicate."""
+        await self._living(space)
+        record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
+        if replace:
+            added = (await self.replace(space, record)).added
+        else:
+            [added] = await self.remember_many(space, [record])
         for attachment_id in dict.fromkeys(attachment_ids):
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
+
+    async def replace(self, space: str, record: Record) -> "Replaced":
+        """Store a keyed record as the current one under its key. A key
+        nobody holds is accepted; the same content again is a duplicate
+        and changes nothing; changed content is an update: the episode
+        the key named is forgotten (its receipt returned; the claims that
+        cited it stand) and the new one stored. The forget lands before
+        the store, so a failure between them leaves the key empty rather
+        than pointing at stale text; the error says so."""
+        await self._living(space)
+        check_space(space)
+        if not record.dedup_key:
+            raise InvalidInput("replace needs a dedup_key: it is the key that names what is being replaced")
+        digest = content_hash(space, record.content, record.dedup_key)
+        existing = await self.documents.episode_by_hash(space, digest)
+        if existing is not None and existing.content == record.content:
+            added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+            return Replaced(added=added, outcome="duplicate", replaced=None)
+        receipt = None
+        if existing is not None:
+            receipt = await self.forget(space, existing.episode_id)
+        try:
+            [added] = await self.remember_many(space, [record])
+        except Exception as error:
+            if receipt is not None:
+                raise InvalidInput(
+                    f"replace forgot episode {receipt.episode_id} and the new record then failed to land "
+                    f"({type(error).__name__}); the key {record.dedup_key!r} names nothing now, so send it again"
+                ) from error
+            raise
+        outcome = "updated" if receipt is not None else added.outcome
+        added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
+        return Replaced(added=added, outcome=outcome, replaced=receipt)
 
     # -- attachments ------------------------------------------------------
 
@@ -379,6 +457,7 @@ class MemoryEngine:
         """Store bytes an episode will carry, addressed by their SHA-256.
         The same bytes stored twice are one attachment: the digest is the
         id, so a second store is a second reference."""
+        await self._living(space)
         check_space(space)
         if not data:
             raise InvalidInput("an attachment needs bytes")
@@ -407,6 +486,7 @@ class MemoryEngine:
         write, the episodes written so far are deleted again and the
         error is raised; a batch either lands whole or not at all.
         """
+        await self._living(space)
         check_space(space)
         started = time.perf_counter()
         records = list(records)
@@ -458,7 +538,7 @@ class MemoryEngine:
             existing = await self.documents.episode_by_hash(space, digest)
             if existing is not None:
                 seen[digest] = len(results)
-                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0))
+                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
                 continue
             seen[digest] = len(results)
             results.append(None)
@@ -494,7 +574,7 @@ class MemoryEngine:
         for r in results:
             if isinstance(r, _DupOf):
                 target = results[r.slot]
-                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0))  # type: ignore[union-attr]
+                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))  # type: ignore[union-attr]
             else:
                 resolved.append(r)  # type: ignore[arg-type]
         return resolved
@@ -558,22 +638,224 @@ class MemoryEngine:
                 await self.documents.clear_inflight(space, pending.new.content_hash)
             raise
 
-    async def forget(self, space: str, episode_id: int) -> None:
+    async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
+        """The episode, or Gone when a tombstone says it was forgotten, or
+        NotFound when the id never meant anything here."""
+        found = await self.documents.get_episode(space, episode_id)
+        if found is not None:
+            return found
+        stone = await self.documents.tombstone(space, episode_id)
+        if stone is not None:
+            raise Gone(f"episode {episode_id} was forgotten on {stone.forgotten_at}", stone.forgotten_at)
+        raise NotFound(f"episode {episode_id} not found in {space!r}")
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        """The record that an episode was forgotten, or None."""
+        check_space(space)
+        return await self.documents.tombstone(space, episode_id)
+
+    async def doctor(self, space: str) -> DoctorReport:
+        """What references what across the space's stores, read only: chunks
+        whose episode is gone, vectors whose chunk is gone, facts citing a
+        forgotten or an unknown episode, links with a missing end, held
+        attachments no episode carries. A store that cannot be walked is
+        named in not_inspected rather than reported clean."""
+        check_space(space)
+        counts = await self.documents.counts(space)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        report = DoctorReport(space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts))
+        episode_ids = {e.episode_id for e in await self.documents.recent_episodes(space, max(counts.episodes, 1))}
+        stones = {t.episode_id for t in await self.documents.list_tombstones(space)}
+        report.tombstones = len(stones)
+        for fact in facts:
+            source = fact.source_episode_id
+            if source is None or source in episode_ids:
+                continue
+            (report.facts_citing_forgotten if source in stones else report.facts_citing_unknown).append(fact.fact_id)
+        fact_ids = {f.fact_id for f in facts}
+        seen: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.link_id in seen:
+                    continue
+                seen.add(link.link_id)
+                if link.from_fact not in fact_ids or link.to_fact not in fact_ids:
+                    report.links_with_missing_ends.append(link.link_id)
+        report.links = len(seen)
+        chunk_index = getattr(self.documents, "chunk_index", None)
+        chunk_ids: Optional[set[int]] = None
+        if callable(chunk_index):
+            pairs = await chunk_index(space)
+            chunk_ids = {chunk_id for chunk_id, _ in pairs}
+            report.chunks_without_episode = sorted(chunk_id for chunk_id, episode_id in pairs if episode_id not in episode_ids)
+        else:
+            report.not_inspected.append("chunks")
+        vector_ids = getattr(self.vectors, "ids", None)
+        if callable(vector_ids) and chunk_ids is not None:
+            report.vectors_without_chunk = sorted(v for v in await vector_ids(space) if v not in chunk_ids)
+        else:
+            report.not_inspected.append("vectors")
+        held = getattr(self.blobs, "held", None)
+        if callable(held):
+            linked = await self.blobs.linked(space)
+            report.attachments_unlinked = [a for a in await held(space) if a not in linked]
+        else:
+            report.not_inspected.append("attachments")
+        report.healthy = not any([
+            report.chunks_without_episode, report.vectors_without_chunk, report.facts_citing_forgotten,
+            report.facts_citing_unknown, report.links_with_missing_ends, report.attachments_unlinked,
+        ])
+        return report
+
+    async def expire(self, space: str, policy: Mapping[str, float], *, limit: int = 100,
+                     dry_run: bool = False) -> ExpiryReport:
+        """Forget the episodes a retention policy no longer keeps: for each
+        kind in ``policy``, those whose own time is more than that many
+        days before this engine's clock, oldest first, at most ``limit``
+        in one pass. Facts never expire; the claims that cited a forgotten
+        episode stand. ``dry_run`` reports and forgets nothing."""
+        check_space(space)
+        clean = retention_policy(policy)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise InvalidInput("limit must be an integer in 1..10000")
+        now = parse_rfc3339(self.clock())
+        counts = await self.documents.counts(space)
+        due = []
+        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
+            days = clean.get(episode.kind)
+            if days is not None and (now - parse_rfc3339(episode.created_at)).total_seconds() > days * 86400:
+                due.append(episode)
+        due.sort(key=lambda e: (e.created_at, e.episode_id))
+        report = ExpiryReport(space=space, policy=dict(clean), remaining=len(due), dry_run=dry_run)
+        if dry_run:
+            return report
+        for episode in due[:limit]:
+            report.receipts.append(await self.forget(space, episode.episode_id))
+            report.forgotten.append(episode.episode_id)
+        report.remaining = len(due) - len(report.forgotten)
+        await self._emit(space, "expire", {"policy": dict(clean), "forgotten": len(report.forgotten),
+                                           "remaining": report.remaining, "limit": limit})
+        return report
+
+    async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
+        """What forgetting the episode would take with it and leave, with
+        nothing removed. The claims and links that cite it are reported,
+        not closed: a source being gone is a fact about the evidence."""
+        check_space(space)
+        await self._episode_or_gone(space, episode_id)
+        carried = [a.attachment_id for a in await self.blobs.for_episode(space, episode_id)]
+        released = await self.blobs.released_by(space, episode_id)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        citing_links: dict[int, int] = {}
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.source_episode_id == episode_id:
+                    citing_links[link.link_id] = link.link_id
+        return ForgetReceipt(
+            episode_id=episode_id,
+            chunks=len(await self.documents.chunks_of(space, episode_id)),
+            attachments_released=released,
+            attachments_kept=[a for a in carried if a not in released],
+            facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
+            links_citing=sorted(citing_links),
+        )
+
+    async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
+        """Remove the episode, its chunks and vectors, and release the
+        attachments nothing else carries; return the receipt that
+        ``impact`` would have shown. Claims and links stand."""
         check_space(space)
         started = time.perf_counter()
+        try:
+            receipt = await self.impact(space, episode_id)
+        except NotFound as error:
+            await self._emit(space, "forget", {"episode_id": episode_id, "error": type(error).__name__, "latency_ms": _ms(started)})
+            raise
+        episode = await self._episode_or_gone(space, episode_id)
         removed = await self.documents.delete_episode(space, episode_id)
-        if not removed and await self.documents.get_episode(space, episode_id) is None:
-            await self._emit(space, "forget", {"episode_id": episode_id, "error": "NotFound", "latency_ms": _ms(started)})
-            raise NotFound(f"episode {episode_id} not found in {space!r}")
         await self.vectors.delete(removed)
+        await self.blobs.unlink(space, episode_id)
+        # The tombstone outlives the episode: the id keeps meaning something
+        # and the decision is not undone by a later import.
+        stone = await self.documents.record_tombstone(NewTombstone(
+            space=space, episode_id=episode_id, content_hash=episode.content_hash, forgotten_at=self.clock(),
+        ))
+        receipt = receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
         await self.documents.bump_revision(space)
-        await self._emit(space, "forget", {"episode_id": episode_id, "chunks_removed": len(removed), "latency_ms": _ms(started)})
+        await self._emit(space, "forget", {
+            "episode_id": episode_id, "chunks_removed": len(removed),
+            "attachments_released": len(receipt.attachments_released),
+            "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
+            "latency_ms": _ms(started),
+        })
+        return receipt
+
+    # -- a whole space ------------------------------------------------------
+
+    async def _living(self, space: str) -> None:
+        """Refuse a space that was deleted: a key left in config must not
+        re-create what was erased."""
+        when = await self.space_deleted(space)
+        if when is not None:
+            raise NotFound(f"space {space!r} was deleted at {when}")
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        """When the space was deleted, or None while it lives. A store
+        that cannot record a deletion has never deleted one."""
+        check_space(space)
+        deleted = getattr(self.documents, "space_deleted", None)
+        return await deleted(space) if callable(deleted) else None
+
+    async def _space_receipt(self, space: str) -> SpaceReceipt:
+        counts = await self.documents.counts(space)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        links: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                links.add(link.link_id)
+        released, kept = await self.blobs.release_space(space, preview=True)
+        return SpaceReceipt(
+            space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts), links=len(links),
+            tombstones=len(await self.documents.list_tombstones(space)),
+            events=(await self.events.purge(space, preview=True)) if self.events is not None else 0,
+            attachments_released=released, attachments_kept=kept,
+        )
+
+    async def space_impact(self, space: str) -> SpaceReceipt:
+        """What deleting the space would take with it, with nothing removed."""
+        check_space(space)
+        await self._living(space)
+        return await self._space_receipt(space)
+
+    async def delete_space(self, space: str) -> SpaceReceipt:
+        """Remove everything the space holds, in order: attachment holds
+        (bytes only when no other space holds them), the records of the
+        space with their vectors, then the event trail; mark the space
+        deleted so no write re-creates it. Returns the receipt
+        ``space_impact`` would have shown, with the counts of the deed."""
+        check_space(space)
+        await self._living(space)
+        if not callable(getattr(self.documents, "delete_space", None)):
+            raise InvalidInput("this document store does not implement delete-space")
+        preview = await self._space_receipt(space)
+        deleted_at = self.clock()
+        released, kept = await self.blobs.release_space(space)
+        gone = await self.documents.delete_space(space, deleted_at)
+        sweep = getattr(self.vectors, "delete_space", None)
+        if sweep is not None:
+            await sweep(space)
+        else:
+            await self.vectors.delete(list(gone.chunk_ids))
+        events = (await self.events.purge(space)) if self.events is not None else 0
+        return preview.model_copy(update={
+            "episodes": gone.episodes, "chunks": len(gone.chunk_ids), "facts": gone.facts, "links": gone.links,
+            "tombstones": gone.tombstones, "events": events, "attachments_released": released,
+            "attachments_kept": kept, "deleted_at": deleted_at,
+        })
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
-        found = await self.documents.get_episode(space, episode_id)
-        if found is None:
-            raise NotFound(f"episode {episode_id} not found in {space!r}")
+        found = await self._episode_or_gone(space, episode_id)
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
 
@@ -929,6 +1211,14 @@ class MemoryEngine:
                 "valid_until": f.valid_until, "closed_reason": f.closed_reason, "excluded_reason": f.excluded_reason,
                 "source_episode_id": f.source_episode_id, "superseded_by": f.superseded_by,
             }))
+        # The typed relations among the claims drawn, each once.
+        drawn = set()
+        for f in wanted:
+            for link in await self.documents.fact_links(space, f.fact_id):
+                ends = (f"claim:{link.from_fact}", f"claim:{link.to_fact}")
+                if link.link_id not in drawn and ends[0] in g.nodes and ends[1] in g.nodes:
+                    drawn.add(link.link_id)
+                    g.link(ends[0], ends[1], link.kind, source_episode_id=link.source_episode_id)
         for e in agent_events:
             G.add_agent_event(g, e)
         for e in recall_events:
@@ -1000,6 +1290,130 @@ class MemoryEngine:
     # -- facts ------------------------------------------------------------
 
     async def assert_fact(
+        self,
+        space: str,
+        subject: str,
+        predicate: str,
+        object: str,
+        valid_from: Optional[str] = None,
+        confidence: float = 1.0,
+        source_episode_id: Optional[int] = None,
+        origin: str = "stated",
+        proposed: bool = False,
+        quote: Optional[str] = None,
+        extends: Optional[int] = None,
+        derived_from: Sequence[int] = (),
+    ) -> Fact:
+        """Record that ``subject predicate object`` holds from ``valid_from``;
+        see ``_assert_placed`` for how it is placed among the ledger facts.
+
+        ``extends`` names a fact this one adds detail to: both stay as they
+        are and a link records the relation, so an extension may not share
+        the extended fact's subject and predicate (that would supersede it;
+        assert an update instead). ``derived_from`` names the ledger facts
+        this one was inferred from; the claim is stored as ``inferred`` and
+        a link records each premise. Both are checked before anything is
+        written: an unknown target, one in another space, or one that is
+        only proposed or declined refuses the whole assertion."""
+        await self._living(space)
+        check_space(space)
+        premises = [int(f) for f in derived_from]
+        if premises:
+            if origin == "stated":
+                origin = "inferred"
+            elif origin != "inferred":
+                raise InvalidInput("a derived claim is inferred; it cannot claim another origin")
+        targets = {}
+        for target_id in ([extends] if extends is not None else []) + premises:
+            target = await self.documents.get_fact(space, target_id)
+            if target is None:
+                raise NotFound(f"fact {target_id} not found in {space!r}")
+            if not target.in_ledger:
+                raise InvalidInput(f"fact {target_id} is {target.status}; only a held or closed fact can be built on")
+            targets[target_id] = target
+        if extends is not None and (targets[extends].subject, targets[extends].predicate) == (subject, predicate):
+            raise InvalidInput("an extension cannot supersede what it extends; assert an update instead")
+        fact = await self._assert_placed(space, subject, predicate, object, valid_from=valid_from, confidence=confidence,
+                                         source_episode_id=source_episode_id, origin=origin, proposed=proposed, quote=quote)
+        if extends is not None:
+            await self.link_facts(space, fact.fact_id, extends, "extends")
+        for premise in premises:
+            await self.link_facts(space, fact.fact_id, premise, "derived_from")
+        return fact
+
+    async def link_facts(
+        self, space: str, from_fact: int, to_fact: int, kind: str, *,
+        source_episode_id: Optional[int] = None, quote: Optional[str] = None,
+    ) -> FactLink:
+        """Relate two facts of one space: ``from_fact`` extends / is derived
+        from / contradicts / supports ``to_fact``. The same link twice is one
+        link. A quote must sit in the source episode it names. A dependency
+        (extends, derived_from) that would close a cycle is refused."""
+        await self._living(space)
+        check_space(space)
+        if kind not in LINK_KINDS:
+            raise InvalidInput(f"link kind must be one of {LINK_KINDS}, got {kind!r}")
+        if from_fact == to_fact:
+            raise InvalidInput("a fact cannot be linked to itself")
+        for fact_id in (from_fact, to_fact):
+            if await self.documents.get_fact(space, fact_id) is None:
+                raise NotFound(f"fact {fact_id} not found in {space!r}")
+        if quote is not None:
+            if not quote.strip() or len(quote) > 2000:
+                raise InvalidInput("quote must be 1..2000 characters when given")
+            if source_episode_id is None:
+                raise InvalidInput("a quote needs a source_episode_id to be checked against")
+            episode = await self.documents.get_episode(space, source_episode_id)
+            if episode is None:
+                raise NotFound(f"source episode {source_episode_id} not found in {space!r}")
+            if quote not in episode.content:
+                raise InvalidInput(f"quote is not a substring of episode {source_episode_id}; the link was not stored")
+        for existing in await self.documents.fact_links(space, from_fact):
+            if (existing.from_fact, existing.to_fact, existing.kind) == (from_fact, to_fact, kind):
+                return existing
+        if kind in DEPENDENCY_KINDS and await self._depends_on(space, to_fact, from_fact):
+            raise InvalidInput(f"fact {from_fact} cannot {kind.replace('_', ' ')} fact {to_fact}: that would close a dependency cycle")
+        link = await self.documents.insert_fact_link(NewFactLink(
+            space=space, from_fact=from_fact, to_fact=to_fact, kind=kind, created_at=self.clock(),
+            source_episode_id=source_episode_id, quote=quote,
+        ))
+        await self.documents.bump_revision(space)
+        await self._emit(space, "fact_link", {"link_id": link.link_id, "from_fact": from_fact, "to_fact": to_fact,
+                                              "kind": kind, "source_episode_id": source_episode_id})
+        return link
+
+    async def fact(self, space: str, fact_id: int) -> Fact:
+        """One fact of the space, whatever its status."""
+        check_space(space)
+        found = await self.documents.get_fact(space, fact_id)
+        if found is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        return found
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        """Every link naming the fact at either end, oldest first."""
+        check_space(space)
+        if await self.documents.get_fact(space, fact_id) is None:
+            raise NotFound(f"fact {fact_id} not found in {space!r}")
+        return await self.documents.fact_links(space, fact_id)
+
+    async def _depends_on(self, space: str, start: int, target: int) -> bool:
+        """Whether ``start`` reaches ``target`` along dependency links."""
+        seen, frontier = {start}, [start]
+        while frontier:
+            fact_id = frontier.pop()
+            for link in await self.documents.fact_links(space, fact_id):
+                if link.from_fact != fact_id or link.kind not in DEPENDENCY_KINDS or link.to_fact in seen:
+                    continue
+                if link.to_fact == target:
+                    return True
+                seen.add(link.to_fact)
+                frontier.append(link.to_fact)
+            if len(seen) > 10_000:
+                raise InvalidInput("dependency chain too long to check")
+        return False
+
+    async def _assert_placed(
         self,
         space: str,
         subject: str,
@@ -1341,17 +1755,30 @@ class MemoryEngine:
     async def profile(self, space: str, limit: int = 10) -> Profile:
         check_space(space)
         limit = max(1, min(limit, 50))
-        active = [f for f in await self.documents.list_facts(space, include_closed=False) if f.status == "active" and not f.excluded]
+        now = self.clock()
+        active = [f for f in await self.documents.list_facts(space, include_closed=False)
+                  if f.status == "active" and not f.excluded
+                  and f.valid_from <= now and (f.valid_until is None or f.valid_until > now)]
         active.sort(key=lambda f: (-f.confidence, f.fact_id))
-        recent = await self.documents.recent_episodes(space, limit)
+        recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
+                  for e in await self.documents.recent_episodes(space, limit)]
         return Profile(
             static_facts=active[:limit],
-            dynamic=[e.content[:200] for e in recent],
+            dynamic=[r.excerpt for r in recent],
+            recent=recent,
         )
 
     async def tags(self, space: str) -> dict[str, int]:
         check_space(space)
         return dict(sorted((await self.documents.counts(space)).tags.items()))
+
+    async def pending_derivation(self, space: str) -> int:
+        """Groups of active claims a derivation pass has not seen at their
+        current membership. In memory only: a new process starts at zero
+        seen, sends every group once, and restates rather than repeats."""
+        check_space(space)
+        return sum(1 for g in derivation_groups(await self.facts(space))
+                   if (space, frozenset(f.fact_id for f in g)) not in self._derive_seen)
 
     async def pending_distillation(self, space: str) -> int:
         """Episodes no claim cites yet. The same definition the distiller
@@ -1362,6 +1789,12 @@ class MemoryEngine:
             return 0
         referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
         return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
+
+    async def cited_episode_ids(self, space: str) -> set[int]:
+        """The episodes some claim cites, whatever the claim's status."""
+        check_space(space)
+        return {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)
+                if f.source_episode_id is not None}
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
                           limit: int = 25, kind: Optional[str] = None) -> SourcePage:
@@ -1458,10 +1891,19 @@ class MemoryEngine:
                 "metadata": dict(episode.metadata),
                 "created_at": episode.created_at,
             }
-        for fact in await self.documents.list_facts(space, include_closed=True):
+        facts = await self.documents.list_facts(space, include_closed=True)
+        for fact in facts:
             yield {"type": "fact", **fact.model_dump(exclude={"space"})}
+        # A relation is part of the ledger's history, so it moves with it;
+        # each link is read from both ends and written once.
+        seen: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.link_id not in seen:
+                    seen.add(link.link_id)
+                    yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
 
-    async def import_records(self, space: str, records: Iterable[Mapping]) -> ImportSummary:
+    async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
         """Load an export. Episodes go through the normal ingest, so they
         are re-chunked, re-embedded and deduplicated; facts are stored as
         they were, closed ones included, because the ledger's history is
@@ -1474,18 +1916,29 @@ class MemoryEngine:
         there next. A keyed identity (dedup_key) has no content to derive
         from and is passed through as the source made it; it keeps
         deduplicating a same-space move and not a renamed one."""
+        await self._living(space)
         check_space(space)
         summary = ImportSummary()
         episodes: list[Record] = []
         source_ids: list[Optional[int]] = []
         facts: list[Mapping] = []
+        links: list[Mapping] = []
         for record in records:
             kind = record.get("type", "episode")
             if kind == "episode":
-                episodes.append(_rederived(Record.from_dict(record), record.get("space"), space))
+                episode = _rederived(Record.from_dict(record), record.get("space"), space)
+                # Forgetting was a decision; an archive that carries the
+                # forgotten content does not undo it unless told to.
+                digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
+                if not resurrect and await self.documents.tombstone_by_hash(space, digest) is not None:
+                    summary.tombstoned += 1
+                    continue
+                episodes.append(episode)
                 source_ids.append(record.get("episode_id"))
             elif kind == "fact":
                 facts.append(record)
+            elif kind == "fact_link":
+                links.append(record)
             else:
                 raise InvalidInput(f"unknown record type {kind!r}")
         # Ids are store-local (spec 3.1). Provenance in the dump names the
@@ -1498,7 +1951,10 @@ class MemoryEngine:
             summary.deduplicated += 1 if added.deduplicated else 0
             if old_id is not None:
                 id_map[int(old_id)] = added.episode_id
-        existing = {_fact_identity(f) for f in await self.documents.list_facts(space, include_closed=True)}
+        existing = {_fact_identity(f): f.fact_id for f in await self.documents.list_facts(space, include_closed=True)}
+        # Fact ids are store-local too: a link's ends are remapped through
+        # the ids this import produced or found already present.
+        fact_map: dict[int, int] = {}
         for f in facts:
             source = f.get("source_episode_id")
             new = NewFact(
@@ -1525,11 +1981,36 @@ class MemoryEngine:
             )
             if identity in existing:
                 summary.facts_skipped += 1
+                if f.get("fact_id") is not None:
+                    fact_map[int(f["fact_id"])] = existing[identity]
                 continue
-            existing.add(identity)
-            await self.documents.insert_fact(new)
+            stored = await self.documents.insert_fact(new)
+            existing[identity] = stored.fact_id
+            if f.get("fact_id") is not None:
+                fact_map[int(f["fact_id"])] = stored.fact_id
             summary.facts += 1
-        if summary.facts:
+        for record in links:
+            kind = str(record.get("kind", ""))
+            ends = (fact_map.get(int(record["from_fact"])), fact_map.get(int(record["to_fact"])))
+            if kind not in LINK_KINDS or None in ends or ends[0] == ends[1]:
+                # A link to a fact not in the dump is dropped, not pointed at
+                # an unrelated record; a bad kind is a bad record.
+                summary.links_skipped += 1
+                continue
+            source = record.get("source_episode_id")
+            new_link = NewFactLink(
+                space=space, from_fact=ends[0], to_fact=ends[1], kind=kind,
+                created_at=normalise_time(str(record["created_at"])) if record.get("created_at") else self.clock(),
+                source_episode_id=id_map.get(int(source)) if source is not None else None,
+                quote=record.get("quote"),
+            )
+            already = any((l.to_fact, l.kind) == (ends[1], kind) for l in await self.documents.fact_links(space, ends[0]) if l.from_fact == ends[0])
+            if already:
+                summary.links_skipped += 1
+                continue
+            await self.documents.insert_fact_link(new_link)
+            summary.links += 1
+        if summary.facts or summary.links:
             await self.documents.bump_revision(space)
         return summary
 
@@ -1537,6 +2018,19 @@ class MemoryEngine:
 # -- validation helpers -----------------------------------------------------
 
 
+
+
+def retention_policy(policy: Mapping[str, float]) -> dict[str, float]:
+    """A retention policy: episode kinds to the days they are kept. Only
+    episodes have retention; facts, links and tombstones are not kinds."""
+    clean: dict[str, float] = {}
+    for kind, days in dict(policy or {}).items():
+        if kind not in KINDS:
+            raise InvalidInput(f"retention kind must be one of {KINDS}, got {kind!r}")
+        if isinstance(days, bool) or not isinstance(days, (int, float)) or not math.isfinite(days) or days <= 0:
+            raise InvalidInput(f"retention days for {kind} must be a positive number, got {days!r}")
+        clean[kind] = float(days)
+    return clean
 
 
 def _reason(reason: str) -> str:
@@ -1641,3 +2135,36 @@ def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> s
             raise InvalidInput("dedup_key must be 1..=256 chars")
         return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
     return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()
+
+
+def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
+    """Claims grouped by subject, joined one hop through shared names: a
+    claim whose object is another claim's subject puts both subjects in one
+    group, so "mark works_at acme" and "acme based_in lisbon" meet. Pure;
+    order is by the smallest fact id in each group."""
+    parent: dict[str, str] = {}
+
+    def key(name: str) -> str:
+        return name.strip().casefold()
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    subjects = {key(f.subject) for f in facts}
+    for f in facts:
+        find(key(f.subject))
+        if key(f.object) in subjects:
+            union(key(f.subject), key(f.object))
+    grouped: dict[str, list[Fact]] = {}
+    for f in facts:
+        grouped.setdefault(find(key(f.subject)), []).append(f)
+    return sorted((sorted(g, key=lambda f: f.fact_id) for g in grouped.values()), key=lambda g: g[0].fact_id)

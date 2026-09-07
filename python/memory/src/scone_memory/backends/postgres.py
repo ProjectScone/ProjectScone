@@ -24,8 +24,8 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -95,6 +95,16 @@ def _chunk(row: Mapping) -> Chunk:
     )
 
 
+def _tombstone(row: Mapping) -> Tombstone:
+    return Tombstone(space=row["space"], episode_id=int(row["episode_id"]), content_hash=row["content_hash"],
+                     forgotten_at=row["forgotten_at"], reason=row["reason"])
+
+
+def _fact_link(row: Mapping) -> FactLink:
+    return FactLink(link_id=int(row["id"]), space=row["space"], from_fact=int(row["from_fact"]), to_fact=int(row["to_fact"]),
+                    kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
+
+
 def _fact(row: Mapping) -> Fact:
     return Fact(
         fact_id=row["id"], space=row["space"], subject=row["subject"], predicate=row["predicate"], object=row["object"],
@@ -146,8 +156,17 @@ class PostgresDocumentStore:
         closed_reason TEXT, source_episode_id BIGINT, origin TEXT NOT NULL DEFAULT 'stated', superseded_by BIGINT,
         excluded_reason TEXT, quote TEXT);
     CREATE INDEX IF NOT EXISTS facts_key ON {s}.facts (space, subject, predicate);
+    CREATE TABLE IF NOT EXISTS {s}.fact_links (
+        id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
+        created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
+    CREATE INDEX IF NOT EXISTS fact_links_to ON {s}.fact_links (space, to_fact);
+    CREATE TABLE IF NOT EXISTS {s}.tombstones (
+        space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
+        reason TEXT, PRIMARY KEY (space, episode_id));
+    CREATE INDEX IF NOT EXISTS tombstones_hash ON {s}.tombstones (space, content_hash);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+    CREATE TABLE IF NOT EXISTS {s}.erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
     """
 
     def __init__(self, url: str, schema: str = "scone", pool: Optional[Pool] = None) -> None:
@@ -226,6 +245,29 @@ class PostgresDocumentStore:
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
         row = await self._row(f"SELECT * FROM {self.schema}.episodes WHERE space = %s AND id = %s", (space, episode_id))
         return _episode(row) if row else None
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        s = self.schema
+        chunk_ids = tuple(r["id"] for r in await self._rows(f"SELECT id FROM {s}.chunks WHERE space = %s ORDER BY id", (space,)))
+
+        async def count(table: str) -> int:
+            row = await self._row(f"SELECT count(*) AS n FROM {s}.{table} WHERE space = %s", (space,))
+            return int(row["n"]) if row else 0
+
+        gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
+                            links=await count("fact_links"), tombstones=await count("tombstones"))
+        for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+            await self._rows(f"DELETE FROM {s}.{table} WHERE space = %s RETURNING space", (space,))
+        await self._rows(
+            f"INSERT INTO {s}.erased_spaces (space, erased_at) VALUES (%s, %s)"
+            " ON CONFLICT (space) DO UPDATE SET erased_at = EXCLUDED.erased_at RETURNING space",
+            (space, erased_at),
+        )
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        row = await self._row(f"SELECT erased_at FROM {self.schema}.erased_spaces WHERE space = %s", (space,))
+        return row["erased_at"] if row else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.get_episode(space, episode_id) is None:
@@ -367,6 +409,50 @@ class PostgresDocumentStore:
         )
         return [_fact(r) for r in rows]
 
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        await self._rows(
+            f"INSERT INTO {self.schema}.tombstones (space, episode_id, content_hash, forgotten_at, reason)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (space, episode_id) DO NOTHING RETURNING space",
+            (new.space, new.episode_id, new.content_hash, new.forgotten_at, new.reason),
+        )
+        row = await self._row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (new.space, new.episode_id))
+        return _tombstone(row)
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        row = await self._row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (space, episode_id))
+        return _tombstone(row) if row else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        row = await self._row(
+            f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND content_hash = %s ORDER BY episode_id DESC LIMIT 1",
+            (space, content_hash),
+        )
+        return _tombstone(row) if row else None
+
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        rows = await self._rows(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s ORDER BY episode_id", (space,))
+        return [_tombstone(r) for r in rows]
+
+    async def insert_fact_link(self, new: NewFactLink) -> FactLink:
+        row = await self._row(
+            f"INSERT INTO {self.schema}.fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (space, from_fact, to_fact, kind) DO NOTHING RETURNING *",
+            (new.space, new.from_fact, new.to_fact, new.kind, new.created_at, new.source_episode_id, new.quote),
+        )
+        if row is None:
+            row = await self._row(
+                f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = %s AND to_fact = %s AND kind = %s",
+                (new.space, new.from_fact, new.to_fact, new.kind),
+            )
+        return _fact_link(row)
+
+    async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
+        rows = await self._rows(
+            f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND (from_fact = %s OR to_fact = %s) ORDER BY id",
+            (space, fact_id, fact_id),
+        )
+        return [_fact_link(r) for r in rows]
+
     async def bump_revision(self, space: str) -> int:
         row = await self._row(
             f"INSERT INTO {self.schema}.revisions (space, revision) VALUES (%s, 1)"
@@ -472,6 +558,10 @@ class PostgresVectorIndex:
         async with self.pool.connection() as conn:
             await conn.execute(f"DELETE FROM {self.schema}.vectors WHERE chunk_id = ANY(%s)", ([int(c) for c in chunk_ids],))
 
+    async def delete_space(self, space: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(f"DELETE FROM {self.schema}.vectors WHERE space = %s", (space,))
+
     async def drop(self) -> None:
         if not self.pool.opened:
             return  # the schema went with the store that owned the pool
@@ -562,6 +652,12 @@ class PostgresEventLog:
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
             await self.sweep()
         return Event(event_id=int(rows[0]["id"]), **new.__dict__)
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        if preview:
+            rows = await self._rows(f"SELECT count(*) AS n FROM {self.schema}.events WHERE space = %s", (space,))
+            return int(rows[0]["n"]) if rows else 0
+        return len(await self._rows(f"DELETE FROM {self.schema}.events WHERE space = %s RETURNING id", (space,)))
 
     async def sweep(self) -> int:
         """Delete events older than max_age_days; returns how many."""

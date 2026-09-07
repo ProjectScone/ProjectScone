@@ -1,0 +1,5 @@
+{
+  "_": "Recorded for GET /v1/profile on both engines. Each entry of `recent` has exactly these keys, newest first, in the same order as `dynamic`; `excerpt` equals the matching `dynamic` entry and is at most excerpt_max_chars characters; `episode_id` names the episode the excerpt was cut from and `created_at` is that episode's timestamp. `static_facts` and `dynamic` are unchanged.",
+  "recent_item": ["episode_id", "excerpt", "created_at"],
+  "excerpt_max_chars": 200
+}
