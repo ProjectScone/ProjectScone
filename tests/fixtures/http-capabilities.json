@@ -22,6 +22,7 @@
     "implementation": "python",
     "features": {
       "recall": true,
+      "recall.conditions": true,
       "facts.read": true,
       "facts.review": true,
       "facts.close": true,

@@ -67,4 +67,6 @@ async def test_narrowing_is_on_the_evidence(engine):
     await seeded(engine)
     await engine.recall("default", "deploy runbook", kind="file", since="2024-02-01")
     [event] = await engine.events.query("default", kind="recall", limit=1)
-    assert event.payload["narrow"] == {"kind": "file", "source_prefix": None, "since": "2024-02-01T00:00:00.000Z", "until": None}
+    assert event.payload["narrow"] == {"kind": "file", "source_prefix": None,
+                                       "since": "2024-02-01T00:00:00.000Z", "until": None,
+                                       "conditions": None}
