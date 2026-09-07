@@ -6,11 +6,12 @@ const {once}=require('node:events');
 const path=require('node:path');
 const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
+const {pythonLayout}=require('./python-layout.cjs');
 
 async function fixture(t,{reopened=false,scoped=false,streaming=false}={}){
   const html=process.env.SCONE_CONVERSATIONS_HTML;
   assert.ok(html,'SCONE_CONVERSATIONS_HTML must name the verified isolated webapp artifact');
-  const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(root,'python/scone-memory/.venv/bin/python'),
+  const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(pythonLayout(root).project,'.venv/bin/python'),
     ['-u',path.join(__dirname,'fixtures/conversation-server.py'),html,...(reopened?['--reopened']:[]),...(scoped?['--scoped']:[]),...(streaming?['--streaming']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
   let browser,logs='';server.stderr.on('data',part=>{logs=(logs+part).slice(-6000);});
   const closed=once(server,'close');
@@ -222,7 +223,9 @@ test('the browser pages a native transcript and opens an older original source',
   await page.getByRole('button',{name:'Older messages',exact:true}).click();
   await page.getByText('Archived fixture message 1',{exact:true}).waitFor();
   await page.getByRole('button',{name:`Inspect message episode ${ids[0]}`,exact:true}).click();
-  await page.getByRole('complementary',{name:'Conversation evidence'}).getByText('Archived fixture message 1',{exact:true}).waitFor();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.locator('.source-markdown').getByText('Archived fixture message 1',{exact:true}).waitFor();
+  assert.equal(await evidence.getByLabel('Original source text',{exact:true}).textContent(),'Archived fixture message 1');
   await page.getByRole('button',{name:'Latest messages',exact:true}).click();
   await page.getByText('Archived fixture message 123',{exact:true}).waitFor();
   assert.equal(writes,0,'reading history must not create or submit work');
@@ -277,7 +280,8 @@ test('conversation deep links, public capture and sources work through native Sc
   assert.equal(await messages.locator('article').count(),4);
   await messages.locator('article').first().getByRole('button').click();
   const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
-  await evidence.getByText('How is Juniper calibrated?',{exact:true}).waitFor();
+  await evidence.locator('.source-markdown').getByText('How is Juniper calibrated?',{exact:true}).waitFor();
+  assert.equal(await evidence.getByLabel('Original source text',{exact:true}).textContent(),'How is Juniper calibrated?');
   assert.ok(!(await page.innerText('body')).includes('private-fixture-thought'));
   const headers={authorization:'Bearer conversation-fixture-alpha'};
   const api='/v1/conversations/'+sid;

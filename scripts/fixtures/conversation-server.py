@@ -10,7 +10,8 @@ from tempfile import TemporaryDirectory
 # Optional installed extras can be supplied explicitly in a local test environment.
 if os.environ.get("SCONE_TEST_EXTRA_SITEPACKAGES"):
     sys.path.append(os.environ["SCONE_TEST_EXTRA_SITEPACKAGES"])
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python/scone-memory"))
+# Import the package installed in the selected test interpreter. Forcing the old
+# checkout onto sys.path would conceal broken src-layout or wheel installations.
 
 import httpx
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine

@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import pythonProject from '../../scripts/python-layout.cjs';
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repo = path.resolve(app, '..');
@@ -26,13 +27,15 @@ if (outputIndex !== -1) {
   fs.writeFileSync(path.resolve(output), bytes);
   process.exit(0);
 }
-const targets = ['crates/scone/src/playground.html', 'python/scone-memory/scone_memory/api/playground.html', 'python/scone-memory/scone_memory/api/console.html'];
+// Resolve before writing any target: an incomplete/ambiguous move must not publish
+// Rust's UI and then fail halfway through Python's copies.
+const {source} = pythonProject.pythonLayout(repo);
+const targets = [path.join(repo, 'crates/scone/src/playground.html'), path.join(source, 'api/playground.html'), path.join(source, 'api/console.html')];
 let drift = false;
-for (const target of targets) {
-  const file = path.join(repo, target);
+for (const file of targets) {
   if (process.argv.includes('--check')) {
     if (!fs.existsSync(file) || !fs.readFileSync(file).equals(bytes)) {
-      process.stderr.write('Console build drift: ' + target + '\n'); drift = true;
+      process.stderr.write('Console build drift: ' + path.relative(repo, file) + '\n'); drift = true;
     }
   } else fs.writeFileSync(file, bytes);
 }

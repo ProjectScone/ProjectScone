@@ -216,6 +216,12 @@ The Python console serves the built app directly at `/memory` and `/playground`
 the React Memory page into Python; Rust retains its native root console pending
 independent Memory-page compatibility verification.
 `npm run check:assets` detects drift against that build.
+During the Python directory migration, build tooling accepts either the current
+`python/scone-memory/scone_memory` tree or `python/memory/src/scone_memory`, but
+refuses two project manifests or an incomplete source tree before publishing.
+Native browser tests use that project's installed `.venv`, or the explicitly
+selected `SCONE_TEST_PYTHON` interpreter; they do not force imports from the old
+checkout. An old virtualenv retained for rollback is not another source project.
 The preview is not yet a lossless event replay or a complete host-activity feed.
 
 The Python Memory page includes a subject-grouped **Review inbox** with search,

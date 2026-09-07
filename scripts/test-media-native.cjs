@@ -6,16 +6,17 @@ const {once}=require('node:events');
 const path=require('node:path');
 const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..');
+const {pythonLayout}=require('./python-layout.cjs');
 
 test('stored image bytes survive native recall and render in the real webapp',{timeout:40000},async t=>{
   const html=process.env.SCONE_PLAYGROUND_HTML;
   assert.ok(html,'SCONE_PLAYGROUND_HTML must name a freshly built isolated artifact');
-  const server=spawn(path.join(root,'python/scone-memory/.venv/bin/python'),['-u','-c',String.raw`
+  const server=spawn(process.env.SCONE_TEST_PYTHON||path.join(pythonLayout(root).project,'.venv/bin/python'),['-u','-c',String.raw`
 import asyncio, socket, sys
 from pathlib import Path
 import uvicorn
 from scone_memory import MemoryEngine, HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex
-from scone_memory.events import InMemoryEventLog
+from scone_memory import InMemoryEventLog
 import importlib
 api_module = importlib.import_module('scone_memory.api.app')
 api_module.CONSOLE = Path(sys.argv[1])
@@ -102,8 +103,12 @@ asyncio.run(run())
   await page.getByRole('button',{name:'Add another source',exact:true}).click();
   await page.getByRole('textbox',{name:'Source note',exact:true}).fill('A second screenshot documenting the upload workflow');
   const refreshed=page.waitForRequest(req=>new URL(req.url()).pathname==='/v1/recall'&&new URL(req.url()).searchParams.get('q')==='second screenshot documenting');
+  const duplicateReceipt=page.waitForResponse(response=>new URL(response.url()).pathname==='/v1/episodes'&&response.request().method()==='POST');
   await page.getByRole('button',{name:'Save source',exact:true}).click();
-  await page.getByText(/Identical note text already existed/).waitFor();
+  const duplicateResponse=await duplicateReceipt;
+  assert.equal(duplicateResponse.status(),200);
+  assert.equal((await duplicateResponse.json()).deduplicated,true,'the native save receipt confirms reuse');
+  await page.getByRole('status').getByText(/That episode was reused/).waitFor();
   await refreshed;
   assert.equal(await page.locator('.source-saved h3').innerText(),savedHeading,'note-only duplicate reuses the existing episode');
 });
