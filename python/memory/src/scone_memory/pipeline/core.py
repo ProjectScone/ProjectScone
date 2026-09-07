@@ -82,16 +82,19 @@ class Observer(Protocol):
     async def observed(self, delivery: Delivery) -> None: ...
 
 
-class Emit:
-    """A stage's way to send, bound to the turn it is working on, so
-    anything it produces belongs to that turn and dies with it."""
+class Send:
+    """A stage's way to send, fixed to the stage's own position. What
+    separates the two kinds below is only which turn a frame belongs to."""
 
-    __slots__ = ("_pipeline", "_index", "turn")
+    __slots__ = ("_pipeline", "_index")
 
-    def __init__(self, pipeline: "Pipeline", index: int, turn: int) -> None:
+    def __init__(self, pipeline: "Pipeline", index: int) -> None:
         self._pipeline = pipeline
         self._index = index
-        self.turn = turn
+
+    @property
+    def turn(self) -> int:
+        raise NotImplementedError
 
     async def __call__(self, frame: object) -> None:
         """Send to the next stage."""
@@ -103,29 +106,41 @@ class Emit:
         for index in range(self._index - 1, -1, -1):
             await self._pipeline._deliver(index, frame, self.turn, UP)
 
+    async def interrupt(self) -> int:
+        """Cut off the turn in flight and return the one that follows.
+        The stage nearest the person is the one that knows the person has
+        started talking again, so it has to be able to say so itself."""
+        return await self._pipeline.interrupt()
 
-class Feed:
+
+class Emit(Send):
+    """Bound to the turn the stage was handed, so anything it produces
+    belongs to that turn and dies with it."""
+
+    __slots__ = ("_turn",)
+
+    def __init__(self, pipeline: "Pipeline", index: int, turn: int) -> None:
+        super().__init__(pipeline, index)
+        self._turn = turn
+
+    @property
+    def turn(self) -> int:
+        return self._turn
+
+
+class Feed(Send):
     """A stage's way in when nothing has been handed to it: a source with
     its own task, or a transducer that answers when the far end does.
 
-    Unlike ``Emit``, the turn is read at the moment of sending rather than
-    fixed, because a frame arriving from outside belongs to whatever turn
-    is running when it arrives."""
+    The turn is read at the moment of sending rather than fixed, because a
+    frame arriving from outside belongs to whatever turn is running when
+    it arrives."""
 
-    __slots__ = ("_pipeline", "_index")
+    __slots__ = ()
 
-    def __init__(self, pipeline: "Pipeline", index: int) -> None:
-        self._pipeline = pipeline
-        self._index = index
-
-    async def __call__(self, frame: object) -> None:
-        """Send to the next stage."""
-        await self._pipeline._deliver(self._index + 1, frame, self._pipeline.turn, DOWN)
-
-    async def up(self, frame: object) -> None:
-        """Send back to every stage before this one, nearest first."""
-        for index in range(self._index - 1, -1, -1):
-            await self._pipeline._deliver(index, frame, self._pipeline.turn, UP)
+    @property
+    def turn(self) -> int:
+        return self._pipeline.turn
 
 
 class Pipeline:
@@ -215,11 +230,15 @@ class Pipeline:
         """Put a frame in at the head, as part of the current turn."""
         await self._deliver(0, frame, self.turn, DOWN)
 
-    def interrupt(self) -> int:
+    async def interrupt(self) -> int:
         """Cut off the current turn and return the new one. Work already
         in flight finishes, but nothing it produces is delivered, and a
-        backlog of the old turn is dropped rather than started."""
+        backlog of the old turn is dropped rather than started. Every
+        stage is told which turn it lost, so anything held for it, audio
+        queued to play or a request part-written, can be let go."""
+        cut = self.turn
         self.turn += 1
+        await self._announce(Interrupted(turn=cut))
         return self.turn
 
     async def drain(self) -> None:

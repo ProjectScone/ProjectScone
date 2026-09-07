@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from scone_memory.pipeline import DROPPED, HANDLED, Delivery, Failed, Pipeline, Stage, Started, Stopped
+from scone_memory.pipeline import (DROPPED, HANDLED, Delivery, Failed, Interrupted, Pipeline,
+                                   Stage, Started, Stopped)
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ async def test_an_interruption_drops_the_cut_off_turn_and_the_next_one_runs():
     await pipeline.push(Word("first"))
     await pipeline.push(Word("second"))
     await asyncio.sleep(0.01)
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.push(Word("third"))
     await pipeline.drain()
     assert slow.started == ["first", "third"], "the queued frame of the cut-off turn is never started"
@@ -249,7 +250,7 @@ async def test_the_observer_can_tell_finished_work_from_work_that_was_cut_off():
     await pipeline.push(Word("kept"))
     await pipeline.push(Word("cut"))
     await asyncio.sleep(0.005)
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.drain()
     await pipeline.stop()
 
@@ -386,8 +387,44 @@ async def test_a_stage_with_its_own_frames_sends_them_on_the_turn_of_the_moment(
     pipeline = Pipeline([ear, tail])
     await pipeline.start()
     await ear.feed(Word("one"))
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await ear.feed(Word("two"))
     assert [f.text for f in tail.seen if isinstance(f, Word)] == ["one", "two"]
     assert pipeline.dropped == 0, "nothing was late; the second frame belongs to the second turn"
+    await pipeline.stop()
+
+
+async def test_an_interruption_tells_every_stage_which_turn_was_lost():
+    """A stage holding work for the turn that was cut off, audio queued
+    to play or a request in flight, has to be told, and told which turn,
+    so it throws that away and not the work that replaced it."""
+    first, tail = Collect(), Collect()
+    pipeline = Pipeline([first, tail])
+    await pipeline.start()
+    await pipeline.push(Word("first"))
+    assert await pipeline.interrupt() == 2, "the turn to come is the one returned"
+    for stage in (first, tail):
+        assert [f.turn for f in stage.seen if isinstance(f, Interrupted)] == [1], \
+            "every stage is told once, and the turn named is the one cut off"
+    await pipeline.stop()
+
+
+async def test_a_stage_can_cut_off_the_turn_it_is_in_the_middle_of():
+    """The stage nearest the person is the one that knows the person has
+    started speaking again, so it has to be able to say the turn is over
+    without asking whoever started the run."""
+    tail = Collect()
+
+    class Barge:
+        async def handle(self, frame, emit):
+            if isinstance(frame, Word) and frame.text == "stop":
+                await emit.interrupt()
+                await emit(Word("late"))
+
+    pipeline = Pipeline([Barge(), tail])
+    await pipeline.start()
+    await pipeline.push(Word("stop"))
+    assert not [f for f in tail.seen if isinstance(f, Word)], \
+        "what it sends for the turn it has just cut off does not arrive"
+    assert any(isinstance(f, Interrupted) for f in tail.seen)
     await pipeline.stop()
