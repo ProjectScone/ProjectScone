@@ -8,13 +8,15 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
   let turn=null,posts=0,checks=0;const requested=[],creates=new Map();
   const streams=new Set(),chunks=[];
+  let releaseCapabilities;const capabilityGate=new Promise(resolve=>{releaseCapabilities=resolve;});
+  let releaseList;const listGate=new Promise(resolve=>{releaseList=resolve;});
   const frame=(sequence,text)=>`event: text\nid: ${sequence}\ndata: ${JSON.stringify({sequence,text,provisional:true})}\n\n`;
   function emit(text){chunks.push(text);for(const stream of streams)stream.write(frame(chunks.length,text));}
   function finish(status='completed',availability='available'){
@@ -31,7 +33,11 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     if(!req.url.startsWith('/v1/')){res.setHeader('content-type','text/html');return res.end(html);}
     assert.equal(req.headers.authorization,'Bearer fixture-key');
     if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
-    if(req.url==='/v1/conversations/capabilities')return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped,streaming,text_stream:streaming?{transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256}:null}));
+    if(req.url==='/v1/conversations/capabilities'){
+      if(holdCapabilities)await capabilityGate;
+      if(capStatus!==200){res.statusCode=capStatus;return res.end('{"detail":"unavailable"}');}
+      return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped,streaming,text_stream:streaming?{transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256}:null}));
+    }
     if(streaming&&/\/stream\?after=\d+$/.test(req.url)){
       assert.equal(req.method,'GET');assert.equal(req.headers.accept,'text/event-stream');
       res.setHeader('content-type','text/event-stream');res.flushHeaders();streams.add(res);res.on('close',()=>streams.delete(res));
@@ -46,7 +52,12 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
       assert.equal(data.capture,true);if(creates.has(data.request_id))return res.end(JSON.stringify(creates.get(data.request_id)));
       const value={...sessions[0],session_id:'current',state:'running',revision:2,...(scoped?{recall_scope:data.recall_scope||{}}:{})};creates.set(data.request_id,value);sessions.push(value);saved.current=[];return res.end(JSON.stringify(value));
     }
-    if(req.url.startsWith('/v1/conversations?'))return res.end(JSON.stringify({items:sessions,has_more:false,next_after:null}));
+    if(req.url.startsWith('/v1/conversations?')){
+      if(listFailure){res.statusCode=503;return res.end('{"error":"list unavailable"}');}
+      const response=JSON.stringify({items:sessions,has_more:false,next_after:null});
+      if(holdFirstList){holdFirstList=false;await listGate;}
+      return res.end(response);
+    }
     if(req.url==='/v1/episodes/7')return res.end(JSON.stringify({episode_id:7,content:'Juniper is calibrated with Polaris. <script>not executable</script>',metadata:{},attachments:[]}));
     const match=req.url.match(/^\/v1\/conversations\/([^/]+)(.*)$/);
     if(match){
@@ -78,9 +89,9 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1440,height:1000},reducedMotion:'reduce'});
   page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  t.after(async()=>{await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
+  t.after(async()=>{releaseCapabilities();releaseList();await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
-  return {page,requested,posts:()=>posts,emit,finish,streams,endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
+  return {page,requested,posts:()=>posts,emit,finish,streams,releaseCapabilities,releaseList,recoverService:()=>{capStatus=200;},recoverList:()=>{listFailure=false;},endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
 }
 async function start(page){
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
@@ -89,6 +100,61 @@ async function start(page){
   await page.getByLabel('Save my public messages and replies to this memory space').check();
   await start.click();await page.getByLabel('Message',{exact:true}).waitFor();
 }
+
+for(const mobile of [false,true])test(`missing conversation service explains setup and recovers without writes, mobile=${mobile}`,async t=>{
+  const {page,requested,recoverService,posts}=await fixture(t,{capStatus:404,mobile});
+  await page.getByRole('heading',{name:'Connect a conversation service',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Saved session count').innerText(),'—','unread history is not zero sessions');
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
+  assert.equal(requested.some(p=>p.startsWith('/v1/conversations?')),false);
+  await page.getByText('Service setup details',{exact:true}).click();
+  await page.getByText(/scone-memory serve-conversations --help/).waitFor();
+  assert.equal(await page.getByRole('button',{name:/microphone|start voice/i}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`scone-readiness-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  recoverService();await page.getByRole('button',{name:'Retry service connection',exact:true}).click();
+  await page.getByRole('link',{name:/previous/}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isEnabled(),true);
+  assert.equal(posts(),0);assert.equal(requested.filter(p=>p==='/v1/conversations').length,0);
+});
+
+test('discovery pending is not presented as a ready or empty workspace',async t=>{
+  const {page,releaseCapabilities}=await fixture(t,{holdCapabilities:true});
+  await page.getByRole('heading',{name:'Checking conversation service',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Saved session count').innerText(),'—');
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
+  releaseCapabilities();await page.getByRole('link',{name:/previous/}).waitFor();
+  assert.equal(await page.getByLabel('Saved session count').innerText(),'1');
+});
+
+test('temporary discovery failure offers retry without asserting service absence',async t=>{
+  const {page,recoverService}=await fixture(t,{capStatus:503});
+  await page.getByRole('heading',{name:'Connection check failed',exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Connect a conversation service',exact:true}).count(),0);
+  recoverService();await page.getByRole('button',{name:'Retry service connection',exact:true}).click();
+  await page.getByRole('link',{name:/previous/}).waitFor();
+});
+
+test('session-list failure does not disable text or discard a draft during list retry',async t=>{
+  const {page,requested,recoverList,posts}=await fixture(t,{listFailure:true});
+  await page.getByRole('button',{name:'Retry saved sessions',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isEnabled(),true);
+  await start(page);await page.getByLabel('Message',{exact:true}).fill('Keep this unsent draft');
+  const discoveryReads=requested.filter(p=>p==='/v1/conversations/capabilities').length;
+  recoverList();await page.getByRole('button',{name:'Retry saved sessions',exact:true}).click();
+  await page.getByRole('link',{name:/previous/}).waitFor();
+  assert.equal(await page.getByLabel('Message',{exact:true}).inputValue(),'Keep this unsent draft');
+  assert.equal(requested.filter(p=>p==='/v1/conversations/capabilities').length,discoveryReads);
+  assert.equal(posts(),0);
+});
+
+test('a delayed initial session list cannot erase a newly created session',async t=>{
+  const {page,releaseList}=await fixture(t,{holdFirstList:true});
+  await start(page);await page.getByRole('link',{name:/current/}).waitFor();
+  releaseList();await page.getByRole('link',{name:/previous/}).waitFor();
+  assert.equal(await page.getByRole('link',{name:/current/}).count(),1,'late history must merge, not replace current sessions');
+  assert.equal(await page.getByLabel('Message',{exact:true}).isEnabled(),true);
+});
 
 for(const mobile of [false,true])test(`live public chunks stay provisional until a saved receipt, mobile=${mobile}`,async t=>{
   const {page,emit,finish,posts,requested}=await fixture(t,{streaming:true,mobile});await start(page);
@@ -414,6 +480,7 @@ test('unconfigured text keeps saved conversations readable without permitting ne
 test('an unknown conversation contract does not trigger session reads',async t=>{
   const {page,requested}=await fixture(t,{unknown:true});
   await page.getByRole('button',{name:'Retry service connection',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'Conversation service needs an update',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
   assert.equal(requested.some(p=>p.startsWith('/v1/conversations?')),false);
 });
