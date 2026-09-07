@@ -234,3 +234,25 @@ async def test_a_retry_of_a_lost_create_replays_even_after_the_catalog_changed(t
         assert fresh.status_code == 409
         assert fresh.json()["code"] == "persona_selection_stale" and len(fresh.json()["fingerprint"]) == 16
         assert [s["session_id"] for s in (await client.get("/v1/conversations")).json()["items"]] == [sid]
+
+
+async def test_a_retry_of_a_lost_create_replays_even_after_its_persona_left_the_catalog(tmp_path):
+    """Identity first, judgement second: a request id that already made a
+    session replays it even when the persona it named is gone from this
+    process's catalog; only a fresh request id is refused."""
+    engine = await engine_for()
+    first = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=catalog(HELPER), public_text_streaming=True)
+    async with client_for(first) as client:
+        created = await client.post("/v1/conversations", json={"request_id": "lost", "capture": True, "persona": "helper"})
+        sid = created.json()["session_id"]
+    other = {**HELPER, "id": "other", "name": "Other"}
+    without = bind_catalog([Persona.model_validate(other)], registry())
+    second = create_conversation_app(engine, KEYS, tmp_path / "j.db", None, catalog=without, public_text_streaming=True)
+    async with client_for(second) as client:
+        assert (await client.get(f"/v1/conversations/{sid}")).status_code == 200
+        retry = await client.post("/v1/conversations", json={"request_id": "lost", "capture": True, "persona": "helper"})
+        assert retry.status_code == 200 and retry.json()["session_id"] == sid
+        assert retry.json()["persona"]["id"] == "helper" and retry.json()["persona"]["name"] is None
+        fresh = await client.post("/v1/conversations", json={"request_id": "new", "capture": True, "persona": "helper"})
+        assert fresh.status_code == 422 and "helper" in fresh.text
+        assert [s["session_id"] for s in (await client.get("/v1/conversations")).json()["items"]] == [sid]

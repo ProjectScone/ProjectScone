@@ -329,21 +329,32 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if not body.capture:
             raise HTTPException(422, "this runtime requires explicit transcript capture consent")
         scope = RecallScope.from_mapping(body.recall_scope)
+        key = (space, body.request_id)
+        # Identity first, judgement second. A retry of a create that already
+        # made a session replays it whatever this process's catalog says now:
+        # the persona may be gone or changed, and the session still exists.
+        if key in creates:
+            # Deleted sessions keep a process-local retry tombstone. Check it
+            # before journal.create can insert a new row for the deleted key.
+            current = inspect(space, creates[key])
+            journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona)
+            return current
+        already = journal.created(space, body.request_id)
+        if already is not None:
+            journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona)
+            return inspect(space, already)
         chosen = None
         if body.persona is not None:
             chosen = catalog.get(body.persona) if catalog is not None else None
             if chosen is None:
                 raise HTTPException(422, f"persona is not in this host's catalog: {body.persona}")
             if body.persona_fingerprint is not None and body.persona_fingerprint != catalog.fingerprint(body.persona):
-                # The create's identity is its request id: a retry of a create
-                # that already made a session replays it, whatever the catalog
-                # says now. Only a request id with nothing behind it is stale,
-                # and then with a code the client can act on without guessing.
-                if (space, body.request_id) not in creates and journal.created(space, body.request_id) is None:
-                    return JSONResponse({"error": f"persona selection is stale: {body.persona} "
-                                                  f"(current fingerprint {catalog.fingerprint(body.persona)})",
-                                         "code": "persona_selection_stale",
-                                         "fingerprint": catalog.fingerprint(body.persona)}, status_code=409)
+                # Nothing is behind this request id (checked above), so the
+                # refusal proves no write, with a code the client can act on.
+                return JSONResponse({"error": f"persona selection is stale: {body.persona} "
+                                              f"(current fingerprint {catalog.fingerprint(body.persona)})",
+                                     "code": "persona_selection_stale",
+                                     "fingerprint": catalog.fingerprint(body.persona)}, status_code=409)
         elif runtime_factory is None and scoped_runtime_factory is None:
             if catalog is not None and catalog.personas:
                 raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
@@ -352,14 +363,6 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             raise HTTPException(422, "this runtime does not support session recall constraints")
         if body.mode == "voice" and chosen is None:
             raise HTTPException(422, "a voice session needs a persona with transcription and speech choices")
-        key = (space, body.request_id)
-        if key in creates:
-            # Deleted sessions keep a process-local retry tombstone. Check it
-            # before journal.create can insert a new row for the deleted key.
-            current = inspect(space, creates[key])
-            journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona,
-                           persona_fingerprint=catalog.fingerprint(body.persona) if chosen is not None else None)
-            return current
         if len(creates) >= max_sessions:
             raise HTTPException(429, "conversation process capacity reached")
         receipt = journal.create(space, body.request_id, body.mode, recall_scope=scope.as_dict(), persona=body.persona,
