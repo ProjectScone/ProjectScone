@@ -222,6 +222,19 @@ enum FactsCmd {
     },
     /// Show which episodes taught us a fact
     Why { id: i64 },
+    /// Relate one fact to another: <from> extends | derived_from |
+    /// contradicts | supports <to>, with the episode and quote it rests on
+    Link {
+        from: i64,
+        to: i64,
+        kind: String,
+        #[arg(long)]
+        source: Option<i64>,
+        #[arg(long)]
+        quote: Option<String>,
+    },
+    /// Show the relations a fact takes part in, from either end
+    Links { id: i64 },
     /// Close a fact by hand with a reason (never deletes)
     Close {
         id: i64,
@@ -751,6 +764,38 @@ fn run() -> Result<(), String> {
                             p.kind,
                             p.source.as_deref().unwrap_or("note"),
                             p.created_at
+                        );
+                    }
+                }
+                FactsCmd::Link {
+                    from,
+                    to,
+                    kind,
+                    source,
+                    quote,
+                } => {
+                    let link = engine
+                        .link_facts(&space, *from, *to, kind, *source, quote.as_deref())
+                        .map_err(|e| e.to_string())?;
+                    println!(
+                        "link {}: fact {} {} fact {}",
+                        link.link_id,
+                        link.from_fact,
+                        link.kind.replace('_', " "),
+                        link.to_fact
+                    );
+                }
+                FactsCmd::Links { id } => {
+                    for link in engine.fact_links(&space, *id).map_err(|e| e.to_string())? {
+                        println!(
+                            "link {}: fact {} {} fact {}{}",
+                            link.link_id,
+                            link.from_fact,
+                            link.kind.replace('_', " "),
+                            link.to_fact,
+                            link.source_episode_id
+                                .map(|e| format!(" (episode {e})"))
+                                .unwrap_or_default()
                         );
                     }
                 }

@@ -71,6 +71,18 @@ CREATE TABLE IF NOT EXISTS fact_provenance (
     episode_id INTEGER NOT NULL REFERENCES episodes(id),
     UNIQUE (fact_id, episode_id)
 );
+CREATE TABLE IF NOT EXISTS fact_links (
+    id                INTEGER PRIMARY KEY,
+    space_id          INTEGER NOT NULL REFERENCES spaces(id),
+    from_fact         INTEGER NOT NULL REFERENCES facts(id),
+    to_fact           INTEGER NOT NULL REFERENCES facts(id),
+    kind              TEXT NOT NULL
+                      CHECK (kind IN ('extends','derived_from','contradicts','supports')),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    source_episode_id INTEGER,
+    quote             TEXT,
+    UNIQUE (space_id, from_fact, to_fact, kind)
+);
 CREATE TABLE IF NOT EXISTS distill_queue (
     id         INTEGER PRIMARY KEY,
     episode_id INTEGER NOT NULL UNIQUE REFERENCES episodes(id),
@@ -221,6 +233,19 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         result?;
         conn.execute(
             "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+            [],
+        )?;
+    }
+    let version: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version.as_str() < "6" {
+        // v6 adds fact_links, created above by the base schema for every
+        // file; the step only records that this build's shape is in place.
+        conn.execute(
+            "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
             [],
         )?;
     }
