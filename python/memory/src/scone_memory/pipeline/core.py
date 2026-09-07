@@ -211,23 +211,38 @@ class Pipeline:
                 await begin()
         await self._announce(Started())
 
-    async def stop(self) -> None:
-        """Announce the end, stop every stage, and let the tasks go."""
+    async def stop(self, *, grace: float = 5.0) -> None:
+        """Announce the end, stop every stage, and let the tasks go.
+
+        Bounded, because the common reason a stage will not finish is
+        that something outside it has gone wrong, which is exactly when
+        shutting down matters. Work in hand gets `grace` seconds; after
+        that the tasks are taken back rather than waited on."""
         if not self._running:
             return
-        self._end(None)
-        await self._announce(Stopped())
-        for stage in reversed(self.stages):
-            end = getattr(stage, "stop", None)
-            if callable(end):
-                await end()
-        for queue in self._queues.values():
-            await queue.put(None)
-        for worker in self._workers:
-            await worker
-        self._workers.clear()
-        self._queues.clear()
         self._running = False
+        self._end(None)
+        try:
+            async with asyncio.timeout(grace):
+                await self._announce(Stopped())
+                for stage in reversed(self.stages):
+                    end = getattr(stage, "stop", None)
+                    if callable(end):
+                        await end()
+                for queue in self._queues.values():
+                    # Waiting for room is right even here: a queue that is
+                    # merely momentarily full empties at once, and one that
+                    # never empties is the case the grace period covers.
+                    await queue.put(None)
+                await asyncio.gather(*self._workers)
+        except TimeoutError:
+            pass
+        finally:
+            for worker in self._workers:
+                worker.cancel()
+            await asyncio.gather(*self._workers, return_exceptions=True)
+            self._workers.clear()
+            self._queues.clear()
 
     @staticmethod
     def _capacity(stage: Stage) -> int:

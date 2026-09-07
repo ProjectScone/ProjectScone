@@ -489,3 +489,26 @@ async def test_a_stage_can_tell_that_the_turn_it_is_working_on_is_over():
     await pipeline.drain()
     assert spoken == ["a"], "it stopped when the turn ended instead of finishing into a drop"
     await pipeline.stop()
+
+
+async def test_stopping_does_not_wait_forever_on_a_stage_that_will_not_finish():
+    """A provider wedged in its own cleanup must not be able to hold the
+    run open. Stopping gives every stage a moment to finish what it has,
+    and then takes the task back, so whoever is shutting down is not
+    stuck behind the one thing that has gone wrong."""
+    reached = asyncio.Event()
+
+    class Wedged:
+        buffered = True
+
+        async def handle(self, frame, emit):
+            if isinstance(frame, Word):
+                reached.set()
+                await asyncio.Event().wait()
+
+    pipeline = Pipeline([Wedged()])
+    await pipeline.start()
+    await pipeline.push(Word("hello"))
+    await asyncio.wait_for(reached.wait(), 1)
+    await asyncio.wait_for(pipeline.stop(grace=0.05), 1)
+    assert pipeline.ended.is_set(), "the run is over even though the stage never let go"
