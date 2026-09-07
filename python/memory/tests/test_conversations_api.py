@@ -144,12 +144,14 @@ async def test_workspace_is_opt_in_and_deep_links_never_disclose_keys(engine, tm
     """Catch absent SPA deep links, an over-broad fallback, or key injection."""
     disabled, _ = configured(engine, tmp_path / "disabled.db")
     async with client_for(disabled) as client:
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one"):
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one",
+                     "/learn", "/learn/how-it-works", "/learn/graph-memory"):
             assert (await client.get(path)).status_code == 404
 
     enabled, _ = configured(engine, tmp_path / "enabled.db", console=True)
     async with client_for(enabled) as client:
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one"):
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one",
+                     "/learn", "/learn/how-it-works", "/learn/graph-memory"):
             response = await client.get(path, headers={"Authorization": ""})
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/html")
@@ -162,6 +164,7 @@ async def test_workspace_is_opt_in_and_deep_links_never_disclose_keys(engine, tm
             assert head.headers["content-length"] == response.headers["content-length"]
         assert (await client.get("/v1/unknown")).status_code == 404
         assert (await client.get("/conversations/session-one/not-a-route")).status_code == 404
+        assert (await client.get("/learn/not-a-page")).status_code == 404, "no catch-all"
         # The mounted memory router can turn a method mismatch into 404; neither
         # may serve the SPA for a write or turn it into a session command.
         assert (await client.post("/conversations")).status_code in {404, 405}

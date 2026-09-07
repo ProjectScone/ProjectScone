@@ -30,7 +30,7 @@ from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
-from .app import PLAYGROUND, create_app, episode_json
+from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -847,7 +847,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
 
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
+        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
     # The mounted app answers /v1/status, so it must know the worker; its own

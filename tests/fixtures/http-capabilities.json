@@ -31,7 +31,8 @@
       "scopes.read": true,
       "status.read": true,
       "episodes.attachments": true,
-      "episodes.list": true
+      "episodes.list": true,
+      "facts.links": true
     }
   }
 }

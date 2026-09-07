@@ -120,6 +120,8 @@ class FeedbackBody(BaseModel):
     note: Optional[str] = None
 
 
+#: The public concept pages the packaged workspace renders without a key.
+LEARN_PAGES = ("/learn", "/learn/how-it-works", "/learn/graph-memory")
 CONSOLE = Path(__file__).with_name("console.html")
 PLAYGROUND = Path(__file__).with_name("playground.html")
 MARK = Path(__file__).with_name("scone-mark.png")
@@ -272,11 +274,13 @@ def create_app(
         async def console_page() -> Response:
             return page_response(console_html if console_html is not None else render_console(), CONSOLE)
 
-        # The packaged workspace also owns the conversation addresses, so a
-        # refresh or a shared link lands on the page even on a host with no
-        # conversation service mounted; the page reads
+        # The packaged workspace also owns the conversation addresses and the
+        # concept pages, so a refresh or a shared link lands on the page even
+        # on a host with no conversation service mounted; the page reads
         # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
-        for path in ("/conversations", "/conversations/{sid}"):
+        # Each address is named: there is no catch-all that would turn a
+        # mistyped /v1 path into HTML.
+        for path in ("/conversations", "/conversations/{sid}", *LEARN_PAGES):
             app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
 
         if PLAYGROUND.exists():

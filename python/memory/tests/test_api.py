@@ -239,7 +239,7 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         canonical = c.get("/memory")
-        for path in ("/conversations", "/conversations/session-one"):
+        for path in ("/conversations", "/conversations/session-one", "/learn", "/learn/how-it-works", "/learn/graph-memory"):
             page = c.get(path)
             assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
             assert page.text == canonical.text, path
@@ -253,8 +253,9 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
         features = c.get("/v1/capabilities", headers={"Authorization": "Bearer solo"}).json()["features"]
         assert not [name for name in features if name.startswith("conversations")], features
     with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
-        for path in ("/conversations", "/conversations/session-one"):
+        for path in ("/conversations", "/conversations/session-one", "/learn", "/learn/how-it-works", "/learn/graph-memory"):
             assert c.get(path).status_code == 404, path
+        assert c.get("/learn/anything-else").status_code == 404, "no catch-all"
 
 
 def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
