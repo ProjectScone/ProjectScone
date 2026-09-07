@@ -381,6 +381,10 @@ class SqliteDocumentStore:
         rows = self.conn.execute("SELECT space, content_hash FROM inflight ORDER BY space, content_hash").fetchall()
         return [(r["space"], r["content_hash"]) for r in rows]
 
+    #: This store applies a metadata filter itself, so the lanes
+    #: do not have to be widened to compensate for it.
+    narrows_metadata = True
+
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:

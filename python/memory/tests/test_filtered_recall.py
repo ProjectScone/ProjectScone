@@ -106,3 +106,39 @@ async def test_a_filter_narrows_within_a_space_and_never_across_one(engine):
 
     assert theirs.episode_id not in {item.episode_id for item in found.items}
     assert len(found.items) == 1
+
+
+async def test_a_store_that_cannot_narrow_is_given_a_wider_window(engine):
+    """Not every store can take the filter. One that cannot would
+    otherwise hand back its best twenty, all of which the filter then
+    rejects, and the search returns nothing while the memory that
+    answers it sits just outside the window. Widening is not free and
+    not unlimited, so the result says which happened."""
+
+    class Blind:
+        """Wraps a store and forgets the one thing it was asked."""
+
+        narrows_metadata = False
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def search_text(self, space, query, limit, filter):
+            from dataclasses import replace
+            return await self._inner.search_text(space, query, limit, replace(filter, conditions=None))
+
+    await crowd(engine)
+    kept = await engine.remember("alpha", "quarterly planning note, the one that shipped",
+                                 metadata={"status": "published"})
+    engine.documents = Blind(engine.documents)
+
+    found = await engine.recall("alpha", "quarterly planning note", limit=5,
+                                conditions={"field": "status", "is": "published"})
+
+    assert [item.episode_id for item in found.items] == [kept.episode_id]
+    events = await engine.events.query("alpha", kind="recall", limit=1)
+    assert events[-1].payload["narrow"]["conditions_in_store"] is False, \
+        "and it says the store could not take the filter, so a short answer can be read"

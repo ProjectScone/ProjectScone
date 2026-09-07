@@ -77,6 +77,10 @@ MAX_LIMIT = 50
 MAX_SOURCE = 1_000
 #: How many candidates each lane contributes before fusion.
 LANE_DEPTH = 4
+#: How much wider each lane looks when the store cannot take the filter
+#: itself. Bounded: post-filtering cannot be made exact by widening, so
+#: this buys a reasonable corpus rather than pretending to buy every one.
+UNFILTERED_DEPTH = 25
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
 
@@ -1040,9 +1044,13 @@ class MemoryEngine:
         from ..retrieval.filters import parse_filter
 
         narrow_by = parse_filter(conditions) if conditions is not None else None
+        # A store that cannot take the filter returns its best few, all of
+        # which the filter may then reject, and the search comes back
+        # empty while the memory that answers it sits outside the window.
+        in_store = narrow_by is None or bool(getattr(self.documents, "narrows_metadata", False))
         narrowing = (kind is not None or source_prefix is not None or since_at is not None
                      or until_at is not None or narrow_by is not None)
-        depth = limit * LANE_DEPTH
+        depth = limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
         degraded: list[str] = []
         started = time.perf_counter()
         latency: dict[str, float] = {}
@@ -1056,7 +1064,8 @@ class MemoryEngine:
             "contextual_embeddings": self.contextual_embeddings,
             "similarity_floor": self.similarity_floor,
             "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
-                       "conditions": dict(conditions) if conditions is not None else None},
+                       "conditions": dict(conditions) if conditions is not None else None,
+                       "conditions_in_store": None if narrow_by is None else in_store},
         }
 
         vector_lane: list[tuple[int, float]] = []
