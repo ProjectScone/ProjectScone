@@ -20,8 +20,8 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact, FactLink
-from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """
@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS fact_links (
     id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL, to_fact INTEGER NOT NULL,
     kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,
     UNIQUE(space, from_fact, to_fact, kind));
+CREATE TABLE IF NOT EXISTS tombstones (
+    space TEXT NOT NULL, episode_id INTEGER NOT NULL, content_hash TEXT NOT NULL,
+    forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id));
 CREATE TABLE IF NOT EXISTS revisions (space TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vectors (
     chunk_id INTEGER PRIMARY KEY, space TEXT NOT NULL, episode_id INTEGER NOT NULL,
@@ -68,7 +71,7 @@ CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 8  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts
+SCHEMA_VERSION = 9  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -83,6 +86,10 @@ STEPS: dict[int, tuple[str, ...]] = {
         "CREATE TABLE IF NOT EXISTS fact_links (id INTEGER PRIMARY KEY, space TEXT NOT NULL, from_fact INTEGER NOT NULL,"
         " to_fact INTEGER NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL, source_episode_id INTEGER, quote TEXT,"
         " UNIQUE(space, from_fact, to_fact, kind))",
+    ),
+    8: (
+        "CREATE TABLE IF NOT EXISTS tombstones (space TEXT NOT NULL, episode_id INTEGER NOT NULL, content_hash TEXT NOT NULL,"
+        " forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id))",
     ),
 }
 
@@ -242,6 +249,11 @@ def _chunk(row: sqlite3.Row) -> Chunk:
         text=row["text"],
         created_at=row["created_at"],
     )
+
+
+def _tombstone(row: sqlite3.Row) -> Tombstone:
+    return Tombstone(space=row["space"], episode_id=row["episode_id"], content_hash=row["content_hash"],
+                     forgotten_at=row["forgotten_at"], reason=row["reason"])
 
 
 def _fact_link(row: sqlite3.Row) -> FactLink:
@@ -461,6 +473,22 @@ class SqliteDocumentStore:
             (space, subject, predicate),
         )
         return [_fact(r) for r in rows]
+
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tombstones (space, episode_id, content_hash, forgotten_at, reason) VALUES (?, ?, ?, ?, ?)",
+            (new.space, new.episode_id, new.content_hash, new.forgotten_at, new.reason),
+        )
+        self.conn.commit()
+        return _tombstone(self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (new.space, new.episode_id)).fetchone())
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (space, episode_id)).fetchone()
+        return _tombstone(row) if row else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND content_hash = ? ORDER BY episode_id DESC", (space, content_hash)).fetchone()
+        return _tombstone(row) if row else None
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         self.conn.execute(

@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 
 from ..observability import metrics
 from ..memory.engine import Record, MemoryEngine
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..core.models import Attachment, Fact, RecallItem
 
 
@@ -241,6 +241,10 @@ def create_app(
     @app.exception_handler(Conflict)
     async def _moved(_: Request, e: Conflict) -> JSONResponse:
         return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
+
+    @app.exception_handler(Gone)
+    async def _gone(_: Request, e: Gone) -> JSONResponse:
+        return JSONResponse({"error": str(e), "forgotten_at": e.forgotten_at}, status_code=410)
 
     @app.exception_handler(NotFound)
     async def _missing(_: Request, e: NotFound) -> JSONResponse:

@@ -160,6 +160,19 @@ class FactLink(BaseModel):
     quote: Optional[str] = None
 
 
+class Tombstone(BaseModel):
+    """The record that an episode existed and was forgotten on purpose:
+    its id, the identity of its content, and when. It outlives the episode
+    so the id keeps meaning something and the decision is not undone by
+    accident."""
+
+    space: str
+    episode_id: int
+    content_hash: str
+    forgotten_at: str
+    reason: Optional[str] = None
+
+
 class ForgetReceipt(BaseModel):
     """What forgetting an episode takes with it and what it leaves. The
     same shape answers the preview and the deed: chunks (and their
@@ -173,6 +186,8 @@ class ForgetReceipt(BaseModel):
     attachments_kept: list[str] = Field(default_factory=list)
     facts_citing: list[int] = Field(default_factory=list)
     links_citing: list[int] = Field(default_factory=list)
+    #: Set once the deed is done; a preview has none.
+    forgotten_at: Optional[str] = None
 
 
 class RecallItem(BaseModel):

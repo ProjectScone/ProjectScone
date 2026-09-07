@@ -108,7 +108,7 @@ def test_cli_round_trip_through_sqlite(tmp_path):
     env2 = {"SCONE_SQLITE_PATH": str(tmp_path / "second.db")}
     out = io.StringIO()
     assert cli.main(["import", "--json"], env=env2, stdin=io.StringIO(dump), out=out) == 0
-    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0, "links": 0, "links_skipped": 0}
+    assert json.loads(out.getvalue()) == {"episodes": 1, "deduplicated": 0, "facts": 1, "facts_skipped": 0, "links": 0, "links_skipped": 0, "tombstoned": 0}
     out = io.StringIO()
     cli.main(["status", "--json"], env=env2, stdin=io.StringIO(), out=out)
     assert json.loads(out.getvalue())["episodes"] == 1
@@ -477,3 +477,20 @@ def test_cli_remember_takes_a_key_and_replaces_on_request(tmp_path):
     assert run("recall", "Porto", "--json")[1].count('"episode_id"') >= 1
     code, text = run("remember", "--replace", stdin="no key")
     assert code == 2
+
+
+def test_cli_import_skips_forgotten_content_unless_resurrected(tmp_path):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    run("remember", stdin="a note to export and forget")
+    _, dump = run("export")
+    run("forget", "1")
+    code, text = run("import", "--json", stdin=dump)
+    assert code == 0 and json.loads(text)["episodes"] == 0 and json.loads(text)["tombstoned"] == 1
+    code, text = run("import", "--resurrect", "--json", stdin=dump)
+    assert code == 0 and json.loads(text)["episodes"] == 1 and json.loads(text)["tombstoned"] == 0

@@ -19,7 +19,7 @@ from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequenc
 
 from ..retrieval import fusion
 from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..retrieval.lexical import tokenize
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
@@ -33,6 +33,7 @@ from ..core.models import (
     Fact,
     FactLink,
     ForgetReceipt,
+    Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
     RecallItem,
@@ -51,6 +52,7 @@ from ..core.ports import (
     NewEvent,
     NewFact,
     NewFactLink,
+    NewTombstone,
     SourcePage,
     TextFilter,
     VectorIndex,
@@ -179,6 +181,8 @@ class ImportSummary:
     #: Relations stored, and those dropped or already present.
     links: int = 0
     links_skipped: int = 0
+    #: Episodes skipped because this space forgot that content on purpose.
+    tombstoned: int = 0
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
@@ -614,13 +618,28 @@ class MemoryEngine:
                 await self.documents.clear_inflight(space, pending.new.content_hash)
             raise
 
+    async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
+        """The episode, or Gone when a tombstone says it was forgotten, or
+        NotFound when the id never meant anything here."""
+        found = await self.documents.get_episode(space, episode_id)
+        if found is not None:
+            return found
+        stone = await self.documents.tombstone(space, episode_id)
+        if stone is not None:
+            raise Gone(f"episode {episode_id} was forgotten on {stone.forgotten_at}", stone.forgotten_at)
+        raise NotFound(f"episode {episode_id} not found in {space!r}")
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        """The record that an episode was forgotten, or None."""
+        check_space(space)
+        return await self.documents.tombstone(space, episode_id)
+
     async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
         """What forgetting the episode would take with it and leave, with
         nothing removed. The claims and links that cite it are reported,
         not closed: a source being gone is a fact about the evidence."""
         check_space(space)
-        if await self.documents.get_episode(space, episode_id) is None:
-            raise NotFound(f"episode {episode_id} not found in {space!r}")
+        await self._episode_or_gone(space, episode_id)
         carried = [a.attachment_id for a in await self.blobs.for_episode(space, episode_id)]
         released = await self.blobs.released_by(space, episode_id)
         facts = await self.documents.list_facts(space, include_closed=True)
@@ -646,12 +665,19 @@ class MemoryEngine:
         started = time.perf_counter()
         try:
             receipt = await self.impact(space, episode_id)
-        except NotFound:
-            await self._emit(space, "forget", {"episode_id": episode_id, "error": "NotFound", "latency_ms": _ms(started)})
+        except NotFound as error:
+            await self._emit(space, "forget", {"episode_id": episode_id, "error": type(error).__name__, "latency_ms": _ms(started)})
             raise
+        episode = await self._episode_or_gone(space, episode_id)
         removed = await self.documents.delete_episode(space, episode_id)
         await self.vectors.delete(removed)
         await self.blobs.unlink(space, episode_id)
+        # The tombstone outlives the episode: the id keeps meaning something
+        # and the decision is not undone by a later import.
+        stone = await self.documents.record_tombstone(NewTombstone(
+            space=space, episode_id=episode_id, content_hash=episode.content_hash, forgotten_at=self.clock(),
+        ))
+        receipt = receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
         await self.documents.bump_revision(space)
         await self._emit(space, "forget", {
             "episode_id": episode_id, "chunks_removed": len(removed),
@@ -663,9 +689,7 @@ class MemoryEngine:
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
-        found = await self.documents.get_episode(space, episode_id)
-        if found is None:
-            raise NotFound(f"episode {episode_id} not found in {space!r}")
+        found = await self._episode_or_gone(space, episode_id)
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
 
@@ -1698,7 +1722,7 @@ class MemoryEngine:
                     seen.add(link.link_id)
                     yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
 
-    async def import_records(self, space: str, records: Iterable[Mapping]) -> ImportSummary:
+    async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
         """Load an export. Episodes go through the normal ingest, so they
         are re-chunked, re-embedded and deduplicated; facts are stored as
         they were, closed ones included, because the ledger's history is
@@ -1720,7 +1744,14 @@ class MemoryEngine:
         for record in records:
             kind = record.get("type", "episode")
             if kind == "episode":
-                episodes.append(_rederived(Record.from_dict(record), record.get("space"), space))
+                episode = _rederived(Record.from_dict(record), record.get("space"), space)
+                # Forgetting was a decision; an archive that carries the
+                # forgotten content does not undo it unless told to.
+                digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
+                if not resurrect and await self.documents.tombstone_by_hash(space, digest) is not None:
+                    summary.tombstoned += 1
+                    continue
+                episodes.append(episode)
                 source_ids.append(record.get("episode_id"))
             elif kind == "fact":
                 facts.append(record)

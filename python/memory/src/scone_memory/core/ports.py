@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Chunk, Episode, Fact, FactLink
+from .models import Chunk, Episode, Fact, FactLink, Tombstone
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,15 @@ class NewFact:
     superseded_by: Optional[int] = None
     excluded_reason: Optional[str] = None
     quote: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NewTombstone:
+    space: str
+    episode_id: int
+    content_hash: str
+    forgotten_at: str
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +174,12 @@ class DocumentStore(Protocol):
     async def update_fact(self, fact: Fact) -> None: ...
     async def get_fact(self, space: str, fact_id: int) -> Optional[Fact]: ...
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]: ...
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        """Remember that an episode existed and was forgotten; the same
+        (space, episode_id) recorded again returns the first record."""
+        ...
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]: ...
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]: ...
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         """Store a link; the same (space, from, to, kind) stored again returns
         the stored link unchanged, so linking is idempotent everywhere."""

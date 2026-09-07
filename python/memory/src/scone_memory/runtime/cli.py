@@ -143,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("export", help="dump the space as JSON lines to stdout")
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
+    p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
     sub.add_parser("serve", help="run the HTTP server (see SCONE_API_KEY, SCONE_HOST, SCONE_PORT; "
                                 "SCONE_CONVERSATIONS_JOURNAL composes the conversation service on the same origin; "
                                 "SCONE_CONVERSATIONS_PERSONAS + SCONE_CONVERSATIONS_REGISTRY add a persona catalog)")
@@ -601,10 +602,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "import":
         raw = read_source(args.file, stdin)
-        summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()])
+        summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()],
+                                              resurrect=args.resurrect)
         emit(summary.__dict__) if args.json else print(
             f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
-            f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)", file=out
+            f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)"
+            + (f"; forgotten here and left so: {summary.tombstoned}" if summary.tombstoned else ""), file=out
         )
         return 0
 

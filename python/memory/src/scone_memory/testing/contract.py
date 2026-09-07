@@ -276,6 +276,7 @@ __all__ = [
     "test_forgetting_returns_a_receipt_and_leaves_claims_standing",
     "test_a_keyed_record_can_be_replaced_and_says_when_it_was_not",
     "test_a_forgotten_episode_id_is_never_given_to_another_episode",
+    "test_a_forgotten_episode_is_known_to_have_existed",
     "test_backfilled_fact_splits_a_previously_closed_interval",
     "test_backfill_preserves_a_manual_closure_and_gap",
     "test_backfill_truncates_manual_interval_without_rewriting_reason",
@@ -331,7 +332,8 @@ async def test_forgetting_returns_a_receipt_and_leaves_claims_standing(engine):
     assert (await engine.attachment("default", alone.attachment_id))[0].attachment_id == alone.attachment_id
 
     receipt = await engine.forget("default", first.episode_id)
-    assert receipt == preview, "the receipt is the preview, done"
+    assert receipt.forgotten_at is not None
+    assert receipt.model_copy(update={"forgotten_at": None}) == preview, "the receipt is the preview, done, and dated"
     with pytest.raises(NotFound):
         await engine.episode("default", first.episode_id)
     with pytest.raises(NotFound):
@@ -394,3 +396,41 @@ async def test_a_forgotten_episode_id_is_never_given_to_another_episode(engine):
     assert second.episode_id != first.episode_id, "an id is used once"
     with pytest.raises(NotFound):
         await engine.episode("default", first.episode_id)
+
+
+async def test_a_forgotten_episode_is_known_to_have_existed(engine):
+    """Forgetting leaves a tombstone: the id answers Gone with the date,
+    not NotFound; the same text remembered again is a new record, because
+    forgetting was a decision; and an archive that carries the forgotten
+    content is skipped on import unless the caller resurrects it, in which
+    case the tombstone still stands beside the new record."""
+    from ..core.errors import Gone
+    from .. import Record
+
+    first = await engine.remember("default", "a note that will be forgotten")
+    dump = [record async for record in engine.export("default")]
+    receipt = await engine.forget("default", first.episode_id)
+    assert receipt.forgotten_at is not None
+    with pytest.raises(Gone) as gone:
+        await engine.episode("default", first.episode_id)
+    assert gone.value.forgotten_at == receipt.forgotten_at
+    with pytest.raises(Gone):
+        await engine.impact("default", first.episode_id)
+    with pytest.raises(Gone):
+        await engine.forget("default", first.episode_id)
+    stone = await engine.tombstone("default", first.episode_id)
+    assert stone.episode_id == first.episode_id and stone.forgotten_at == receipt.forgotten_at
+
+    again = await engine.remember("default", "a note that will be forgotten")
+    assert again.outcome == "accepted" and again.episode_id != first.episode_id, "remembered again is a new decision"
+    await engine.forget("default", again.episode_id)
+
+    skipped = await engine.import_records("default", dump)
+    assert (skipped.episodes, skipped.tombstoned) == (0, 1), "the archive carries what was forgotten here"
+    assert await engine.documents.episode_by_hash("default", dump[0]["content_hash"]) is None
+    back = await engine.import_records("default", dump, resurrect=True)
+    assert (back.episodes, back.tombstoned) == (1, 0)
+    assert (await engine.tombstone("default", first.episode_id)).forgotten_at == receipt.forgotten_at, "resurrection does not erase the decision"
+    with pytest.raises(pytest.raises(Gone).expected_exception if False else Gone):
+        await engine.episode("default", first.episode_id)
+    assert await engine.tombstone("default", 999_999) is None

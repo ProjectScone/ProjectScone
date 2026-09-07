@@ -183,7 +183,8 @@ async def test_identical_public_messages_remain_distinct_and_delete_only_their_s
         assert (await client.delete(first)).status_code == 204
         assert (await client.get(first)).status_code == 404
         for removed in transcripts[0]:
-            assert (await client.get(f"/v1/episodes/{removed['episode_id']}")).status_code == 404
+            gone = await client.get(f"/v1/episodes/{removed['episode_id']}")
+            assert gone.status_code == 410 and gone.json()["forgotten_at"], "deleted with its session: forgotten on purpose, not unknown"
         assert (await client.get(second + "/transcript")).json()["episodes"] == transcripts[1]
         assert (await memory.episode("alpha", manual.episode_id)).content == "Same words"
         assert (await client.get("/v1/conversations/capabilities")).json()["session_deletion"] is True

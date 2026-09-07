@@ -24,8 +24,8 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact, FactLink
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -95,6 +95,11 @@ def _chunk(row: Mapping) -> Chunk:
     )
 
 
+def _tombstone(row: Mapping) -> Tombstone:
+    return Tombstone(space=row["space"], episode_id=int(row["episode_id"]), content_hash=row["content_hash"],
+                     forgotten_at=row["forgotten_at"], reason=row["reason"])
+
+
 def _fact_link(row: Mapping) -> FactLink:
     return FactLink(link_id=int(row["id"]), space=row["space"], from_fact=int(row["from_fact"]), to_fact=int(row["to_fact"]),
                     kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
@@ -155,6 +160,10 @@ class PostgresDocumentStore:
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
         created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
     CREATE INDEX IF NOT EXISTS fact_links_to ON {s}.fact_links (space, to_fact);
+    CREATE TABLE IF NOT EXISTS {s}.tombstones (
+        space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
+        reason TEXT, PRIMARY KEY (space, episode_id));
+    CREATE INDEX IF NOT EXISTS tombstones_hash ON {s}.tombstones (space, content_hash);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
     """
@@ -375,6 +384,26 @@ class PostgresDocumentStore:
             f"SELECT * FROM {self.schema}.facts WHERE space = %s AND subject = %s AND predicate = %s ORDER BY id", (space, subject, predicate)
         )
         return [_fact(r) for r in rows]
+
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        await self._rows(
+            f"INSERT INTO {self.schema}.tombstones (space, episode_id, content_hash, forgotten_at, reason)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (space, episode_id) DO NOTHING RETURNING space",
+            (new.space, new.episode_id, new.content_hash, new.forgotten_at, new.reason),
+        )
+        row = await self._row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (new.space, new.episode_id))
+        return _tombstone(row)
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        row = await self._row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (space, episode_id))
+        return _tombstone(row) if row else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        row = await self._row(
+            f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND content_hash = %s ORDER BY episode_id DESC LIMIT 1",
+            (space, content_hash),
+        )
+        return _tombstone(row) if row else None
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         row = await self._row(

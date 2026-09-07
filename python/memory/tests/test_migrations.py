@@ -26,8 +26,9 @@ def write_v5_file(path):
     conn = sqlite3.connect(path)
     v5_schema = SCHEMA.replace(", superseded_by INTEGER, quote TEXT);", ", superseded_by INTEGER);")
     v5_schema = re.sub(r"CREATE TABLE IF NOT EXISTS fact_links \(.*?\);\n", "", v5_schema, flags=re.S)
-    v5_schema = "\n".join(line for line in v5_schema.splitlines() if "inflight" not in line and "fact_links" not in line)
-    assert "quote" not in v5_schema and "inflight" not in v5_schema and "fact_links" not in v5_schema, "the v5 shape must not carry the new parts"
+    v5_schema = re.sub(r"CREATE TABLE IF NOT EXISTS tombstones \(.*?\);\n", "", v5_schema, flags=re.S)
+    v5_schema = "\n".join(line for line in v5_schema.splitlines() if "inflight" not in line and "fact_links" not in line and "tombstones" not in line)
+    assert "quote" not in v5_schema and "inflight" not in v5_schema and "fact_links" not in v5_schema and "tombstones" not in v5_schema, "the v5 shape must not carry the new parts"
     conn.executescript(v5_schema)
     conn.executescript(SqliteEventLog.SCHEMA)  # the live file holds its event log in the same database
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')")
@@ -68,12 +69,13 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     write_v5_file(path)
     before = snapshot(path)
 
-    store = SqliteDocumentStore(path)  # opening applies every step, 5 -> 6 -> 7 -> 8
-    assert schema_version(store.conn) == SCHEMA_VERSION == 8
+    store = SqliteDocumentStore(path)  # opening applies every step, 5 -> 6 -> 7 -> 8 -> 9
+    assert schema_version(store.conn) == SCHEMA_VERSION == 9
     cols = [r[1] for r in store.conn.execute("PRAGMA table_info(facts)")]
     assert "quote" in cols
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'inflight'").fetchone()[0] == 1
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'fact_links'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'tombstones'").fetchone()[0] == 1
     after = snapshot(path)
     assert after["episodes"] == before["episodes"], "episode rows and ids untouched"
     assert after["facts"] == before["facts"], "fact rows, ids, statuses, reasons untouched"
@@ -99,7 +101,9 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     facts = asyncio.run(store.list_facts("default", include_closed=True))
     assert sorted(f.fact_id for f in facts) == [2, 3] and all(f.quote is None for f in facts)
     again = SqliteDocumentStore(path)  # reopening does nothing further
-    assert schema_version(again.conn) == 8 and not (tmp_path / "live.db.v8.bak").exists()
+    fourth = tmp_path / "live.db.v8.bak"
+    assert fourth.exists() and snapshot(fourth) == before, "and one before the fourth"
+    assert schema_version(again.conn) == 9 and not (tmp_path / "live.db.v9.bak").exists()
 
 
 def test_the_step_is_atomic(tmp_path, monkeypatch):
@@ -161,7 +165,7 @@ def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
 
 
 def test_other_versions_are_still_refused_not_rewritten(tmp_path):
-    for version in ("2", "4", "9"):  # 9 stands for a build newer than this one
+    for version in ("2", "4", "10"):  # 10 stands for a build newer than this one
         path = tmp_path / f"v{version}.db"
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)

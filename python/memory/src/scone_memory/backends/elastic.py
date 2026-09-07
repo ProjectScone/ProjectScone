@@ -27,8 +27,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
-from ..core.models import Chunk, Episode, Fact, FactLink
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -105,6 +105,11 @@ def _chunk(doc: Mapping) -> Chunk:
     )
 
 
+def _tombstone(doc: Mapping) -> Tombstone:
+    return Tombstone(space=doc["space"], episode_id=int(doc["episode_id"]), content_hash=doc["content_hash"],
+                     forgotten_at=doc["forgotten_at"], reason=doc.get("reason"))
+
+
 def _fact_link(doc: Mapping) -> FactLink:
     return FactLink(link_id=int(doc["link_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
                     kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
@@ -161,6 +166,9 @@ FACT_LINK_MAPPINGS = {"properties": {
     "link_id": LONG, "space": KEYWORD, "from_fact": LONG, "to_fact": LONG, "kind": KEYWORD, "created_at": KEYWORD,
     "source_episode_id": LONG, "quote": {"type": "text", "index": False},
 }}
+TOMBSTONE_MAPPINGS = {"properties": {
+    "space": KEYWORD, "episode_id": LONG, "content_hash": KEYWORD, "forgotten_at": KEYWORD, "reason": {"type": "text", "index": False},
+}}
 EVENT_MAPPINGS = {"properties": {
     "event_id": LONG, "ts": KEYWORD, "space": KEYWORD, "kind": KEYWORD, "schema_version": LONG,
     "payload": {"type": "text", "index": False}, "dedup_key": KEYWORD,
@@ -195,6 +203,7 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
         await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
+        await self.shared.ensure_index("tombstones", TOMBSTONE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
         await self.check_schema()
@@ -219,7 +228,7 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "meta", "counters", "vectors", "events", "inflight")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "tombstones", "meta", "counters", "vectors", "events", "inflight")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -422,6 +431,26 @@ class ElasticsearchDocumentStore:
         filters = [{"term": {"space": space}}, {"term": {"subject": subject}}, {"term": {"predicate": predicate}}]
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
+
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        from elasticsearch import ConflictError
+
+        doc_id = f"{new.space}|{new.episode_id}"
+        try:
+            await self.client.index(index=self._idx("tombstones"), id=doc_id, document=dict(new.__dict__),
+                                    op_type="create", refresh=self.shared.refresh)
+        except ConflictError:
+            pass
+        return _tombstone(await self._doc("tombstones", doc_id))
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        doc = await self._doc("tombstones", f"{space}|{episode_id}")
+        return _tombstone(doc) if doc is not None else None
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        query = {"bool": {"filter": [{"term": {"space": space}}, {"term": {"content_hash": content_hash}}]}}
+        hits = await self._search("tombstones", query=query, size=1, sort=[{"episode_id": "desc"}])
+        return _tombstone(hits[0]) if hits else None
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         from elasticsearch import ConflictError

@@ -410,9 +410,9 @@ def test_forgetting_over_http_previews_then_reports_its_impact(client):
     assert preview.json()["facts_citing"] == [fact["fact_id"]] and preview.json()["chunks"] >= 1
     assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 200, "a preview removes nothing"
     gone = client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h)
-    assert gone.status_code == 200 and gone.json()["forgotten"] == episode["episode_id"]
-    assert {k: v for k, v in gone.json().items() if k != "forgotten"} == preview.json()
-    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 404
+    assert gone.status_code == 200 and gone.json()["forgotten"] == episode["episode_id"] and gone.json()["forgotten_at"]
+    assert {k: v for k, v in gone.json().items() if k not in ("forgotten", "forgotten_at")} == {k: v for k, v in preview.json().items() if k != "forgotten_at"}
+    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 410, "forgotten, not unknown"
     assert client.get(f"/v1/facts/{fact['fact_id']}", headers=h).json()["fact"]["status"] == "active", "the claim stands"
 
 
@@ -425,7 +425,7 @@ def test_a_keyed_episode_reports_duplicate_or_updated_over_http(client):
     updated = client.post("/v1/episodes", json={"content": "The office moved to Porto.", "dedup_key": "doc:office", "replace": True}, headers=h).json()
     assert updated["outcome"] == "updated" and updated["episode_id"] != first["episode_id"]
     assert updated["replaced"]["episode_id"] == first["episode_id"] and updated["replaced"]["chunks"] >= 1
-    assert client.get(f"/v1/episodes/{first['episode_id']}", headers=h).status_code == 404
+    assert client.get(f"/v1/episodes/{first['episode_id']}", headers=h).status_code == 410, "replaced is forgotten on purpose"
     plain = client.post("/v1/episodes", json={"content": "no key, no replace"}, headers=h).json()
     assert plain["outcome"] == "accepted"
     assert client.post("/v1/episodes", json={"content": "x", "replace": True}, headers=h).status_code == 422, "replace needs a key"
@@ -460,3 +460,16 @@ def test_a_batch_of_episodes_answers_per_item_and_lands_whole_or_not_at_all(clie
     one_at_a_time = client.post("/v1/episodes/batch", json={"records": [{"content": "y", "dedup_key": "k", "replace": True}]}, headers=h)
     assert one_at_a_time.status_code == 422 and "one record at a time" in one_at_a_time.text
     assert client.post("/v1/episodes/batch", json=body).status_code == 401
+
+
+def test_a_forgotten_episode_answers_gone_with_the_date(client):
+    h = auth()
+    episode = client.post("/v1/episodes", json={"content": "soon gone"}, headers=h).json()
+    gone = client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h).json()
+    assert gone["forgotten_at"]
+    read = client.get(f"/v1/episodes/{episode['episode_id']}", headers=h)
+    assert read.status_code == 410 and read.json()["forgotten_at"] == gone["forgotten_at"] and "forgotten" in read.json()["error"]
+    assert client.get(f"/v1/episodes/{episode['episode_id']}/impact", headers=h).status_code == 410
+    assert client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 410
+    assert client.get("/v1/episodes/999999", headers=h).status_code == 404, "never existed is still 404"
+    assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=auth("key-b")).status_code == 404, "another space learns nothing"

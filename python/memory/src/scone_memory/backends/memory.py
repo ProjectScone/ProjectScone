@@ -15,8 +15,8 @@ from itertools import count
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
-from ..core.models import Chunk, Episode, Fact, FactLink
-from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, SpaceCounts, TextFilter, VectorPoint
+from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 
@@ -29,6 +29,7 @@ class InMemoryDocumentStore:
         self._chunks: dict[int, Chunk] = {}
         self._facts: dict[int, Fact] = {}
         self._links: dict[int, FactLink] = {}
+        self._tombstones: dict[tuple[str, int], Tombstone] = {}
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
         self._fact_ids = count(1)
@@ -168,6 +169,16 @@ class InMemoryDocumentStore:
             for f in self._facts.values()
             if f.space == space and f.subject == subject and f.predicate == predicate
         ]
+
+    async def record_tombstone(self, new: NewTombstone) -> Tombstone:
+        return self._tombstones.setdefault((new.space, new.episode_id), Tombstone(**new.__dict__))
+
+    async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
+        return self._tombstones.get((space, episode_id))
+
+    async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
+        found = [t for (s, _), t in self._tombstones.items() if s == space and t.content_hash == content_hash]
+        return max(found, key=lambda t: t.episode_id) if found else None
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         for link in self._links.values():
