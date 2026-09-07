@@ -61,7 +61,8 @@ class OwnedSession:
 
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
-                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False):
+                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
+                            worker=None, reload_pages=False):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -74,6 +75,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     the native runtime. When configured it takes precedence for every new session.
     public_text_streaming=True requires every runtime to accept an async on_text
     reply keyword delivering public chunks. Defaults off for custom runtimes.
+    worker is a ConsolidationWorker started once the journal is owned and
+    stopped with the service; a mounted memory app's own lifespan never runs,
+    so the service must carry it. reload_pages re-reads the shell per request.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -155,10 +159,17 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                     if not page["has_more"]:
                         break
                     after = page["next_after"]
+            if worker is not None:
+                worker.start()
             yield
         finally:
             begin_shutdown()
             cleanup_errors = []
+            if worker is not None:
+                try:
+                    await worker.stop()
+                except Exception as error:
+                    cleanup_errors.append(error)
             try:
                 if journal is not None:
                     for (space, sid), entry in owned.items():
@@ -193,6 +204,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     # Hosts must notify before draining HTTP tasks, not only at lifespan end:
     # an idle SSE response is itself one of the tasks they would wait for.
     app.state.begin_conversation_shutdown = begin_shutdown
+    app.state.worker = worker
 
     def space_for(request: Request):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
@@ -664,12 +676,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         workspace_html = PLAYGROUND.read_text(encoding="utf-8")
 
         async def workspace_page():
-            return HTMLResponse(workspace_html, headers={
+            body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
+            return HTMLResponse(body, headers={
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
 
         for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}"):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
-    app.mount("/", create_app(engine, keys, console=False))
+    app.mount("/", create_app(engine, keys, console=False, conversations=True))
     return app

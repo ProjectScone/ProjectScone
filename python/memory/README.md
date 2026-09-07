@@ -612,6 +612,23 @@ scone-memory serve-conversations --journal ./conversation-sessions.db --history-
 scone-memory serve-conversations --journal ./conversation-sessions.db --model-factory my_models:create --console
 ```
 
+The same service can ride the memory server instead of a second port. Naming
+a journal composes it onto `serve`'s origin, so `/v1/conversations/*`, the
+memory routes, the packaged pages and the consolidation worker share one
+process; leave it unset and `serve` is the memory-only server it always was:
+
+```sh
+# Composed: same keys, same store, one origin. History-only without a factory.
+SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db scone-memory serve
+SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db SCONE_CONVERSATIONS_MODEL_FACTORY=my_models:create scone-memory serve
+```
+
+On a composed host the pages carry no baked key even with a single configured
+key (the tab asks for one), `GET /v1/capabilities` reports
+`features.conversations: true`, and `GET /v1/conversations/capabilities` says
+whether text is configured. A journal that is the memory database, or a factory
+that does not load, stops `serve` with exit status 2 before it listens.
+
 `my_models:create` must be a synchronous, zero-argument callable returning a
 **fresh native `TextModel` adapter per turn**. Importing the module executes trusted
 Python code; use only operator-controlled modules. The launcher checks the

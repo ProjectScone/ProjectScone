@@ -130,6 +130,7 @@ def create_app(
     console_key: Optional[str] = None,
     worker=None,
     reload_pages: bool = False,
+    conversations: bool = False,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
@@ -137,7 +138,9 @@ def create_app(
     ``worker`` is a ConsolidationWorker started with the app and stopped
     with it; None means no distiller runs on this server. ``reload_pages``
     re-reads the console and playground files on every request, for
-    editing them with the server running; off in normal use."""
+    editing them with the server running; off in normal use. ``conversations``
+    says this app is mounted under a conversation service on the same
+    origin, so the capability manifest may advertise it."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -203,13 +206,18 @@ def create_app(
     @app.get("/v1/capabilities")
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
-        return {"schema_version": 1, "implementation": "python", "features": {
+        features = {
             "recall": True, "facts.read": True, "facts.review": True,
             "facts.close": True, "facts.exclude": True, "facts.include": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
-        }}
+        }
+        if conversations:
+            # Present only when the service is mounted here; its own manifest
+            # at /v1/conversations/capabilities says what it can do.
+            features["conversations"] = True
+        return {"schema_version": 1, "implementation": "python", "features": features}
 
     if console:
         def render_console() -> str:
