@@ -251,6 +251,80 @@ async fn evidence_console_and_plain_server_both_serve_playground() {
 }
 
 #[tokio::test]
+async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = || ServeConfig {
+        keys: vec![SpaceKey {
+            key: "fixture-token".into(),
+            space: "alice".into(),
+        }],
+    };
+    let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let console = scone::serve::console_router(engine, config(), "fixture-token");
+    for path in scone::serve::LEARN_PAGES {
+        for method in ["GET", "HEAD"] {
+            let response = console
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            assert!(
+                response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/html")
+            );
+            if method == "GET" {
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let text = String::from_utf8_lossy(&body);
+                assert!(
+                    !text.contains("fixture-token"),
+                    "a public page carries no configured key: {path}"
+                );
+                assert!(
+                    text.contains("__SCONE_TOKEN__") || !text.contains("SCONE_TOKEN"),
+                    "the bundle is served as packaged"
+                );
+            }
+        }
+    }
+    let stray = console
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/learn/anything-else")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stray.status(), StatusCode::NOT_FOUND, "no catch-all");
+    let plain = scone::serve::router(
+        Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap(),
+        config(),
+    );
+    for path in scone::serve::LEARN_PAGES {
+        let response = plain
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} on the plain server"
+        );
+    }
+}
+
+#[tokio::test]
 async fn evidence_is_scoped_persistent_and_retries_do_not_duplicate() {
     let dir = tempfile::tempdir().unwrap();
     let server = app(dir.path());

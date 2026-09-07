@@ -46,14 +46,34 @@ const PLAYGROUND_HTML: &str = include_str!("playground.html");
 pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router {
     let page = CONSOLE_HTML.replace("__SCONE_TOKEN__", key);
     let playground = PLAYGROUND_HTML.replace("__SCONE_TOKEN__", key);
-    router_with_playground(engine, config, playground).route(
+    let root = page.clone();
+    let mut router = router_with_playground(engine, config, playground).route(
         "/",
         get(move || {
-            let page = page.clone();
+            let page = root.clone();
             async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
         }),
-    )
+    );
+    // The concept pages are public: the same bundle with no key put into
+    // it, so anyone may read them and the configured key never leaves the
+    // console. Each address is named, so a mistyped path never turns into a
+    // page; they are pages, not API, and stay outside the frozen /v1 surface.
+    for path in LEARN_PAGES {
+        router = router.route(
+            path,
+            get(move || async move {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    PLAYGROUND_HTML,
+                )
+            }),
+        );
+    }
+    router
 }
+
+/// The public concept pages the packaged workspace renders.
+pub const LEARN_PAGES: [&str; 3] = ["/learn", "/learn/how-it-works", "/learn/graph-memory"];
 
 pub fn router(engine: Engine, config: ServeConfig) -> Router {
     router_with_playground(engine, config, PLAYGROUND_HTML.to_owned())
