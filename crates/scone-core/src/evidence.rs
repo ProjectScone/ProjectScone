@@ -286,8 +286,16 @@ impl Engine {
         // Read enough UTF-8 bytes for 501 scalar values, including embedded NULs
         // (SQLite's text substr stops at NUL). A cut final codepoint is beyond
         // the first 500 characters and is never included in the preview.
+        // Where consolidation left each source, in the words the API means:
+        // cited (a claim rests on it), parked (the queue gave up on it),
+        // done (visited, nothing to cite), pending (the queue will visit it).
         let mut sql = String::from(
-            "SELECT id,kind,source,created_at,length(CAST(content AS BLOB)),substr(CAST(content AS BLOB),1,2004) FROM episodes WHERE space_id=?",
+            "SELECT id,kind,source,created_at,length(CAST(content AS BLOB)),substr(CAST(content AS BLOB),1,2004),\
+             (SELECT count(*) FROM fact_provenance fp JOIN facts f ON f.id = fp.fact_id \
+              WHERE fp.episode_id = episodes.id AND f.space_id = episodes.space_id),\
+             (SELECT state FROM distill_queue q WHERE q.episode_id = episodes.id),\
+             (SELECT last_error FROM distill_queue q WHERE q.episode_id = episodes.id) \
+             FROM episodes WHERE space_id=?",
         );
         let mut parameters = vec![rusqlite::types::Value::Integer(space.id())];
         if let Some(id) = before {
@@ -304,10 +312,28 @@ impl Engine {
         let mut items = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
             let bytes: Vec<u8> = row.get(5)?;
             let preview = String::from_utf8_lossy(&bytes);
-            Ok(json!({"episode_id":row.get::<_,i64>(0)?,"kind":row.get::<_,String>(1)?,
+            let cited: i64 = row.get(6)?;
+            let queued: Option<String> = row.get(7)?;
+            let last_error: Option<String> = row.get(8)?;
+            let mut item = json!({"episode_id":row.get::<_,i64>(0)?,"kind":row.get::<_,String>(1)?,
                 "source":row.get::<_,Option<String>>(2)?,"created_at":row.get::<_,String>(3)?,
                 "byte_count":row.get::<_,i64>(4)?,"preview":preview.chars().take(500).collect::<String>(),
-                "preview_truncated":preview.chars().count()>500}))
+                "preview_truncated":preview.chars().count()>500});
+            let status = if cited > 0 {
+                "cited"
+            } else {
+                match queued.as_deref() {
+                    Some("failed") => "parked",
+                    Some("done") => "done",
+                    _ => "pending",
+                }
+            };
+            item["status"] = json!(status);
+            if status == "parked" {
+                let reason: String = last_error.unwrap_or_default().chars().take(200).collect();
+                item["parked_reason"] = json!(reason);
+            }
+            Ok(item)
         })?.collect::<std::result::Result<Vec<_>,_>>()?;
         let has_more = items.len() > limit;
         items.truncate(limit);

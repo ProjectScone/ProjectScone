@@ -445,9 +445,26 @@ def create_app(
         if not callable(getattr(engine.documents, "page_episodes", None)):
             return JSONResponse({"error": "this document store does not implement source inventory"}, status_code=501)
         page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind)
+        # Where consolidation left each source, in the words the API means:
+        # cited (a claim rests on it), parked (the distiller gave up on it in
+        # this process), pending (no claim cites it yet; a pass, the worker's
+        # or `distill`'s, visits it). The Rust host says the same words and
+        # adds "done" for a source its queue has visited and found nothing in.
+        cited = await engine.cited_episode_ids(space)
+        distiller = getattr(worker, "distiller", None) if worker is not None else None
+        parked = distiller.parked(space) if distiller is not None and callable(getattr(distiller, "parked", None)) else {}
+
+        def status_of(episode_id: int) -> dict:
+            if episode_id in cited:
+                return {"status": "cited"}
+            if episode_id in parked:
+                return {"status": "parked", "parked_reason": str(parked[episode_id])[:200]}
+            return {"status": "pending"}
+
         return {"items": [{"episode_id": e.episode_id, "kind": e.kind, "source": e.source,
                            "created_at": e.created_at, "byte_count": len(e.content.encode("utf-8")),
-                           "preview": e.content[:500], "preview_truncated": len(e.content) > 500}
+                           "preview": e.content[:500], "preview_truncated": len(e.content) > 500,
+                           **status_of(e.episode_id)}
                           for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
 
     @app.get("/v1/episodes/{episode_id}")

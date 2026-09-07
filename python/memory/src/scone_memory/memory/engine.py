@@ -1585,6 +1585,12 @@ class MemoryEngine:
         referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
         return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
 
+    async def cited_episode_ids(self, space: str) -> set[int]:
+        """The episodes some claim cites, whatever the claim's status."""
+        check_space(space)
+        return {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)
+                if f.source_episode_id is not None}
+
     async def source_page(self, space: str, *, before: Optional[int] = None,
                           limit: int = 25, kind: Optional[str] = None) -> SourcePage:
         """Browse retained sources by descending ID, not relevance or source date.

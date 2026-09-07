@@ -195,7 +195,7 @@ async fn source_inventory_has_literal_unicode_previews_and_byte_counts() {
     assert_eq!(
         page,
         serde_json::json!({"items":[{"episode_id":added["episode_id"],"kind":"file","source":"original.txt",
-        "created_at":"2024-01-01T00:00:00.000Z","byte_count":text.len(),"preview":text.chars().take(500).collect::<String>(),"preview_truncated":true}],
+        "created_at":"2024-01-01T00:00:00.000Z","byte_count":text.len(),"preview":text.chars().take(500).collect::<String>(),"preview_truncated":true,"status":"pending"}],
         "has_more":false,"next_before":null})
     );
 }

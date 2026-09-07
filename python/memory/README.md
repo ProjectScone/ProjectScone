@@ -598,7 +598,12 @@ while following `next_before`.
 
 The response has `items`, `has_more` and nullable `next_before`. Each item contains
 `episode_id`, `kind`, `source`, `created_at`, `byte_count` (UTF-8 stored text),
-`preview` (at most 500 Unicode scalar values), and `preview_truncated`. A preview
+`preview` (at most 500 Unicode scalar values), `preview_truncated`, and `status`:
+`cited` (a claim rests on it), `parked` (the distiller gave up on it in this
+process; `parked_reason` says why), or `pending` (no claim cites it yet; a
+consolidation pass, the worker's or `scone-memory distill`'s, visits it). The
+Rust host uses the same words and adds `done` for a source its queue visited and
+found nothing in. A preview
 is not an original file; retrieve retained text with `GET /v1/episodes/{id}` and
 original media through the separate attachment routes. The bearer key selects
 the space; query/body fields cannot change it. Page limits are 1–100; an invalid
