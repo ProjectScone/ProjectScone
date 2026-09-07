@@ -684,6 +684,11 @@ def create_app(
         g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit)
         return {"evidence": engine.events.name if engine.events else "none", **g.as_dict()}
 
+    @app.get("/v1/doctor")
+    async def get_doctor(space: str = Depends(space_for)) -> dict:
+        """What references what across the stores, read only; see doctor()."""
+        return (await engine.doctor(space)).model_dump()
+
     @app.get("/v1/scopes")
     async def get_scopes(space: str = Depends(space_for)) -> dict:
         return {"scopes": await engine.scopes(space)}

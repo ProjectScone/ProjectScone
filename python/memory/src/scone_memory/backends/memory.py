@@ -180,6 +180,13 @@ class InMemoryDocumentStore:
         found = [t for (s, _), t in self._tombstones.items() if s == space and t.content_hash == content_hash]
         return max(found, key=lambda t: t.episode_id) if found else None
 
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        return sorted((t for (s, _), t in self._tombstones.items() if s == space), key=lambda t: t.episode_id)
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        """(chunk_id, episode_id) for every chunk of the space; for doctor."""
+        return sorted((c.chunk_id, c.episode_id) for c in self._chunks.values() if c.space == space)
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         for link in self._links.values():
             if (link.space, link.from_fact, link.to_fact, link.kind) == (new.space, new.from_fact, new.to_fact, new.kind):
@@ -205,6 +212,10 @@ class InMemoryVectorIndex:
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
         self.dim: Optional[int] = None
+
+    async def ids(self, space: str) -> list[int]:
+        """Every chunk id with a vector in the space; for doctor."""
+        return sorted(p.chunk_id for p in self._points.values() if p.space == space)
 
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:

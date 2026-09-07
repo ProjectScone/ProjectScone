@@ -324,6 +324,9 @@ class MongoDocumentStore:
         doc = await self.tombstones.find_one({"space": space, "content_hash": content_hash}, sort=[("episode_id", -1)])
         return _tombstone(doc) if doc else None
 
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        return [_tombstone(doc) async for doc in self.tombstones.find({"space": space}).sort("episode_id", 1)]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         from pymongo.errors import DuplicateKeyError
 

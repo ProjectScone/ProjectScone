@@ -452,6 +452,11 @@ class ElasticsearchDocumentStore:
         hits = await self._search("tombstones", query=query, size=1, sort=[{"episode_id": "desc"}])
         return _tombstone(hits[0]) if hits else None
 
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        hits = await self._search("tombstones", query={"bool": {"filter": [{"term": {"space": space}}]}},
+                                  size=10_000, sort=[{"episode_id": "asc"}])
+        return [_tombstone(h) for h in hits]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         from elasticsearch import ConflictError
 

@@ -114,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quote", help="an exact substring of that episode supporting the relation")
     p = sub.add_parser("links", help="show the relations a fact takes part in, from either end")
     p.add_argument("fact_id", type=int)
+    sub.add_parser("doctor", help="what references what across the stores, read only: orphans by id, nothing repaired")
     p = sub.add_parser("expire", help="forget episodes older than a retention policy (oldest first, bounded); facts never expire")
     p.add_argument("--keep", action="append", default=[], metavar="KIND=DAYS", required=True,
                    help="keep this kind for this many days by the episode's own time (repeatable)")
@@ -488,6 +489,22 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         link = await engine.link_facts(space, args.from_fact, args.to_fact, args.kind,
                                        source_episode_id=args.source, quote=args.quote)
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
+        return 0
+
+    if args.command == "doctor":
+        report = await engine.doctor(space)
+        if args.json:
+            emit(report.model_dump())
+        else:
+            print(("healthy" if report.healthy else "orphans found") + f": {report.episodes} episode(s), {report.chunks} chunk(s), "
+                  f"{report.facts} fact(s), {report.links} link(s), {report.tombstones} tombstone(s)", file=out)
+            for name in ("chunks_without_episode", "vectors_without_chunk", "facts_citing_forgotten", "facts_citing_unknown",
+                         "links_with_missing_ends", "attachments_unlinked"):
+                found = getattr(report, name)
+                if found:
+                    print(f"  {name}: {', '.join(str(i) for i in found)}", file=out)
+            if report.not_inspected:
+                print(f"  not inspected: {', '.join(report.not_inspected)}", file=out)
         return 0
 
     if args.command == "expire":

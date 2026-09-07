@@ -30,6 +30,12 @@ class BlobStore(Protocol):
     async def get(self, space: str, attachment_id: str) -> tuple[Attachment, bytes]: ...
     async def link(self, space: str, attachment_id: str, episode_id: int) -> None: ...
     async def for_episode(self, space: str, episode_id: int) -> list[Attachment]: ...
+    async def held(self, space: str) -> list[str]:
+        """Every attachment id the space holds, linked or not."""
+        ...
+    async def linked(self, space: str) -> set[str]:
+        """The attachment ids some episode of the space carries."""
+        ...
     async def released_by(self, space: str, episode_id: int) -> list[str]:
         """The attachment ids no other episode of the space carries."""
         ...
@@ -75,6 +81,12 @@ class InMemoryBlobStore:
 
     async def for_episode(self, space: str, episode_id: int) -> list[Attachment]:
         return [self._held[(space, i)] for i in self._links.get((space, episode_id), [])]
+
+    async def held(self, space: str) -> list[str]:
+        return sorted(i for (s, i) in self._held if s == space)
+
+    async def linked(self, space: str) -> set[str]:
+        return {i for (s, _), ids in self._links.items() if s == space for i in ids}
 
     async def released_by(self, space: str, episode_id: int) -> list[str]:
         mine = self._links.get((space, episode_id), [])
@@ -159,6 +171,18 @@ class FileBlobStore:
             if held.exists():
                 found.append(Attachment(**json.loads(held.read_text())))
         return found
+
+    async def held(self, space: str) -> list[str]:
+        folder = self.root / "spaces" / space / "attachments"
+        return sorted(p.stem for p in folder.glob("*.json")) if folder.exists() else []
+
+    async def linked(self, space: str) -> set[str]:
+        folder = self.root / "spaces" / space / "episodes"
+        out: set[str] = set()
+        if folder.exists():
+            for path in folder.glob("*.json"):
+                out.update(json.loads(path.read_text()))
+        return out
 
     async def released_by(self, space: str, episode_id: int) -> list[str]:
         path = self._links(space, episode_id)

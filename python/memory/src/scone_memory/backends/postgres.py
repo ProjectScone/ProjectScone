@@ -405,6 +405,10 @@ class PostgresDocumentStore:
         )
         return _tombstone(row) if row else None
 
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        rows = await self._rows(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s ORDER BY episode_id", (space,))
+        return [_tombstone(r) for r in rows]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         row = await self._row(
             f"INSERT INTO {self.schema}.fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"

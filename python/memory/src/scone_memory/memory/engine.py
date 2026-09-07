@@ -32,6 +32,7 @@ from ..core.models import (
     EpisodeKind,
     Fact,
     FactLink,
+    DoctorReport,
     ExpiryReport,
     ForgetReceipt,
     Tombstone,
@@ -634,6 +635,59 @@ class MemoryEngine:
         """The record that an episode was forgotten, or None."""
         check_space(space)
         return await self.documents.tombstone(space, episode_id)
+
+    async def doctor(self, space: str) -> DoctorReport:
+        """What references what across the space's stores, read only: chunks
+        whose episode is gone, vectors whose chunk is gone, facts citing a
+        forgotten or an unknown episode, links with a missing end, held
+        attachments no episode carries. A store that cannot be walked is
+        named in not_inspected rather than reported clean."""
+        check_space(space)
+        counts = await self.documents.counts(space)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        report = DoctorReport(space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts))
+        episode_ids = {e.episode_id for e in await self.documents.recent_episodes(space, max(counts.episodes, 1))}
+        stones = {t.episode_id for t in await self.documents.list_tombstones(space)}
+        report.tombstones = len(stones)
+        for fact in facts:
+            source = fact.source_episode_id
+            if source is None or source in episode_ids:
+                continue
+            (report.facts_citing_forgotten if source in stones else report.facts_citing_unknown).append(fact.fact_id)
+        fact_ids = {f.fact_id for f in facts}
+        seen: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                if link.link_id in seen:
+                    continue
+                seen.add(link.link_id)
+                if link.from_fact not in fact_ids or link.to_fact not in fact_ids:
+                    report.links_with_missing_ends.append(link.link_id)
+        report.links = len(seen)
+        chunk_index = getattr(self.documents, "chunk_index", None)
+        chunk_ids: Optional[set[int]] = None
+        if callable(chunk_index):
+            pairs = await chunk_index(space)
+            chunk_ids = {chunk_id for chunk_id, _ in pairs}
+            report.chunks_without_episode = sorted(chunk_id for chunk_id, episode_id in pairs if episode_id not in episode_ids)
+        else:
+            report.not_inspected.append("chunks")
+        vector_ids = getattr(self.vectors, "ids", None)
+        if callable(vector_ids) and chunk_ids is not None:
+            report.vectors_without_chunk = sorted(v for v in await vector_ids(space) if v not in chunk_ids)
+        else:
+            report.not_inspected.append("vectors")
+        held = getattr(self.blobs, "held", None)
+        if callable(held):
+            linked = await self.blobs.linked(space)
+            report.attachments_unlinked = [a for a in await held(space) if a not in linked]
+        else:
+            report.not_inspected.append("attachments")
+        report.healthy = not any([
+            report.chunks_without_episode, report.vectors_without_chunk, report.facts_citing_forgotten,
+            report.facts_citing_unknown, report.links_with_missing_ends, report.attachments_unlinked,
+        ])
+        return report
 
     async def expire(self, space: str, policy: Mapping[str, float], *, limit: int = 100,
                      dry_run: bool = False) -> ExpiryReport:

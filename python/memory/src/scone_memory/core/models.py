@@ -190,6 +190,27 @@ class ForgetReceipt(BaseModel):
     forgotten_at: Optional[str] = None
 
 
+class DoctorReport(BaseModel):
+    """What references what across a space's stores, read only. A list is
+    the ids found dangling; None means that store could not be walked and
+    the name is in not_inspected, so silence is never mistaken for health."""
+
+    space: str
+    episodes: int = 0
+    chunks: int = 0
+    facts: int = 0
+    links: int = 0
+    tombstones: Optional[int] = None
+    chunks_without_episode: Optional[list[int]] = None
+    vectors_without_chunk: Optional[list[int]] = None
+    facts_citing_forgotten: list[int] = Field(default_factory=list)
+    facts_citing_unknown: list[int] = Field(default_factory=list)
+    links_with_missing_ends: list[int] = Field(default_factory=list)
+    attachments_unlinked: Optional[list[str]] = None
+    not_inspected: list[str] = Field(default_factory=list)
+    healthy: bool = True
+
+
 class ExpiryReport(BaseModel):
     """What one retention pass did in a space: the policy it applied, the
     episodes it forgot (oldest first, up to the pass's limit) with their

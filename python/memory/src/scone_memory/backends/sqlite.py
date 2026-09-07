@@ -490,6 +490,13 @@ class SqliteDocumentStore:
         row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND content_hash = ? ORDER BY episode_id DESC", (space, content_hash)).fetchone()
         return _tombstone(row) if row else None
 
+    async def list_tombstones(self, space: str) -> list[Tombstone]:
+        return [_tombstone(r) for r in self.conn.execute("SELECT * FROM tombstones WHERE space = ? ORDER BY episode_id", (space,))]
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        """(chunk_id, episode_id) for every chunk of the space; for doctor."""
+        return [(r[0], r[1]) for r in self.conn.execute("SELECT id, episode_id FROM chunks WHERE space = ? ORDER BY id", (space,))]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         self.conn.execute(
             "INSERT OR IGNORE INTO fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
@@ -596,3 +603,7 @@ class SqliteVectorIndex:
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         self.conn.executemany("DELETE FROM vectors WHERE chunk_id = ?", [(c,) for c in chunk_ids])
         self.conn.commit()
+
+    async def ids(self, space: str) -> list[int]:
+        """Every chunk id with a vector in the space; for doctor."""
+        return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
