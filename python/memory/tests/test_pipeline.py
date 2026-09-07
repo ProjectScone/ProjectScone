@@ -409,3 +409,32 @@ def test_cli_recall_narrowing_flags(tmp_path):
     assert got("--source-prefix", "session-") == [3]
     assert got("--until", "2024-01-31") == [1]
     assert got("--since", "2024-03-01") == [3]
+
+
+def test_cli_links_facts_and_reads_them_back(tmp_path, capsys):
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "cli.db")}
+
+    def run(*argv, stdin=""):
+        out = io.StringIO()
+        code = cli.main(list(argv), env=env, stdin=io.StringIO(stdin), out=out)
+        return code, out.getvalue()
+
+    _, text = run("remember", stdin="Acme is headquartered in Lisbon, near the river.")
+    _, works = run("assert", "mark", "works_at", "Acme", "--json")
+    _, based = run("assert", "Acme", "based_in", "Lisbon", "--json")
+    works_id, based_id = json.loads(works)["fact_id"], json.loads(based)["fact_id"]
+    code, text = run("assert", "mark", "works_in", "Lisbon", "--derived-from", str(works_id), "--derived-from", str(based_id), "--json")
+    derived = json.loads(text)
+    assert code == 0 and derived["origin"] == "inferred"
+    code, text = run("assert", "Acme", "office_near", "the river", "--extends", str(based_id), "--json")
+    assert code == 0 and json.loads(text)["status"] == "active"
+    code, text = run("link", str(works_id), str(based_id), "supports", "--source", "1", "--quote", "headquartered in Lisbon")
+    assert code == 0 and f"#{works_id} supports #{based_id}" in text and "episode 1" in text
+    code, text = run("links", str(based_id))
+    assert code == 0
+    assert f"#{derived['fact_id']} derived from #{based_id}" in text and f"#{works_id} supports #{based_id}" in text
+    assert f"office_near" not in text and "extends" in text, "a link line names facts by id and kind, not by restating them"
+    code, text = run("link", str(works_id), str(works_id), "supports")
+    assert code == 2 and "itself" in capsys.readouterr().err
+    code, text = run("links", str(based_id), "--json")
+    assert code == 0 and sorted(l["kind"] for l in json.loads(text)) == ["derived_from", "extends", "supports"]

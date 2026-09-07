@@ -100,6 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confidence", type=float, default=1.0)
     p.add_argument("--origin", choices=["stated", "extracted", "inferred"], default="stated")
     p.add_argument("--propose", action="store_true", help="park it for review instead of entering the ledger")
+    p.add_argument("--extends", type=int, metavar="FACT_ID", help="a fact this one adds detail to; both stay as they are")
+    p.add_argument("--derived-from", type=int, action="append", default=[], metavar="FACT_ID",
+                   help="a ledger fact this one was inferred from (repeatable); the claim is stored as inferred")
+    p = sub.add_parser("link", help="relate one fact to another: FROM extends | derived_from | contradicts | supports TO")
+    p.add_argument("from_fact", type=int)
+    p.add_argument("to_fact", type=int)
+    p.add_argument("kind", choices=["extends", "derived_from", "contradicts", "supports"])
+    p.add_argument("--source", type=int, metavar="EPISODE_ID", help="the episode the relation rests on")
+    p.add_argument("--quote", help="an exact substring of that episode supporting the relation")
+    p = sub.add_parser("links", help="show the relations a fact takes part in, from either end")
+    p.add_argument("fact_id", type=int)
 
     p = sub.add_parser("close", help="close a fact with a reason: it stopped holding")
     p.add_argument("fact_id", type=int)
@@ -176,6 +187,11 @@ def read_source(path: str, stdin) -> str:
         return stdin.read()
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def link_line(link) -> str:
+    where = f"  (episode {link.source_episode_id})" if link.source_episode_id is not None else ""
+    return f"link #{link.link_id}: #{link.from_fact} {link.kind.replace('_', ' ')} #{link.to_fact}{where}"
 
 
 def fact_line(f) -> str:
@@ -442,9 +458,26 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "assert":
         fact = await engine.assert_fact(
             space, args.subject, args.predicate, args.object, valid_from=args.valid_from, confidence=args.confidence,
-            origin=args.origin, proposed=args.propose,
+            origin=args.origin, proposed=args.propose, extends=args.extends, derived_from=args.derived_from,
         )
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)
+        return 0
+
+    if args.command == "link":
+        link = await engine.link_facts(space, args.from_fact, args.to_fact, args.kind,
+                                       source_episode_id=args.source, quote=args.quote)
+        emit(link.model_dump()) if args.json else print(link_line(link), file=out)
+        return 0
+
+    if args.command == "links":
+        links = await engine.fact_links(space, args.fact_id)
+        if args.json:
+            emit([link.model_dump() for link in links])
+        elif not links:
+            print("no links", file=out)
+        else:
+            for link in links:
+                print(link_line(link), file=out)
         return 0
 
     if args.command == "audit-grounding":
