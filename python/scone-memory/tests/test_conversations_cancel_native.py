@@ -45,8 +45,7 @@ class Model:
 
 async def app_with(memory, models, path):
     def factory():
-        model = models.pop(0)
-        return model
+        return models.pop(0)
 
     return create_conversation_app(
         memory, {"alpha-key": "alpha"}, path,
@@ -122,6 +121,10 @@ async def test_a_cancel_the_runtime_cannot_vouch_for_interrupts_the_session_inst
                 break
             await asyncio.sleep(0.01)
         assert (await client.get(url)).json()["state"] == "interrupted"
+        # What this proves is the route's response to a cancel it cannot vouch
+        # for. The runtime's own closure on failed cleanup is proven where it
+        # lives, in test_text_conversation.py; asserting runtime.closed here
+        # would observe the route's cleanup, which closes it either way.
 
         refused = await client.post(url + "/turns", json={"request_id": "two", "text": "second question",
                                                           "expected_revision": session["revision"]})
