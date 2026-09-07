@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
 
+    p = sub.add_parser("jobs", help="recent ingest batches and how far each has got")
+    p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("job", help="one ingest batch: what each record became")
+    p.add_argument("job_id")
+    p = sub.add_parser("cancel-job", help="stop expecting more of a batch; stored records stay stored")
+    p.add_argument("job_id")
     p = sub.add_parser("delete-space", help="delete everything the space holds; --dry-run previews the receipt")
     p.add_argument("--confirm", metavar="SPACE", help="repeat the space name to do it")
     p.add_argument("--dry-run", action="store_true", help="show what would go, and remove nothing")
@@ -208,6 +214,15 @@ def read_source(path: str, stdin) -> str:
         return stdin.read()
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def job_payload(job) -> dict:
+    return {**job.model_dump(), "searchable": job.searchable, "consolidated": job.consolidated, "state": job.state}
+
+
+def job_line(job) -> str:
+    return (f"{job.job_id}  {job.created_at}  {len(job.items)} record(s): "
+            f"{job.searchable} searchable, {job.consolidated} read  [{job.state}]")
 
 
 def space_line(receipt) -> str:
@@ -485,6 +500,23 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"{item.attachment_id}  {item.media_type}  {item.bytes} bytes  {name}", file=out)
             if not episode.attachments:
                 print("no attachments", file=out)
+        return 0
+
+    if args.command in ("jobs", "job", "cancel-job"):
+        if args.command == "jobs":
+            found = await engine.jobs(space, args.limit)
+            if args.json:
+                for job in found:
+                    emit(job_payload(job))
+            elif not found:
+                print("no ingest jobs in this space yet", file=out)
+            else:
+                for job in found:
+                    print(job_line(job), file=out)
+            return 0
+        job = await (engine.cancel_job(space, args.job_id) if args.command == "cancel-job"
+                     else engine.job(space, args.job_id))
+        emit(job_payload(job)) if args.json else print(job_line(job), file=out)
         return 0
 
     if args.command == "delete-space":

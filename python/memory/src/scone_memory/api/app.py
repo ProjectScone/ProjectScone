@@ -155,6 +155,9 @@ class BatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     records: list[EpisodeBody] = Field(min_length=1, max_length=MAX_BATCH_RECORDS)
+    #: The caller's id for this request. Sending it again returns the job
+    #: the first attempt made instead of ingesting the batch a second time.
+    request_id: Optional[str] = Field(default=None, max_length=128)
 
 
 class LinkBody(BaseModel):
@@ -485,6 +488,16 @@ def create_app(
         a time, because it forgets before it stores."""
         if any(r.replace for r in body.records):
             raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
+        if body.request_id:
+            replayed = await engine.job_for_request(space, body.request_id)
+            if replayed is not None:
+                # The batch already landed under this id. Nothing is ingested
+                # again, and the answer says plainly that this is the receipt
+                # of the first attempt rather than a second one.
+                return {"items": [{"episode_id": i.episode_id, "outcome": i.outcome} for i in replayed.items],
+                        "counts": {outcome: sum(1 for i in replayed.items if i.outcome == outcome)
+                                   for outcome in ("accepted", "duplicate", "updated")},
+                        "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
             for r in body.records
@@ -495,7 +508,24 @@ def create_app(
             for attachment_id in dict.fromkeys(record.attachment_ids):
                 await engine.blobs.link(space, attachment_id, item.episode_id)
         counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
-        return {"items": [a.model_dump() for a in added], "counts": counts}
+        job = await engine.record_job(space, added, request_id=body.request_id)
+        return {"items": [a.model_dump() for a in added], "counts": counts, "job": job_json(job)}
+
+    @app.get("/v1/jobs")
+    async def get_jobs(limit: int = 20, space: str = Depends(space_for)) -> dict:
+        """Recent batches, newest first."""
+        return {"jobs": [job_json(job) for job in await engine.jobs(space, limit)]}
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(job_id: str, space: str = Depends(space_for)) -> dict:
+        """One batch: what each record became, and how far it has got."""
+        return job_json(await engine.job(space, job_id))
+
+    @app.post("/v1/jobs/{job_id}/cancel")
+    async def post_job_cancel(job_id: str, space: str = Depends(space_for)) -> dict:
+        """Stop expecting more of this batch. Records already stored stay
+        stored: this abandons work, it does not delete memory."""
+        return job_json(await engine.cancel_job(space, job_id))
 
     @app.get("/v1/episodes")
     async def get_episodes(ids: str, space: str = Depends(space_for)) -> dict:
@@ -922,6 +952,13 @@ def link_json(link) -> dict:
         "link_id": link.link_id, "from_fact": link.from_fact, "to_fact": link.to_fact, "kind": link.kind,
         "created_at": link.created_at, "source_episode_id": link.source_episode_id, "quote": link.quote,
     }
+
+
+def job_json(job) -> dict:
+    """A job as the API reports it: the stored fields, plus the two counts
+    and the state that are read off them."""
+    return {**job.model_dump(), "searchable": job.searchable,
+            "consolidated": job.consolidated, "state": job.state}
 
 
 def fact_json(fact: Fact) -> dict:

@@ -818,8 +818,16 @@ class MemoryEngine:
             already = await self.documents.job_by_request(space, request_id)
             if already is not None:
                 return already
-        records = list(records)
-        added = await self.remember_many(space, records)
+        added = await self.remember_many(space, list(records))
+        return await self.record_job(space, added, request_id=request_id)
+
+    async def record_job(self, space: str, added: Sequence[Added], *,
+                         request_id: Optional[str] = None) -> "IngestJob":
+        """Keep the receipt for records that have just landed. Separate
+        from ingesting them, because a caller may have written the batch
+        its own way and still owes the person a receipt."""
+        check_space(space)
+        self._keeps_jobs()
         when = self.clock()
         items = tuple(
             JobItem(index=index, episode_id=one.episode_id, outcome=one.outcome,
@@ -832,6 +840,12 @@ class MemoryEngine:
             "job_id": job.job_id, "records": len(items), "request_id": request_id,
         })
         return job
+
+    async def job_for_request(self, space: str, request_id: str) -> Optional["IngestJob"]:
+        """The job this request already made, if it made one."""
+        check_space(space)
+        self._keeps_jobs()
+        return await self.documents.job_by_request(space, request_id)
 
     async def job(self, space: str, job_id: str) -> "IngestJob":
         """One batch's receipt."""
