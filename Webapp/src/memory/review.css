@@ -32,7 +32,9 @@
 .memory-page .review-workspace .proposal{padding:18px 20px;gap:12px 18px}
 .review-record{display:flex;gap:12px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:10px;margin-bottom:8px}
 .review-record>span:first-child{text-transform:uppercase;letter-spacing:.045em}
-.review-record .review-grounded,.review-record .review-unchecked{border:1px solid var(--line);padding:2px 6px;border-radius:4px;line-height:1.5}
+.review-record .review-grounded,.review-record .review-unchecked,.review-record .review-inferred{border:1px solid var(--line);padding:2px 6px;border-radius:4px;line-height:1.5}
+.review-record .review-inferred{color:var(--ink);background:var(--surface-2)}
+.review-premise-note{margin:0;max-width:70ch;color:var(--muted);font-size:12px;line-height:1.7}
 .review-record .review-grounded{color:var(--ok);background:var(--accent-soft)}
 .review-claim .triple{line-height:1.65}
 .review-claim-meta{font-size:11px;color:var(--muted);margin-top:7px;line-height:1.6}
@@ -40,8 +42,8 @@
 .memory-page .review-workspace .proposal .decide{align-items:center;align-self:start;padding-top:27px;gap:6px}
 .memory-page .review-workspace .review-decline .decide{padding-top:0}
 .memory-page .review-workspace .proposal .excerpt{padding:0;background:none;margin:0;border-top:1px solid var(--line);border-radius:0;font-size:11px}
-.memory-page .review-workspace .excerpt summary{padding:10px 0 0;font-size:11px;display:list-item}
-.review-workspace .excerpt summary span{color:var(--muted);margin-left:8px}
+.memory-page .review-workspace .excerpt > summary{padding:10px 0 0;font-size:11px;display:list-item}
+.review-workspace .excerpt > summary span{color:var(--muted);margin-left:8px}
 .review-workspace .source-meta{font-size:11px;margin-top:12px;color:var(--muted)}
 .memory-page .review-workspace .review-source{max-height:360px;overflow:auto;background:var(--bg);padding:14px;border-radius:6px;font-size:12px}
 .review-workspace .excerpt p[role=alert]{padding:10px 0;color:var(--warn);white-space:normal}

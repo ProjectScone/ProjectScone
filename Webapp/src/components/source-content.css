@@ -3,24 +3,24 @@
 .source-markdown>:first-child{margin-top:0}
 .source-markdown>:last-child{margin-bottom:0}
 .source-markdown p{margin:.7em 0}
-.source-markdown h3,.source-markdown h4,.source-markdown h5,.source-markdown h6{font-size:1.05em;line-height:1.35;margin:1.3em 0 .5em;color:var(--ink,#252923)}
-.source-markdown strong{font-weight:650;color:var(--ink,#252923)}
+.source-markdown h3,.source-markdown h4,.source-markdown h5,.source-markdown h6{font-size:1.05em;line-height:1.35;margin:1.3em 0 .5em;color:var(--ink)}
+.source-markdown strong{font-weight:650;color:var(--ink)}
 .source-markdown ul,.source-markdown ol{margin:.7em 0;padding-left:1.6em}
 .source-markdown li+li{margin-top:.25em}
-.source-markdown blockquote{margin:1em 0;padding:.3em 1em;border-left:3px solid #aeb7a2;color:#656b5e}
-.source-markdown code,.source-markdown-inline code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em;padding:.13em .35em;background:#e9ece4;border:1px solid #dce1d4;border-radius:4px;box-decoration-break:clone}
-.source-markdown pre{max-width:100%;overflow:auto;white-space:pre;margin:1em 0;padding:14px 16px;border:1px solid #dce1d4;border-radius:8px;background:#f3f4ef;line-height:1.55}
+.source-markdown blockquote{margin:1em 0;padding:.3em 1em;border-left:3px solid var(--line-strong);color:var(--muted)}
+.source-markdown code,.source-markdown-inline code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em;padding:.13em .35em;background:var(--raised);border:1px solid var(--line);border-radius:4px;box-decoration-break:clone}
+.source-markdown pre{max-width:100%;overflow:auto;white-space:pre;margin:1em 0;padding:14px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);line-height:1.55}
 .source-markdown pre code{padding:0;border:0;background:none;white-space:pre;overflow-wrap:normal}
-.source-markdown a{color:#42643d;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
-.source-markdown a:hover{color:#263d22}
-.source-markdown hr{border:0;border-top:1px solid #dce1d4;margin:1.2em 0}
+.source-markdown a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+.source-markdown a:hover{text-decoration-thickness:2px}
+.source-markdown hr{border:0;border-top:1px solid var(--line);margin:1.2em 0}
 .source-table{max-width:100%;overflow:auto;margin:1em 0}
 .source-table table{border-collapse:collapse;min-width:100%;font-size:.93em}
-.source-table th,.source-table td{border:1px solid #dce1d4;padding:8px 12px;text-align:left}
-.source-table th{background:#f0f2eb;font-weight:600}
-.source-image-reference{display:inline-block;color:#737b69;font-size:.9em;border:1px dashed #c4cbb9;border-radius:5px;padding:4px 8px}
-.source-original{margin-top:16px;padding-top:10px;border-top:1px solid #e1e4da;white-space:normal}
-.source-original>summary{cursor:pointer;color:#737869;font-size:12px;font-weight:500;letter-spacing:.01em}
-.source-original>pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:480px;overflow:auto;padding:12px;background:#f3f4ef;border-radius:6px}
-.source-format-limit{font-size:12px;color:#737869}
+.source-table th,.source-table td{border:1px solid var(--line);padding:8px 12px;text-align:left}
+.source-table th{background:var(--raised);font-weight:600}
+.source-image-reference{display:inline-block;color:var(--muted);font-size:.9em;border:1px dashed var(--line-strong);border-radius:5px;padding:4px 8px}
+.source-original{margin-top:16px;padding-top:10px;border-top:1px solid var(--line);white-space:normal}
+.source-original>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:500;letter-spacing:.01em}
+.source-original>pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-height:480px;overflow:auto;padding:12px;background:var(--bg);border-radius:6px}
+.source-format-limit{font-size:12px;color:var(--muted)}
 .source-markdown-inline{white-space:normal;overflow-wrap:anywhere}

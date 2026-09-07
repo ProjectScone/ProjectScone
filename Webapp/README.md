@@ -5,8 +5,8 @@ Work here, not in generated native package HTML copies.
 
 ```sh
 cd Webapp
-npm ci
-npm run dev
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
 Open http://127.0.0.1:5173/memory. Vite supplies React Fast Refresh during development.
@@ -21,10 +21,10 @@ transcripts. If no single key is exposed, the access-key dialog remains availabl
 Keys stay in page memory, never `localStorage` or `VITE_` environment variables.
 
 ```sh
-npm test
-npm run typecheck
-npm run build
-npm run check:assets
+pnpm test
+pnpm typecheck
+pnpm build
+pnpm check:assets
 ```
 
 Production packaging embeds built JS, CSS and the original Scone mark into both
@@ -32,11 +32,16 @@ native playground distributions and the Python Memory console. Node is not requi
 or Python server. `dist/` and `node_modules/` are ignored. The lockfile belongs to
 this app; upstream projects under `../reference/` are ignored reference material.
 
+CI and release workflows rebuild these embedded assets before Rust compilation
+and Python wheel packaging. When building native apps locally from source, run
+`pnpm --dir Webapp build` first. Source-only UI commits do not update an already
+compiled Rust binary; Python's UI reload mode can read freshly packaged files.
+
 To test a backend-dependent UI before publishing it to running native servers:
 
 ```sh
-npm run typecheck
-npm exec vite build
+pnpm typecheck
+pnpm exec vite build
 node scripts/package.mjs --output /private/tmp/scone-preview.html
 ```
 
@@ -90,6 +95,22 @@ literal readback, original images and cross-space denial against a disposable
 native Python service. Neither suite uses the live memory database.
 
 ## Current boundaries
+
+### Three-dimensional evidence map
+
+Depth renders individual records in the current snapshot with deterministic XYZ
+coordinates, a rotation matrix and perspective projection. Drag to orbit,
+Shift-drag to pan, and pinch or Ctrl-scroll to zoom inside the canvas. Focus the canvas and use
+arrow keys to orbit, +/− to zoom, or 0 to reset. Nodes support keyboard inspection;
+this is useful when nearer records obscure a distant one. The X/Y/Z compass and
+wireframe planes describe spatial orientation, not confidence or temporal truth.
+Layout choices change geometry without changing evidence edges. Unattributed
+records and source IDs absent from the snapshot are explicitly identified.
+The 2D view retains its expandable session groups. Depth pages large responses
+at 1,000 individual records and draws at most 4,000 stored links per page; the
+view reports links outside the page or drawing limit. The inspector still shows
+all connections in the loaded response, and selecting an endpoint opens its
+page. This is not a claim that the complete database was loaded.
 
 Source-image previews are implemented for Playground recall, graph source
 inspection, Memory Search and recent-memory results. Select an episode node in

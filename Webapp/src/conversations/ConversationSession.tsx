@@ -4,11 +4,13 @@ import {ConversationEvidence} from './ConversationEvidence';
 import {DeleteConversation} from './DeleteConversation';
 import {RecallScopeSummary} from './RecallScopeControls';
 import {LiveReply} from './LiveReply';
+import {VoiceControls} from './VoiceControls';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
-export function ConversationSession({api,sid,onSession,textConfigured,deletionSupported,cancellationSupported,paginationSupported,streamingSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;streamingSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
+export function ConversationSession({api,sid,onSession,textConfigured,voiceSupported,deletionSupported,cancellationSupported,paginationSupported,streamingSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;voiceSupported:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;streamingSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
+  const [voiceVerified,setVoiceVerified]=useState(false),[audioStopRequested,setAudioStopRequested]=useState(false);
   const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
   const [attempt,setAttempt]=useState(0);
   const [cancelTarget,setCancelTarget]=useState<string|null>(null),[cancelling,setCancelling]=useState(false);
@@ -36,7 +38,12 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
       const isCurrent=()=>!controller.signal.aborted&&generation===commandGeneration.current;
       try{
         const options={signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])};
-        const next=session(await api.request(url,options));
+        let next:Session;
+        try{next=session(await api.request(url,options));}
+        catch(error){if(isCurrent())setVoiceVerified(false);throw error;}
+        // Transcript paging is not an audio authorization failure. Lifecycle checks
+        // still revoke audio immediately, even if the transcript fetch then stalls.
+        if(isCurrent()){setVoiceVerified(true);setCurrent(previous=>previous&&previous.revision>next.revision?previous:next);onSession(next);}
         if(isCurrent()&&next.state!=='running')setLiveTarget(null);
         async function readTranscript(){
           const records=transcript(await api.request(transcriptUrl,options));
@@ -73,7 +80,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
           }
         }else if(!next.active_request_id&&!mutation.current){setLiveTarget(null);setBusy(false);}
       }catch{
-        if(isCurrent()){setLiveTarget(null);setVerified(false);setError('Connection interrupted. Controls are paused until session state is verified.');}
+        if(isCurrent()){setLiveTarget(null);setVerified(false);setError('Connection interrupted. Controls are paused where session state cannot be verified; saved messages may be out of date.');}
       }finally{if(!controller.signal.aborted)timer=setTimeout(refresh,1500);}
     }
     void refresh();return()=>{controller.abort();clearTimeout(timer);};
@@ -83,7 +90,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
     setSaved(null);setVerified(false);setPages(next);
   }
   async function send(){
-    if(!textConfigured||!current||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
+    if(!textConfigured||!current||current.mode==='voice'||!verified||busy||mutation.current||current.state!=='running'||!draft.trim())return;
     if(new TextEncoder().encode(draft).length>32000){setError('Keep messages within 32,000 UTF-8 bytes.');return;}
     commandGeneration.current++;
     const controller=lifetime.current,id=crypto.randomUUID();request.current=id;pendingRequest.current=id;mutation.current=true;setBusy(true);setDelivery('Sending message…');setError('');
@@ -100,6 +107,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
   }
   async function stop(){
     if(!current||!verified||mutation.current||current.state!=='running')return;
+    setAudioStopRequested(true); // Local capture never waits for a remote stop receipt.
     commandGeneration.current++;
     suppressedPreview.current=liveTarget;setLiveTarget(null);
     const controller=lifetime.current;stopId.current??=crypto.randomUUID();mutation.current=true;setBusy(true);
@@ -125,12 +133,18 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
     }
   }
   const terminal=current&&['ended','failed','interrupted'].includes(current.state);
-  return <><section className="conversation-thread" aria-label="Text conversation">
-    <header className="conversation-thread-header"><div><span className="eyebrow">Text session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
+  const voice=current?.mode==='voice';
+  return <><section className="conversation-thread" aria-label={voice?'Voice conversation':'Text conversation'}>
+    <header className="conversation-thread-header"><div><span className="eyebrow">{voice?'Voice':'Text'} session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
       {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
     {current&&<RecallScopeSummary scope={current.recall_scope}/>}
+    {current?.persona!==undefined&&<p className="session-persona" aria-label="Session persona"><span>Persona</span> <strong>{current.persona?(current.persona.current===false?current.persona.id:current.persona.name??current.persona.id):'Server default'}</strong>{current.persona&&<>
+      <small>{!current.persona.fingerprint?'Provider configuration version was not recorded.':current.persona.current===false?'Recorded configuration differs from the current catalog or is unavailable.':'Provider choices match the current catalog.'}</small>
+      {current.persona.fingerprint&&<code title="Recorded provider-choice fingerprint; does not verify instructions or model weights">{current.persona.fingerprint}</code>}
+    </>}</p>}
     {error&&<div className="conversation-notice" role="alert">{error}<button onClick={()=>setAttempt(n=>n+1)}>Check connection</button></div>}
-    {!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
+    {!voice&&!textConfigured&&<p className="conversation-notice">History is available. Sending messages requires a text model configured on this server.</p>}
+    {voice&&current&&<VoiceControls api={api} session={current} supported={voiceSupported} verified={voiceVerified} stopRequested={audioStopRequested}/>}
     {paginationSupported&&<nav className="conversation-transcript-nav" aria-label="Transcript pages">
       <div><strong>{before?'Earlier messages':'Latest messages'}</strong><span>{saved?`${saved.episodes.length} messages on this page`:'Loading page…'}{before?' · New replies stay in Latest':''}</span></div>
       <div className="conversation-page-actions">
@@ -142,15 +156,15 @@ export function ConversationSession({api,sid,onSession,textConfigured,deletionSu
     <div className={`conversation-messages${saved?.episodes.length===0&&busy?' is-pending-empty':''}`} role="region" aria-label="Saved messages">
       {saved===null?<p role="status">Loading saved messages…</p>:saved.episodes.length?saved.episodes.map(item=><article className={`conversation-message ${item.metadata.role==='user'?'from-user':'from-agent'}`} key={item.episode_id}>
         <div className="conversation-message-label">{item.metadata.role==='user'?'You':item.metadata.role==='assistant'?'Assistant':'Recorded message'}<button onClick={()=>setSelected(item.episode_id)} aria-label={`Inspect message episode ${item.episode_id}`}>↗ Source {item.episode_id}</button></div><p>{item.content}</p>
-      </article>):before?<p>No retained messages on this page. Return to a newer page.</p>:busy?<p className="conversation-caption">Waiting for saved messages…</p>:<div className="conversation-welcome"><div className="conversation-orbit" aria-hidden="true">✳</div><h3>Start with a question.</h3><p>Bring your knowledge into the conversation.<br/>Public messages and replies will be saved to this space.</p></div>}
+      </article>):before?<p>No retained messages on this page. Return to a newer page.</p>:busy?<p className="conversation-caption">Waiting for saved messages…</p>:<div className="conversation-welcome"><div className="conversation-orbit" aria-hidden="true">✳</div><h3>{voice?'Your conversation, in words.':'Start with a question.'}</h3><p>{voice?'Completed public transcripts and replies appear here as they are saved.':'Bring your knowledge into the conversation.'}<br/>{voice?'Audio activity is not a saved transcript.':'Public messages and replies will be saved to this space.'}</p></div>}
       {saved?.has_more&&!paginationSupported&&<p className="conversation-notice">This is a partial transcript. This server does not support browsing older messages.</p>}
     </div>
-    {streamingSupported&&liveTarget&&<LiveReply key={liveTarget} api={api} sid={sid} requestId={liveTarget} onTerminal={streamTerminal}/>}
-    <form className="conversation-composer" onSubmit={e=>{e.preventDefault();void send();}}>
+    {!voice&&streamingSupported&&liveTarget&&<LiveReply key={liveTarget} api={api} sid={sid} requestId={liveTarget} onTerminal={streamTerminal}/>}
+    {current&&!voice&&<form className="conversation-composer" onSubmit={e=>{e.preventDefault();void send();}}>
       <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>
       <div className="conversation-composer-footer"><span role="status">{delivery|| (terminal?'Saved messages remain in your memory.':streamingSupported?'Live public text · saved replies verified separately':'Completed replies · not a token stream')}</span>
         {cancellationSupported&&cancelTarget&&current?.state==='running'?<button type="button" disabled={!verified||cancelling} onClick={cancelReply}>{cancelling?'Cancelling…':'Cancel reply'}</button>:<button className="primary" type="submit" aria-label="Send message" disabled={!textConfigured||!verified||current?.state!=='running'||busy||!draft.trim()}>Send ↑</button>}
       </div>
-    </form>
+    </form>}
   </section><ConversationEvidence api={api} result={result} selected={selected} onSelect={setSelected}/></>;
 }

@@ -336,6 +336,8 @@ def create_app(
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
+            "integrity.read": True,
+            "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
         }
         if conversations:

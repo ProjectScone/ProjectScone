@@ -182,14 +182,15 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         engine: Arc::new(Mutex::new(engine)),
         config: Arc::new(config),
     };
+    let workspace_page = get(move || {
+        let page = playground.clone();
+        async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+    });
     Router::new()
-        .route(
-            "/playground",
-            get(move || {
-                let page = playground.clone();
-                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-            }),
-        )
+        .route("/playground", workspace_page.clone())
+        .route("/memory", workspace_page.clone())
+        .route("/conversations", workspace_page.clone())
+        .route("/conversations/{session_id}", workspace_page)
         .route("/v1/graph", get(get_graph))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/events", get(get_events).post(post_event))

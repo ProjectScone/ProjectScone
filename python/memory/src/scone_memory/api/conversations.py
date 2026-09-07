@@ -307,6 +307,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
+                "voice_stream": ({"schema_version": 1, "transport": "websocket", "protocol": "scone-pcm-v1",
+                                  "authentication": "hello", "reconnect": False, "pcm": "s16le",
+                                  "input_channels": [1, 2], "min_sample_rate": 8000,
+                                  "max_sample_rate": 192000, "max_input_frame_bytes": 64000}
+                                 if catalog and catalog.personas else None),
                 "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
                                   "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
                 "reply_transport": "poll", "reply_replay": "durable_receipts",

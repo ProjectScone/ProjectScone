@@ -8,9 +8,118 @@ const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false}={}){
+
+for(const mobile of [false,true])test(`product navigation remains readable and shares the workspace surface, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  for(const route of ['/memory','/playground','/conversations','/learn']){
+    await page.goto(new URL(route,page.url()).href);
+    await page.locator('h1').waitFor();
+    const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
+    const surface=await page.locator('.server-strip').evaluate(el=>getComputedStyle(el).backgroundColor);
+    assert.equal(await page.locator('.topbar').evaluate(el=>getComputedStyle(el).backgroundColor),surface,'Product navigation must not introduce an unrelated theme.');
+    for(const link of await nav.getByRole('link').all()){
+      assert.ok(await link.evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=12),'Destination labels must remain readable without page zoom.');
+      assert.equal(await link.evaluate(el=>el.scrollWidth<=el.clientWidth),true,'Full destination names must fit without clipping.');
+      const box=await link.boundingBox();assert.ok(box.height>=44,'Navigation has a usable touch target.');
+    }
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+});
+
+test('workspace pages keep the same title hierarchy and conversation rail alignment',async t=>{
+  const {page}=await fixture(t);
+  const styles=[];
+  for(const route of ['/memory','/playground','/conversations','/learn']){
+    await page.goto(new URL(route,page.url()).href);
+    await page.locator('h1').waitFor();
+    styles.push(await page.locator('h1').evaluate(el=>{
+      const s=getComputedStyle(el);
+      return {size:s.fontSize,weight:s.fontWeight,line:s.lineHeight,color:s.color};
+    }));
+    if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`frame-${route.slice(1)}.png`),fullPage:true});
+  }
+  for(const style of styles)assert.deepEqual(style,styles[0],'Page navigation must not change the product title scale.');
+  await page.goto(new URL('/conversations',page.url()).href);
+  const rail=await page.locator('.conversation-list').boundingBox();
+  const strip=await page.locator('.server-strip').boundingBox();
+  const heading=await page.locator('h1').boundingBox();
+  assert.equal(rail.x,strip.x,'Session navigation belongs to the working frame, not an inset card.');
+  assert.ok(Math.abs(rail.y-(strip.y+strip.height))<2,'Rail must meet the application frame.');
+  assert.ok(heading.x>rail.x+rail.width,'Heading belongs to the working pane, not above session navigation.');
+});
+
+test('application navigation and connection remain reachable while a long workspace scrolls',async t=>{
+  const {page}=await fixture(t);
+  await page.goto(new URL('/learn/graph-memory',page.url()).href);
+  await page.locator('h1').waitFor();
+  await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
+  const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
+  for(const link of await nav.getByRole('link').all()){
+    const box=await link.boundingBox();
+    assert.ok(box.y>=0&&box.y+box.height<=900,'Primary destinations remain visible while reading a long page.');
+  }
+  const connect=page.getByRole('button',{name:'Memory connection',exact:true});
+  const box=await connect.boundingBox();
+  assert.ok(box.y>=0&&box.y+box.height<=900,'Connection settings remain reachable without scrolling to the top.');
+  await connect.click();
+  await page.getByRole('dialog').waitFor();
+  assert.match(await page.getByRole('dialog').innerText(),/Memory connection/);
+});
+
+for(const mobile of [false,true])test(`keyboard skip link stays above the application frame, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  await page.keyboard.press('Tab');
+  const skip=page.getByRole('link',{name:'Skip to workspace',exact:true});
+  assert.equal(await skip.evaluate(el=>el===document.activeElement),true);
+  assert.equal(await skip.evaluate(el=>{
+    const box=el.getBoundingClientRect();
+    return el.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
+  }),true,'The focused skip link must not be painted underneath sticky navigation.');
+  const before=page.url();
+  await page.keyboard.press('Enter');
+  assert.equal(page.url(),before);
+  assert.equal(await page.evaluate(()=>document.activeElement?.id),'main');
+  assert.equal(await page.locator('#main').count(),1);
+});
+
+test('conversation frame keeps session controls and evidence usable across viewport sizes',async t=>{
+  const {page}=await fixture(t);
+  for(const width of [390,768,1024,1280,1600]){
+    await page.setViewportSize({width,height:900});
+    await page.getByRole('link',{name:/previous ended/}).click();
+    await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+    const bounds=await page.evaluate(()=>{
+      const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width};};
+      return {overflow:document.documentElement.scrollWidth>innerWidth,rail:box('.conversation-list'),thread:box('.conversation-thread'),evidence:box('.conversation-evidence')};
+    });
+    assert.equal(bounds.overflow,false,`No page overflow at ${width}px`);
+    assert.ok(bounds.thread.width>=Math.min(width-40,320),`Transcript remains readable at ${width}px`);
+    assert.ok(bounds.evidence.y>=bounds.thread.bottom-1||bounds.evidence.x>=bounds.thread.right-1,`Evidence never overlaps the transcript at ${width}px`);
+    if(process.env.SCONE_SCREENSHOT_DIR&&[390,1440,1600].includes(width))await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`workspace-conversation-${width}.png`),fullPage:true});
+  }
+});
+for(const voiceState of ['created','running','ended'])test(`saved voice session preserves evidence without text controls or microphone acquisition: ${voiceState}`,async t=>{
+  const {page,posts}=await fixture(t,{voiceState});
+  let microphoneRequests=0;page.on('websocket',()=>{microphoneRequests++;});
+  await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=()=>{throw Error('Unexpected microphone request');};});
+  await page.getByRole('link',{name:new RegExp(`previous ${voiceState}`)}).click();
+  await page.getByRole('region',{name:'Voice session',exact:true}).waitFor();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).count(),0);
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  await page.getByRole('complementary',{name:'Conversation evidence'}).locator('.source-markdown').getByText('Earlier conversation.',{exact:true}).waitFor();
+  assert.equal(microphoneRequests,0);assert.equal(posts(),0);
+  if(voiceState==='running'){
+    await page.getByRole('button',{name:'End conversation',exact:true}).click();
+    await page.getByRole('heading',{name:'Conversation ended',exact:true}).waitFor();
+    assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
+  }
+});
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
+  if(voiceState){sessions[0].mode='voice';sessions[0].state=voiceState;}
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
   let turn=null,posts=0,checks=0;const requested=[],creates=new Map();
@@ -36,8 +145,9 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     if(req.url==='/v1/conversations/capabilities'){
       if(holdCapabilities)await capabilityGate;
       if(capStatus!==200){res.statusCode=capStatus;return res.end('{"detail":"unavailable"}');}
-      return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped,streaming,text_stream:streaming?{transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256}:null}));
+      return res.end(JSON.stringify({schema_version:unknown?999:1,text_configured:!unavailable,reply_transport:'poll',reply_replay:'process_lifetime',session_deletion:deletion,turn_cancellation:cancellation,transcript_pagination:pagination,recall_scope:scoped,streaming,text_stream:streaming?{transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256}:null,...(personaCatalog?{personas:personaCatalog.length}:{})}));
     }
+    if(req.url==='/v1/conversations/personas'){res.statusCode=personaStatus;return res.end(JSON.stringify({schema_version:1,...(personaCatalog?.some(p=>p.fingerprint)?{revision:'abcdef0123456789'}:{}),personas:personaCatalog}));}
     if(streaming&&/\/stream\?after=\d+$/.test(req.url)){
       assert.equal(req.method,'GET');assert.equal(req.headers.accept,'text/event-stream');
       res.setHeader('content-type','text/event-stream');res.flushHeaders();streams.add(res);res.on('close',()=>streams.delete(res));
@@ -50,7 +160,9 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     const data=body?JSON.parse(body):null;
     if(req.url==='/v1/conversations'&&req.method==='POST'){
       assert.equal(data.capture,true);if(creates.has(data.request_id))return res.end(JSON.stringify(creates.get(data.request_id)));
-      const value={...sessions[0],session_id:'current',state:'running',revision:2,...(scoped?{recall_scope:data.recall_scope||{}}:{})};creates.set(data.request_id,value);sessions.push(value);saved.current=[];return res.end(JSON.stringify(value));
+      const persona=personaCatalog?.find(item=>item.id===data.persona);
+      if(personaCatalog&&!persona){res.statusCode=422;return res.end('{"error":"persona required"}');}
+      const value={...sessions[0],session_id:'current',state:'running',revision:2,...(scoped?{recall_scope:data.recall_scope||{}}:{}),...(persona?{persona:{id:persona.id,name:persona.name,...(persona.fingerprint?{fingerprint:persona.fingerprint,current:true}:{})}}:{})};creates.set(data.request_id,value);sessions.push(value);saved.current=[];return res.end(JSON.stringify(value));
     }
     if(req.url.startsWith('/v1/conversations?')){
       if(listFailure){res.statusCode=503;return res.end('{"error":"list unavailable"}');}
@@ -59,6 +171,7 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
       return res.end(response);
     }
     if(req.url==='/v1/episodes/7')return res.end(JSON.stringify({episode_id:7,content:'Juniper is calibrated with Polaris. <script>not executable</script>',metadata:{},attachments:[]}));
+    if(req.url==='/v1/episodes/2')return res.end(JSON.stringify({episode_id:2,content:'Earlier conversation.',metadata:{role:'user'},attachments:[]}));
     const match=req.url.match(/^\/v1\/conversations\/([^/]+)(.*)$/);
     if(match){
       const value=sessions.find(s=>s.session_id===match[1]);if(!value){res.statusCode=404;return res.end('{}');}
@@ -91,8 +204,193 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
   page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{releaseCapabilities();releaseList();await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
-  return {page,requested,posts:()=>posts,emit,finish,streams,releaseCapabilities,releaseList,recoverService:()=>{capStatus=200;},recoverList:()=>{listFailure=false;},endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
+  return {page,requested,posts:()=>posts,emit,finish,streams,releaseCapabilities,releaseList,recoverService:()=>{capStatus=200;},recoverList:()=>{listFailure=false;},recoverPersonas:()=>{personaStatus=200;},endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
 }
+
+const personas=[
+  {id:'guide',name:'Research guide',reply:{provider:'local',model:'atlas'},transcription:{provider:'deepgram',model:'nova'},speech:{provider:'cartesia',model:'sonic',voice:'calm'},activity:{provider:'silero',model:'vad'},text_ready:true,voice_ready:false},
+  {id:'coach',name:'Writing coach',reply:{provider:'alternate',model:'scribe'},transcription:{provider:'deepgram',model:'nova'},speech:{provider:'elevenlabs',model:'multilingual',voice:'warm'},activity:null,text_ready:true,voice_ready:false},
+  {id:'offline',name:'Unavailable persona',reply:{provider:'local',model:'absent'},transcription:null,speech:null,activity:null,text_ready:false,voice_ready:false},
+];
+
+for(const mobile of [false,true])test(`persona choice is explicit, labelled and retained after reopening, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{personaCatalog:personas,mobile});const starts=[];
+  page.on('request',r=>{if(r.method()==='POST'&&new URL(r.url()).pathname==='/v1/conversations')starts.push(r.postDataJSON());});
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Start a conversation'});
+  await dialog.getByRole('radio',{name:'Writing coach',exact:true}).waitFor();
+  await dialog.getByLabel('Save my public messages and replies to this memory space').check();
+  assert.equal(await dialog.getByRole('button',{name:'Start text conversation',exact:true}).isDisabled(),true);
+  assert.equal(await dialog.getByRole('radio',{name:'Unavailable persona',exact:true}).isDisabled(),true);
+  await dialog.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await dialog.getByText('elevenlabs / multilingual · warm',{exact:true}).waitFor();
+  const palette=await dialog.evaluate(el=>{
+    const root=getComputedStyle(document.documentElement);
+    const selected=el.querySelector('.persona-option.is-selected');
+    return {
+      selected:getComputedStyle(selected).backgroundColor,
+      radio:getComputedStyle(selected.querySelector('input')).accentColor,
+      primary:getComputedStyle(el.querySelector('button.primary')).backgroundColor,
+      detail:getComputedStyle(el.querySelector('.persona-detail')).backgroundColor,
+      // Resolve tokens as CSS colors, rather than assuming a particular theme.
+      soft:root.getPropertyValue('--accent-soft').trim(),
+      raised:root.getPropertyValue('--raised').trim(),
+    };
+  });
+  const resolved=await page.evaluate(({soft,raised})=>{
+    const probe=document.createElement('span');document.body.append(probe);
+    probe.style.backgroundColor=soft;const selected=getComputedStyle(probe).backgroundColor;
+    probe.style.backgroundColor=raised;const detail=getComputedStyle(probe).backgroundColor;
+    probe.remove();return {selected,detail};
+  },palette);
+  assert.equal(palette.radio,palette.primary,'persona selection and primary actions use the same accent');
+  assert.equal(palette.selected,resolved.selected,'selected personas use the shared selection surface');
+  assert.equal(palette.detail,resolved.detail,'provider details use the shared raised surface');
+  assert.equal(await page.getByRole('button',{name:/microphone|start voice/i}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`persona-picker-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  const action=dialog.getByRole('button',{name:'Start text conversation',exact:true});
+  await action.scrollIntoViewIfNeeded();
+  const target=await action.boundingBox();
+  assert.ok(target&&target.height>=44,'the primary touch target must be at least 44px tall');
+  await dialog.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Session persona',{exact:true}).getByText('Writing coach',{exact:true}).waitFor();
+  assert.equal(starts.length,1);assert.equal(starts[0].persona,'coach');
+  await page.reload();
+  await page.getByLabel('Session persona',{exact:true}).getByText('Writing coach',{exact:true}).waitFor();
+  assert.equal(starts.length,1,'reopening must not recreate or choose a different persona');
+});
+
+test('persona catalog retry is read-only and never falls back to an unchosen provider',async t=>{
+  const {page,recoverPersonas}=await fixture(t,{personaCatalog:personas,personaStatus:503});const starts=[];
+  page.on('request',r=>{if(r.method()==='POST')starts.push(r.url());});
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('button',{name:'Retry personas',exact:true}).waitFor();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  assert.equal(await page.getByRole('button',{name:'Start text conversation',exact:true}).isDisabled(),true);
+  recoverPersonas();await page.getByRole('button',{name:'Retry personas',exact:true}).click();
+  await page.getByRole('radio',{name:'Research guide',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Start text conversation',exact:true}).isDisabled(),true);
+  assert.deepEqual(starts,[]);
+});
+
+test('unconfirmed persona acknowledgement freezes selection and retries the identical start',async t=>{
+  const {page}=await fixture(t,{personaCatalog:personas});const bodies=[];let mismatch=true;
+  await page.route('**/v1/conversations',async route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    bodies.push(route.request().postDataJSON());
+    const response=await route.fetch(),body=await response.json();
+    await route.fulfill({response,json:mismatch?{...body,persona:{id:'guide',name:'Research guide'}}:body});
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByText(/Start was not confirmed/).waitFor();
+  assert.equal(new URL(page.url()).pathname,'/conversations');
+  assert.equal(await page.getByRole('radio',{name:'Research guide',exact:true}).isDisabled(),true);
+  mismatch=false;await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByLabel('Session persona',{exact:true}).getByText('Writing coach',{exact:true}).waitFor();
+  assert.equal(bodies.length,2);assert.deepEqual(bodies[1],bodies[0]);
+});
+
+for(const mismatch of ['missing','different'])test(`persona fingerprint ${mismatch} receipt freezes the exact request until replay`,async t=>{
+  const versioned=personas.map(p=>({...p,fingerprint:'0123456789abcdef'}));
+  const {page}=await fixture(t,{personaCatalog:versioned});const bodies=[];let bad=true;
+  await page.route('**/v1/conversations',async route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    bodies.push(route.request().postDataJSON());const response=await route.fetch(),body=await response.json();
+    if(bad)body.persona=mismatch==='missing'?{id:'coach',name:'Writing coach'}:{...body.persona,fingerprint:'fedcba9876543210'};
+    await route.fulfill({response,json:body});
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByText(/Start was not confirmed/).waitFor();
+  assert.equal(bodies[0].persona_fingerprint,'0123456789abcdef');
+  assert.equal(await page.getByRole('radio',{name:'Research guide',exact:true}).isDisabled(),true);
+  bad=false;await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.waitForURL('**/conversations/current');assert.deepEqual(bodies[1],bodies[0]);
+  await page.route('**/v1/conversations/current',async route=>{
+    const response=await route.fetch(),body=await response.json();
+    await route.fulfill({response,json:{...body,persona:{...body.persona,name:'Changed catalog name',current:false}}});
+  });
+  await page.reload();const identity=page.getByLabel('Session persona',{exact:true});
+  await identity.getByText('coach',{exact:true}).waitFor();
+  await identity.getByText(/differs from the current catalog/).waitFor();
+  assert.equal(await identity.getByText('Changed catalog name',{exact:true}).count(),0);
+});
+
+test('a refused conversation start preserves the selected persona without an uncertain receipt',async t=>{
+  const {page}=await fixture(t,{personaCatalog:personas});let writes=0;
+  await page.route('**/v1/conversations',route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    writes++;return route.fulfill({status:403,json:{error:'key role read cannot write'}});
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:/write access/}).waitFor();
+  assert.equal(await page.getByText(/Start was not confirmed|Memory selection is locked/).count(),0);
+  assert.equal(await page.getByRole('radio',{name:'Writing coach',exact:true}).isChecked(),true);
+  assert.equal(await page.getByRole('radio',{name:'Research guide',exact:true}).isEnabled(),true);
+  assert.equal(await page.locator('.server-state').innerText(),'Authenticated');
+  assert.equal(writes,1,'A refusal must not trigger an automatic retry.');
+});
+
+for(const status of [422,403])test(`a later ${status} error cannot erase the identity of an uncertain create`,async t=>{
+  const {page}=await fixture(t,{personaCatalog:personas});const bodies=[];
+  await page.route('**/v1/conversations',async route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    bodies.push(route.request().postDataJSON());
+    if(bodies.length===1){await route.fetch();return route.fulfill({status:503,json:{error:'acknowledgement lost'}});}
+    return route.fulfill({status,json:{error:'persona unavailable or operation forbidden'}});
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  const start=page.getByRole('button',{name:'Start text conversation',exact:true});await start.click();
+  await page.getByText(/Start was not confirmed/).waitFor();await start.click();
+  await page.getByText(/Start was not confirmed/).waitFor();
+  assert.equal(await page.getByRole('radio',{name:'Research guide',exact:true}).isDisabled(),true);
+  assert.deepEqual(bodies[0],bodies[1]);
+});
+
+for(const explicit of [true,false])test(`stale persona recovery requires definitive no-write code, explicit=${explicit}`,async t=>{
+  const versioned=personas.map(p=>({...p,fingerprint:'0123456789abcdef'}));
+  const {page}=await fixture(t,{personaCatalog:versioned});const bodies=[];let rejected=false;
+  await page.route('**/v1/conversations/personas',route=>route.fulfill({json:{schema_version:1,revision:'abcdef0123456789',personas:versioned}}));
+  await page.route('**/v1/conversations',async route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    bodies.push(route.request().postDataJSON());
+    if(!rejected){rejected=true;versioned.forEach(p=>p.fingerprint='fedcba9876543210');return route.fulfill({status:409,json:{error:'persona selection is stale',...(explicit?{code:'persona_selection_stale'}:{})}});}
+    return route.continue();
+  });
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  await page.getByRole('button',{name:'Start text conversation',exact:true}).click();
+  if(!explicit){await page.getByText(/Start was not confirmed/).waitFor();assert.equal(await page.getByRole('radio',{name:'Research guide',exact:true}).isDisabled(),true);return;}
+  await page.getByText(/configuration changed before this conversation was created/).waitFor();
+  const start=page.getByRole('button',{name:'Start text conversation',exact:true});
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).waitFor();assert.equal(await start.isDisabled(),true);
+  assert.equal(bodies.length,1,'refresh must not create automatically');
+  await page.getByRole('radio',{name:'Writing coach',exact:true}).check();await start.click();
+  await page.waitForURL('**/conversations/current');assert.notEqual(bodies[0].request_id,bodies[1].request_id);
+  assert.equal(bodies[1].persona_fingerprint,'fedcba9876543210');
+});
+
+test('malformed persona catalog cannot unlock an unchosen session',async t=>{
+  const {page}=await fixture(t,{personaCatalog:personas});
+  await page.route('**/v1/conversations/personas',r=>r.fulfill({json:{schema_version:1,personas:[personas[0],personas[0]]}}));
+  await page.reload();
+  await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('button',{name:'Retry personas',exact:true}).waitFor();
+  await page.getByLabel('Save my public messages and replies to this memory space').check();
+  assert.equal(await page.getByRole('button',{name:'Start text conversation',exact:true}).isDisabled(),true);
+});
 async function start(page){
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
   const start=page.getByRole('button',{name:'Start text conversation',exact:true});
