@@ -173,6 +173,27 @@ class Tombstone(BaseModel):
     reason: Optional[str] = None
 
 
+class SpaceReceipt(BaseModel):
+    """What deleting a space takes with it, the same shape for the preview
+    and the deed: episodes with their chunks and vectors, claims and the
+    links between them, the tombstones of what was already forgotten, the
+    event trail, and the attachment holds (bytes go only when no other
+    space holds them). ``deleted_at`` is set once the deed is done."""
+
+    model_config = ConfigDict(frozen=True)
+
+    space: str
+    episodes: int
+    chunks: int
+    facts: int
+    links: int
+    tombstones: int
+    events: int
+    attachments_released: list[str] = Field(default_factory=list)
+    attachments_kept: list[str] = Field(default_factory=list)
+    deleted_at: Optional[str] = None
+
+
 class ForgetReceipt(BaseModel):
     """What forgetting an episode takes with it and what it leaves. The
     same shape answers the preview and the deed: chunks (and their

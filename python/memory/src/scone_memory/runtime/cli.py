@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
 
+    p = sub.add_parser("delete-space", help="delete everything the space holds; --dry-run previews the receipt")
+    p.add_argument("--confirm", metavar="SPACE", help="repeat the space name to do it")
+    p.add_argument("--dry-run", action="store_true", help="show what would go, and remove nothing")
     p = sub.add_parser("forget", help="delete an episode; the receipt says what went and what stayed")
     p.add_argument("episode_id", type=int)
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
@@ -199,6 +202,12 @@ def read_source(path: str, stdin) -> str:
         return stdin.read()
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def space_line(receipt) -> str:
+    return (f"{receipt.episodes} episodes, {receipt.chunks} chunks, {receipt.facts} claims, {receipt.links} links, "
+            f"{receipt.tombstones} tombstones, {receipt.events} events; attachments released "
+            f"{len(receipt.attachments_released)}, kept {len(receipt.attachments_kept)}")
 
 
 def receipt_line(r) -> str:
@@ -456,6 +465,18 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"{item.attachment_id}  {item.media_type}  {item.bytes} bytes  {name}", file=out)
             if not episode.attachments:
                 print("no attachments", file=out)
+        return 0
+
+    if args.command == "delete-space":
+        if args.dry_run:
+            receipt = await engine.space_impact(space)
+            emit(receipt.model_dump()) if args.json else print(f"would delete space {space}: {space_line(receipt)}", file=out)
+            return 0
+        if args.confirm != space:
+            print(f"refusing: --confirm must repeat the space name {space!r}; nothing was deleted", file=out)
+            return 2
+        receipt = await engine.delete_space(space)
+        emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
         return 0
 
     if args.command == "forget":

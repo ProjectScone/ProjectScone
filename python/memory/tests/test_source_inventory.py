@@ -79,10 +79,12 @@ async def test_http_inventory_summaries_and_legacy_batch_are_separate(memory):
 
 async def test_custom_store_without_inventory_advertises_unavailable(memory, monkeypatch):
     monkeypatch.setattr(memory.documents, "page_episodes", None)
-    with TestClient(create_app(memory, {"a": "alpha"})) as client:
+    # The async transport, like the other tests here: a key lookup reads the
+    # store (a deleted space answers 404), and sqlite refuses another thread.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(memory, {"a": "alpha"})), base_url="http://test") as client:
         auth = {"Authorization": "Bearer a"}
-        assert client.get("/v1/capabilities", headers=auth).json()["features"]["episodes.list"] is False
-        assert client.get("/v1/sources", headers=auth).status_code == 501
+        assert (await client.get("/v1/capabilities", headers=auth)).json()["features"]["episodes.list"] is False
+        assert (await client.get("/v1/sources", headers=auth)).status_code == 501
 
 
 def test_sync_native_inventory_is_available():

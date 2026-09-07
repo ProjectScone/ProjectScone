@@ -312,6 +312,7 @@ __all__ = [
     "test_close_fact_keeps_the_reason",
     "test_recall_returns_facts_that_hold_at_the_time_asked",
     "test_profile_is_identity_plus_recent_activity",
+    "test_deleting_a_space_removes_everything_and_keeps_it_gone",
 ]
 
 
@@ -445,3 +446,60 @@ async def test_a_forgotten_episode_is_known_to_have_existed(engine):
     with pytest.raises(pytest.raises(Gone).expected_exception if False else Gone):
         await engine.episode("default", first.episode_id)
     assert await engine.tombstone("default", 999_999) is None
+
+
+async def test_deleting_a_space_removes_everything_and_keeps_it_gone(engine):
+    """Deleting a space is the deed forgetting is for one episode: the
+    holds go (bytes only when no other space holds them), then vectors,
+    chunks, episodes, links, claims, events, tombstones and the revision.
+    The preview says the same with nothing removed. Afterwards the space
+    refuses writes, so a key left in config cannot re-create what was
+    erased, and the neighbouring space is untouched."""
+    from ..core.errors import NotFound
+
+    shared = await engine.attach("default", b"shared across spaces", "text/plain")
+    alone = await engine.attach("default", b"only here", "text/plain")
+    also = await engine.attach("other", b"shared across spaces", "text/plain")
+    assert also.attachment_id == shared.attachment_id, "one digest, two holds"
+    first = await engine.remember("default", "Acme is headquartered in Lisbon.",
+                                  attachment_ids=[shared.attachment_id, alone.attachment_id])
+    second = await engine.remember("default", "Acme moved its office in March.")
+    doomed = await engine.remember("default", "A note forgotten before the space goes.")
+    await engine.forget("default", doomed.episode_id)
+    cited = await engine.assert_fact("default", "acme", "based_in", "lisbon", source_episode_id=first.episode_id, quote="headquartered in Lisbon")
+    other = await engine.assert_fact("default", "mark", "works_at", "acme")
+    await engine.link_facts("default", other.fact_id, cited.fact_id, "supports")
+    neighbour = await engine.remember("other", "The neighbour keeps its own note.", attachment_ids=[also.attachment_id])
+    kept_fact = await engine.assert_fact("other", "neighbour", "keeps", "its note")
+
+    preview = await engine.space_impact("default")
+    assert (preview.space, preview.episodes, preview.facts, preview.links, preview.tombstones) == ("default", 2, 2, 1, 1)
+    assert preview.chunks == first.chunks + second.chunks
+    assert (preview.attachments_released, preview.attachments_kept) == ([alone.attachment_id], [shared.attachment_id])
+    assert preview.events > 0 and preview.deleted_at is None
+    assert (await engine.status("default")).episodes == 2, "a preview removes nothing"
+
+    receipt = await engine.delete_space("default")
+    assert receipt.model_dump(exclude={"deleted_at"}) == preview.model_dump(exclude={"deleted_at"})
+    assert receipt.deleted_at is not None
+    assert await engine.space_deleted("default") == receipt.deleted_at
+    assert await engine.events.query("default", limit=1000) == [], "the event trail went with the space"
+    assert (await engine.recall("default", "Acme Lisbon")).items == []
+    assert await engine.documents.list_facts("default", include_closed=True) == []
+    assert await engine.documents.list_tombstones("default") == []
+    counts = await engine.documents.counts("default")
+    assert (counts.episodes, counts.chunks) == (0, 0)
+    assert await engine.blobs.held("default") == []
+    ids = getattr(engine.vectors, "ids", None)
+    if ids is not None:
+        assert await ids("default") == [], "no vector outlives its space"
+    with pytest.raises(NotFound):
+        await engine.attachment("default", alone.attachment_id)
+    with pytest.raises(NotFound):
+        await engine.remember("default", "nothing goes into a deleted space")
+    with pytest.raises(NotFound):
+        await engine.delete_space("default")
+    # The neighbour is untouched, including the bytes it shares.
+    assert [i.episode_id for i in (await engine.recall("other", "neighbour note")).items] == [neighbour.episode_id]
+    assert (await engine.attachment("other", also.attachment_id))[1] == b"shared across spaces"
+    assert [f.fact_id for f in await engine.facts("other")] == [kept_fact.fact_id]

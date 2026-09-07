@@ -107,10 +107,29 @@ def _is_decision(path: str) -> bool:
     return path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
 
 
+def _is_space_delete(method: str, path: str) -> bool:
+    return method == "DELETE" and path.startswith("/v1/spaces/")
+
+
 def permitted(role: str, method: str, path: str) -> bool:
     if method in ("GET", "HEAD", "OPTIONS") or role == "full":
         return True
+    if _is_space_delete(method, path):
+        return False  # a whole space goes only on the full role's word
     return role == ("review" if _is_decision(path) else "write")
+
+
+def _refused_verb(method: str, path: str) -> str:
+    if _is_space_delete(method, path):
+        return "delete a space"
+    return "decide" if _is_decision(path) else "write"
+
+
+def _own_space(name: str, space: str) -> None:
+    """A key reaches its own space and no other; another name is as
+    unknown as a space that never existed."""
+    if name != space:
+        raise NotFound(f"space {name!r} is not this key's")
 
 
 class Forbidden(Exception):
@@ -235,7 +254,7 @@ def create_app(
     app.state.keys = dict(keys)
     app.state.worker = worker
 
-    def space_for(request: Request) -> str:
+    async def space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         if scheme.lower() != "bearer" or not token.strip():
@@ -245,7 +264,12 @@ def create_app(
             raise Unauthorized("unknown key")
         role = app.state.roles.get(token.strip(), "full")
         if not permitted(role, request.method, request.url.path):
-            raise Forbidden(f"key role {role} cannot {'decide' if _is_decision(request.url.path) else 'write'}")
+            raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
+        # A deleted space's key answers 404 on every route: the space is
+        # gone, and a key left in config must not bring it back.
+        when = await engine.space_deleted(space)
+        if when is not None:
+            raise NotFound(f"space {space!r} was deleted at {when}")
         return space
 
     def actor_for(request: Request) -> str:
@@ -518,6 +542,22 @@ def create_app(
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         receipt = await engine.forget(space, episode_id)
         return {"forgotten": episode_id, **receipt.model_dump()}
+
+    @app.get("/v1/spaces/{name}/impact")
+    async def space_impact(name: str, space: str = Depends(space_for)) -> dict:
+        """What deleting the space would take with it; nothing is removed."""
+        _own_space(name, space)
+        return (await engine.space_impact(space)).model_dump()
+
+    @app.delete("/v1/spaces/{name}")
+    async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:
+        """Remove everything the space holds. ``confirm`` must repeat the
+        space name; afterwards this key answers 404 on every route."""
+        _own_space(name, space)
+        if confirm != name:
+            raise InvalidInput("confirm must repeat the space name; a whole space is not deleted by accident")
+        receipt = await engine.delete_space(space)
+        return {"deleted": name, **receipt.model_dump()}
 
     @app.get("/v1/recall")
     async def get_recall(

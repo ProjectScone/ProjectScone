@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -166,6 +166,7 @@ FACT_LINK_MAPPINGS = {"properties": {
     "link_id": LONG, "space": KEYWORD, "from_fact": LONG, "to_fact": LONG, "kind": KEYWORD, "created_at": KEYWORD,
     "source_episode_id": LONG, "quote": {"type": "text", "index": False},
 }}
+ERASED_SPACE_MAPPINGS = {"properties": {"space": {"type": "keyword"}, "erased_at": {"type": "keyword"}}}
 TOMBSTONE_MAPPINGS = {"properties": {
     "space": KEYWORD, "episode_id": LONG, "content_hash": KEYWORD, "forgotten_at": KEYWORD, "reason": {"type": "text", "index": False},
 }}
@@ -204,6 +205,7 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
         await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
         await self.shared.ensure_index("tombstones", TOMBSTONE_MAPPINGS)
+        await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
         await self.check_schema()
@@ -228,7 +230,7 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "tombstones", "meta", "counters", "vectors", "events", "inflight")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "tombstones", "meta", "counters", "vectors", "events", "inflight", "erased_spaces")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -283,6 +285,28 @@ class ElasticsearchDocumentStore:
             if len(hits) < self.PAGE:
                 return ids
             after = hits[-1]["sort"]
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        term = {"term": {"space": space}}
+        hits = await self._search("chunks", query=term, size=10_000, _source=["chunk_id"])
+        chunk_ids = tuple(sorted(int(h["chunk_id"]) for h in hits))
+
+        async def count(name: str) -> int:
+            return int((await self.client.count(index=self._idx(name), query=term))["count"])
+
+        gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
+                            links=await count("fact_links"), tombstones=await count("tombstones"))
+        for name in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight"):
+            await self.client.delete_by_query(index=self._idx(name), query=term, refresh=True)
+        await self.client.delete(index=self._idx("counters"), id=f"revision:{space}", ignore=[404])
+        await self.client.index(index=self._idx("erased_spaces"), id=space, document={"space": space, "erased_at": erased_at},
+                                refresh=self.shared.refresh)
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        if not await self.client.exists(index=self._idx("erased_spaces"), id=space):
+            return None
+        return (await self.client.get(index=self._idx("erased_spaces"), id=space))["_source"]["erased_at"]
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.get_episode(space, episode_id) is None:
@@ -572,6 +596,9 @@ class ElasticsearchVectorIndex:
             return
         await self.client.delete_by_query(index=self.index, query={"terms": {"chunk_id": [int(c) for c in chunk_ids]}}, refresh=True)
 
+    async def delete_space(self, space: str) -> None:
+        await self.client.delete_by_query(index=self.index, query={"term": {"space": space}}, refresh=True)
+
     async def drop(self) -> None:
         await self.client.indices.delete(index=self.index, ignore_unavailable=True)
 
@@ -639,6 +666,13 @@ class ElasticsearchEventLog:
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
             await self.sweep()
         return Event(event_id=event_id, **new.__dict__)
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        term = {"term": {"space": space}}
+        if preview:
+            return int((await self.client.count(index=self.index, query=term))["count"])
+        response = await self.client.delete_by_query(index=self.index, query=term, refresh=True)
+        return int(response.get("deleted", 0))
 
     async def sweep(self) -> int:
         if self.max_age_days is None:

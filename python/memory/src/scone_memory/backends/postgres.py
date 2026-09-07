@@ -25,7 +25,7 @@ from typing import Callable, Mapping, Optional, Sequence
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
@@ -166,6 +166,7 @@ class PostgresDocumentStore:
     CREATE INDEX IF NOT EXISTS tombstones_hash ON {s}.tombstones (space, content_hash);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+    CREATE TABLE IF NOT EXISTS {s}.erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
     """
 
     def __init__(self, url: str, schema: str = "scone", pool: Optional[Pool] = None) -> None:
@@ -244,6 +245,29 @@ class PostgresDocumentStore:
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
         row = await self._row(f"SELECT * FROM {self.schema}.episodes WHERE space = %s AND id = %s", (space, episode_id))
         return _episode(row) if row else None
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        s = self.schema
+        chunk_ids = tuple(r["id"] for r in await self._rows(f"SELECT id FROM {s}.chunks WHERE space = %s ORDER BY id", (space,)))
+
+        async def count(table: str) -> int:
+            row = await self._row(f"SELECT count(*) AS n FROM {s}.{table} WHERE space = %s", (space,))
+            return int(row["n"]) if row else 0
+
+        gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
+                            links=await count("fact_links"), tombstones=await count("tombstones"))
+        for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+            await self._rows(f"DELETE FROM {s}.{table} WHERE space = %s RETURNING space", (space,))
+        await self._rows(
+            f"INSERT INTO {s}.erased_spaces (space, erased_at) VALUES (%s, %s)"
+            " ON CONFLICT (space) DO UPDATE SET erased_at = EXCLUDED.erased_at RETURNING space",
+            (space, erased_at),
+        )
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        row = await self._row(f"SELECT erased_at FROM {self.schema}.erased_spaces WHERE space = %s", (space,))
+        return row["erased_at"] if row else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.get_episode(space, episode_id) is None:
@@ -534,6 +558,10 @@ class PostgresVectorIndex:
         async with self.pool.connection() as conn:
             await conn.execute(f"DELETE FROM {self.schema}.vectors WHERE chunk_id = ANY(%s)", ([int(c) for c in chunk_ids],))
 
+    async def delete_space(self, space: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(f"DELETE FROM {self.schema}.vectors WHERE space = %s", (space,))
+
     async def drop(self) -> None:
         if not self.pool.opened:
             return  # the schema went with the store that owned the pool
@@ -624,6 +652,12 @@ class PostgresEventLog:
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
             await self.sweep()
         return Event(event_id=int(rows[0]["id"]), **new.__dict__)
+
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        if preview:
+            row = await self._row(f"SELECT count(*) AS n FROM {self.schema}.events WHERE space = %s", (space,))
+            return int(row["n"]) if row else 0
+        return len(await self._rows(f"DELETE FROM {self.schema}.events WHERE space = %s RETURNING id", (space,)))
 
     async def sweep(self) -> int:
         """Delete events older than max_age_days; returns how many."""

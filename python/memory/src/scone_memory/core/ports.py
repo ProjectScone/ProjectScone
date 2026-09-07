@@ -108,6 +108,18 @@ class SpaceCounts:
     tags: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DeletedSpace:
+    """What a document store removed for ``delete_space``: the chunk ids
+    (so the vector index can follow) and the counts for the receipt."""
+
+    chunk_ids: tuple[int, ...]
+    episodes: int
+    facts: int
+    links: int
+    tombstones: int
+
+
 @runtime_checkable
 class EpisodeInventory(Protocol):
     """Optional bounded inventory, newest ID first; apply filters before LIMIT.
@@ -194,6 +206,14 @@ class DocumentStore(Protocol):
 
     async def bump_revision(self, space: str) -> int: ...
     async def revision(self, space: str) -> int: ...
+    async def delete_space(self, space: str, deleted_at: str) -> DeletedSpace:
+        """Remove every record of the space (chunks, episodes, links,
+        facts, tombstones, inflight marks, the revision row) and mark it
+        deleted at ``deleted_at``; atomic where the store can be."""
+        ...
+    async def space_deleted(self, space: str) -> Optional[str]:
+        """When the space was deleted, or None while it lives."""
+        ...
 
 
 @runtime_checkable
@@ -273,6 +293,9 @@ class EventLog(Protocol):
         ...
 
     async def get(self, space: str, event_id: int) -> Optional[Event]: ...
+    async def purge(self, space: str, *, preview: bool = False) -> int:
+        """How many events the space holds; remove them unless ``preview``."""
+        ...
     async def query(
         self,
         space: str,

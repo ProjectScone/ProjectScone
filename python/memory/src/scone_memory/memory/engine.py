@@ -35,6 +35,7 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
+    SpaceReceipt,
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
@@ -403,6 +404,7 @@ class MemoryEngine:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate."""
+        await self._living(space)
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
         if replace:
             added = (await self.replace(space, record)).added
@@ -420,6 +422,7 @@ class MemoryEngine:
         cited it stand) and the new one stored. The forget lands before
         the store, so a failure between them leaves the key empty rather
         than pointing at stale text; the error says so."""
+        await self._living(space)
         check_space(space)
         if not record.dedup_key:
             raise InvalidInput("replace needs a dedup_key: it is the key that names what is being replaced")
@@ -452,6 +455,7 @@ class MemoryEngine:
         """Store bytes an episode will carry, addressed by their SHA-256.
         The same bytes stored twice are one attachment: the digest is the
         id, so a second store is a second reference."""
+        await self._living(space)
         check_space(space)
         if not data:
             raise InvalidInput("an attachment needs bytes")
@@ -480,6 +484,7 @@ class MemoryEngine:
         write, the episodes written so far are deleted again and the
         error is raised; a batch either lands whole or not at all.
         """
+        await self._living(space)
         check_space(space)
         started = time.perf_counter()
         records = list(records)
@@ -782,6 +787,69 @@ class MemoryEngine:
             "latency_ms": _ms(started),
         })
         return receipt
+
+    # -- a whole space ------------------------------------------------------
+
+    async def _living(self, space: str) -> None:
+        """Refuse a space that was deleted: a key left in config must not
+        re-create what was erased."""
+        when = await self.space_deleted(space)
+        if when is not None:
+            raise NotFound(f"space {space!r} was deleted at {when}")
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        """When the space was deleted, or None while it lives. A store
+        that cannot record a deletion has never deleted one."""
+        check_space(space)
+        deleted = getattr(self.documents, "space_deleted", None)
+        return await deleted(space) if callable(deleted) else None
+
+    async def _space_receipt(self, space: str) -> SpaceReceipt:
+        counts = await self.documents.counts(space)
+        facts = await self.documents.list_facts(space, include_closed=True)
+        links: set[int] = set()
+        for fact in facts:
+            for link in await self.documents.fact_links(space, fact.fact_id):
+                links.add(link.link_id)
+        released, kept = await self.blobs.release_space(space, preview=True)
+        return SpaceReceipt(
+            space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts), links=len(links),
+            tombstones=len(await self.documents.list_tombstones(space)),
+            events=(await self.events.purge(space, preview=True)) if self.events is not None else 0,
+            attachments_released=released, attachments_kept=kept,
+        )
+
+    async def space_impact(self, space: str) -> SpaceReceipt:
+        """What deleting the space would take with it, with nothing removed."""
+        check_space(space)
+        await self._living(space)
+        return await self._space_receipt(space)
+
+    async def delete_space(self, space: str) -> SpaceReceipt:
+        """Remove everything the space holds, in order: attachment holds
+        (bytes only when no other space holds them), the records of the
+        space with their vectors, then the event trail; mark the space
+        deleted so no write re-creates it. Returns the receipt
+        ``space_impact`` would have shown, with the counts of the deed."""
+        check_space(space)
+        await self._living(space)
+        if not callable(getattr(self.documents, "delete_space", None)):
+            raise InvalidInput("this document store does not implement delete-space")
+        preview = await self._space_receipt(space)
+        deleted_at = self.clock()
+        released, kept = await self.blobs.release_space(space)
+        gone = await self.documents.delete_space(space, deleted_at)
+        sweep = getattr(self.vectors, "delete_space", None)
+        if sweep is not None:
+            await sweep(space)
+        else:
+            await self.vectors.delete(list(gone.chunk_ids))
+        events = (await self.events.purge(space)) if self.events is not None else 0
+        return preview.model_copy(update={
+            "episodes": gone.episodes, "chunks": len(gone.chunk_ids), "facts": gone.facts, "links": gone.links,
+            "tombstones": gone.tombstones, "events": events, "attachments_released": released,
+            "attachments_kept": kept, "deleted_at": deleted_at,
+        })
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
@@ -1245,6 +1313,7 @@ class MemoryEngine:
         a link records each premise. Both are checked before anything is
         written: an unknown target, one in another space, or one that is
         only proposed or declined refuses the whole assertion."""
+        await self._living(space)
         check_space(space)
         premises = [int(f) for f in derived_from]
         if premises:
@@ -1278,6 +1347,7 @@ class MemoryEngine:
         from / contradicts / supports ``to_fact``. The same link twice is one
         link. A quote must sit in the source episode it names. A dependency
         (extends, derived_from) that would close a cycle is refused."""
+        await self._living(space)
         check_space(space)
         if kind not in LINK_KINDS:
             raise InvalidInput(f"link kind must be one of {LINK_KINDS}, got {kind!r}")
@@ -1836,6 +1906,7 @@ class MemoryEngine:
         there next. A keyed identity (dedup_key) has no content to derive
         from and is passed through as the source made it; it keeps
         deduplicating a same-space move and not a renamed one."""
+        await self._living(space)
         check_space(space)
         summary = ImportSummary()
         episodes: list[Record] = []

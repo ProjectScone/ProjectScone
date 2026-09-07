@@ -16,7 +16,7 @@ from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 
@@ -37,6 +37,7 @@ class InMemoryDocumentStore:
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         self._inflight: set[tuple[str, str]] = set()
+        self._deleted: dict[str, str] = {}
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
         episode = Episode(episode_id=next(self._episode_ids), **new.__dict__)
@@ -52,6 +53,32 @@ class InMemoryDocumentStore:
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
         episode = self._episodes.get(episode_id)
         return episode if episode and episode.space == space else None
+
+    async def delete_space(self, space: str, deleted_at: str) -> DeletedSpace:
+        episode_ids = [e.episode_id for e in self._episodes.values() if e.space == space]
+        chunk_ids = tuple(sorted(c.chunk_id for c in self._chunks.values() if c.space == space))
+        fact_ids = [i for i, f in self._facts.items() if f.space == space]
+        link_ids = [i for i, l in self._links.items() if l.space == space]
+        stones = [k for k in self._tombstones if k[0] == space]
+        for episode_id in episode_ids:
+            del self._episodes[episode_id]
+        for chunk_id in chunk_ids:
+            del self._chunks[chunk_id]
+        self._bm25.pop(space, None)
+        for fact_id in fact_ids:
+            del self._facts[fact_id]
+        for link_id in link_ids:
+            del self._links[link_id]
+        for key in stones:
+            del self._tombstones[key]
+        self._inflight = {mark for mark in self._inflight if mark[0] != space}
+        self._revision.pop(space, None)
+        self._deleted[space] = deleted_at
+        return DeletedSpace(chunk_ids=chunk_ids, episodes=len(episode_ids), facts=len(fact_ids),
+                            links=len(link_ids), tombstones=len(stones))
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        return self._deleted.get(space)
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         episode = await self.get_episode(space, episode_id)
@@ -255,6 +282,9 @@ class InMemoryVectorIndex:
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)
+
+    async def delete_space(self, space: str) -> None:
+        self._points = {chunk_id: p for chunk_id, p in self._points.items() if p.space != space}
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:

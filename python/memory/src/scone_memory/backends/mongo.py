@@ -14,7 +14,7 @@ from typing import Mapping, Optional, Sequence
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter
+from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
@@ -171,6 +171,25 @@ class MongoDocumentStore:
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]:
         doc = await self.episodes.find_one({"_id": episode_id, "space": space})
         return _episode(doc) if doc else None
+
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        chunk_ids = tuple(sorted([doc["_id"] async for doc in self.chunks.find({"space": space}, {"_id": 1})]))
+        gone = DeletedSpace(
+            chunk_ids=chunk_ids,
+            episodes=await self.episodes.count_documents({"space": space}),
+            facts=await self.facts.count_documents({"space": space}),
+            links=await self.fact_links.count_documents({"space": space}),
+            tombstones=await self.tombstones.count_documents({"space": space}),
+        )
+        for collection in (self.chunks, self.episodes, self.fact_links, self.facts, self.tombstones, self.inflight_marks):
+            await collection.delete_many({"space": space})
+        await self.revisions.delete_one({"_id": space})
+        await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        doc = await self.db["erased_spaces"].find_one({"_id": space})
+        return doc["erased_at"] if doc else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         if await self.episodes.find_one({"_id": episode_id, "space": space}) is None:

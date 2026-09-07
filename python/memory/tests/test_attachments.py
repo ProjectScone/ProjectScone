@@ -240,3 +240,25 @@ async def test_a_file_blob_store_releases_a_hold_but_keeps_bytes_another_space_h
         await blobs.get(SPACE, shared.attachment_id)
     assert (await blobs.get("beta", shared.attachment_id))[1] == PNG, "beta still holds it, so the bytes stay"
     assert await blobs.unlink(SPACE, 999) == [], "an episode with no attachments releases nothing"
+
+
+async def test_releasing_a_space_keeps_the_bytes_another_space_holds(tmp_path):
+    """The file store keeps one copy of the bytes for every space that
+    stored them, so releasing a space drops its holds and only the bytes
+    no other space holds; the preview says the same and drops nothing."""
+    store = FileBlobStore(tmp_path)
+    shared = await store.put("alpha", b"shared bytes", "text/plain")
+    alone = await store.put("alpha", b"alone bytes", "text/plain")
+    assert (await store.put("beta", b"shared bytes", "text/plain")).attachment_id == shared.attachment_id
+    await store.link("alpha", shared.attachment_id, 1)
+    released, kept = await store.release_space("alpha", preview=True)
+    assert (released, kept) == ([alone.attachment_id], [shared.attachment_id])
+    assert await store.held("alpha") == sorted([shared.attachment_id, alone.attachment_id]), "a preview releases nothing"
+    assert await store.release_space("alpha") == (released, kept)
+    assert await store.held("alpha") == [] and await store.for_episode("alpha", 1) == []
+    with pytest.raises(NotFound):
+        await store.get("alpha", shared.attachment_id)
+    assert (await store.get("beta", shared.attachment_id))[1] == b"shared bytes", "the bytes serve the space that still holds them"
+    assert not store._blob(alone.attachment_id).exists(), "bytes nobody holds are gone"
+    assert await store.release_space("beta") == ([shared.attachment_id], [])
+    assert not store._blob(shared.attachment_id).exists()

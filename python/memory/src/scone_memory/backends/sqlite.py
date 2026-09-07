@@ -21,7 +21,7 @@ from typing import Mapping, Optional, Sequence
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """
@@ -66,12 +66,13 @@ CREATE INDEX IF NOT EXISTS vectors_space ON vectors(space, created_at);
 CREATE TABLE IF NOT EXISTS vector_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
 """
 
 #: Shared spec 3.6. Bumped on any incompatible change. A file from an
 #: older build is refused with a message, not rewritten, unless this build
 #: knows the one additive step from that exact version (STEPS below).
-SCHEMA_VERSION = 9  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones
+SCHEMA_VERSION = 10  # 6: facts carry quote; 7: inflight marks for crash recovery; 8: typed links between facts; 9: tombstones; 10: deleted spaces
 
 #: Additive steps this build can apply, keyed by the version they start
 #: from. A version gets a step only once a live store has held it (the
@@ -91,6 +92,7 @@ STEPS: dict[int, tuple[str, ...]] = {
         "CREATE TABLE IF NOT EXISTS tombstones (space TEXT NOT NULL, episode_id INTEGER NOT NULL, content_hash TEXT NOT NULL,"
         " forgotten_at TEXT NOT NULL, reason TEXT, PRIMARY KEY(space, episode_id))",
     ),
+    9: ("CREATE TABLE IF NOT EXISTS erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL)",),
 }
 
 
@@ -493,6 +495,32 @@ class SqliteDocumentStore:
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         return [_tombstone(r) for r in self.conn.execute("SELECT * FROM tombstones WHERE space = ? ORDER BY episode_id", (space,))]
 
+    async def delete_space(self, space: str, erased_at: str) -> DeletedSpace:
+        """Every row of the space goes in one transaction, and the space
+        is marked deleted in the same one, so a crash leaves either the
+        whole space or none of it."""
+        conn = self.conn
+        try:
+            chunk_ids = tuple(r[0] for r in conn.execute("SELECT id FROM chunks WHERE space = ? ORDER BY id", (space,)))
+
+            def count(table: str) -> int:
+                return conn.execute(f"SELECT count(*) FROM {table} WHERE space = ?", (space,)).fetchone()[0]
+
+            gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
+                                links=count("fact_links"), tombstones=count("tombstones"))
+            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+                conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
+            conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return gone
+
+    async def space_deleted(self, space: str) -> Optional[str]:
+        row = self.conn.execute("SELECT erased_at FROM erased_spaces WHERE space = ?", (space,)).fetchone()
+        return row[0] if row else None
+
     async def chunk_index(self, space: str) -> list[tuple[int, int]]:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""
         return [(r[0], r[1]) for r in self.conn.execute("SELECT id, episode_id FROM chunks WHERE space = ? ORDER BY id", (space,))]
@@ -607,3 +635,7 @@ class SqliteVectorIndex:
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
         return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
+
+    async def delete_space(self, space: str) -> None:
+        self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
+        self.conn.commit()
