@@ -4,6 +4,7 @@ thing with another object, and the reader sees the top k oldest first."""
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -129,3 +130,56 @@ def test_the_cli_runs_the_split_without_touching_the_configured_store(tmp_path):
     assert saved["k"] == 5 and saved["results"][0]["gold"] == 3 and saved["accuracy"] is None
     assert not untouched.exists()
     assert cli.main(["bench-conflicts", str(path), "--reader"], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2
+
+
+async def test_distill_and_derive_stages_score_recalled_claims_and_derived_bridges(tmp_path):
+    """E36's stages: every statement is distilled and its extractions
+    approved; one derivation pass proposes bridges; recall scores the
+    claims it returns beside the episodes. An inferred proposal is
+    invisible to recall until approved, so the two runs bracket the effect."""
+    rows = [{"context": "0. mark works at acme.\n1. acme is based in lisbon.\n2. juniper likes tuna.",
+             "questions": ["Where does mark work?"], "answers": [["lisbon"]],
+             "metadata": {"source": "factconsolidation_mh_6k"}}]
+    path = tmp_path / "mh.json"
+    path.write_text(json.dumps(rows))
+    [item] = load_conflict_resolution(path)
+
+    def make():
+        return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    def triple(s, p, o, quote):
+        return json.dumps([{"subject": s, "predicate": p, "object": o, "confidence": 0.9,
+                            "statement_type": "observation", "quote": quote}])
+
+    extraction = [triple("mark", "works_at", "acme", "mark works at acme"),
+                  triple("acme", "based_in", "lisbon", "acme is based in lisbon"),
+                  triple("juniper", "likes", "tuna", "juniper likes tuna")]
+    bridge = json.dumps([{"subject": "mark", "predicate": "works_in", "object": "lisbon", "premises": [1, 2], "confidence": 0.7}])
+
+    proposed = await run_conflict_resolution(make, item, model=FakeChat([*extraction, bridge, "[]"]), model_name="fake",
+                                             distill=True, derive=True, k=5)
+    assert (proposed.model, proposed.distilled, proposed.derived, proposed.derive_approved) == ("fake", 3, 1, False)
+    [q] = proposed.results
+    assert q.claims and q.claim_gold_at_k is False and q.derived_gold_at_k is False and q.derived_hits == [], \
+        "recall returns the claim about mark, which names acme, not lisbon: the multi-hop gap; a proposal is not recalled"
+
+    approved = await run_conflict_resolution(make, item, model=FakeChat([*extraction, bridge, "[]"]), model_name="fake",
+                                             distill=True, derive=True, derive_approve=True, k=5)
+    [q] = approved.results
+    assert q.derived_gold_at_k is True and len(q.derived_hits) == 1, "the approved bridge answers the multi-hop question"
+    assert approved.derived_gold_at_k == 1.0 and approved.claim_gold_at_k == 1.0
+
+    plain = await run_conflict_resolution(make, item, k=5)
+    assert plain.distilled is None and plain.derived is None and plain.claim_gold_at_k is None
+    assert plain.results[0].claim_gold_at_k is None and "claims" not in plain.results[0].__dict__ or plain.results[0].claims == []
+
+
+def test_the_cli_refuses_derive_without_distill(tmp_path):
+    from scone_memory.runtime.cli import main
+
+    path = tmp_path / "cr.json"
+    path.write_text(json.dumps([{"context": "0. a is b.", "questions": ["what is a?"], "answers": [["b"]],
+                                 "metadata": {"source": "factconsolidation_sh_6k"}}]))
+    env = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    assert main(["bench-conflicts", str(path), "--derive"], env=env, out=io.StringIO()) == 2, "the pass runs over extracted claims"
+    assert main(["bench-conflicts", str(path), "--distill"], env=env, out=io.StringIO()) == 2, "no model configured"

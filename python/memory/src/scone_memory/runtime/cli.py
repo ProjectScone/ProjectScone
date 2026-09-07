@@ -189,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--questions", type=int, help="only the first N questions of each item")
     p.add_argument("--reader", action="store_true",
                    help="answer with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL); without it only retrieval is measured")
+    p.add_argument("--distill", action="store_true",
+                   help="E36: extract claims from every statement with the configured chat model and approve them for the run")
+    p.add_argument("--derive", action="store_true", help="E36: after --distill, one derivation pass; bridges stay proposed")
+    p.add_argument("--derive-approve", action="store_true", help="E36: approve the derivation pass's bridges to measure the ceiling")
     p.add_argument("--out", help="write every item's report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -315,6 +319,13 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         print("error: --reader needs SCONE_CHAT_URL and SCONE_CHAT_MODEL", file=sys.stderr)
         return 2
     reader_name = f"{settings.chat_model} at {settings.chat_url}" if reader is not None else None
+    model = build_chat(settings) if args.distill else None
+    if args.distill and model is None:
+        print("error: --distill needs SCONE_CHAT_URL and SCONE_CHAT_MODEL", file=sys.stderr)
+        return 2
+    if (args.derive or args.derive_approve) and not args.distill:
+        print("error: --derive needs --distill (the pass runs over extracted claims)", file=sys.stderr)
+        return 2
 
     async def make():
         return await build_in_process_engine(settings, embedder)
@@ -328,7 +339,10 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         if not args.json:
             print(f"{item.source}: {len(item.facts)} facts, {len(item.questions)} questions", file=sys.stderr)
         report = await run_conflict_resolution(make, item, reader=reader, reader_name=reader_name, k=args.k,
-                                               questions=args.questions, progress=progress)
+                                               questions=args.questions, progress=progress,
+                                              model=model, model_name=f"{settings.chat_model} at {settings.chat_url}" if model is not None else None,
+                                              distill=args.distill, derive=args.derive or args.derive_approve,
+                                              derive_approve=args.derive_approve)
         if not args.json:
             print("", file=sys.stderr)
         reports.append(report)
