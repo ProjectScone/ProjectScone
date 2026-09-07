@@ -9,8 +9,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path as AxPath, Query, Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,10 +20,100 @@ use scone_core::{Engine, IngestOutcome, RecallOpts, auth};
 const MAX_CONTENT: usize = 100_000;
 const MAX_QUERY: usize = 1_000;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpaceKey {
     pub key: String,
     pub space: String,
+    /// What the key may do; `Role::Full` when a config row names none.
+    pub role: Role,
+}
+
+/// What a key may do. Reads are open to every role, because a key already
+/// cannot see outside its space; the decisions of review (approve, decline,
+/// exclude, include) belong to review and full; every other write belongs
+/// to write and full. The same four words and the same rule as the Python
+/// engine's `SCONE_API_KEYS` `key:space:role`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Role {
+    Read,
+    Write,
+    Review,
+    #[default]
+    Full,
+}
+
+impl Role {
+    pub fn parse(name: &str) -> Result<Role, String> {
+        match name {
+            "read" => Ok(Role::Read),
+            "write" => Ok(Role::Write),
+            "review" => Ok(Role::Review),
+            "full" => Ok(Role::Full),
+            other => Err(format!(
+                "key role must be one of read, write, review, full; got {other:?}"
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Read => "read",
+            Role::Write => "write",
+            Role::Review => "review",
+            Role::Full => "full",
+        }
+    }
+
+    /// Whether this role may send `method` to `path`.
+    pub fn permits(self, method: &Method, path: &str) -> bool {
+        if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || self == Role::Full {
+            return true;
+        }
+        if is_decision(path) {
+            self == Role::Review
+        } else {
+            self == Role::Write
+        }
+    }
+}
+
+/// The routes that decide a claim's fate, on either engine.
+fn is_decision(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    path.starts_with("/v1/facts/decide")
+        || ["/approve", "/decline", "/exclude", "/include"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+}
+
+/// The `[[server.keys]]` rows of config.toml: `key`, `space` and an
+/// optional `role` (full when absent). A row missing its key or space, an
+/// unknown role, or a key listed twice refuses to serve instead of being
+/// skipped.
+pub fn keys_from_config(server: &toml::Value) -> Result<Vec<SpaceKey>, String> {
+    let Some(rows) = server.get("keys").and_then(|k| k.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut keys: Vec<SpaceKey> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let field = |name: &str| {
+            row.get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("[[server.keys]] entry needs a string {name}"))
+        };
+        let key = field("key")?;
+        let space = field("space")?;
+        let role = match row.get("role") {
+            None => Role::Full,
+            Some(v) => Role::parse(v.as_str().ok_or("key role must be a string")?)?,
+        };
+        if keys.iter().any(|k| k.key == key) {
+            return Err("a key is listed twice in [[server.keys]]".to_owned());
+        }
+        keys.push(SpaceKey { key, space, role });
+    }
+    Ok(keys)
 }
 
 #[derive(Clone)]
@@ -106,6 +197,7 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         .route("/v1/profile", get(get_profile))
         .route("/v1/status", get(get_status))
         .route("/v1/tags", get(get_tags))
+        .route_layer(middleware::from_fn_with_state(state.clone(), role_gate))
         .with_state(state)
 }
 
@@ -139,17 +231,40 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
 /// Resolve the Bearer key to its space, or 401. The space name travels
 /// back through auth::resolve (I5) on every request.
 fn space_for(headers: &axum::http::HeaderMap, config: &ServeConfig) -> Result<String, Response> {
-    let presented = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing Bearer key"))?;
+    let presented =
+        bearer(headers).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing Bearer key"))?;
     config
         .keys
         .iter()
         .find(|k| k.key == presented)
         .map(|k| k.space.clone())
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "unknown key"))
+}
+
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+/// Refuse, before any handler runs, a known key whose role does not allow
+/// this request. An unknown or missing key passes through to the handler's
+/// 401; reads are never gated here.
+async fn role_gate(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if let Some(key) =
+        bearer(request.headers()).and_then(|k| state.config.keys.iter().find(|s| s.key == k))
+    {
+        let path = request.uri().path();
+        if !key.role.permits(request.method(), path) {
+            let verb = if is_decision(path) { "decide" } else { "write" };
+            return err(
+                StatusCode::FORBIDDEN,
+                format!("key role {} cannot {verb}", key.role.name()),
+            );
+        }
+    }
+    next.run(request).await
 }
 
 fn with_engine<T>(
@@ -570,6 +685,9 @@ async fn get_profile(State(state): State<AppState>, headers: axum::http::HeaderM
                 "object": f.object, "confidence": f.confidence,
             })).collect::<Vec<_>>(),
             "dynamic": profile.dynamic,
+            "recent": profile.recent.iter().map(|r| serde_json::json!({
+                "episode_id": r.episode_id, "excerpt": r.excerpt, "created_at": r.created_at,
+            })).collect::<Vec<_>>(),
         }))
         .into_response(),
         Err(response) => response,

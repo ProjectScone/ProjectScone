@@ -6,12 +6,23 @@ use crate::auth::ScopedSpace;
 use crate::error::Result;
 use crate::{Engine, FactItem};
 
+/// One `dynamic` excerpt with the episode it was cut from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentActivity {
+    pub episode_id: i64,
+    pub excerpt: String,
+    pub created_at: String,
+}
+
 #[derive(Debug)]
 pub struct Profile {
     /// Durable identity: active facts, strongest first.
     pub static_facts: Vec<FactItem>,
     /// Recent activity: newest episode excerpts, newest first.
     pub dynamic: Vec<String>,
+    /// `dynamic` with its evidence: same order, same excerpts, newest
+    /// first. The shape both engines share (tests/fixtures/profile-recent.json).
+    pub recent: Vec<RecentActivity>,
 }
 
 impl Engine {
@@ -40,19 +51,25 @@ impl Engine {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        let dynamic = {
+        let recent = {
             let mut stmt = self.conn.prepare(
-                "SELECT substr(content, 1, 200) FROM episodes
+                "SELECT id, substr(content, 1, 200), created_at FROM episodes
                  WHERE space_id = ?1 ORDER BY id DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![space.id(), limit], |r| {
-                r.get::<_, String>(0)
+                Ok(RecentActivity {
+                    episode_id: r.get(0)?,
+                    excerpt: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let dynamic = recent.iter().map(|r| r.excerpt.clone()).collect();
         Ok(Profile {
             static_facts,
             dynamic,
+            recent,
         })
     }
 }

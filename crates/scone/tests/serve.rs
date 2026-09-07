@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use scone::serve::{ServeConfig, SpaceKey, router};
+use scone::serve::{Role, ServeConfig, SpaceKey, keys_from_config, router};
 use scone_core::Engine;
 use scone_core::embed::HashEmbedder;
 use tower::ServiceExt;
@@ -17,10 +17,12 @@ fn app(dir: &std::path::Path) -> axum::Router {
                 SpaceKey {
                     key: "sk-alice".into(),
                     space: "alice".into(),
+                    role: Role::Full,
                 },
                 SpaceKey {
                     key: "sk-bob".into(),
                     space: "bob".into(),
+                    role: Role::Full,
                 },
             ],
         },
@@ -232,6 +234,7 @@ async fn evidence_console_and_plain_server_both_serve_playground() {
             keys: vec![SpaceKey {
                 key: "fixture-token".into(),
                 space: "alice".into(),
+                role: Role::Full,
             }],
         },
         "fixture-token",
@@ -257,6 +260,7 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
         keys: vec![SpaceKey {
             key: "fixture-token".into(),
             space: "alice".into(),
+            role: Role::Full,
         }],
     };
     let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
@@ -609,7 +613,7 @@ async fn status_reports_space_and_lane() {
 async fn profile_endpoint_serves_identity_and_activity() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path());
-    call(
+    let (_, added) = call(
         &app,
         "POST",
         "/v1/episodes",
@@ -617,6 +621,7 @@ async fn profile_endpoint_serves_identity_and_activity() {
         Some(serde_json::json!({"content": "alice ships rust code"})),
     )
     .await;
+    let episode_id = added["episode_id"].as_i64().unwrap();
     let (status, body) = call(&app, "GET", "/v1/profile", Some("sk-alice"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -624,6 +629,34 @@ async fn profile_endpoint_serves_identity_and_activity() {
         "{body}"
     );
     assert!(body["static_facts"].as_array().is_some());
+    // Recent activity carries its evidence, in the shape both engines share.
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/profile-recent.json")).unwrap();
+    let mut want: Vec<&str> = fixture["recent_item"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    want.sort();
+    let recent = body["recent"].as_array().unwrap();
+    assert_eq!(recent.len(), body["dynamic"].as_array().unwrap().len());
+    for item in recent {
+        let mut have: Vec<&str> = item
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        have.sort();
+        assert_eq!(have, want, "exactly the shared keys: {item}");
+    }
+    assert_eq!(recent[0]["episode_id"].as_i64(), Some(episode_id));
+    assert_eq!(
+        recent[0]["excerpt"], body["dynamic"][0],
+        "recent is dynamic with its evidence"
+    );
+    assert!(!recent[0]["created_at"].as_str().unwrap().is_empty());
     let (status, _) = call(&app, "GET", "/v1/profile", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -679,6 +712,7 @@ async fn console_page_carries_its_key_and_the_api_still_refuses_others() {
             keys: vec![SpaceKey {
                 key: "ui-deadbeefdeadbeef".into(),
                 space: "default".into(),
+                role: Role::Full,
             }],
         },
         "ui-deadbeefdeadbeef",
@@ -861,6 +895,7 @@ async fn a_fact_names_the_episodes_it_came_from() {
             keys: vec![SpaceKey {
                 key: "sk-alice".into(),
                 space: "alice".into(),
+                role: Role::Full,
             }],
         },
     );
@@ -926,6 +961,7 @@ async fn a_proposal_can_be_listed_and_settled_over_http() {
             keys: vec![SpaceKey {
                 key: "sk-alice".into(),
                 space: "alice".into(),
+                role: Role::Full,
             }],
         },
     );
@@ -1093,4 +1129,135 @@ fn every_capability_claim_matches_a_mounted_route() {
         mounted("/v1/facts/{id}/approve") && mounted("/v1/facts/{id}/decline"),
         "facts.review must mean both approve and decline"
     );
+}
+
+fn roled_app(dir: &std::path::Path) -> axum::Router {
+    let engine = Engine::open(dir, Box::new(HashEmbedder::new(64))).unwrap();
+    let key = |key: &str, role: Role| SpaceKey {
+        key: key.into(),
+        space: "team".into(),
+        role,
+    };
+    router(
+        engine,
+        ServeConfig {
+            keys: vec![
+                key("sk-read", Role::Read),
+                key("sk-write", Role::Write),
+                key("sk-review", Role::Review),
+                key("sk-full", Role::Full),
+            ],
+        },
+    )
+}
+
+/// The same four words as the Python engine: read only reads; write adds
+/// and closes but never decides; review decides but never adds; full does
+/// everything. A refusal is a 403 naming the role.
+#[tokio::test]
+async fn each_role_can_do_what_it_says_and_nothing_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = roled_app(dir.path());
+    let note = || Some(serde_json::json!({"content": "the team ships on fridays"}));
+    let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-write"), note()).await;
+    assert!(status.is_success(), "write remembers: {status}");
+    let (status, body) = call(&app, "POST", "/v1/episodes", Some("sk-read"), note()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"].as_str().unwrap().contains("read"), "{body}");
+    let (status, _) = call(&app, "GET", "/v1/profile", Some("sk-read"), None).await;
+    assert_eq!(status, StatusCode::OK, "read reads");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/approve",
+        Some("sk-write"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "write never decides");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/decline",
+        Some("sk-write"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/approve",
+        Some("sk-review"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "review reaches the decision; there is no such claim"
+    );
+    let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-review"), note()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "review never adds");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/close",
+        Some("sk-review"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "closing is a write, not a decision"
+    );
+    let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-full"), note()).await;
+    assert!(status.is_success());
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/facts/4242/approve",
+        Some("sk-full"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "full does everything");
+    let (status, _) = call(&app, "POST", "/v1/episodes", Some("sk-nobody"), note()).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an unknown key is refused before any role is read"
+    );
+}
+
+#[test]
+fn roles_are_the_four_words_and_config_rows_carry_them() {
+    assert_eq!(Role::parse("review"), Ok(Role::Review));
+    assert!(Role::parse("owner").is_err());
+    assert_eq!(Role::default(), Role::Full);
+    let rows = |text: &str| toml::from_str::<toml::Value>(text).unwrap();
+    let keys = keys_from_config(&rows(
+        "[[keys]]\nkey = \"a\"\nspace = \"alpha\"\nrole = \"read\"\n[[keys]]\nkey = \"b\"\nspace = \"alpha\"\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        keys.iter()
+            .map(|k| (k.key.as_str(), k.role))
+            .collect::<Vec<_>>(),
+        vec![("a", Role::Read), ("b", Role::Full)],
+        "a row without a role is full"
+    );
+    let bad = keys_from_config(&rows(
+        "[[keys]]\nkey = \"a\"\nspace = \"alpha\"\nrole = \"owner\"\n",
+    ))
+    .unwrap_err();
+    assert!(bad.contains("owner"), "{bad}");
+    let twice = keys_from_config(&rows(
+        "[[keys]]\nkey = \"a\"\nspace = \"alpha\"\n[[keys]]\nkey = \"a\"\nspace = \"beta\"\n",
+    ))
+    .unwrap_err();
+    assert!(twice.contains("twice"), "{twice}");
+    let bare = keys_from_config(&rows("[[keys]]\nspace = \"alpha\"\n")).unwrap_err();
+    assert!(bare.contains("key"), "{bare}");
 }

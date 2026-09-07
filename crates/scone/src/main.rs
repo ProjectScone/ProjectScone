@@ -1068,6 +1068,7 @@ fn run() -> Result<(), String> {
                     keys: vec![scone::serve::SpaceKey {
                         key: key.clone(),
                         space: space.clone(),
+                        role: scone::serve::Role::Full,
                     }],
                 },
                 &key,
@@ -1103,20 +1104,8 @@ fn run() -> Result<(), String> {
             let server = table
                 .get("server")
                 .ok_or("config.toml needs a [server] section")?;
-            let keys: Vec<scone::serve::SpaceKey> = server
-                .get("keys")
-                .and_then(|k| k.as_array())
-                .map(|rows| {
-                    rows.iter()
-                        .filter_map(|row| {
-                            Some(scone::serve::SpaceKey {
-                                key: row.get("key")?.as_str()?.to_owned(),
-                                space: row.get("space")?.as_str()?.to_owned(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let keys =
+                scone::serve::keys_from_config(server).map_err(|e| format!("config.toml: {e}"))?;
             if keys.is_empty() {
                 return Err(
                     "refusing to serve with zero API keys — add [[server.keys]]                      entries (key, space) to config.toml"
