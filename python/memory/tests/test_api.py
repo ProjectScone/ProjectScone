@@ -457,4 +457,6 @@ def test_a_batch_of_episodes_answers_per_item_and_lands_whole_or_not_at_all(clie
     too_many = {"records": [{"content": f"note {i}"} for i in range(501)]}
     assert client.post("/v1/episodes/batch", json=too_many, headers=h).status_code == 422
     assert client.post("/v1/episodes/batch", json={"records": [{"content": "x", "bogus": 1}]}, headers=h).status_code == 422
+    one_at_a_time = client.post("/v1/episodes/batch", json={"records": [{"content": "y", "dedup_key": "k", "replace": True}]}, headers=h)
+    assert one_at_a_time.status_code == 422 and "one record at a time" in one_at_a_time.text
     assert client.post("/v1/episodes/batch", json=body).status_code == 401
