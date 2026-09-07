@@ -922,3 +922,55 @@ async fn a_proposal_can_be_listed_and_settled_over_http() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// The Rust HTTP surface is frozen at the engine essentials, and this
+/// test is the freeze.
+///
+/// Decision of 2026-09-06, recorded in memory/DECISIONS.md: there are two
+/// HTTP servers over one engine contract, and every route costs twice,
+/// plus a conformance test to keep the two honest. The Rust one exists
+/// for self-hosting the engine as a single binary with no Python
+/// runtime; the product surface, which is conversations, voice,
+/// attachments, the grounding audit and distillation, lives in Python
+/// and is not chased here.
+///
+/// Adding a route to serve.rs fails this test on purpose. If the new
+/// route is an engine essential, add it to the list below and say why in
+/// DECISIONS.md. If it is product surface, it belongs in the Python
+/// server instead. What must not happen is the surface widening by
+/// accident, one convenience at a time, until parity is claimed that
+/// nobody is keeping.
+#[test]
+fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
+    let source = include_str!("../src/serve.rs");
+    let mut routes: Vec<&str> = source
+        .match_indices(".route(\"")
+        .map(|(at, marker)| {
+            let rest = &source[at + marker.len()..];
+            &rest[..rest.find('"').expect("a closing quote on the route path")]
+        })
+        .collect();
+    routes.sort_unstable();
+    routes.dedup();
+
+    let frozen = [
+        "/v1/capabilities",
+        "/v1/episodes",
+        "/v1/episodes/{id}",
+        "/v1/events",
+        "/v1/facts",
+        "/v1/facts/{id}/approve",
+        "/v1/facts/{id}/close",
+        "/v1/facts/{id}/decline",
+        "/v1/graph",
+        "/v1/profile",
+        "/v1/recall",
+        "/v1/sources",
+        "/v1/status",
+        "/v1/tags",
+    ];
+    assert_eq!(
+        routes, frozen,
+        "the Rust server's routes changed; see the decision above before widening it"
+    );
+}
