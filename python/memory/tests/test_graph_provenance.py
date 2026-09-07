@@ -71,3 +71,23 @@ async def test_provenance_left_out_of_a_snapshot_is_reported_rather_than_hidden(
     assert small.provenance_omitted > 0, "a snapshot that could not fit every source says so"
     assert len(drawn) + small.provenance_omitted == 6, "and the two numbers account for every source"
     assert small.as_dict()["provenance_omitted"] == small.provenance_omitted
+
+
+async def test_a_source_that_was_forgotten_is_counted_apart_from_one_that_did_not_fit(engine):
+    """Codex caught the two counts sharing a name across the engines. A
+    source out of view and a source that no longer exists are different
+    facts about the evidence, and a reader must be able to tell them
+    apart; both are counted in source episodes, never in edges."""
+    gone = await engine.remember("alpha", "a note that will be forgotten", created_at="2024-01-01")
+    kept = await engine.remember("alpha", "a note that stays", created_at="2024-01-02")
+    orphan = await engine.assert_fact("alpha", "one", "came_from", "the forgotten note",
+                                      source_episode_id=gone.episode_id)
+    await engine.assert_fact("alpha", "two", "came_from", "the kept note", source_episode_id=kept.episode_id)
+    await engine.forget("alpha", gone.episode_id)
+
+    graph = await engine.graph("alpha")
+    assert graph.provenance_missing == 1, "the forgotten source is named as gone, not as out of view"
+    assert graph.provenance_omitted == 0, "and nothing was cut for room"
+    assert f"claim:{orphan.fact_id}" in graph.nodes, "the claim stands; its source is what went"
+    assert f"episode:{gone.episode_id}" not in graph.nodes
+    assert graph.as_dict()["provenance_missing"] == 1

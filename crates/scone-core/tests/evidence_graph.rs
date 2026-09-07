@@ -111,3 +111,43 @@ fn what_the_bound_left_out_is_counted_rather_than_quietly_dropped() {
         "episodes and claims are kept before passages: {kinds:?}"
     );
 }
+
+#[test]
+fn a_source_that_is_gone_is_counted_apart_from_one_that_did_not_fit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
+    let space = auth::resolve(&mut e, "default", true).unwrap();
+    let (gone, _) = e
+        .import_episode(&space, "note", "a note that will be removed", None, None)
+        .unwrap();
+    e.apply_facts(
+        &space,
+        gone,
+        &[fact("one", "came_from", "the removed note")],
+    )
+    .unwrap();
+    // The episode row goes while the claim and its provenance stay. The
+    // foreign key normally prevents exactly this, which is the point: the
+    // count is what reports the state if a store ever reaches it, by a
+    // restore, a repair or a hand-edited file, rather than the graph
+    // quietly drawing a claim with nothing behind it.
+    let raw = rusqlite::Connection::open(dir.path().join("scone.db")).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    raw.execute("DELETE FROM episodes WHERE id = ?1", [gone])
+        .unwrap();
+    drop(raw);
+
+    let graph = e.evidence_graph(&space, 50).unwrap();
+    assert_eq!(
+        graph["provenance_missing"], 1,
+        "the source is named as gone, not as out of view: {graph}"
+    );
+    assert_eq!(
+        graph["provenance_omitted"], 0,
+        "and nothing was cut for room"
+    );
+    assert!(
+        has_node(&graph, "claim:1"),
+        "the claim stands; its source is what went"
+    );
+}

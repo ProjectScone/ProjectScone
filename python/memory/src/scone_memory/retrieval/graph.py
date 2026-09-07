@@ -39,11 +39,15 @@ class Graph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
     truncated: bool = False
-    #: Sources this snapshot could not fit. A claim drawn without the
-    #: episode it came from is a claim with invisible provenance, so the
-    #: count is reported rather than the absence being left to look like
-    #: an absence of evidence.
+    #: Source episodes this snapshot had room for but could not fit,
+    #: counted in episodes, not edges. A claim drawn without the episode
+    #: it came from has invisible provenance, so the number is reported
+    #: rather than left to look like an absence of evidence.
     provenance_omitted: int = 0
+    #: Source episodes a drawn claim names that no longer exist, counted
+    #: the same way. Forgetting is not a budget: this is evidence that is
+    #: gone, and a reader should be able to tell the two apart.
+    provenance_missing: int = 0
 
     def add(self, node: Node) -> None:
         self.nodes.setdefault(node.id, node)
@@ -58,6 +62,7 @@ class Graph:
             "edges": [e.__dict__ for e in self.edges],
             "truncated": self.truncated,
             "provenance_omitted": self.provenance_omitted,
+            "provenance_missing": self.provenance_missing,
             "counts": {kind: sum(1 for n in self.nodes.values() if n.kind == kind) for kind in sorted({n.kind for n in self.nodes.values()})},
         }
 

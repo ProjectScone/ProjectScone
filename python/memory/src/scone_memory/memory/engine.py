@@ -1329,7 +1329,13 @@ class MemoryEngine:
             if f.source_episode_id is not None and f"episode:{f.source_episode_id}" not in g.nodes))
         for eid in sorted(elsewhere)[:limit]:
             ep = await self.documents.get_episode(space, eid)
-            if ep is not None:
+            if ep is None:
+                # The claim names a source that is gone. That is not a
+                # budget: it is evidence that was forgotten, and saying so
+                # separately is the difference between "out of view" and
+                # "no longer exists".
+                g.provenance_missing += 1
+            else:
                 draw_episode(ep)
         g.provenance_omitted = max(0, len(elsewhere) - limit)
         for f in wanted:
