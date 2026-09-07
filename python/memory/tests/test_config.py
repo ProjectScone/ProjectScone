@@ -3,7 +3,7 @@ import os
 import pytest
 
 from scone_memory import InvalidInput
-from scone_memory.config import Settings, build_engine, parse_keys
+from scone_memory.runtime.config import Settings, build_engine, parse_keys
 
 
 def test_keys_parse_and_refuse_duplicates():
@@ -73,8 +73,8 @@ async def test_production_shape_mongo_plus_qdrant_round_trips():
 def test_event_sink_follows_the_document_store_by_default(tmp_path):
     import importlib.util
 
-    from scone_memory.config import build_events
-    from scone_memory.events import InMemoryEventLog, SqliteEventLog
+    from scone_memory.runtime.config import build_events
+    from scone_memory.observability.events import InMemoryEventLog, SqliteEventLog
 
     assert isinstance(build_events(Settings()), InMemoryEventLog)
     assert isinstance(build_events(Settings(documents="sqlite", sqlite_path=str(tmp_path / "e.db"))), SqliteEventLog)
@@ -84,6 +84,6 @@ def test_event_sink_follows_the_document_store_by_default(tmp_path):
         build_events(Settings(events="mongo"))
     if importlib.util.find_spec("pymongo") is None:
         pytest.skip("pymongo not installed; the mongo default needs the driver to construct")
-    from scone_memory.events import MongoEventLog
+    from scone_memory.observability.events import MongoEventLog
 
     assert isinstance(build_events(Settings(documents="mongo", mongo_url="mongodb://localhost:1")), MongoEventLog)

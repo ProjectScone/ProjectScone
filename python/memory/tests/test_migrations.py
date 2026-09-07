@@ -12,7 +12,7 @@ import sqlite3
 import pytest
 
 from scone_memory.backends.sqlite import SCHEMA, SCHEMA_VERSION, STEPS, SchemaMismatch, SqliteDocumentStore, schema_version
-from scone_memory.events import SqliteEventLog
+from scone_memory.observability.events import SqliteEventLog
 
 ROW = ("INSERT INTO episodes (id, space, kind, content, content_hash, tags, metadata, created_at, ingested_at)"
        " VALUES (?, 'default', 'note', ?, ?, '[]', '{}', '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z')")

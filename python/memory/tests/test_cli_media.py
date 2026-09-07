@@ -9,9 +9,9 @@ import sqlite3
 
 import pytest
 
-from scone_memory.cli import main, settings_for_cli
-from scone_memory.config import build_engine
-from scone_memory.errors import NotFound
+from scone_memory.runtime.cli import main, settings_for_cli
+from scone_memory.runtime.config import build_engine
+from scone_memory.core.errors import NotFound
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=")
 
@@ -179,9 +179,9 @@ def test_cli_rejects_empty_note_before_storing_image(tmp_path, capsys):
 
 async def test_missing_attachment_link_is_unconfirmed_not_success(tmp_path):
     from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-    from scone_memory.blobs import InMemoryBlobStore
-    from scone_memory.cli import build_parser, run
-    from scone_memory.errors import InvalidInput
+    from scone_memory.backends.blobs import InMemoryBlobStore
+    from scone_memory.runtime.cli import build_parser, run
+    from scone_memory.core.errors import InvalidInput
 
     class DroppedLink(InMemoryBlobStore):
         async def link(self, space, attachment_id, episode_id):

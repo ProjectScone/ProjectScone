@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence
 
-from ..ports import VectorPoint
-from ..timeutil import epoch_seconds
+from ..core.ports import VectorPoint
+from ..core.timeutil import epoch_seconds
 from .validation import validate_vector
 
 

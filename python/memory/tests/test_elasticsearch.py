@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InvalidInput, MemoryEngine
-from scone_memory.config import Settings, build_engine, build_events, build_vectors
+from scone_memory.runtime.config import Settings, build_engine, build_events, build_vectors
 
 URL = os.environ.get("SCONE_TEST_ELASTICSEARCH_URL")
 pytestmark = [pytest.mark.elasticsearch, pytest.mark.skipif(not URL, reason="needs a live Elasticsearch 8")]

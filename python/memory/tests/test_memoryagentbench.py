@@ -17,7 +17,7 @@ from scone_memory.bench.memoryagentbench import (
     run_conflict_resolution,
     stale_facts,
 )
-from scone_memory.llm import FakeChat
+from scone_memory.providers.llm import FakeChat
 
 CONTEXT = """Here is a list of facts:
 0. pesäpallo was created in the country of Finland.
@@ -110,7 +110,7 @@ async def test_the_reader_sees_the_top_k_oldest_first_and_is_scored_by_substring
 def test_the_cli_runs_the_split_without_touching_the_configured_store(tmp_path):
     import io
 
-    from scone_memory import cli
+    from scone_memory.runtime import cli
 
     rows = [{"context": CONTEXT, "questions": ["In which country was pesäpallo created?"], "answers": [["Philippines"]],
              "metadata": {"source": "factconsolidation_sh_6k"}},

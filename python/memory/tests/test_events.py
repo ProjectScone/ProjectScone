@@ -22,7 +22,7 @@ from scone_memory import (
     SqliteEventLog,
 )
 from scone_memory.api import create_app
-from scone_memory.ports import NewEvent
+from scone_memory.core.ports import NewEvent
 from scone_memory.testing import Clock
 from scone_memory.testing.events_contract import *  # noqa: F401,F403
 from scone_memory.testing.events_contract import ev
@@ -55,7 +55,7 @@ async def sink(request, tmp_path):
 
         log = await ElasticsearchEventLog(os.environ["SCONE_TEST_ELASTICSEARCH_URL"], prefix=f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=30, clock=clock).open()
     else:
-        from scone_memory.events import MongoEventLog
+        from scone_memory.observability.events import MongoEventLog
 
         log = await MongoEventLog(os.environ["SCONE_TEST_MONGO_URL"], f"scone_test_ev_{uuid.uuid4().hex[:8]}", max_age_days=7).open()
     log.test_clock = clock

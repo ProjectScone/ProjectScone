@@ -1,4 +1,4 @@
-from scone_memory.fusion import Fused, cap_per_episode, normalise, order, rrf
+from scone_memory.retrieval.fusion import Fused, cap_per_episode, normalise, order, rrf
 
 
 def test_tied_scores_order_by_chunk_id():

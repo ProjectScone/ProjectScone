@@ -18,10 +18,10 @@ from array import array
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
-from ..errors import SconeError
-from ..lexical import tokenize
-from ..models import Chunk, Episode, Fact
-from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.errors import SconeError
+from ..retrieval.lexical import tokenize
+from ..core.models import Chunk, Episode, Fact
+from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
 
 SCHEMA = """

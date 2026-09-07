@@ -10,8 +10,8 @@ import httpx
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.distill import EXTRACTION_PROMPT, DistillError, Distiller, Extracted, parse_triples
-from scone_memory.llm import ChatError, FakeChat, OpenAICompatibleChat
+from scone_memory.ingestion.distill import EXTRACTION_PROMPT, DistillError, Distiller, Extracted, parse_triples
+from scone_memory.providers.llm import ChatError, FakeChat, OpenAICompatibleChat
 from scone_memory.testing import Clock
 
 SPACE = "default"

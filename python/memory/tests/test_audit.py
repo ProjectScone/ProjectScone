@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.audit import audit_grounding
+from scone_memory.observability.audit import audit_grounding
 
 SPACE = "default"
 #: The live episode that produced the two malformed claims, verbatim.
@@ -178,7 +178,7 @@ def test_the_cli_reports_a_flagged_claim_with_its_evidence(tmp_path):
     import io
     import json
 
-    from scone_memory import cli
+    from scone_memory.runtime import cli
 
     env = {"SCONE_SQLITE_PATH": str(tmp_path / "audit.db")}
     dump = "\n".join([

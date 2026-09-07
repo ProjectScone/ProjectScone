@@ -28,3 +28,4 @@ python/*/dist/
 python/*/.pytest_cache/
 # Codex keeps the capability ledger; it is not part of the published tree.
 CAPABILITIES.md
+python/*/src/*.egg-info/

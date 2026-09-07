@@ -7,10 +7,10 @@ one unchanged. Invalid input comes back as a tool result with
 ``is_error`` set, never as an exception, so the model can read the
 reason and correct the call.
 
-    python -m scone_memory.mcp --space default
+    python -m scone_memory.runtime.mcp --space default
 
 Stores come from the environment exactly as for the CLI (see
-``scone_memory.config``); with nothing set, memory persists to SQLite at
+``scone_memory.runtime.config``); with nothing set, memory persists to SQLite at
 ~/.scone-memory/memory.db.
 
 Built on mcp 2.x, where the class the 1.x SDK called ``FastMCP`` is
@@ -31,12 +31,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field
 
-from . import __version__
+from .. import __version__
 from .cli import settings_for_cli
 from .config import Settings, build_engine
-from .engine import MemoryEngine, Profile, check_space, normalise_term
-from .errors import SconeError
-from .models import Added, Episode, Fact, RecallResult
+from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
+from ..core.errors import SconeError
+from ..core.models import Added, Episode, Fact, RecallResult
 
 MAX_CONTENT = 100_000
 MAX_QUERY = 1_000
@@ -406,7 +406,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m scone_memory.mcp",
+        prog="python -m scone_memory.runtime.mcp",
         description="Serve the memory engine over MCP stdio. Stores come from SCONE_* variables, as for the CLI.",
     )
     parser.add_argument("--space", default="default", help="space used when a call names none (default: default)")

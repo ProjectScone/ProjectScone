@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.mcp import create_server
+from scone_memory.runtime.mcp import create_server
 from scone_memory.testing import Clock
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent
@@ -274,7 +274,7 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
     stdio = pytest.importorskip("mcp.client.stdio", reason="mcp stdio client unavailable")
     params = stdio.StdioServerParameters(
         command=sys.executable,
-        args=["-m", "scone_memory.mcp", "--space", "smoke"],
+        args=["-m", "scone_memory.runtime.mcp", "--space", "smoke"],
         env={"SCONE_SQLITE_PATH": str(tmp_path / "memory.db")},
         cwd=str(PACKAGE_DIR),
     )
@@ -318,7 +318,7 @@ async def test_recall_narrows_by_kind_source_prefix_and_dates():
     memory_store cannot set kind, source or date, so the episodes are
     seeded through the engine."""
     from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-    from scone_memory.mcp import create_server
+    from scone_memory.runtime.mcp import create_server
 
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
     ids = []
@@ -386,8 +386,8 @@ async def test_the_gate_can_be_turned_on_where_an_operator_can_reach_it(monkeypa
     """A gate only the library can set is a gate no deployment has. The
     server reads it from the environment, the same way every other store
     and model setting arrives."""
-    from scone_memory import mcp
-    from scone_memory.cli import settings_for_cli
+    from scone_memory.runtime import mcp
+    from scone_memory.runtime.cli import settings_for_cli
 
     seen: dict = {}
 
@@ -408,8 +408,8 @@ async def test_the_gate_can_be_turned_on_where_an_operator_can_reach_it(monkeypa
 
 
 async def test_no_gate_in_the_environment_leaves_the_server_ungated(monkeypatch):
-    from scone_memory import mcp
-    from scone_memory.cli import settings_for_cli
+    from scone_memory.runtime import mcp
+    from scone_memory.runtime.cli import settings_for_cli
 
     seen: dict = {}
 

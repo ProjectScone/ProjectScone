@@ -14,7 +14,7 @@ from types import ModuleType, SimpleNamespace
 import httpx
 import pytest
 
-from scone_memory.cli import build_parser, main
+from scone_memory.runtime.cli import build_parser, main
 
 
 def env_for(tmp_path):
@@ -87,7 +87,7 @@ def test_journal_aliases_are_rejected_before_open(tmp_path, capsys):
 def test_server_builds_and_closes_resources_on_one_loop(tmp_path, monkeypatch, capsys, started):
     import uvicorn
     from scone_memory.api import conversation_server as launcher
-    from scone_memory.cli import settings_for_cli
+    from scone_memory.runtime.cli import settings_for_cli
     loops, closed = [], []
     class Backend:
         async def close(self):
@@ -161,7 +161,7 @@ def launched(tmp_path):
         env["SCONE_PORT"] = str(port)
         root = str(Path(__file__).resolve().parents[1])
         env["PYTHONPATH"] = os.pathsep.join([root, str(Path(__file__).parent), env.get("PYTHONPATH", "")])
-        process = subprocess.Popen([sys.executable, "-m", "scone_memory.cli", "serve-conversations",
+        process = subprocess.Popen([sys.executable, "-m", "scone_memory.runtime.cli", "serve-conversations",
                                     "--journal", str(tmp_path / "sessions.db"), *options],
                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(process)

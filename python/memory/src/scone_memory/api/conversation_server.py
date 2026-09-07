@@ -8,9 +8,9 @@ import inspect
 from pathlib import Path
 import sys
 
-from ..config import Settings, build_engine
-from ..engine import check_space
-from ..errors import InvalidInput
+from ..runtime.config import Settings, build_engine
+from ..memory.engine import check_space
+from ..core.errors import InvalidInput
 
 
 def load_model_factory(spec: str):

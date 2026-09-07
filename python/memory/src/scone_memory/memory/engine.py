@@ -17,12 +17,12 @@ import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
-from . import fusion
-from .chunker import DEFAULT_TARGET, byte_spans, chunk_spans
-from .errors import Conflict, InvalidInput, NotFound
-from .lexical import tokenize
-from .blobs import BlobStore, InMemoryBlobStore
-from .models import (
+from ..retrieval import fusion
+from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
+from ..core.errors import Conflict, InvalidInput, NotFound
+from ..retrieval.lexical import tokenize
+from ..backends.blobs import BlobStore, InMemoryBlobStore
+from ..core.models import (
     MAX_CONTENT_BYTES,
     Added,
     Attachment,
@@ -35,8 +35,8 @@ from .models import (
     RecallResult,
     Status,
 )
-from .redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
-from .ports import (
+from ..capture.redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
+from ..core.ports import (
     DocumentStore,
     DuplicateEvent,
     Embedder,
@@ -51,7 +51,7 @@ from .ports import (
     VectorIndex,
     VectorPoint,
 )
-from .timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
+from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
 SPACE_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
 METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -866,7 +866,7 @@ class MemoryEngine:
     ):
         """The recorded relations around a session or an episode (or the
         latest activity when neither is given). See ``graph.py``."""
-        from . import graph as G
+        from ..retrieval import graph as G
 
         check_space(space)
         limit = max(1, min(limit, 2000))

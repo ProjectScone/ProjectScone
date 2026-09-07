@@ -12,7 +12,7 @@ import random
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.errors import NotFound
+from scone_memory.core.errors import NotFound
 from scone_memory.testing import Clock
 
 

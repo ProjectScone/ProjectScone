@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import create_app
-from scone_memory.metrics import compute, nearest_rank
-from scone_memory.ports import Event
+from scone_memory.observability.metrics import compute, nearest_rank
+from scone_memory.core.ports import Event
 
 
 def recall(i, ts, total, lanes, similarity=0.5, returned=10, space_bytes=100, where=None, error=None, embedder="hash-256",

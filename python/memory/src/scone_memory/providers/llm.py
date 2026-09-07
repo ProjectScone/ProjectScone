@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional, Protocol, Sequence, runtime_checkable
 
-from .errors import SconeError
+from ..core.errors import SconeError
 
 #: Ceiling for one model call. A hung provider must become a typed
 #: error, never a stuck process.

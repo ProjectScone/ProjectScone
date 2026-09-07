@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.blobs import InMemoryBlobStore
-from scone_memory.events import InMemoryEventLog
+from scone_memory.backends.blobs import InMemoryBlobStore
+from scone_memory.observability.events import InMemoryEventLog
 
 
 class Closable:

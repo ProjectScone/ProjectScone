@@ -13,8 +13,8 @@ import json
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
 
-from .errors import NotFound
-from .models import Attachment
+from ..core.errors import NotFound
+from ..core.models import Attachment
 
 
 def digest_of(data: bytes) -> str:

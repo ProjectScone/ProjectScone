@@ -271,7 +271,7 @@ def test_serve_builds_the_engine_on_the_loop_it_serves_from(monkeypatch, capsys)
     import uvicorn
 
     from scone_memory.api import __main__ as serve
-    from scone_memory.config import Settings
+    from scone_memory.runtime.config import Settings
 
     loops: dict[str, object] = {}
 

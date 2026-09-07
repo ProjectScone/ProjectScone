@@ -1,6 +1,6 @@
 """``scone-memory``: the engine from any shell.
 
-Stores come from the environment (see ``scone_memory.config``); with
+Stores come from the environment (see ``scone_memory.runtime.config``); with
 nothing set, the CLI persists to SQLite at ~/.scone-memory/memory.db so
 two invocations see the same memory. Every command takes ``--json`` for
 machine-readable output, so it pipes into jq, into another process, or
@@ -26,8 +26,8 @@ import stat
 from typing import Mapping, Optional, Sequence
 
 from .config import Settings, build_engine
-from .engine import MemoryEngine, Record
-from .errors import InvalidInput, SconeError
+from ..memory.engine import MemoryEngine, Record
+from ..core.errors import InvalidInput, SconeError
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -191,7 +191,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     from collections import defaultdict
 
-    from .bench import load_items, run as run_bench, stratified_sample
+    from ..bench import load_items, run as run_bench, stratified_sample
     from .config import build_embedder, build_in_process_engine
 
     items = load_items(args.dataset)
@@ -256,7 +256,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 
 async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -> int:
     """Like bench: in-process stores per item, the configured store untouched."""
-    from .bench.memoryagentbench import load_conflict_resolution, run_conflict_resolution
+    from ..bench.memoryagentbench import load_conflict_resolution, run_conflict_resolution
     from .config import build_chat, build_embedder, build_in_process_engine
 
     items = load_conflict_resolution(args.dataset)
@@ -344,7 +344,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             if args.image is not None:
                 if not raw.strip():
                     raise InvalidInput("--image needs a nonempty source note for retrieval")
-                from .engine import MAX_ATTACHMENT_BYTES
+                from ..memory.engine import MAX_ATTACHMENT_BYTES
 
                 data, media_type, name = read_original_image(args.image, min(engine.max_attachment_bytes, MAX_ATTACHMENT_BYTES))
                 try:
@@ -448,7 +448,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "audit-grounding":
         from dataclasses import asdict
 
-        from .audit import audit_grounding
+        from ..observability.audit import audit_grounding
 
         found = await audit_grounding(engine, space, statuses=tuple(args.status or ("active",)))
         shown = [f for f in found if f.flagged] if args.flagged_only else found
@@ -566,7 +566,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     args, rest = build_parser().parse_known_args(raw)
     env = os.environ if env is None else env
     if args.command == "agent-hook":
-        from .agent_hook import run_hook
+        from ..capture.agent_hook import run_hook
 
         return run_hook(rest, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
     if rest:
@@ -578,7 +578,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
             print("invalid conversation server settings; check SCONE_* configuration", file=sys.stderr)
             return 2
         try:
-            from .api.conversation_server import main as serve_conversations
+            from ..api.conversation_server import main as serve_conversations
         except ImportError:
             print("conversation serving needs pip install 'scone-memory[api]'", file=sys.stderr)
             return 2
@@ -587,7 +587,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
                                    model_factory=args.model_factory, console=args.console)
     settings = settings_for_cli(env)
     if args.command == "serve":
-        from .api.__main__ import main as serve
+        from ..api.__main__ import main as serve
 
         serve(settings)  # same SQLite default as the other commands
         return 0

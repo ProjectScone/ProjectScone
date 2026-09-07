@@ -6,14 +6,14 @@ import json
 import subprocess
 import sys
 
-from scone_memory.agent_hook import build_event, normalise_claude, normalise_codex, project_for, run_hook
+from scone_memory.capture.agent_hook import build_event, normalise_claude, normalise_codex, project_for, run_hook
 
 PROJECTS = "scone=/Users/me/ProjectScone,examples=/Users/me/zdeceptron/examples"
 ENV = {"SCONE_API_KEY": "k", "SCONE_HOOK_PROJECTS": PROJECTS, "SCONE_HOOK_FEED": "full", "SCONE_HOOK_CAPTURE": "1"}
 
 
 def test_observer_module_entrypoint_accepts_host_flags_and_returns_valid_hook_json():
-    result = subprocess.run([sys.executable, "-m", "scone_memory.agent_hook", "--agent", "codex", "--feed", "metadata"], input="{}", text=True, capture_output=True)
+    result = subprocess.run([sys.executable, "-m", "scone_memory.capture.agent_hook", "--agent", "codex", "--feed", "metadata"], input="{}", text=True, capture_output=True)
     assert result.returncode == 0
     assert json.loads(result.stdout) == {}
 
@@ -122,7 +122,7 @@ def test_the_hook_imports_nothing_heavy():
     import sys
 
     probe = (
-        "import sys; import scone_memory.agent_hook, scone_memory.prompting; "
+        "import sys; import scone_memory.capture.agent_hook, scone_memory.capture.prompting; "
         "heavy = sorted(m for m in sys.modules if m.split('.')[0] in ('pydantic', 'fastapi', 'httpx', 'fastembed', 'qdrant_client', 'pymongo', 'numpy')); "
         "scone = sorted(m for m in sys.modules if m.startswith('scone_memory')); "
         "print(repr(heavy)); print(repr(scone))"
@@ -130,4 +130,4 @@ def test_the_hook_imports_nothing_heavy():
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.splitlines()
     heavy, scone = eval(out[0]), eval(out[1])  # noqa: S307 - our own repr output
     assert heavy == [], f"the hook dragged in {heavy}"
-    assert set(scone) <= {"scone_memory", "scone_memory.agent_hook", "scone_memory.prompting", "scone_memory.redact"}, scone
+    assert set(scone) <= {"scone_memory", "scone_memory.capture", "scone_memory.capture.agent_hook", "scone_memory.capture.prompting", "scone_memory.capture.redact"}, scone

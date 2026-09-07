@@ -1,4 +1,4 @@
-from scone_memory.chunker import MIN_CHUNK, chunk_spans
+from scone_memory.ingestion.chunker import MIN_CHUNK, chunk_spans
 
 
 def test_every_character_lands_in_exactly_one_span():
@@ -42,7 +42,7 @@ def test_tiny_tail_joins_its_predecessor():
 
 def test_stored_spans_are_utf8_byte_offsets():
     """Spec rule 1.2: a span must mean the same thing to the Rust product."""
-    from scone_memory.chunker import byte_spans
+    from scone_memory.ingestion.chunker import byte_spans
 
     content = "café ☕ Rua Augusta, 3º andar. " * 12 + "\n\nFin."
     spans = chunk_spans(content, target=150)

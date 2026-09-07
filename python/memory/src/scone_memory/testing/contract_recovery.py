@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from ..engine import MemoryEngine
-from ..models import RecallItem
+from ..memory.engine import MemoryEngine
+from ..core.models import RecallItem
 
 
 class Crash(BaseException):

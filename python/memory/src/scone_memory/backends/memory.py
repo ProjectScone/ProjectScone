@@ -14,10 +14,10 @@ from collections import defaultdict
 from itertools import count
 from typing import Mapping, Optional, Sequence
 
-from ..lexical import Bm25
-from ..models import Chunk, Episode, Fact
-from ..ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
-from ..timeutil import is_before_or_at
+from ..retrieval.lexical import Bm25
+from ..core.models import Chunk, Episode, Fact
+from ..core.ports import NewChunk, NewEpisode, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 
 

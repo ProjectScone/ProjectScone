@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
-from ..engine import MemoryEngine, Record
-from ..models import RecallItem
+from ..memory.engine import MemoryEngine, Record
+from ..core.models import RecallItem
 
 
 @dataclass(frozen=True)

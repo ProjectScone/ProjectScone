@@ -9,10 +9,10 @@ from fastapi.testclient import TestClient
 
 from scone_memory import FakeChat, HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api import create_app
-from scone_memory.config import Settings, build_worker
-from scone_memory.distill import Distiller
+from scone_memory.runtime.config import Settings, build_worker
+from scone_memory.ingestion.distill import Distiller
 from scone_memory.testing import Clock
-from scone_memory.worker import ConsolidationWorker
+from scone_memory.ingestion.worker import ConsolidationWorker
 
 LISBON = json.dumps([{
     "subject": "Ana", "predicate": "moved_to", "object": "Lisbon", "confidence": 0.9,

@@ -30,7 +30,7 @@ class LoopBound(Reference):
 
 
 def test_from_env_builds_on_the_loop_that_serves(monkeypatch):
-    import scone_memory.config as config
+    import scone_memory.runtime.config as config
 
     async def fake_build(settings):
         documents = await LoopBound().open()

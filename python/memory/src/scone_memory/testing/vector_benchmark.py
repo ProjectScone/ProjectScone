@@ -14,8 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Mapping, Sequence
 
-from ..ports import VectorIndex
-from ..timeutil import now_rfc3339
+from ..core.ports import VectorIndex
+from ..core.timeutil import now_rfc3339
 
 
 @dataclass(frozen=True)

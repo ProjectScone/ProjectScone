@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from scone_memory.ports import TextFilter, VectorPoint
+from scone_memory.core.ports import TextFilter, VectorPoint
 
 
 def point(chunk_id, vector):

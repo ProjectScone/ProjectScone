@@ -10,7 +10,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api.conversations import create_conversation_app
-from scone_memory.session_journal import SessionJournal
+from scone_memory.realtime.session_journal import SessionJournal
 
 
 class ControlledConversation:

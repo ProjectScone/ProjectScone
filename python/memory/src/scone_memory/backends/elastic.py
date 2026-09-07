@@ -25,11 +25,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from ..errors import SconeError
-from ..lexical import tokenize
-from ..models import Chunk, Episode, Fact
-from ..ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
-from ..timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
+from ..core.errors import SconeError
+from ..retrieval.lexical import tokenize
+from ..core.models import Chunk, Episode, Fact
+from ..core.ports import DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, SpaceCounts, TextFilter, VectorPoint
+from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
 #: Shared spec 3.6. Pre-release: an index set another build wrote is

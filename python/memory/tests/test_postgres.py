@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from scone_memory import HashEmbedder, InvalidInput, MemoryEngine
-from scone_memory.config import Settings, build_engine, build_events, build_vectors
+from scone_memory.runtime.config import Settings, build_engine, build_events, build_vectors
 
 URL = os.environ.get("SCONE_TEST_POSTGRES_URL")
 pytestmark = [pytest.mark.postgres, pytest.mark.skipif(not URL, reason="needs a live PostgreSQL with pgvector")]

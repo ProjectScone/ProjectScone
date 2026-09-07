@@ -37,7 +37,7 @@ function main(){
     const agent=process.argv[2],p=prepare(agent,config,payload,fs.realpathSync(root));
     if(!p)return;
     const env={...process.env,SCONE_CAPTURE_KEY:config.key,SCONE_HOOK_COMPILE:'0',SCONE_HOOK_DEBUG:'1'};
-    const args=['-m','scone_memory.agent_hook','--agent',agent,'--server',config.server,'--key-env','SCONE_CAPTURE_KEY','--feed',p.feed,'--projects','ProjectScone='+p.projectRoot];
+    const args=['-m','scone_memory.capture.agent_hook','--agent',agent,'--server',config.server,'--key-env','SCONE_CAPTURE_KEY','--feed',p.feed,'--projects','ProjectScone='+p.projectRoot];
     if(p.feed==='full')args.push('--capture');
     const child=spawnSync(path.join(root,'python/memory/.venv/bin/python'),args,{input:JSON.stringify(p.payload),env,encoding:'utf8',timeout:4500,maxBuffer:65536});
     if(child.error||child.status!==0||child.stderr.includes('agent-hook:'))process.stderr.write('Scone capture: event delivery not confirmed; inspect the local API.\n');

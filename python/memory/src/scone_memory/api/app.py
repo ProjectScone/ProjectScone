@@ -21,10 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from contextlib import asynccontextmanager
 
-from .. import metrics
-from ..engine import MemoryEngine
-from ..errors import Conflict, InvalidInput, NotFound
-from ..models import Attachment, Fact, RecallItem
+from ..observability import metrics
+from ..memory.engine import MemoryEngine
+from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.models import Attachment, Fact, RecallItem
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -419,7 +419,7 @@ def create_app(
         from collections import Counter
         from dataclasses import asdict
 
-        from ..audit import audit_grounding
+        from ..observability.audit import audit_grounding
 
         findings = await audit_grounding(engine, space, statuses=(status,))
         shown = [f for f in findings if f.flagged] if flagged else findings

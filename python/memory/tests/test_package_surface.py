@@ -37,9 +37,9 @@ def test_the_public_names_are_the_ones_the_modules_define():
     """No shadowing: what the package hands out is what the module that
     owns it defines, not a copy that drifted."""
     for module, names in (
-        ("scone_memory.models", ["Attachment", "BatchDecision", "DecisionOutcome", "Episode", "Fact"]),
-        ("scone_memory.blobs", ["InMemoryBlobStore", "FileBlobStore"]),
-        ("scone_memory.errors", ["Conflict", "InvalidInput", "NotFound"]),
+        ("scone_memory.core.models", ["Attachment", "BatchDecision", "DecisionOutcome", "Episode", "Fact"]),
+        ("scone_memory.backends.blobs", ["InMemoryBlobStore", "FileBlobStore"]),
+        ("scone_memory.core.errors", ["Conflict", "InvalidInput", "NotFound"]),
     ):
         owner = importlib.import_module(module)
         for name in names:

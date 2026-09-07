@@ -18,8 +18,8 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without the extra
     raise ImportError("scone_memory.integrations.langchain needs langchain-core: pip install 'scone-memory[langchain]'") from e
 
-from ..models import RecallResult
-from ..sync import SyncMemoryEngine
+from ..core.models import RecallResult
+from ..memory.sync import SyncMemoryEngine
 from .turns import Turn, item_metadata, next_seq, read_turn, turn_records
 
 PLAIN = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}

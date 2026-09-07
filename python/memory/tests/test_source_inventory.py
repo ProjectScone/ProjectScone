@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.backends.sqlite import SqliteDocumentStore
 from scone_memory.api import create_app
-from scone_memory.errors import InvalidInput
+from scone_memory.core.errors import InvalidInput
 
 
 @pytest.fixture(params=["memory", "sqlite"])
