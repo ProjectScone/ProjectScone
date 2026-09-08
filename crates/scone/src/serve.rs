@@ -10,12 +10,12 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxPath, Query, Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use scone_core::{Engine, IngestOutcome, RecallOpts, SpaceReceipt, auth};
+use scone_core::{auth, Engine, IngestOutcome, RecallOpts, SpaceReceipt};
 
 const MAX_CONTENT: usize = 100_000;
 const MAX_QUERY: usize = 1_000;
@@ -172,9 +172,17 @@ pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router 
 
 /// The public concept pages the packaged workspace renders.
 pub const LEARN_PAGES: [&str; 11] = [
-    "/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
-    "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
-    "/learn/conversations", "/learn/spaces", "/learn/api",
+    "/learn",
+    "/learn/quickstart",
+    "/learn/how-it-works",
+    "/learn/graph-memory",
+    "/learn/sources",
+    "/learn/search",
+    "/learn/review",
+    "/learn/profiles",
+    "/learn/conversations",
+    "/learn/spaces",
+    "/learn/api",
 ];
 
 pub fn router(engine: Engine, config: ServeConfig) -> Router {
@@ -189,14 +197,20 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         config: Arc::new(config),
     };
     Router::new()
-        .route("/memory", get(move || {
-            let page = memory_page.clone();
-            async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-        }))
-        .route("/memory/sources/{id}", get(move || {
-            let page = source_page.clone();
-            async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-        }))
+        .route(
+            "/memory",
+            get(move || {
+                let page = memory_page.clone();
+                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+            }),
+        )
+        .route(
+            "/memory/sources/{id}",
+            get(move || {
+                let page = source_page.clone();
+                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+            }),
+        )
         .route(
             "/playground",
             get(move || {

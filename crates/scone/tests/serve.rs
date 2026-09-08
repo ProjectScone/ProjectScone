@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used)]
 //! HTTP API tested hermetically via tower oneshot — no ports, no network.
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use scone::serve::{Role, ServeConfig, SpaceKey, keys_from_config, router};
-use scone_core::Engine;
+use scone::serve::{keys_from_config, router, Role, ServeConfig, SpaceKey};
 use scone_core::embed::HashEmbedder;
+use scone_core::Engine;
 use tower::ServiceExt;
 
 fn app(dir: &std::path::Path) -> axum::Router {
@@ -90,17 +90,47 @@ async fn source_pages_and_canonical_memory_serve_the_workspace_without_an_api_ca
     let server = app(dir.path());
     for path in ["/memory", "/memory/sources/42?space=alice"] {
         for method in ["GET", "HEAD"] {
-            let response = server.clone().oneshot(Request::builder().method(method).uri(path).body(Body::empty()).unwrap()).await.unwrap();
+            let response = server
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
-            assert!(response.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+            assert!(response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"));
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            if method == "GET" { assert!(String::from_utf8_lossy(&body).contains("id=\"root\"")); }
-            else { assert!(body.is_empty()); }
+            if method == "GET" {
+                assert!(String::from_utf8_lossy(&body).contains("id=\"root\""));
+            } else {
+                assert!(body.is_empty());
+            }
         }
     }
-    let stray = server.clone().oneshot(Request::builder().uri("/memory/sources/42/not-a-page").body(Body::empty()).unwrap()).await.unwrap();
+    let stray = server
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/memory/sources/42/not-a-page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(stray.status(), StatusCode::NOT_FOUND);
-    assert_eq!(call(&server, "GET", "/v1/episodes/42", Some("sk-alice"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(&server, "GET", "/v1/episodes/42", Some("sk-alice"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -284,9 +314,19 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
     };
     let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
     let console = scone::serve::console_router(engine, config(), "fixture-token");
-    for path in ["/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
-        "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
-        "/learn/conversations", "/learn/spaces", "/learn/api"] {
+    for path in [
+        "/learn",
+        "/learn/quickstart",
+        "/learn/how-it-works",
+        "/learn/graph-memory",
+        "/learn/sources",
+        "/learn/search",
+        "/learn/review",
+        "/learn/profiles",
+        "/learn/conversations",
+        "/learn/spaces",
+        "/learn/api",
+    ] {
         for method in ["GET", "HEAD"] {
             let response = console
                 .clone()
@@ -300,12 +340,10 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
-            assert!(
-                response.headers()[header::CONTENT_TYPE]
-                    .to_str()
-                    .unwrap()
-                    .starts_with("text/html")
-            );
+            assert!(response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"));
             if method == "GET" {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let text = String::from_utf8_lossy(&body);
@@ -389,13 +427,11 @@ async fn evidence_is_scoped_persistent_and_retries_do_not_duplicate() {
     drop(server);
     let reopened = app(dir.path());
     let (_, graph) = call(&reopened, "GET", "/v1/graph", Some("sk-alice"), None).await;
-    assert!(
-        graph["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["data"]["text"] == "Keep launch local")
-    );
+    assert!(graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["data"]["text"] == "Keep launch local"));
 }
 
 #[tokio::test]
@@ -427,16 +463,12 @@ async fn evidence_links_capture_and_recall_only_to_scoped_records() {
     assert!(recall["event_id"].as_i64().is_some());
     let (_, graph) = call(&server, "GET", "/v1/graph", Some("sk-alice"), None).await;
     let edges = graph["edges"].as_array().unwrap();
-    assert!(
-        edges
-            .iter()
-            .any(|e| e["kind"] == "captured_as" && e["target"] == "episode:1")
-    );
-    assert!(
-        edges
-            .iter()
-            .any(|e| e["kind"] == "returned" && e["target"] == "chunk:1")
-    );
+    assert!(edges
+        .iter()
+        .any(|e| e["kind"] == "captured_as" && e["target"] == "episode:1"));
+    assert!(edges
+        .iter()
+        .any(|e| e["kind"] == "returned" && e["target"] == "chunk:1"));
     assert!(!edges.iter().any(|e| e["kind"] == "similar"));
     let (status, _) = call(&server, "GET", "/v1/episodes/1", Some("sk-bob"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -919,7 +951,7 @@ async fn the_facts_list_carries_the_space_revision() {
 #[tokio::test]
 async fn a_fact_names_the_episodes_it_came_from() {
     use scone_core::llm::ExtractedFact;
-    use scone_core::{IngestInput, IngestOutcome, auth};
+    use scone_core::{auth, IngestInput, IngestOutcome};
 
     let dir = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
@@ -976,7 +1008,7 @@ async fn a_fact_names_the_episodes_it_came_from() {
 #[tokio::test]
 async fn a_proposal_can_be_listed_and_settled_over_http() {
     use scone_core::llm::ExtractedFact;
-    use scone_core::{IngestInput, IngestOutcome, auth};
+    use scone_core::{auth, IngestInput, IngestOutcome};
 
     let dir = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
@@ -1123,7 +1155,11 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     routes.dedup();
 
     // Named HTML entry points use the existing source-read API; no new /v1 API.
-    let html: Vec<_> = routes.iter().copied().filter(|path| !path.starts_with("/v1/")).collect();
+    let html: Vec<_> = routes
+        .iter()
+        .copied()
+        .filter(|path| !path.starts_with("/v1/"))
+        .collect();
     assert_eq!(html, ["/memory", "/memory/sources/{id}"]);
     routes.retain(|path| path.starts_with("/v1/"));
 
