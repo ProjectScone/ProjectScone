@@ -1236,6 +1236,15 @@ expansion enabled, all candidate sources and facts share the engine clock
 boundary; future-created sources are excluded. It verifies expanded source
 records before disclosing them to the assessor.
 
+In-memory, SQLite, MongoDB, PostgreSQL and Elasticsearch document stores expose
+the bounded subject and incident-link reads used by this traversal, plus link
+lookups for source revalidation. Candidate reads return at most 129 records,
+in identifier order, including the traversal's lookahead record. PostgreSQL
+uses indexes on space, subject or link endpoint, and identifier; Elasticsearch
+uses exact keyword filters and bounded search sizes. The host still checks
+source scope and validity for each candidate before retaining it. These reads
+do not equate a connected route with an entailed answer.
+
 This option prioritizes connected fact components within the adaptive candidate
 and byte budgets. Exact components become host-owned atomic groups: partial
 model selections or later source loss omit the whole group. These known groups

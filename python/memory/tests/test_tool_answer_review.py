@@ -171,7 +171,7 @@ async def test_review_is_cancelled_at_the_original_tool_deadline(engine):
 @pytest.mark.parametrize('characters', [5, 6])
 async def test_reviewed_tool_answer_obeys_original_utf8_reply_limit(engine, characters):
     from scone_memory.agents.evidence_loop import ToolLoopLimits
-    revision = 'é' * characters
+    revision = 'A' + 'é' * (characters - 1) + 'B'
     class Reviewer:
         async def review(self, question, answer, evidence, evidence_ids):
             if answer == revision:

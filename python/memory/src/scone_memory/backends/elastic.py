@@ -464,6 +464,15 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []
+        filters = [{"term": {"space": space}}, {"term": {"subject": subject}}]
+        hits = await self._search("facts", query={"bool": {"filter": filters}}, size=cap,
+                                  sort=[{"fact_id": "asc"}])
+        return [_fact(hit) for hit in hits]
+
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         from elasticsearch import ConflictError
 
@@ -512,6 +521,21 @@ class ElasticsearchDocumentStore:
                           "minimum_should_match": 1}}
         hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
         return [_fact_link(h) for h in hits]
+
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []
+        query = {"bool": {"filter": [{"term": {"space": space}}],
+                          "should": [{"term": {"from_fact": fact_id}}, {"term": {"to_fact": fact_id}}],
+                          "minimum_should_match": 1}}
+        hits = await self._search("fact_links", query=query, size=cap, sort=[{"link_id": "asc"}])
+        return [_fact_link(hit) for hit in hits]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        filters = [{"term": {"space": space}}, {"term": {"link_id": link_id}}]
+        hits = await self._search("fact_links", query={"bool": {"filter": filters}}, size=1)
+        return _fact_link(hits[0]) if hits else None
 
     async def bump_revision(self, space: str) -> int:
         return await self.shared.next_id(f"revision:{space}")
