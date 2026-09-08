@@ -21,6 +21,8 @@ def _limits(settings: Settings) -> ToolLoopLimits:
 def validate_tool_settings(settings: Settings) -> None:
     if settings.conversations_tool_mode not in ('off', 'native', 'structured'):
         raise InvalidInput('SCONE_CONVERSATIONS_TOOL_MODE must be off, native, or structured')
+    if type(settings.conversations_tool_initial_search) is not bool:
+        raise InvalidInput('SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH must be a boolean')
     try:
         limits = _limits(settings)
     except ValueError:
@@ -41,9 +43,11 @@ def validate_tool_settings(settings: Settings) -> None:
 class ConversationTools:
     mode: Literal['native', 'structured']
     limits: ToolLoopLimits
+    initial_search: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in ('native', 'structured') or not isinstance(self.limits, ToolLoopLimits):
+        if (self.mode not in ('native', 'structured') or not isinstance(self.limits, ToolLoopLimits)
+                or type(self.initial_search) is not bool):
             raise ValueError('invalid conversation tool configuration')
         object.__setattr__(self, 'limits', ToolLoopLimits.model_validate(self.limits.model_dump()))
 
@@ -65,4 +69,4 @@ def build_conversation_tools(settings: Settings) -> ConversationTools | None:
     if settings.conversations_tool_mode == 'off':
         return None
     mode: Literal['native', 'structured'] = 'native' if settings.conversations_tool_mode == 'native' else 'structured'
-    return ConversationTools(mode, _limits(settings))
+    return ConversationTools(mode, _limits(settings), settings.conversations_tool_initial_search)

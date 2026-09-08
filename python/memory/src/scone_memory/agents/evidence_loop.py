@@ -52,6 +52,7 @@ class ToolOutcome(BaseModel):
     status: Literal['prepared', 'empty', 'unavailable']
     error: str | None
     output_bytes: int
+    origin: Literal['host', 'model'] = 'model'
 
 
 @dataclass(frozen=True)
@@ -88,7 +89,11 @@ class EvidenceToolLoop:
     successful retrievals. Deadline cancellation is cooperative with adapters.
     """
 
-    def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None) -> None:
+    def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
+                 initial_search: bool = False) -> None:
+        if type(initial_search) is not bool:
+            raise ValueError('initial_search must be a boolean')
+        self._initial_search = initial_search
         self._model, self._tools = model, tools
         self._limits = ToolLoopLimits.model_validate((limits or ToolLoopLimits()).model_dump())
 
@@ -99,6 +104,9 @@ class EvidenceToolLoop:
         if not messages or any(set(row) != {'role', 'content'} or row['role'] not in ('system', 'user', 'assistant')
                                or not isinstance(row['content'], str) for row in messages):
             raise ValueError('invalid tool conversation messages')
+        if self._initial_search and (messages[-1]['role'] != 'user' or not messages[-1]['content'].strip()
+                or len(messages[-1]['content'].encode()) > 8000):
+            raise ValueError('initial memory query requires a final user message of 1..8000 bytes')
         transcript = cast(list[dict[str, object]], json.loads(_json(messages)))
         seen: set[str] = set()
         known_facts: set[int] = set()
@@ -115,7 +123,62 @@ class EvidenceToolLoop:
             if time.monotonic() >= deadline:
                 raise TimeoutError('tool loop deadline exceeded')
 
+        async def record_call(call: ToolCall, origin: Literal['host', 'model']) -> None:
+            nonlocal calls, tool_bytes
+            if calls >= limits.max_tool_calls:
+                payload = _denied('tool_budget')
+            else:
+                calls += 1
+                seed = call.arguments.get('seed_fact_id')
+                if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
+                    payload = _denied('search_for_seed_first')
+                elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
+                        or call.arguments['chunk_id'] not in known_chunks):
+                    payload = _denied('search_for_chunk_first')
+                else:
+                    evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
+                    check_deadline()
+                    size = len(evidence.payload.encode())
+                    if tool_bytes + size > limits.max_tool_bytes:
+                        payload = _denied('tool_output_budget')
+                    else:
+                        payload = evidence.payload
+                        prepared.append(evidence)
+                        known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
+                                           if key.startswith('fact:'))
+                        known_chunks.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
+                                            if key.startswith('chunk:'))
+            tool_bytes += len(payload.encode())
+            if tool_bytes > limits.max_tool_bytes:
+                raise RuntimeError('tool output byte limit')
+            transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
+            packet = json.loads(payload)
+            error = packet.get('error')
+            codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
+                     'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
+                     'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window'}
+            # Model-authored IDs/unknown names can contain source text.
+            # Keep them only in the transient provider protocol.
+            name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool'],
+                        call.name if call.name in ('search_memory', 'trace_memory', 'read_memory') else 'unknown_tool')
+            outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
+                error=error if isinstance(error, str) and error in codes else None,
+                output_bytes=len(payload.encode()), origin=origin))
+
         async with asyncio.timeout(limits.timeout_s):
+            if self._initial_search:
+                check_deadline()
+                if len(_json(transcript).encode()) > limits.max_transcript_bytes:
+                    raise RuntimeError('tool transcript byte limit')
+                initial = ToolCall(id='host-initial-search', name='search_memory',
+                    arguments={'query':messages[-1]['content'], 'limit':5})
+                seen.add(initial.id)
+                transcript.append({'role':'assistant', 'content':None, 'tool_calls':[
+                    {'id':initial.id, 'type':'function', 'function':{
+                        'name':initial.name, 'arguments':_json(initial.arguments)}}]})
+                await record_call(initial, 'host')
+                if outcomes[-1].status == 'unavailable':
+                    raise RuntimeError('initial memory retrieval unavailable')
             while True:
                 check_deadline()
                 if len(_json(transcript).encode()) > limits.max_transcript_bytes:
@@ -175,42 +238,4 @@ class EvidenceToolLoop:
                     {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': _json(call.arguments)}}
                     for call in step.calls]})
                 for call in step.calls:
-                    if calls >= limits.max_tool_calls:
-                        payload = _denied('tool_budget')
-                    else:
-                        calls += 1
-                        seed = call.arguments.get('seed_fact_id')
-                        if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
-                            payload = _denied('search_for_seed_first')
-                        elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
-                                or call.arguments['chunk_id'] not in known_chunks):
-                            payload = _denied('search_for_chunk_first')
-                        else:
-                            evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
-                            check_deadline()
-                            size = len(evidence.payload.encode())
-                            if tool_bytes + size > limits.max_tool_bytes:
-                                payload = _denied('tool_output_budget')
-                            else:
-                                payload = evidence.payload
-                                prepared.append(evidence)
-                                known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
-                                                   if key.startswith('fact:'))
-                                known_chunks.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
-                                                    if key.startswith('chunk:'))
-                    tool_bytes += len(payload.encode())
-                    if tool_bytes > limits.max_tool_bytes:
-                        raise RuntimeError('tool output byte limit')
-                    transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
-                    packet = json.loads(payload)
-                    error = packet.get('error')
-                    codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
-                             'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
-                             'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window'}
-                    # Model-authored IDs/unknown names can contain source text.
-                    # Keep them only in the transient provider protocol.
-                    name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool'],
-                                call.name if call.name in ('search_memory', 'trace_memory', 'read_memory') else 'unknown_tool')
-                    outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
-                        error=error if isinstance(error, str) and error in codes else None,
-                        output_bytes=len(payload.encode())))
+                    await record_call(call, 'model')

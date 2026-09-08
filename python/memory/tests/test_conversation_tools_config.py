@@ -17,7 +17,7 @@ AUTH = {'Authorization':'Bearer fixture-key'}
 def environment(tmp_path, mode='structured'):
     return {'SCONE_API_KEY':'fixture-key', 'SCONE_MODEL_CONNECTIONS':str(tmp_path / 'models.json'),
             'SCONE_CONVERSATIONS_JOURNAL':str(tmp_path / 'sessions.db'),
-            'SCONE_CONVERSATIONS_TOOL_MODE':mode}
+            'SCONE_CONVERSATIONS_TOOL_MODE':mode, 'SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH':'0'}
 
 
 @pytest.mark.parametrize('changes', [
@@ -30,6 +30,7 @@ def environment(tmp_path, mode='structured'):
     {'SCONE_CONVERSATIONS_TOOL_MAX_CALLS':'0'}, {'SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS':'17'},
     {'SCONE_CONVERSATIONS_TOOL_TIMEOUT':'nan'}, {'SCONE_CONVERSATIONS_TOOL_TIMEOUT':'601'},
     {'SCONE_CONVERSATIONS_TOOL_MODE':'off', 'SCONE_CONVERSATIONS_TOOL_MAX_CALLS':'2'},
+    {'SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH':'maybe'},
 ])
 def test_incompatible_tool_settings_fail_at_startup(tmp_path, changes):
     with pytest.raises(InvalidInput):
@@ -38,6 +39,7 @@ def test_incompatible_tool_settings_fail_at_startup(tmp_path, changes):
 
 def test_tools_are_off_by_default_and_limits_are_explicit(tmp_path):
     assert Settings.from_env({}).conversations_tool_mode == 'off'
+    assert Settings.from_env({}).conversations_tool_initial_search is True
     settings = Settings.from_env(environment(tmp_path) | {'SCONE_CONVERSATIONS_TOOL_MAX_CALLS':'3',
         'SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS':'2', 'SCONE_CONVERSATIONS_TOOL_TIMEOUT':'45'})
     from scone_memory.runtime.conversation_tools import build_conversation_tools
@@ -51,7 +53,8 @@ def test_tools_are_off_by_default_and_limits_are_explicit(tmp_path):
 @pytest.mark.parametrize('mode', ['native', 'structured'])
 @pytest.mark.parametrize('persona', [False, True])
 @pytest.mark.parametrize('outcome', ['success', 'provider_failure', 'deleted_source'])
-async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkeypatch, mode, persona, outcome):
+@pytest.mark.parametrize('initial_search', [False, True])
+async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkeypatch, mode, persona, outcome, initial_search):
     from scone_memory.agents.evidence_loop import ToolCall, ToolStep
     from scone_memory.providers import structured_tool_chat, tool_chat
 
@@ -69,7 +72,7 @@ async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkey
         async def complete(self, messages, tools):
             requests.append(messages)
             self.steps += 1
-            if self.steps == 1:
+            if self.steps == 1 and not initial_search:
                 return ToolStep(calls=(ToolCall(id='find', name='search_memory',
                     arguments={'query':'Juniper', 'limit':1}),))
             assert 'PRIVATE_' not in json.dumps(messages)
@@ -81,7 +84,8 @@ async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkey
 
     provider = structured_tool_chat if mode == 'structured' else tool_chat
     monkeypatch.setattr(provider, 'SelfHostedStructuredToolChat' if mode == 'structured' else 'SelfHostedToolChat', Model)
-    env = environment(tmp_path, mode) | {'SCONE_CHAT_THINK':'false'}
+    env = environment(tmp_path, mode) | {'SCONE_CHAT_THINK':'false',
+        'SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH':'1' if initial_search else '0'}
     chat = ModelConnection(base_url='http://127.0.0.1:11434/v1', model='installed:model', timeout_s=37)
     connections = {'chat':chat}
     if persona:
@@ -96,6 +100,7 @@ async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkey
                 caps = (await client.get('/v1/conversations/capabilities')).json()
                 assert caps['tool_retrieval']['protocol'] == mode
                 assert caps['tool_retrieval']['configured'] is True
+                assert caps['tool_retrieval']['initial_search'] is initial_search
                 assert caps['tool_retrieval']['available'] is True
                 payload = {'request_id':'session', 'capture':True, 'recall_scope':{'where':{'team':'blue'}}}
                 if persona:
@@ -126,7 +131,8 @@ async def test_composed_tool_reply_preserves_scope_and_receipts(tmp_path, monkey
                 assert context['tool_retrieval']['source_status'] == 'retained'
                 assert context['tool_retrieval']['tool_calls'] == 1
                 assert context['evidence_graph_status'] == 'prepared'
-                assert len(model_instances) == 1 and len(requests) == 2
+                assert len(model_instances) == 1 and len(requests) == (1 if initial_search else 2)
+                assert context['tool_retrieval']['outcomes'][0]['origin'] == ('host' if initial_search else 'model')
                 assert model_instances[0][0] == (chat.base_url, chat.model)
                 assert model_instances[0][1]['timeout_s'] == 37
                 assert model_instances[0][1]['think'] is False

@@ -155,6 +155,7 @@ class Settings:
     conversations_personas: Optional[str] = None
     conversations_registry: Optional[str] = None
     conversations_tool_mode: str = "off"
+    conversations_tool_initial_search: bool = True
     conversations_tool_max_calls: int = 4
     conversations_tool_max_rounds: int = 4
     conversations_tool_timeout: float = 120.0
@@ -336,6 +337,7 @@ class Settings:
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
+            conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
             conversations_tool_max_calls=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", "4")),
             conversations_tool_max_rounds=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", "4")),
             conversations_tool_timeout=parse_seconds("SCONE_CONVERSATIONS_TOOL_TIMEOUT", env.get("SCONE_CONVERSATIONS_TOOL_TIMEOUT"), 120.0),

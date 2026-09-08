@@ -532,7 +532,17 @@ print(reply.source_status, reply.evidence_ids)
 packets = reply.evidence_packets
 ```
 
-The model chooses search queries. Tracing becomes available after retained facts
+By default the SDK model chooses search queries. `EvidenceToolLoop(...,
+initial_search=True)` first searches the final user message with `limit=5`,
+before the first model request. This host-initiated search uses the same scope,
+source checks, deadline and byte limits as model-requested tools, and consumes
+one tool call. It does not consume a model decision round. Call outcomes identify
+their `origin` as `host` or `model`. An unavailable initial search prevents
+generation; an empty search is shown to the model without proving absence from
+memory. This mode requires a final, nonblank user message of at most 8,000 UTF-8
+bytes and fails before storage access if that query is invalid.
+
+Tracing becomes available after retained facts
 are discovered; nearby reading becomes available after retained chunks are
 discovered. Both accept only IDs returned during that turn. This discovery gate
 belongs to the loop; standalone `box.run()` enforces scope without turn history. Host scope still
@@ -636,14 +646,20 @@ chat connection:
 SCONE_MODEL_CONNECTIONS=~/.scone-memory/model-connections.json
 SCONE_CONVERSATIONS_JOURNAL=~/.scone-memory/conversations.db
 SCONE_CONVERSATIONS_TOOL_MODE=structured # off (default), native, structured
+SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=1 # default when tool mode is enabled
 # SCONE_CONVERSATIONS_TOOL_MAX_CALLS=4
 # SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS=4
 # SCONE_CONVERSATIONS_TOOL_TIMEOUT=120
 ```
 
 Configure the chat connection in the model settings or supply `SCONE_CHAT_URL`
-and `SCONE_CHAT_MODEL` as connection defaults. `native` requires native
-OpenAI-compatible tool calls; `structured` requires JSON-schema responses. There
+and `SCONE_CHAT_MODEL` as connection defaults. Served tool mode performs the
+host-initiated search by default. Set `SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=0`
+to let the model choose whether to search. SDK `TextConversation` exposes the
+same option as `tool_initial_search=True`, with the SDK default remaining false.
+
+`native` requires native OpenAI-compatible tool calls; `structured` requires
+JSON-schema responses. There
 is no automatic protocol or provider fallback. The setting applies to ordinary
 text sessions and text sessions using a self-hosted persona; voice keeps its
 existing pipeline. Sessions capture the connection at creation, and every turn
@@ -663,15 +679,21 @@ not a model-health probe or an accuracy claim. Without a saved chat connection,
 text remains unavailable; enabling the mode does not install a model.
 
 `source_status="retained"` confirms source revalidation, not answer entailment;
-`verified_accuracy` remains false. A model can still skip search, misunderstand
-a relation, or emit a tool request as prose. In a synthetic 3B Ollama development
+`verified_accuracy` remains false. Without initial search, a model can skip
+retrieval; either policy can still misunderstand a relation or emit a tool
+request as prose. In a synthetic 3B Ollama development
 probe, invalid trace arguments and tool-shaped prose prevented a useful answer.
 That probe is not a successful accuracy benchmark; tool-use reliability remains
 a separate quality requirement before enabling this mode by default.
-An additional two-question served 3B development probe skipped retrieval for a
+Before host-initiated search, a two-question served 3B development probe skipped retrieval for a
 natural memory question and repeatedly reread one passage when explicitly asked
 to use tools, missing a neighboring exception. Successful protocol execution and
-retained citations did not make those answers correct; served mode stays opt-in.
+retained citations did not make those answers correct. With initial search,
+follow-up SQLite and MongoDB/Qdrant probes both returned the requested cutoff
+and outage exception for the explicitly guided question. The general question
+still omitted the cutoff despite retaining its evidence. These two synthetic
+questions used a hash embedder and are integration probes, not a retrieval or
+generation accuracy benchmark. Served mode stays opt-in.
 
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,

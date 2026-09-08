@@ -105,6 +105,7 @@ def self_hosted_text_runtime(engine, store: ModelConnectionStore, *, think: bool
         if tools is not None:
             return TextConversation(engine, space, session_id,
                 tool_model_factory=tools.factory(connection, think=think), tool_limits=tools.limits,
+                tool_initial_search=tools.initial_search,
                 turn_timeout=connection.timeout_s, **scope.kwargs(), **conversation_options)
         # The immutable connection stays with this session, even across edits.
         return TextConversation(engine, space, session_id, text_model_factory(connection, think=think),
@@ -122,12 +123,14 @@ class _SelfHostedBoundPersona(BoundPersona):
     turn_timeout: float
     tool_model_factory: Callable[[], ToolModel] | None = None
     tool_limits: ToolLoopLimits | None = None
+    tool_initial_search: bool = False
 
     def text(self, *args, **options):
         options.setdefault('turn_timeout', self.turn_timeout)
         if self.tool_model_factory is not None:
             options.setdefault('tool_model_factory', self.tool_model_factory)
             options.setdefault('tool_limits', self.tool_limits)
+            options.setdefault('tool_initial_search', self.tool_initial_search)
         return super().text(*args, **options)
 
     def voice(self, *args, **options):
@@ -179,7 +182,7 @@ class DynamicSelfHostedCatalog:
         selected = _SelfHostedBoundPersona(bound.persona, bound.model_factory, bound.stt_factory,
             bound.tts_factory, bound.activity_factory, chat.timeout_s,
             self.tools.factory(chat, think=self.think) if self.tools else None,
-            self.tools.limits if self.tools else None)
+            self.tools.limits if self.tools else None, self.tools.initial_search if self.tools else False)
         return PersonaCatalog((persona,), {persona.id: selected})
 
     @property

@@ -79,6 +79,7 @@ class TextConversation:
     _scope: RecallScope
     _tool_factory: Callable[[], ToolModel] | None
     _tool_limits: ToolLoopLimits
+    _tool_initial_search: bool
     _evidence_answer_policy: Literal["when_available", "required"]
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
@@ -93,7 +94,7 @@ class TextConversation:
                  evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0,
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
-                 tool_limits: ToolLoopLimits | None = None):
+                 tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -108,10 +109,13 @@ class TextConversation:
             raise ValueError("tool_model_factory must supply a fresh native tool model")
         if tool_limits is not None and (tool_model_factory is None or not isinstance(tool_limits, ToolLoopLimits)):
             raise ValueError("tool limits require a tool model and ToolLoopLimits")
+        if type(tool_initial_search) is not bool or (tool_initial_search and tool_model_factory is None):
+            raise ValueError("tool_initial_search requires a boolean and a tool model")
         if tool_model_factory is not None and any(value is not None for value in
                 (answer_reviewer, evidence_selector, adaptive_retriever)):
             raise ValueError("tool mode cannot combine independent retrieval, review, or extractive evidence")
         self._tool_factory = tool_model_factory
+        self._tool_initial_search = tool_initial_search
         self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
         if not isinstance(system_prompt, str) or not system_prompt.strip():
             raise ValueError("system_prompt must be nonempty text")
@@ -299,7 +303,8 @@ class TextConversation:
             raise RuntimeError('tool model unavailable') from None
         tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
                                   exclude_session_id=self._session_id)
-        result = await EvidenceToolLoop(model, tools, limits=self._tool_limits).run(messages)
+        result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
+                                       initial_search=self._tool_initial_search).run(messages)
         receipt = tool_context_receipt(result, self._session_id)
         await self._emit_final(messages, result.text, on_text)
         if not await result.validate():
