@@ -17,7 +17,6 @@ jobs:
       AWS_SHARED_CREDENTIALS_FILE: /dev/null
       CHECKPOINT_DISABLE: "1"
       TF_IN_AUTOMATION: "1"
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-provider-cache
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -27,6 +26,10 @@ jobs:
         with:
           terraform_version: "1.16.1"
           terraform_wrapper: false
+      - name: Prepare provider cache on the runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/terraform-provider-cache"
+          printf 'TF_PLUGIN_CACHE_DIR=%s\n' "$RUNNER_TEMP/terraform-provider-cache" >> "$GITHUB_ENV"
       - name: Check deployment helper types
         run: |
           python -m pip install mypy==2.3.1
@@ -37,7 +40,6 @@ jobs:
         run: python -m unittest discover -s terraform/modules/compute/tests -p test_mount_volume.py
       - name: Check storage foundation with a mock provider
         run: |
-          mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform -chdir=terraform init -backend=false -input=false
           terraform -chdir=terraform fmt -check -recursive
           terraform -chdir=terraform validate
