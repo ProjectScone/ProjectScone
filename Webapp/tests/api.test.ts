@@ -4,6 +4,30 @@ import { createServer } from 'node:http';
 import { createApiClient, ApiError } from '../src/api.ts';
 import { createHash } from 'node:crypto';
 
+for(const operation of ['request','upload','image','stream'] as const)test(`a ${operation} permission denial preserves credentials but an invalid key expires them`,async()=>{
+  let status=403,expired=0;
+  const server=createServer((req,res)=>{
+    assert.equal(req.headers.authorization,'Bearer reader');
+    res.setHeader('content-type','application/json');
+    if(req.url==='/v1/status')return res.end('{"space":"alpha"}');
+    res.statusCode=status;res.end('{"error":"key role read cannot write","code":"operation_forbidden"}');
+  });
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();if(!address||typeof address==='string')throw Error('missing local address');
+  const client=createApiClient('reader',()=>{expired++;},`http://127.0.0.1:${address.port}`);
+  const attempt=()=>operation==='request'?client.request('/v1/episodes',{method:'POST',body:'{"content":"denied"}'}):
+    operation==='upload'?client.uploadImage(new File(['opaque fixture'],'test.png',{type:'image/png'})):
+    operation==='image'?client.image({attachment_id:'a'.repeat(64),media_type:'image/png',bytes:1}):
+    client.conversationStream('session','turn',0,new AbortController().signal);
+  try{
+    await assert.rejects(attempt(),e=>e instanceof ApiError&&e.status===403);
+    assert.equal(expired,0,'A valid key with a restricted role must not trigger a global disconnect.');
+    assert.deepEqual(await client.request('/v1/status'),{space:'alpha'});
+    status=401;await assert.rejects(attempt(),e=>e instanceof ApiError&&e.status===401);
+    assert.equal(expired,1,'Invalid credentials must still expire the session.');
+  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test('conversation streams authenticate a read-only cursor and reject redirects, unsafe paths and non-SSE responses',async()=>{
   let status=200,type='text/event-stream; charset=utf-8',denied=false,calls=0;
   const server=createServer((req,res)=>{

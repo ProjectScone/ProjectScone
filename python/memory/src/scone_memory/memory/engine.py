@@ -1400,6 +1400,17 @@ class MemoryEngine:
                 if link.link_id not in drawn and ends[0] in g.nodes and ends[1] in g.nodes:
                     drawn.add(link.link_id)
                     g.link(ends[0], ends[1], link.kind, source_episode_id=link.source_episode_id)
+        if not focused:
+            captured = {f"episode:{e.payload.get('episode_id')}" for e in agent_events}
+            missing_capture = {n.id for n in g.nodes.values() if n.kind == "episode"} - captured
+            if missing_capture:
+                # Hydrating an old source without its capture event leaves a
+                # real session path broken. Match stored IDs only, within the
+                # same space/time scope, and keep this second read bounded.
+                captures = await self.events.query(space, kind="agent", since=since, limit=2000)
+                matching = [e for e in captures if f"episode:{e.payload.get('episode_id')}" in missing_capture]
+                agent_events.extend(matching[:limit])
+                g.truncated = g.truncated or len(captures) >= 2000 or len(matching) > limit
         for e in agent_events:
             G.add_agent_event(g, e)
         for e in recall_events:

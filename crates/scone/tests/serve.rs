@@ -85,6 +85,25 @@ async fn source_inventory_matches_shared_literal_contract() {
 }
 
 #[tokio::test]
+async fn source_pages_and_canonical_memory_serve_the_workspace_without_an_api_catch_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    for path in ["/memory", "/memory/sources/42?space=alice"] {
+        for method in ["GET", "HEAD"] {
+            let response = server.clone().oneshot(Request::builder().method(method).uri(path).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            assert!(response.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            if method == "GET" { assert!(String::from_utf8_lossy(&body).contains("id=\"root\"")); }
+            else { assert!(body.is_empty()); }
+        }
+    }
+    let stray = server.clone().oneshot(Request::builder().uri("/memory/sources/42/not-a-page").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(stray.status(), StatusCode::NOT_FOUND);
+    assert_eq!(call(&server, "GET", "/v1/episodes/42", Some("sk-alice"), None).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn source_inventory_pages_are_scoped_and_not_ranked() {
     let dir = tempfile::tempdir().unwrap();
     let server = app(dir.path());
@@ -265,7 +284,9 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
     };
     let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
     let console = scone::serve::console_router(engine, config(), "fixture-token");
-    for path in scone::serve::LEARN_PAGES {
+    for path in ["/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
+        "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
+        "/learn/conversations", "/learn/spaces", "/learn/api"] {
         for method in ["GET", "HEAD"] {
             let response = console
                 .clone()
@@ -1101,6 +1122,11 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     routes.sort_unstable();
     routes.dedup();
 
+    // Named HTML entry points use the existing source-read API; no new /v1 API.
+    let html: Vec<_> = routes.iter().copied().filter(|path| !path.starts_with("/v1/")).collect();
+    assert_eq!(html, ["/memory", "/memory/sources/{id}"]);
+    routes.retain(|path| path.starts_with("/v1/"));
+
     let frozen = [
         "/v1/capabilities",
         "/v1/episodes",
@@ -1153,6 +1179,7 @@ fn every_capability_claim_matches_a_mounted_route() {
         ("events.read", "/v1/events"),
         ("status.read", "/v1/status"),
         ("episodes.list", "/v1/episodes"),
+        ("episodes.read", "/v1/episodes/{id}"),
     ] {
         assert_eq!(
             claims(feature),

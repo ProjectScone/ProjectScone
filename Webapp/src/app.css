@@ -12,16 +12,6 @@
 .record-empty{padding:55px 20px;text-align:center}.record-empty p{font-size:12px;color:var(--muted);margin-top:12px}
 .relation-heading{margin-top:22px}.key-input{display:block;width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);margin:12px 0 18px}
 @media(max-width:800px){.record-toolbar{gap:12px}.record-toolbar label{width:100%}.record-toolbar .view-switch button{padding:7px 10px}.record-row{grid-template-columns:58px minmax(0,1fr) 10px;gap:10px}.record-toolbar .eyebrow{font-size:9px}}
-:root {
-  --ink: var(--text);
-  --surface-2: var(--raised);
-  --line-strong: #cfcfc6;
-  --accent: #30392c;
-  --accent-soft: #e9eae2;
-  --on-accent: #fff;
-  --ok: #526948;
-  --warn: #8a3b2b;
-}
 .memory-page { color: var(--text); }
 .server-strip { min-height: 38px; padding: 8px 28px; display: flex; align-items: center; gap: 22px; flex-wrap: wrap; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 .server-strip code, .server-strip b { color: var(--text); font-weight: 500; }

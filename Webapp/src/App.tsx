@@ -1,16 +1,26 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
-import { createApiClient } from './api';
+import { useCallback, useEffect, useMemo, useState, type ComponentProps } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { createApiClient, type ApiClient } from './api';
 import type { Status } from './types';
 import { PlaygroundPage } from './playground/PlaygroundPage';
 import { MemoryPage } from './memory/MemoryPage';
+import {SourcePage} from './memory/SourcePage';
 import { ConversationPage } from './conversations/ConversationPage';
 import { Modal } from './components/Modal';
-import mark from './assets/scone-mark-small.png';
+import { LearnPage } from './learn/LearnPage';
+import { conceptPages } from './learn/content';
+import { AppFrame } from './components/AppFrame';
+import {SourceNavigation} from './memory/SourceNavigation';
+
+function RouteFrame({api,enabled,...props}: ComponentProps<typeof AppFrame>&{api:ApiClient;enabled:boolean}) {
+  const {pathname}=useLocation();
+  if(conceptPages.some(page=>page.path===pathname.replace(/\/$/,''))) return <>{props.children}</>;
+  return <SourceNavigation key={pathname} api={api} enabled={enabled}><AppFrame {...props}/></SourceNavigation>;
+}
 
 export function App({ initialKey }: { initialKey: string }) {
   const [key, setKey] = useState(initialKey.startsWith('__SCONE_') ? '' : initialKey);
-  const [epoch, setEpoch] = useState(0), [auth, setAuth] = useState(!key), [input, setInput] = useState('');
+  const [epoch, setEpoch] = useState(0), [auth, setAuth] = useState(!key && !conceptPages.some(page=>page.path===location.pathname.replace(/\/$/,''))), [input, setInput] = useState('');
   const [space, setSpace] = useState(key ? 'Connecting…' : 'Not connected');
   const [connected, setConnected] = useState(false);
   const unauthorized = useCallback(() => { setKey(''); setEpoch(value => value + 1); setSpace('Not connected'); setConnected(false); }, []);
@@ -24,16 +34,17 @@ export function App({ initialKey }: { initialKey: string }) {
     return () => controller.abort();
   }, [api, key]);
   return <BrowserRouter>
-    <a className="skip" href="#main">Skip to workspace</a>
-    <header className="topbar"><NavLink className="brand" to="/memory" aria-label="Scone console"><img className="brand-icon" src={mark} alt="" width={32} height={32} />Scone</NavLink><nav aria-label="Workspace"><NavLink to="/memory">Memory</NavLink><NavLink to="/playground">Playground</NavLink><NavLink to="/conversations">Conversations</NavLink></nav><span className="scope"><span className="eyebrow">Space</span> <span id="space">{space}</span></span><button className="subtle connection-button" onClick={() => setAuth(true)}>{connected ? 'Memory connection' : 'Connect memory'}</button></header>
-    <div className="server-strip" role="status"><span className={connected ? 'server-state verified' : 'server-state'}>{connected ? 'Authenticated' : key ? 'Checking connection' : 'Not connected'}</span><span>API <code>{location.host}</code></span>{connected && <span>Space <b>{space}</b></span>}<span className="server-caption">{connected ? 'Memory access verified · agent capture is separate' : 'A Scone space key grants access to this server’s memory'}</span></div>
+    <RouteFrame api={api} enabled={Boolean(key)} space={space} connected={connected} checking={Boolean(key)&&space==='Connecting…'} onConnect={()=>setAuth(true)}>
     <Routes>
       <Route path="/" element={<Navigate to="/memory" replace />} />
       <Route path="/memory" element={key ? <MemoryPage key={epoch} api={api} /> : <main id="main" className="connection-empty"><div className="eyebrow">Your memory workspace</div><h1>Connect to Scone</h1><p>This app reads memory from <code>{location.origin}</code>. No memory is available until this server accepts your space key.</p><button className="primary" onClick={() => setAuth(true)}>Set up memory connection</button><p className="muted">The local single-key preview connects automatically after reload. For a multi-space server, its administrator supplies the Scone space key.</p></main>} />
       <Route path="/playground" element={<PlaygroundPage key={epoch} api={api} enabled={Boolean(key)} />} />
+      <Route path="/memory/sources/:id" element={<SourcePage key={epoch} api={api} enabled={Boolean(key)}/>} />
       <Route path="/conversations/:sid?" element={<ConversationPage key={epoch} api={api} enabled={Boolean(key)} />} />
+      {conceptPages.map(page=><Route key={page.id} path={page.path} element={<LearnPage key={page.id} page={page}/>}/>)}
       <Route path="*" element={<Navigate to="/memory" replace />} />
     </Routes>
+    </RouteFrame>
     {auth && <Modal title="Memory connection" onClose={() => setAuth(false)}>
       <p className="setup-intro">This webapp talks to Scone’s API. Scone stores and retrieves memory from its configured database.</p>
       <dl className="connection-details"><div><dt>Server</dt><dd><code>{location.origin}</code></dd></div><div><dt>Memory space</dt><dd>{connected ? space : 'Determined by your Scone space key'}</dd></div><div><dt>Access</dt><dd>{connected ? 'Verified by the memory API' : 'Not authenticated'}</dd></div></dl>

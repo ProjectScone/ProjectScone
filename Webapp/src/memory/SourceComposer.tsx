@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState, type FormEvent} from 'react';
-import {PREVIEW_TYPES, type ApiClient} from '../api';
+import {ApiError, PREVIEW_TYPES, type ApiClient} from '../api';
 import {SourceImages} from '../components/SourceImages';
 import {readTextSource,TEXT_FILE_ACCEPT,type TextSource} from './text-import';
 import './source-composer.css';
@@ -32,17 +32,19 @@ export function SourceComposer({api,onSaved}: {api:ApiClient;onSaved:()=>void}) 
       setError('Choose a nonempty PNG, JPEG, GIF or WebP image up to 25 MB.');return;
     }
     busy.current=true;const controller=new AbortController();request.current=controller;
-    setError('');setSaved(null);setInspect(false);let writing=false;
+    setError('');setSaved(null);setInspect(false);let writing=false,acknowledgedWrite=false;
     try {
       setPhase(image?'Uploading original image…':'Saving source…');
       writing=true;
       const attachment=image?await api.uploadImage(image,controller.signal):null;
+      acknowledgedWrite=Boolean(attachment);
       if(controller.signal.aborted)return;
       setPhase('Saving source…');
       const result=await api.request<{episode_id:number;deduplicated:boolean}>('/v1/episodes',{
         method:'POST',signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)]),
         body:JSON.stringify({content,kind:mode==='file'?'file':'note',...(mode==='file'?{source:document!.name}:{}),attachment_ids:attachment?[attachment.attachment_id]:[]}),
       });
+      acknowledgedWrite=true;
       if(!Number.isSafeInteger(result.episode_id)||result.episode_id<1||typeof result.deduplicated!=='boolean')throw Error('The save receipt could not be verified');
       if(controller.signal.aborted)return;
       setPhase('Verifying saved source…');
@@ -51,7 +53,11 @@ export function SourceComposer({api,onSaved}: {api:ApiClient;onSaved:()=>void}) 
       if(mode==='file'&&source.content!==content)throw Error('The retained text differs from the selected file. Inspect memory before retrying.');
       if(!controller.signal.aborted){setSaved({...result,attachmentId:attachment?.attachment_id,text:typeof source.content==='string'?source.content:undefined,source:typeof source.source==='string'?source.source:null});onSaved();}
     } catch(e) {
-      if(!controller.signal.aborted){setError(e instanceof Error?e.message:'Could not confirm the save');setUncertain(writing);}
+      if(!controller.signal.aborted){
+        const deniedBeforeWrite=e instanceof ApiError&&e.status===403&&!acknowledgedWrite;
+        setError(deniedBeforeWrite?'This key cannot save sources. Your draft is kept. Use a key with write access.':e instanceof Error?e.message:'Could not confirm the save');
+        setUncertain(writing&&!deniedBeforeWrite);
+      }
     } finally {busy.current=false;if(!controller.signal.aborted)setPhase('');}
   }
 

@@ -2,6 +2,26 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {capabilities, session, transcript, turnReceipt} from '../src/conversations/contracts.ts';
 
+test('session mode distinguishes voice from text and refuses unknown transports',()=>{
+  const wire={session_id:'voice-session',space:'alpha',state:'created',revision:1,created_at:'2026-09-07T10:00:00Z'};
+  assert.equal(session({...wire,mode:'voice'}).mode,'voice');
+  assert.equal(session({...wire,mode:'text'}).mode,'text');
+  assert.equal(session(wire).mode,undefined,'Older servers do not establish a voice mode.');
+  for(const mode of ['video','',null,1])assert.throws(()=>session({...wire,mode}));
+});
+test('browser voice requires the explicit PCM protocol, authentication and bounds',()=>{
+  const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts',voice:true};
+  const voice_stream={schema_version:1,transport:'websocket',protocol:'scone-pcm-v1',authentication:'hello',reconnect:false,pcm:'s16le',input_channels:[1,2],min_sample_rate:8000,max_sample_rate:192000,max_input_frame_bytes:64000};
+  assert.equal(capabilities({...wire,voice_stream}).voice,true);
+  for(const stream of [undefined,null,{...voice_stream,schema_version:2},{...voice_stream,pcm:'f32le'},
+    {...voice_stream,input_channels:[2]},{...voice_stream,authentication:'url'},
+    {...voice_stream,max_input_frame_bytes:10},{...voice_stream,min_sample_rate:48000},
+    {...voice_stream,max_sample_rate:48000},{...voice_stream,reconnect:true}]){
+    assert.equal(capabilities({...wire,voice_stream:stream}).voice,false);
+  }
+  assert.equal(capabilities({...wire,voice:false,voice_stream}).voice,false);
+});
+
 test('live text requires an explicit supported SSE active-window contract',()=>{
   const wire={schema_version:1,text_configured:true,reply_transport:'poll',reply_replay:'durable_receipts'};
   const text_stream={transport:'sse',replay:'active_window',max_bytes:65536,max_chunks:256};

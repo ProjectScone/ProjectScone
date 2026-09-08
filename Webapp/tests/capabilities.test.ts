@@ -4,6 +4,47 @@ import { readFileSync } from 'node:fs';
 import { parseCapabilities } from '../src/capabilities.ts';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../tests/fixtures/http-capabilities.json', import.meta.url), 'utf8'));
+test('source reads need an independent explicit boolean capability',()=>{
+  const features={...fixtures.python.features};delete features['episodes.read'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['episodes.read'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'episodes.read':true,'episodes.list':false}}).features['episodes.read'],true);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'episodes.read':value}}));
+});
+test('metadata conditions require explicit native recall support',()=>{
+  const features={...fixtures.python.features};delete features['recall.conditions'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['recall.conditions'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'recall.conditions':true}}).features['recall.conditions'],true);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'recall.conditions':value}}));
+});
+test('job history reads require their own explicit boolean capability',()=>{
+  const features={...fixtures.python.features};delete features['jobs.read'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['jobs.read'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'jobs.read':true}}).features['jobs.read'],true);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'jobs.read':value}}));
+});
+test('processing actions require independent explicit boolean capabilities',()=>{
+  for(const key of ['processing.distill','processing.derive'] as const){
+    assert.equal(parseCapabilities(fixtures.python).features[key],false);
+    assert.equal(parseCapabilities({...fixtures.python,features:{...fixtures.python.features,[key]:true}}).features[key],true);
+    for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...fixtures.python.features,[key]:value}}),/capabilit/i);
+  }
+});
+test('profiles require an explicit boolean capability before evidence is read',()=>{
+  const features={...fixtures.python.features};delete features['profile.read'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['profile.read'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'profile.read':true}}).features['profile.read'],true);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'profile.read':value}}),/capabilit/i);
+});
+test('integrity checks require an explicit boolean capability',()=>{
+  assert.equal(parseCapabilities({...fixtures.python,features:{...fixtures.python.features,'integrity.read':true}}).features['integrity.read'],true);
+  assert.equal(parseCapabilities(fixtures.rust).features['integrity.read'],false);
+  assert.throws(()=>parseCapabilities({...fixtures.python,features:{...fixtures.python.features,'integrity.read':'true'}}),/capabilit/i);
+});
+test('claim relationship inspection requires an explicit valid capability', () => {
+  assert.equal(parseCapabilities(fixtures.python).features['facts.links'],true);
+  assert.equal(parseCapabilities(fixtures.rust).features['facts.links'],false);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...fixtures.python.features,'facts.links':value}}),/capabilit/i);
+});
 test('source browsing requires an explicit valid optional inventory capability', () => {
   for (const native of [fixtures.rust, fixtures.python]) assert.equal(parseCapabilities(native).features['episodes.list'], true);
   const features = {...fixtures.python.features}; delete features['episodes.list'];

@@ -3,6 +3,8 @@ import type { ApiClient } from '../api';
 import type { RecallResult } from '../types';
 import { SourceImages } from '../components/SourceImages';
 import { MarkdownText, SourceContent } from '../components/SourceContent';
+import { WorkspaceState } from '../components/WorkspaceState';
+import {SourcePageLink} from '../memory/SourcePageLink';
 
 export function RecallPanel({ api, enabled, onRecalled }: {api:ApiClient;enabled:boolean;onRecalled:()=>void}) {
   const [query,setQuery] = useState('');
@@ -37,11 +39,12 @@ export function RecallPanel({ api, enabled, onRecalled }: {api:ApiClient;enabled
       {pending && <p className="recall-state">Retrieving stored evidence…</p>}
       {message && <p className="recall-state" role="alert">{message}</p>}
       {result && !result.items.length && <p className="recall-state">No evidence returned for this query.</p>}
-      {!submitted && <div className="recall-empty"><span aria-hidden>⌕</span><p>Follow a question back to its source.</p><small>Submit a query to inspect the passages the engine retrieves.</small></div>}
+      {!submitted && <WorkspaceState className="recall-empty" icon="search" title="Follow a question back to its source." description={<p>Submit a query to inspect the passages the engine retrieves.</p>}/>}
       {result?.items.map((item,i)=><article className="recall-card" key={`${submitted}:${item.episode_id}:${i}`}>
         <div className="recall-card-heading"><span className="recall-rank">{String(i+1).padStart(2,'0')}</span><h3>Episode {item.episode_id}</h3><span>Retrieved passage</span></div>
         {item.text.length > 420 ? <details className="recall-passage"><summary><span><MarkdownText text={item.text.slice(0,420)} inline/>…</span><b>Read full passage</b></summary><div className="recall-full"><SourceContent text={item.text}/></div></details> : <div className="recall-full"><SourceContent text={item.text}/></div>}
         <SourceImages episodeId={item.episode_id} api={api}/>
+        <SourcePageLink api={api} episodeId={item.episode_id}/>
         <footer><code>episode:{item.episode_id}</code><span>Ranking score {Number.isFinite(item.score) ? Number(item.score).toFixed(3) : 'not reported'} · not confidence</span></footer>
       </article>)}
     </div>

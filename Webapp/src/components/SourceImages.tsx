@@ -15,9 +15,10 @@ function SourceImageList({episodeId,api}:{episodeId:number|string;api:ApiClient}
   const [items,setItems]=useState<ImageAttachment[]|null>(null),[error,setError]=useState(''),[attempt,setAttempt]=useState(0),[page,setPage]=useState(0);
   useEffect(()=>{
     const controller=new AbortController();setItems(null);setError('');setPage(0);
-    api.request<{attachments?:unknown}>(`/v1/episodes/${episodeId}`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])})
+    api.request<{episode_id?:unknown;attachments?:unknown}>(`/v1/episodes/${episodeId}`,{cache:'no-store',signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])})
       .then(episode=>{
         if(controller.signal.aborted)return;
+        if(typeof episode.episode_id!=='number'||!Number.isSafeInteger(episode.episode_id)||episode.episode_id<1||String(episode.episode_id)!==String(episodeId))throw Error('The returned source does not match the selected episode.');
         if(!Array.isArray(episode.attachments))throw Error('This server did not return attachment metadata. Image availability is unknown.');
         const valid=episode.attachments.every(a=>a&&typeof a==='object'&&/^[a-f0-9]{64}$/.test(a.attachment_id)&&typeof a.media_type==='string'&&Number.isSafeInteger(a.bytes)&&a.bytes>0&&(a.filename==null||typeof a.filename==='string'));
         if(!valid)throw Error('The source returned invalid attachment metadata.');

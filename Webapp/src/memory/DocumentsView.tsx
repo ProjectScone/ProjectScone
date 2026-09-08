@@ -1,8 +1,10 @@
 import {SourceContent} from '../components/SourceContent';
+import {WorkspaceState} from '../components/WorkspaceState';
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {ApiError,type ApiClient} from '../api';
 import {SourceImages} from '../components/SourceImages';
 import {SourceComposer} from './SourceComposer';
+import {SourcePageLink} from './SourcePageLink';
 import {parseRetainedSource,parseSourcePage,type SourcePage,type SourceSummary} from './source-inventory';
 import './documents.css';
 
@@ -47,7 +49,7 @@ export function DocumentsView({api,attachments}:{api:ApiClient;attachments:boole
       <div>
         {data?.items.length?<ul className="documents-list" aria-label="Stored sources">{data.items.map(source=><li key={source.episode_id}><button className="document-card" aria-label={'Open '+name(source)} aria-pressed={selection?.episode_id===source.episode_id} onClick={event=>{selectedButton.current=event.currentTarget;setSelection(source);}}>
           <span className="document-mark"><SourceMark/></span><span className="document-copy"><span className="document-meta"><span>{source.kind}</span><span>#{source.episode_id}</span></span><strong>{name(source)}</strong><span className="document-preview">{source.preview||'No retained text.'}</span><span className="document-footer"><time dateTime={source.created_at}>{source.created_at.slice(0,10)||'Date unavailable'}</time><span>{source.byte_count.toLocaleString()} text bytes{source.preview_truncated?' · excerpt':''}</span></span></span><span className="document-open" aria-hidden="true">↗</span>
-        </button></li>)}</ul>:data&&!work.loading?<div className="documents-empty"><SourceMark/><h2>No {query.kind||'stored'} sources on this page.</h2><p>{query.kind?'Try another source type or return to all sources.':query.cursors.length>1?'Older sources may have been removed. Refresh to return to the newest records.':'Sources appear here when content is saved to this memory space.'}</p></div>:null}
+        </button></li>)}</ul>:data&&!work.loading?<WorkspaceState className="documents-empty" icon="documents" title={`No ${query.kind||'stored'} sources on this page.`} description={<p>{query.kind?'Try another source type or return to all sources.':query.cursors.length>1?'Older sources may have been removed. Refresh to return to the newest records.':'Sources appear here when content is saved to this memory space.'}</p>}/>:null}
         {data&&<nav className="documents-paging" aria-label="Source pages"><button className="btn quiet small" disabled={work.loading||query.cursors.length===1} onClick={()=>void run({...query,cursors:query.cursors.slice(0,-1)})}>Newer sources</button><span>Page {query.cursors.length}</span><button className="btn quiet small" disabled={work.loading||!data.has_more} onClick={()=>void run({...query,cursors:[...query.cursors,data.next_before!]})}>Older sources</button></nav>}
       </div>
       {selection&&current&&<SourceDetail key={selection.episode_id} source={selection} api={api} attachments={attachments} close={()=>{setSelection(null);requestAnimationFrame(()=>{if(selectedButton.current?.isConnected)selectedButton.current.focus();});}}/>}
@@ -72,6 +74,7 @@ function SourceDetail({source,api,attachments,close}:{source:SourceSummary;api:A
   return <section className="document-detail" aria-label="Retained source">
     <header><span className="eyebrow">Retained source · #{source.episode_id}</span><button className="btn quiet small" onClick={close}>Close source</button></header>
     <h2 tabIndex={-1} ref={heading}>{name(source)}</h2><p className="document-provenance">{source.kind} · {source.created_at||'Date unavailable'}</p>
+    {content!==null&&<SourcePageLink api={api} episodeId={source.episode_id}/>}
     {href&&<a href={href} target="_blank" rel="noopener noreferrer">Open source link ↗</a>}
     <p className="document-detail-note">Text retained by Scone, shown as written. This is source material, not a verified belief or an original-file download.</p>
     {error?<div role="alert"><p>{error}</p><button className="btn quiet small" onClick={()=>setAttempt(n=>n+1)}>Retry source</button></div>:content===null?<p role="status">Loading source…</p>:<div aria-label="Retained text">{content===''&&<p>No retained text.</p>}<SourceContent text={content}/></div>}

@@ -67,6 +67,8 @@ async def test_sqlite_is_fully_inspectable_and_http_reads_the_same_report(tmp_pa
 
     app = create_app(engine, {"k": "default"}, console=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://scone.test") as c:
+        manifest = (await c.get("/v1/capabilities", headers={"Authorization": "Bearer k"})).json()
+        assert manifest["features"]["integrity.read"] is True
         body = (await c.get("/v1/doctor", headers={"Authorization": "Bearer k"})).json()
         assert body["facts_citing_forgotten"] == report.facts_citing_forgotten and body["healthy"] is False
         assert (await c.get("/v1/doctor")).status_code == 401

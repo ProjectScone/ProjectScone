@@ -1,4 +1,6 @@
 import {SourceContent} from '../components/SourceContent';
+import {MetadataFilter} from './MetadataFilter';
+import {SourcePageLink} from './SourcePageLink';
 // The memory console as a React page. Same semantics as the packaged
 // console.html it replaces: every figure carries its n, retrieved text is
 // an excerpt, claims say where they came from, and nothing is shown that
@@ -12,7 +14,6 @@ import type {
   EventRecord,
   EventsResponse,
   Fact,
-  Metric,
   MetricsReport,
   RecallItem,
   RecallResponse,
@@ -22,28 +23,37 @@ import type {
   View,
 } from "./types";
 import "./memory.css";
+import { AnalyticsReport } from "./AnalyticsReport";
 import { ReviewView } from "./ReviewView";
+import { ClaimRelationsButton } from './ClaimRelations';
+import { WorkspaceIcon } from '../components/WorkspaceIcon';
+import { WorkspaceHeading } from '../components/WorkspaceHeading';
+import { WorkspaceState } from '../components/WorkspaceState';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { SourceImages } from '../components/SourceImages';
 import { useSearchRecall } from './useSearchRecall';
 import { SourceComposer } from './SourceComposer';
 import { DocumentsView } from './DocumentsView';
+import { StatusView } from './StatusView';
+import { ProfileView } from './ProfileView';
 import { parseCapabilities, type Capabilities } from '../capabilities';
 import {claimGroups,filterClaimGroups,type ClaimFilter,type DisplayClaimGroup} from './claim-groups';
 
 const GROUPS: Array<{ label: string; views: Array<[View, string]> }> = [
-  { label: "Memory", views: [["search", "Search"], ["documents", "Documents"], ["beliefs", "Beliefs"], ["review", "Review"]] },
+  { label: "Memory", views: [["search", "Search"], ["documents", "Documents"], ["profile", "Profile"], ["beliefs", "Beliefs"], ["review", "Review"]] },
   { label: "Activity", views: [["live", "Live"], ["analytics", "Analytics"]] },
   { label: "System", views: [["scopes", "Scopes"], ["status", "Status"]] },
 ];
 const INTRO: Record<View, [string, string]> = {
   search: ["Search", "Ask in plain words. Every result is an excerpt of something stored, and says where it came from."],
   documents: ["Documents", "Your memory starts here. Browse retained files, notes and conversations, then open the material behind them."],
+  profile: ["Profile", "See the context this space can provide to an agent: selected claims and recent source excerpts."],
   beliefs: ["Memory claims", "Inspect what Scone has recorded about a subject, check its source, and control whether it can appear in recall."],
   review: ["Review", "Claims a model read out of your memory. Nothing here counts until you approve it."],
   live: ["Live", "What the engine is doing, as it happens."],
   analytics: ["Analytics", "How memory is used, from recorded activity. Each figure shows how much evidence it rests on."],
   scopes: ["Scopes", "Who has memory here: episodes per user, agent or session."],
-  status: ["Status", "What this server runs on and how much it holds."],
+  status: ["Status", "See what is stored, what is waiting to be processed, and which services this server has configured."],
 };
 
 const day = (s?: string | null) => (s ?? "").slice(0, 10);
@@ -74,7 +84,7 @@ function useAsync<T>(load: () => Promise<T>, deps: unknown[]) {
 }
 
 const VIEW_FEATURES: Record<View, keyof Capabilities['features']> = {
-  search: 'recall', documents: 'episodes.list', beliefs: 'facts.read', review: 'facts.review',
+  search: 'recall', documents: 'episodes.list', profile: 'profile.read', beliefs: 'facts.read', review: 'facts.review',
   live: 'events.read', analytics: 'metrics.read', scopes: 'scopes.read', status: 'status.read',
 };
 
@@ -96,7 +106,13 @@ function useCapabilities(api: ApiClient) {
 export function MemoryPage({ api }: { api: ApiClient }) {
   const discovery = useCapabilities(api);
   const caps = discovery.data?.features;
-  const [view, setView] = useState<View>(() => (window.location.hash.slice(1) as View) || "search");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedView = location.hash.slice(1) as View;
+  const view: View = Object.hasOwn(INTRO, requestedView) ? requestedView : 'search';
+  const setView = useCallback((next: View) => {
+    navigate({pathname: location.pathname, search: window.location.search, hash: '#' + next}, {replace: true});
+  }, [navigate, location.pathname]);
   const [pending, setPending] = useState<number | null>(null);
   const [search, setSearch] = useState<SearchState>(() => {
     const p = new URLSearchParams(window.location.search);
@@ -109,10 +125,8 @@ export function MemoryPage({ api }: { api: ApiClient }) {
   });
 
   useEffect(() => {
-    if (!INTRO[view]) { setView("search"); return; }
-    const hash = "#" + view;
-    if (window.location.hash !== hash) window.history.replaceState(null, "", window.location.pathname + window.location.search + hash);
-  }, [view, caps]);
+    if (location.hash !== '#' + view) setView(view);
+  }, [location.hash, view, setView]);
 
   const refreshPending = useCallback(() => {
     if (!caps?.['facts.review']) return;
@@ -129,35 +143,33 @@ export function MemoryPage({ api }: { api: ApiClient }) {
   return (
     <div className="memory-page">
       <nav className="sections" aria-label="Sections">
+        {!caps&&<div className="rail-message"><WorkspaceIcon name="memory"/><strong>Memory workspace</strong><p>Sections appear after this server’s capabilities are verified.</p></div>}
         {GROUPS.filter((g) => caps && g.views.some(([id]) => caps[VIEW_FEATURES[id]])).map((g) => (
           <span key={g.label} className="grpwrap">
             <span className="grp">{g.label}</span>
             {g.views.filter(([id]) => caps?.[VIEW_FEATURES[id]]).map(([id, label]) => (
               <button key={id} className="nav" aria-current={view === id} onClick={() => setView(id)}>
-                {label}
+                <WorkspaceIcon name={id}/>{label}
                 {id === "review" && pending ? <span className="count">{pending}</span> : null}
               </button>
             ))}
           </span>
         ))}
       </nav>
-      <main>
-        <div className="page-head">
-          <div className="eyebrow">{GROUPS.find((g) => g.views.some(([id]) => id === view))?.label}</div>
-          <h1>{title}</h1>
-          <p>{intro}</p>
-        </div>
-        {!caps ? discovery.error ? <section role="alert"><h2>Server capabilities unavailable</h2><p>We could not verify which operations this server supports. Your selected page is preserved; no workflow requests were sent.</p><ErrorLine message={discovery.error} /><button className="btn quiet" onClick={discovery.retry}>Retry capabilities</button></section> : <p role="status">Checking server capabilities…</p>
-          : !caps[VIEW_FEATURES[view]] ? <Empty>This server does not support this page. Choose an available section above.</Empty>
+      <main id="main">
+        <WorkspaceHeading className="page-head" eyebrow={GROUPS.find((g) => g.views.some(([id]) => id === view))?.label??'Memory'} title={title} description={intro}/>
+        {!caps ? discovery.error ? <WorkspaceState icon="status" role="alert" className="workspace-state-notice" title="Server capabilities unavailable" description={<><p>We could not verify which operations this server supports. Your selected page is preserved; no workflow requests were sent.</p><p className="workspace-state-detail">{discovery.error}</p></>} actions={<button className="btn quiet" onClick={discovery.retry}>Retry capabilities</button>}/> : <WorkspaceState icon="status" role="status" busy title="Checking server capabilities…" description="Verifying the operations available in this memory space before loading your workspace."/>
+          : !caps[VIEW_FEATURES[view]] ? <WorkspaceState icon="status" title="This page is not available on this server" description="Choose an available section in the workspace navigation. Your memory connection remains active."/>
           : <>
-            {view === "search" && <SearchView api={api} state={search} setState={setSearch} onScope={searchInScope} canAddSources={caps['episodes.attachments']} />}
+            {view === "search" && <SearchView api={api} state={search} setState={setSearch} onScope={searchInScope} canAddSources={caps['episodes.attachments']} canFilterMetadata={caps['recall.conditions']} />}
             {view === "documents" && <DocumentsView api={api} attachments={caps['episodes.attachments']} />}
+            {view === "profile" && <ProfileView api={api} onOpenDocuments={caps['episodes.list']?()=>setView('documents'):undefined} />}
             {view === "beliefs" && <BeliefsView api={api} onChanged={refreshPending} features={caps} />}
-            {view === "review" && <ReviewView api={api} onChanged={refreshPending} />}
+            {view === "review" && <ReviewView api={api} onChanged={refreshPending} relationships={caps['facts.links']} statusAvailable={caps['status.read']} claimsAvailable={caps['facts.read']} />}
             {view === "live" && <LiveView api={api} />}
             {view === "analytics" && <AnalyticsView api={api} />}
             {view === "scopes" && <ScopesView api={api} onScope={searchInScope} />}
-            {view === "status" && <StatusView api={api} />}
+            {view === "status" && <StatusView api={api} integrity={caps['integrity.read']} review={caps['facts.review']} documents={caps['episodes.list']} maintenance={caps['processing.distill']} inference={caps['processing.derive']} jobs={caps['jobs.read']} />}
           </>}
       </main>
     </div>
@@ -191,7 +203,8 @@ function Grounding({ f }: { f: Fact }) {
 
 /* ---------- search ---------- */
 
-function SearchView({ api, state, setState, onScope, canAddSources }: {
+function SearchView({ api, state, setState, onScope, canAddSources, canFilterMetadata }: {
+  canFilterMetadata:boolean;
   canAddSources: boolean;
   api: ApiClient; state: SearchState; setState: (f: (s: SearchState) => SearchState) => void; onScope: (k: string, v: string) => void;
 }) {
@@ -201,18 +214,20 @@ function SearchView({ api, state, setState, onScope, canAddSources }: {
   const [fkey, setFkey] = useState("");
   const [fval, setFval] = useState("");
   const [feedback, setFeedback] = useState<Record<string, boolean>>({});
-  const active = Boolean(state.q || Object.keys(state.where).length || state.tags.length || state.asOf);
+  const active = Boolean(state.q || Object.keys(state.where).length || state.tags.length || state.asOf || state.metadataFilter);
+  const unsupportedFilter=Boolean(state.metadataFilter&&!canFilterMetadata);
 
   const params = new URLSearchParams({ q: state.q || "*", limit: "25" });
   const where = Object.entries(state.where).map(([k, v]) => `${k}:${v}`).join(",");
   if (where) params.set("where", where);
   if (state.tags.length) params.set("tags", state.tags.join(","));
   if (state.asOf) params.set("as_of", state.asOf);
+  if(state.metadataFilter)params.set('conditions',state.metadataFilter.json);
   const query = params.toString();
 
-  const results = useSearchRecall(api, query, active);
+  const results = useSearchRecall(api, query, active&&!unsupportedFilter);
   const start = useAsync(
-    () => Promise.all([
+    () => active?Promise.resolve(null):Promise.all([
       api.request<Status>("/v1/status"),
       api.request<RecallResponse>("/v1/recall?q=*&limit=6"),
       api.request<Scopes>("/v1/scopes").catch(() => ({ scopes: {} } as Scopes)),
@@ -239,12 +254,14 @@ function SearchView({ api, state, setState, onScope, canAddSources }: {
 
   return (
     <>
-      {canAddSources&&<SourceComposer api={api} onSaved={()=>{void start.reload();results.retry();}}/>}
-      <div className="search">
-        <input type="search" value={draft} placeholder="What have we decided about this project?" autoComplete="off"
-          onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
-        <button className="btn" onClick={submit}>Search</button>
-      </div>
+      <section className="memory-search-panel" aria-labelledby="memory-search-label">
+      <div className="memory-search-heading"><label id="memory-search-label" htmlFor="memory-query">Search your memory</label><span>Trace an answer back to its source</span></div>
+      <form className="search" role="search" onSubmit={event=>{event.preventDefault();submit();}}>
+        <WorkspaceIcon name="search"/>
+        <input id="memory-query" type="search" value={draft} placeholder="What have we decided about this project?" autoComplete="off"
+          onChange={(e) => setDraft(e.target.value)} />
+        <button className="btn" type="submit">Search</button>
+      </form>
       <div className="chips">
         {Object.entries(state.where).map(([k, v]) => (
           <span key={k} className="chip"><b>{k}</b> {v} <button aria-label="remove" onClick={() => setState((s) => { const w = { ...s.where }; delete w[k]; return { ...s, where: w }; })}>×</button></span>
@@ -265,30 +282,34 @@ function SearchView({ api, state, setState, onScope, canAddSources }: {
           <button className="btn small quiet" onClick={addFilter}>Add</button>
         </div>
       )}
+      {canFilterMetadata&&<MetadataFilter value={state.metadataFilter} onApply={metadataFilter=>setState(s=>({...s,metadataFilter}))}/>}
+      {unsupportedFilter&&<p role="alert">This server does not advertise support for the applied metadata filter. Search is paused; clear the filter explicitly to search without it. <button className="btn quiet small" onClick={()=>setState(s=>({...s,metadataFilter:undefined}))}>Clear metadata filter</button></p>}
+      </section>
+      {canAddSources&&<SourceComposer api={api} onSaved={()=>{void start.reload();results.retry();}}/>}
 
       {!active ? (
         start.error ? <ErrorLine message={start.error} /> : !start.data ? <Empty>Loading…</Empty> : (() => {
           const [status, recent, scopes] = start.data;
-          if (!status.episodes) return <Empty>Nothing is stored yet. Store a note with <code>scone-memory remember</code>, or connect an agent from the Playground, and it appears here.</Empty>;
+          if (status.episodes === 0) return <WorkspaceState icon="memory" title="Your memory starts with a source" description={<p>Save a note using Add source when available, or connect an agent to bring its recorded conversations here. You can also use <code>scone-memory remember</code> from the CLI.</p>} actions={<><Link className="workspace-action" to="/playground">Connect an agent</Link><Link className="workspace-action quiet" to="/learn/how-it-works">How memory works</Link></>}/>;
           const chips = Object.entries(scopes.scopes ?? {}).flatMap(([k, vals]) => Object.entries(vals).slice(0, 4).map(([v, n]) => (
             <button key={k + v} className="chip scope" title={`${n} episode(s)`} onClick={() => onScope(k, v)}><b>{k.replace(/_/g, " ")}</b> {v}</button>
           ))).slice(0, 8);
           return (
             <>
-              <div className="start">
-                <div className="start-row">
-                  <span className="stat-n">{status.episodes}</span><span className="stat-l">episodes</span>
-                  <span className="stat-n">{status.chunks}</span><span className="stat-l">excerpts</span>
-                  {status.pending_review != null && <><span className="stat-n">{status.pending_review}</span><span className="stat-l">awaiting review</span></>}
-                </div>
+              <section className="start" aria-label="Memory overview">
+                <dl className="memory-overview">
+                  <div><dt>Sources</dt><dd data-reported={status.episodes != null}>{status.episodes ?? 'Not reported'}</dd></div>
+                  {status.chunks != null && <div><dt>Excerpts</dt><dd>{status.chunks}</dd></div>}
+                  {status.pending_review != null && <div><dt>Awaiting review</dt><dd>{status.pending_review}</dd></div>}
+                </dl>
                 {chips.length > 0 && <div className="chips" style={{ marginTop: 14 }}><span className="k">Search within</span>{chips}</div>}
-              </div>
+              </section>
               <p className="summary-line">Most recent</p>
               <div className="rows">{recent.items.map((i) => <ResultRow key={i.chunk_id} item={i} api={api} onScope={onScope} onTag={(t) => setState((s) => s.tags.includes(t) ? s : { ...s, tags: [...s.tags, t] })} />)}</div>
             </>
           );
         })()
-      ) : results.error ? <div role="alert"><ErrorLine message={results.error} /><button className="btn quiet" onClick={results.retry}>Retry search</button></div> : !results.data ? <Empty>Searching…</Empty> : (
+      ) : unsupportedFilter?null:results.error ? <div role="alert"><ErrorLine message={results.error} /><button className="btn quiet" onClick={results.retry}>Retry search</button></div> : !results.data ? <Empty>Searching…</Empty> : (
         <ResultList r={results.data} api={api} asOf={state.asOf} onScope={onScope} feedback={feedback} sendFeedback={sendFeedback}
           onTag={(t) => setState((s) => s.tags.includes(t) ? s : { ...s, tags: [...s.tags, t] })} />
       )}
@@ -359,6 +380,7 @@ function ResultRow({ item, api, onScope, onTag, why }: { item: RecallItem; api: 
         {(item.tags ?? []).map((t) => <button key={t} className="linkish" title={`Add tag filter ${t}`} onClick={() => onTag(t)}>#{t}</button>)}
       </div>
       <div className="text"><span className="label">excerpt</span>{item.text}</div>
+      <SourcePageLink api={api} episodeId={item.episode_id}/>
       <SourceImages episodeId={item.episode_id} api={api} />
       {why}
     </div>
@@ -486,6 +508,7 @@ function BeliefsView({ api, onChanged, features }: { api: ApiClient; onChanged: 
                   <div className="belief-action-buttons"><button className="btn small" disabled={locked || (action.path !== 'include' && !reason.trim())}>{saving ? 'Saving…' : `Confirm ${action.path}`}</button><button type="button" className="btn small quiet" disabled={saving} onClick={() => {setAction(null); setReason('');}}>Cancel</button></div>
                 </form>}
                 <ClaimSource key={displayed.fact_id} fact={displayed} api={api} />
+                {features['facts.links']&&<ClaimRelationsButton key={`relations-${displayed.fact_id}`} id={displayed.fact_id} api={api} disabled={saving}/>}
                 {displayed.excluded_reason && <p className="note">{displayed.object}: excluded from recall, {displayed.excluded_reason}</p>}
                 <details className="claim-history"><summary>Record history · {sorted.length} {sorted.length === 1 ? 'version' : 'versions'}</summary>
                   <ol>{sorted.map(f => <li key={f.fact_id}><b>#{f.fact_id} · {f.object}</b><p>{day(f.valid_from)} → {f.valid_until ? day(f.valid_until) : 'No end date recorded'} · {f.status}{f.excluded_reason ? ' · Excluded' : ''}</p>{f.closed_reason && <p>Closure: {f.closed_reason}</p>}{f.excluded_reason && <p>Exclusion: {f.excluded_reason}</p>}{f.fact_id !== displayed.fact_id && <ClaimSource fact={f} api={api} />}</li>)}</ol>
@@ -608,59 +631,14 @@ function LiveView({ api }: { api: ApiClient }) {
 
 /* ---------- analytics ---------- */
 
-const fmt = (m: Metric) => {
-  if (m.value == null) return <span className="none">no evidence yet</span>;
-  if (typeof m.value === "number") return m.unit === "share" || m.unit === "share of bytes" ? `${(m.value * 100).toFixed(1)}%` : m.unit === "ms" ? `${m.value.toFixed(1)} ms` : String(m.value);
-  return Object.entries(m.value).map(([k, v]) => `${k} ${typeof v === "number" ? v.toFixed(3) : v}`).join(" · ");
-};
-const label = (name: string) => name.split(".").slice(1).join(" ").replace(/_/g, " ").replace("latency ms ", "latency ").replace("top item ", "top excerpt via ").replace(" share", "").replace("top similarity ", "top similarity, ");
-
-function Fig({ m }: { m?: Metric }) {
-  if (!m) return null;
-  return (
-    <div className="fig" title={m.definition + (m.caveat ? "\n" + m.caveat : "")}>
-      <span className="l">{label(m.name)}</span><span className="v">{fmt(m)}</span><span className="n">n = {m.n} {m.denominator}</span>
-    </div>
-  );
-}
-
 function AnalyticsView({ api }: { api: ApiClient }) {
   const r = useAsync(() => api.request<MetricsReport>("/v1/metrics"), [api]);
-  if (r.error) return <ErrorLine message={r.error} />;
+  if (r.error) return <div role="alert"><ErrorLine message={r.error} /></div>;
   if (!r.data) return <Empty>Loading…</Empty>;
   const cov = r.data.coverage;
   if (!cov) return <Empty>No event log is attached to this server, so nothing can be computed.</Empty>;
   if (!cov.events_considered) return <Empty>No activity recorded yet. Once memory is used, its figures appear here.</Empty>;
-  const by = Object.fromEntries((r.data.metrics ?? []).map((m) => [m.name, m]));
-  const panel = (title: string, sub: string, names: string[]) => (
-    <div className="panel"><h3>{title}</h3><div className="sub">{sub}</div>{names.map((n) => <Fig key={n} m={by[n]} />)}</div>
-  );
-  const days = Object.entries(r.data.daily ?? {});
-  const max = Math.max(1, ...days.map(([, k]) => Object.values(k).reduce((a, b) => a + b, 0)));
-  return (
-    <>
-      <div className="grid">
-        {panel("Recall", "use and timing", ["recall.count", "recall.latency_ms.p50", "recall.latency_ms.p95", "recall.degraded_count", "recall.byte_context_reduction.median"])}
-        {panel("Ingest", "what was stored", ["ingest.calls", "ingest.fresh_episodes", "ingest.deduplicated", "ingest.dedup_fraction", "ingest.stored_bytes"])}
-        {panel("Beliefs", "ledger events, not accuracy", ["ledger.asserted", "ledger.asserted_already_closed", "ledger.restated", "ledger.superseded", "ledger.manual_closures"])}
-        {panel("Feedback", "what people judged", ["feedback.judged_items", "feedback.useful_share", "feedback.coverage"])}
-        {panel("Lanes", "retrievers agreeing, not relevance", ["recall.top_item.both_lanes_share", "recall.top_item.vector_only_share", "recall.top_item.text_only_share", ...Object.keys(by).filter((k) => k.startsWith("recall.top_similarity."))])}
-        {panel("Steps", "median latency by step", ["recall.latency_ms.embed.p50", "recall.latency_ms.vector.p50", "recall.latency_ms.text.p50"])}
-      </div>
-      <div className="foot">
-        <span><b>{cov.events_considered}</b> events considered</span><span>from <b>{(cov.earliest_retained ?? "").slice(0, 16)}</b></span>
-        <span>to <b>{(cov.latest ?? "").slice(0, 16)}</b></span><span>{cov.truncated ? <span className="err">read truncated, coverage partial</span> : "read complete"}</span>
-        <span>failures: <b>{Object.entries(r.data.failures ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}</b></span>
-        <span>embedders: <b>{(r.data.embedders ?? []).join(", ") || "none"}</b></span>
-      </div>
-      {days.length > 0 && (
-        <>
-          <div className="spark">{days.map(([d, k]) => { const t = Object.values(k).reduce((a, b) => a + b, 0); return <i key={d} style={{ height: `${Math.round((t / max) * 100)}%` }} title={`${d}: ${t} event(s)`} />; })}</div>
-          <div className="legend"><span>{days[0][0]}</span><span>events per day</span><span>{days[days.length - 1][0]}</span></div>
-        </>
-      )}
-    </>
-  );
+  return <AnalyticsReport report={r.data} />;
 }
 
 /* ---------- scopes, status ---------- */
@@ -688,31 +666,6 @@ function ScopesView({ api, onScope }: { api: ApiClient; onScope: (k: string, v: 
             </div>
           </div>
         ); })}
-    </>
-  );
-}
-
-function StatusView({ api }: { api: ApiClient }) {
-  const r = useAsync(() => api.request<Status>("/v1/status"), [api]);
-  if (r.error) return <ErrorLine message={r.error} />;
-  if (!r.data) return <Empty>Loading…</Empty>;
-  const s = r.data;
-  const rows: Array<[string, string | number | undefined]> = [
-    ["Space", s.space], ["Episodes", s.episodes], ["Chunks", s.chunks], ["Stored bytes", s.bytes], ["Awaiting review", s.pending_review],
-    ["Awaiting distillation", s.pending_distill], ["Revision", s.revision],
-    ["Claims", s.semantic_lane === "manual" ? "asserted by people and agents; no distiller configured on this server" : s.semantic_lane === "active" ? "a consolidation worker proposes claims from new episodes" : s.semantic_lane],
-  ];
-  return (
-    <>
-      {s.embedder && (
-        <div className="flow">
-          <span className="node">episodes<small>{s.episodes} stored, {s.chunks} chunks</small></span><span className="arrow">→</span>
-          <span className="node">{s.embedder}<small>embedder</small></span><span className="arrow">→</span>
-          <span className="node">{s.vector_index}<small>vector index</small></span><span className="arrow">+</span>
-          <span className="node">{s.document_store}<small>documents, facts, text lane</small></span>
-        </div>
-      )}
-      <div className="panel">{rows.filter(([, v]) => v != null).map(([k, v]) => <div key={k} className="stat"><span>{k}</span><span>{v}</span></div>)}</div>
     </>
   );
 }

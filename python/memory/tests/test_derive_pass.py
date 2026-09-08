@@ -75,6 +75,9 @@ def test_status_counts_pending_groups_and_consolidate_runs_the_pass_over_http():
     worker = ConsolidationWorker(engine, None, [], interval_s=999, deriver=Deriver(engine, FakeChat([INFERENCE])))
     keys, roles = {"k": "default", "r": "default"}, {"r": "read"}
     with TestClient(create_app(engine, keys, console=False, worker=worker, roles=roles)) as c:
+        features = c.get("/v1/capabilities", headers=bearer("k")).json()["features"]
+        assert features.get("processing.distill", False) is False
+        assert features.get("processing.derive", False) is False
         status = c.get("/v1/status", headers=bearer("k")).json()
         assert (status["pending_derivation"], status["derivation"]) == (1, "on")
         assert c.post("/v1/consolidate", json={"scope": "derive"}, headers=bearer("r")).status_code == 403, "a pass writes proposals"
@@ -85,5 +88,8 @@ def test_status_counts_pending_groups_and_consolidate_runs_the_pass_over_http():
         by_hand = c.post("/v1/consolidate", json={"scope": "distill"}, headers=bearer("k"))
         assert by_hand.status_code == 200 and by_hand.json()["scope"] == "distill" and by_hand.json()["derived_sent"] == 0
     with TestClient(create_app(asyncio.run(seeded()), {"k": "default"}, console=False)) as c:
+        features = c.get("/v1/capabilities", headers=bearer("k")).json()["features"]
+        assert features.get("processing.distill", False) is False
+        assert features.get("processing.derive", False) is False
         assert c.get("/v1/status", headers=bearer("k")).json()["derivation"] == "off"
         assert c.post("/v1/consolidate", json={"scope": "derive"}, headers=bearer("k")).status_code == 501, "no model, no pass"

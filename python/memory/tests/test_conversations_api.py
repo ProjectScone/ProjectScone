@@ -145,13 +145,17 @@ async def test_workspace_is_opt_in_and_deep_links_never_disclose_keys(engine, tm
     disabled, _ = configured(engine, tmp_path / "disabled.db")
     async with client_for(disabled) as client:
         for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one",
-                     "/learn", "/learn/how-it-works", "/learn/graph-memory"):
+                     "/memory/sources/42", "/learn", "/learn/how-it-works", "/learn/graph-memory",
+                     "/learn/quickstart", "/learn/sources", "/learn/search", "/learn/review",
+                     "/learn/profiles", "/learn/conversations", "/learn/spaces", "/learn/api"):
             assert (await client.get(path)).status_code == 404
 
     enabled, _ = configured(engine, tmp_path / "enabled.db", console=True)
     async with client_for(enabled) as client:
         for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one",
-                     "/learn", "/learn/how-it-works", "/learn/graph-memory"):
+                     "/memory/sources/42", "/learn", "/learn/how-it-works", "/learn/graph-memory",
+                     "/learn/quickstart", "/learn/sources", "/learn/search", "/learn/review",
+                     "/learn/profiles", "/learn/conversations", "/learn/spaces", "/learn/api"):
             response = await client.get(path, headers={"Authorization": ""})
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/html")

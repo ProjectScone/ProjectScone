@@ -307,6 +307,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
+                "voice_stream": ({"schema_version": 1, "transport": "websocket", "protocol": "scone-pcm-v1",
+                                  "authentication": "hello", "reconnect": False, "pcm": "s16le",
+                                  "input_channels": [1, 2], "min_sample_rate": 8000,
+                                  "max_sample_rate": 192000, "max_input_frame_bytes": 64000}
+                                 if catalog and catalog.personas else None),
                 "text_stream": ({"transport": "sse", "replay": "active_window", "max_bytes": MAX_BYTES,
                                   "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
@@ -860,7 +865,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
 
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
+        for path in ("/", "/memory", "/memory/sources/{episode_id}", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
     # The mounted app answers /v1/status, so it must know the worker; its own

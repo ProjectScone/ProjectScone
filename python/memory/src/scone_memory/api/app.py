@@ -195,7 +195,11 @@ class FeedbackBody(BaseModel):
 
 
 #: The public concept pages the packaged workspace renders without a key.
-LEARN_PAGES = ("/learn", "/learn/how-it-works", "/learn/graph-memory")
+LEARN_PAGES = (
+    "/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
+    "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
+    "/learn/conversations", "/learn/spaces", "/learn/api",
+)
 CONSOLE = Path(__file__).with_name("console.html")
 PLAYGROUND = Path(__file__).with_name("playground.html")
 MARK = Path(__file__).with_name("scone-mark.png")
@@ -342,13 +346,18 @@ def create_app(
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
+            "integrity.read": True,
+            "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
+            "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
             features["conversations"] = True
+        # Manual passes must share a server-side guard with scheduled work
+        # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
 
     if console:
@@ -398,7 +407,7 @@ def create_app(
         # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
         # Each address is named: there is no catch-all that would turn a
         # mistyped /v1 path into HTML.
-        for path in ("/conversations", "/conversations/{sid}"):
+        for path in ("/conversations", "/conversations/{sid}", "/memory/sources/{episode_id}"):
             app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
 
         def render_guide() -> str:

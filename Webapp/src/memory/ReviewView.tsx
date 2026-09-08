@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ApiError } from '../api';
 import { Modal } from '../components/Modal';
+import { WorkspaceState } from '../components/WorkspaceState';
+import { ClaimRelationsButton } from './ClaimRelations';
 import { MarkdownText, SourceContent } from '../components/SourceContent';
 import type { ApiClient, Episode, Fact } from './types';
 import './review.css';
 
 const PAGE_SIZE = 25;
 type Sort = 'oldest' | 'newest' | 'subject';
-type Outcome = { id: number; text: string; kind: 'approved' | 'duplicate' | 'declined' | 'uncertain' };
+type Outcome = { id: number; text: string; kind: 'approved' | 'duplicate' | 'declined' | 'denied' | 'uncertain' };
 type Batch = { ids: number[]; outcomes: Outcome[]; stopped: boolean };
 const subjectOf = (fact: Fact) => fact.subject.trim() || 'Unspecified subject';
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -57,7 +60,7 @@ function confirmedOutcome(id: number, response: Fact, action: 'approve' | 'decli
   throw new Error('Server returned an unrecognized decision receipt');
 }
 
-export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () => void }) {
+export function ReviewView({ api, onChanged, relationships=false, statusAvailable=false, claimsAvailable=false }: { api: ApiClient; onChanged: () => void; relationships?:boolean; statusAvailable?:boolean; claimsAvailable?:boolean }) {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [loaded, setLoaded] = useState(false), [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -112,7 +115,8 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
     const query = search.trim().toLocaleLowerCase();
     return facts.filter(f => (subject === null || subjectOf(f) === subject)
       && (origin === 'all' || (f.origin || 'unknown') === origin)
-      && (evidence === 'all' || (evidence === 'quoted' ? f.grounded === true : f.grounded !== true))
+      && (evidence === 'all' || (evidence === 'inferred' ? f.origin === 'inferred'
+        : f.origin !== 'inferred' && (evidence === 'quoted' ? f.grounded === true : f.grounded !== true)))
       && (!query || [f.subject, f.predicate.replaceAll('_', ' '), f.object, f.quote, String(f.fact_id), String(f.source_episode_id ?? '')].join(' ').toLocaleLowerCase().includes(query)))
       .sort((a, b) => sort === 'newest' ? b.fact_id - a.fact_id : sort === 'subject'
         ? subjectOf(a).localeCompare(subjectOf(b)) || a.fact_id - b.fact_id : a.fact_id - b.fact_id);
@@ -130,6 +134,8 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
   for (const fact of visible) groups.set(subjectOf(fact), [...(groups.get(subjectOf(fact)) || []), fact]);
   const locked = saving !== null || confirmation !== null;
   const cannotDecide = locked || loading || needsRefresh || Boolean(loadError);
+  const inferredCount = confirmation?.filter(f => f.origin === 'inferred').length ?? 0;
+  const uncheckedCount = confirmation?.filter(f => f.origin !== 'inferred' && f.grounded !== true).length ?? 0;
 
   const decide = async (snapshot: Fact[], action: 'approve' | 'decline') => {
     if (busy.current || !snapshot.length || needsRefresh || (action === 'decline' && !reason.trim())) return;
@@ -157,6 +163,12 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
         if (!bulk) setNotice(outcome.text);
       } catch (error) {
         if (lifetime.current?.signal.aborted) break;
+        if (error instanceof ApiError && error.status === 403) {
+          const text = `Proposal #${id}: ${messageOf(error)}. This request was refused; no decision was made. Source inspection is still available. Use a key with review access to decide claims.`;
+          result.outcomes.push({ id, kind: 'denied', text });
+          setFailure(text); result.stopped = true;
+          break;
+        }
         const text = `Proposal #${id}: ${messageOf(error)}. No decision was confirmed. Refresh the queue to check its status before trying again.`;
         result.outcomes.push({ id, kind: 'uncertain', text });
         setFailure(text); setNeedsRefresh(true); result.stopped = true;
@@ -169,7 +181,7 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
     if (bulk) setBatch({ ...result, outcomes: [...result.outcomes] });
     onChanged();
     // Uncertain writes are never automatically retried or reconciled away.
-    if (!result.outcomes.some(o => o.kind === 'uncertain')) void refresh();
+    if (!result.outcomes.some(o => o.kind === 'uncertain' || o.kind === 'denied')) void refresh();
   };
 
   const clearFilters = () => { setSearch(''); setSubject(null); setOrigin('all'); setEvidence('all'); };
@@ -192,30 +204,40 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
           <label className="review-search">Search proposals<input type="search" value={search} disabled={locked} placeholder="Subject, claim, quote or record ID" onChange={event => setSearch(event.target.value)} /></label>
           <div className="review-filter-row">
             <label>Origin<select value={origin} disabled={locked} onChange={event => setOrigin(event.target.value)}><option value="all">All origins</option><option value="extracted">Extracted</option><option value="stated">Stated</option><option value="inferred">Inferred</option><option value="unknown">Not recorded</option></select></label>
-            <label>Evidence<select value={evidence} disabled={locked} onChange={event => setEvidence(event.target.value)}><option value="all">All evidence</option><option value="quoted">Source quote checked</option><option value="unchecked">No checked quote</option></select></label>
+            <label>Evidence<select value={evidence} disabled={locked} onChange={event => setEvidence(event.target.value)}><option value="all">All evidence</option><option value="quoted">Source quote checked</option><option value="inferred">Inferred from claims</option><option value="unchecked">Other · no checked quote</option></select></label>
             <label>Sort queue<select value={sort} disabled={locked} onChange={event => setSort(event.target.value as Sort)}><option value="oldest">Oldest record first</option><option value="newest">Newest record first</option><option value="subject">Subject A–Z</option></select></label>
           </div>
         </div>
         <div className="review-toolbar"><span>{matching.length} matching · {facts.length} total</span><button className="btn small" disabled={cannotDecide || !matching.length} onClick={() => setConfirmation([...matching])}>Approve all matching ({matching.length})</button></div>
         {(notice || !loaded) && <p className="review-notice" role="status">{notice || 'Loading review queue…'}</p>}
-        {batch && <div className="review-result"><div role="status"><strong>{batch.outcomes.filter(o => o.kind === 'approved').length} approved</strong> · {batch.outcomes.filter(o => o.kind === 'duplicate').length} duplicates resolved · {batch.outcomes.filter(o => o.kind === 'uncertain').length} unconfirmed · {batch.ids.length - batch.outcomes.length} {saving !== null ? 'remaining' : 'not attempted'}</div>
+        {batch && <div className="review-result"><div role="status"><strong>{batch.outcomes.filter(o => o.kind === 'approved').length} approved</strong> · {batch.outcomes.filter(o => o.kind === 'duplicate').length} duplicates resolved · {batch.outcomes.filter(o => o.kind === 'uncertain').length} unconfirmed{batch.outcomes.some(o=>o.kind==='denied')&&<> · {batch.outcomes.filter(o=>o.kind==='denied').length} denied</>} · {batch.ids.length - batch.outcomes.length} {saving !== null ? 'remaining' : 'not attempted'}</div>
           {saving !== null && <button className="btn small quiet" onClick={() => { stop.current = true; }}>Stop after current</button>}
           <details><summary>Decision receipts</summary><ul>{batch.outcomes.map(o => <li key={o.id}>{o.text}</li>)}</ul></details></div>}
         {failure && <p className="review-error" role="alert">{failure}</p>}
         {needsRefresh && <p className="review-reconcile">Decisions are paused until you refresh. A timed-out request may still have reached the server.</p>}
-        {loaded && !matching.length && <div className="review-empty"><span className="review-empty-symbol" aria-hidden="true">✓</span><h2>{facts.length ? 'No matching proposals' : 'Nothing awaits review.'}</h2><p>{facts.length ? 'Try another subject or clear your filters.' : 'New claims will appear here for your review. Nothing is approved automatically.'}</p>{facts.length > 0 && <button className="btn small quiet" onClick={clearFilters}>Clear filters</button>}</div>}
+        {loaded && !matching.length && <WorkspaceState className="review-empty" icon="review" title={facts.length ? 'No matching proposals' : 'Nothing awaits review.'} description={facts.length ? <p>Try another subject or clear your filters.</p> : <>
+          <p>Review only shows proposed claims. Active and closed claims are listed separately in Memory claims.</p>
+          <p>An empty queue does not mean extraction is complete. When extraction is configured, new proposals appear only when candidates pass its checks.</p>
+        </>} actions={facts.length > 0 ? <button className="btn small quiet" onClick={clearFilters}>Clear filters</button> : <>
+          {statusAvailable && <Link className="btn small quiet" to="#status">Check processing status</Link>}
+          {claimsAvailable && <Link className="btn small quiet" to="#beliefs">View memory claims</Link>}
+        </>}/>}
         {[...groups].map(([name, rows]) => <section className="review-group" key={name}>
           <button className="review-group-heading" aria-expanded={!collapsed.has(name)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(name)) next.delete(name); else next.add(name); return next; })}><span aria-hidden="true">{collapsed.has(name) ? '›' : '⌄'}</span><h2><MarkdownText text={name} inline/></h2><span>{rows.length} on this page</span></button>
           {!collapsed.has(name) && rows.map(f => <article className="proposal" data-fact-id={f.fact_id} key={f.fact_id} aria-busy={saving === f.fact_id}>
             <div className="review-claim">
-              <div className="review-record"><span>#{f.fact_id} · {f.origin || 'Origin not recorded'}</span><span className={f.grounded === true ? 'review-grounded' : 'review-unchecked'}>{f.grounded === true ? 'Source quote checked' : 'No checked quote'}</span></div>
+              <div className="review-record"><span>#{f.fact_id} · {f.origin || 'Origin not recorded'}</span><span className={f.origin === 'inferred' ? 'review-inferred' : f.grounded === true ? 'review-grounded' : 'review-unchecked'}>{f.origin === 'inferred' ? 'Inferred from claims' : f.grounded === true ? 'Source quote checked' : 'No checked quote'}</span></div>
               <div className="triple"><b><MarkdownText text={f.subject} inline/></b> <MarkdownText text={f.predicate.replaceAll('_', ' ')} inline/> <MarkdownText text={f.object} inline/></div>
               <div className="review-claim-meta">Effective {f.valid_from.slice(0, 10)} · Model confidence {Number.isFinite(f.confidence) ? f.confidence.toFixed(2) : 'not recorded'} <span title="Model-provided confidence is not calibrated probability">(uncalibrated)</span></div>
               {f.quote && <blockquote className="quote">“<MarkdownText text={f.quote} inline/>”</blockquote>}
             </div>
             <div className="decide"><button className="btn small" disabled={cannotDecide} onClick={() => void decide([f], 'approve')}>{saving === f.fact_id ? 'Saving…' : 'Approve'}</button><button className="btn small danger" disabled={cannotDecide} onClick={() => { setDeclining(f.fact_id); setReason(''); }}>Decline</button></div>
             {declining === f.fact_id && <form className="review-decline" onSubmit={event => { event.preventDefault(); void decide([f], 'decline'); }}><label htmlFor={`decline-${f.fact_id}`}>Reason for declining</label><p>The proposal stays in history with this reason. Its source is not deleted.</p><textarea id={`decline-${f.fact_id}`} autoFocus required maxLength={2000} value={reason} disabled={locked} onChange={event => setReason(event.target.value)} /><div className="decide"><button type="submit" className="btn small danger" disabled={cannotDecide || !reason.trim()}>Confirm decline</button><button className="btn small quiet" type="button" disabled={locked} onClick={() => setDeclining(null)}>Cancel</button></div></form>}
-            <SourceExcerpt api={api} id={f.source_episode_id} />
+            <div className="review-evidence-actions">
+              {f.origin === 'inferred' && <p className="review-premise-note">This is a proposed conclusion, not a quoted statement. {relationships ? 'Inspect its recorded premises and their sources before deciding whether the conclusion follows.' : 'This host does not expose premise inspection. Supporting claims have not been verified here.'}</p>}
+              {(f.origin !== 'inferred' || f.source_episode_id != null) && <SourceExcerpt api={api} id={f.source_episode_id} />}
+              {relationships&&<ClaimRelationsButton id={f.fact_id} api={api} disabled={locked} purpose={f.origin === 'inferred' ? 'premises' : 'relationships'}/>}
+            </div>
           </article>)}
         </section>)}
         {matching.length > PAGE_SIZE && <nav className="review-pagination" aria-label="Review pages"><button className="btn small quiet" disabled={locked || currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</button><span>{currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, matching.length)} of {matching.length}</span><button className="btn small quiet" disabled={locked || (currentPage + 1) * PAGE_SIZE >= matching.length} onClick={() => setPage(currentPage + 1)}>Next</button></nav>}
@@ -224,7 +246,7 @@ export function ReviewView({ api, onChanged }: { api: ApiClient; onChanged: () =
     </div>
     {confirmation && <Modal title={`Approve ${confirmation.length} proposals?`} onClose={() => setConfirmation(null)}>
       <p className="setup-intro">Approve this exact set of {confirmation.length} matching proposals across all pages. New arrivals are not included. Approval can replace existing beliefs or add historical memory.</p>
-      <p className="setup-intro">{confirmation.filter(f => f.grounded !== true).length} have no checked source quote. Model confidence is not a guarantee of correctness.</p>
+      <p className="setup-intro">{inferredCount} inferred {inferredCount === 1 ? 'proposal requires' : 'proposals require'} premise review. {uncheckedCount} other {uncheckedCount === 1 ? 'proposal has' : 'proposals have'} no checked source quote. Model confidence is not a guarantee of correctness.</p>
       <details className="review-confirm-list"><summary>Inspect the selected claims</summary><ul>{confirmation.map(f => <li key={f.fact_id}><b>#{f.fact_id} {f.subject}</b> {f.predicate.replaceAll('_', ' ')} {f.object}</li>)}</ul></details>
       <p className="setup-note">Decisions run one at a time, oldest effective date first (record ID breaks ties), regardless of display sorting. This is not an atomic transaction: confirmed decisions remain saved if a later request fails. There is no bulk undo.</p>
       <div className="review-confirm-actions"><button onClick={() => setConfirmation(null)}>Cancel</button><button className="primary" onClick={() => void decide(confirmation, 'approve')}>Confirm approval</button></div>

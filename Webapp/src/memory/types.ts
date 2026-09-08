@@ -118,9 +118,10 @@ export interface EventsResponse {
 /** What the shell hands the page. Matches the root-owned client. */
 export type { ApiClient } from '../api';
 
-export type View = "search" | "documents" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status";
+export type View = "search" | "documents" | "profile" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status";
 
 export interface SearchState {
+  metadataFilter?:import('./metadata-filter').AppliedFilter;
   q: string;
   where: Record<string, string>;
   tags: string[];

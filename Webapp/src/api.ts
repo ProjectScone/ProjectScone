@@ -1,8 +1,12 @@
+import {attachVoiceSocket,type VoiceEvents} from './conversations/voice/channel.ts';
+import {voiceSocketUrl} from './conversations/voice/wire.ts';
+
 export interface ApiClient {
   request<T>(path: string, options?: RequestInit): Promise<T>;
   image(attachment: ImageAttachment, signal?: AbortSignal): Promise<Blob>;
   uploadImage(file: File, signal?: AbortSignal): Promise<ImageAttachment>;
   conversationStream(sid: string, requestId: string, after: number, signal: AbortSignal): Promise<ReadableStream<Uint8Array>>;
+  voiceConnection(sid:string,format:{sampleRate:number;channels:number},events:VoiceEvents,signal:AbortSignal):ReturnType<typeof attachVoiceSocket>;
 }
 
 export interface ImageAttachment { attachment_id: string; media_type: string; bytes: number; filename?: string | null }
@@ -11,11 +15,17 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
+  code?: string;
+  constructor(status: number, message: string, code?: string) { super(message); this.status = status; this.code = code; }
 }
 
 export function createApiClient(key: string, unauthorized: () => void, base = ''): ApiClient {
   return {
+    voiceConnection(sid,format,events,signal){
+      signal.throwIfAborted();
+      const url=voiceSocketUrl(sid,base||window.location.origin);
+      return attachVoiceSocket(new WebSocket(url),key,sid,format,events,signal);
+    },
     async conversationStream(sid, requestId, after, signal) {
       if (![sid,requestId].every(id=>/^[A-Za-z0-9._:-]{1,128}$/.test(id)&&id!=='.'&&id!=='..')
         ||!Number.isSafeInteger(after)||after<0) throw Error('Invalid conversation stream address');
@@ -26,7 +36,7 @@ export function createApiClient(key: string, unauthorized: () => void, base = ''
       });
       if(!response.ok){
         await response.body?.cancel();
-        if(response.status===401||response.status===403)unauthorized();
+        if(response.status===401)unauthorized();
         throw new ApiError(response.status,`Live preview request failed (${response.status})`);
       }
       if(response.headers.get('content-type')?.split(';')[0].trim()!=='text/event-stream'||!response.body){
@@ -45,7 +55,7 @@ export function createApiClient(key: string, unauthorized: () => void, base = ''
       });
       const receipt=await response.json().catch(()=>null);
       if(!response.ok){
-        if(response.status===401||response.status===403)unauthorized();
+        if(response.status===401)unauthorized();
         throw new ApiError(response.status,typeof receipt?.error==='string'?receipt.error:`Upload request failed (${response.status})`);
       }
       if(receipt?.attachment_id!==digest||receipt?.media_type!==file.type||receipt?.bytes!==file.size
@@ -61,7 +71,7 @@ export function createApiClient(key: string, unauthorized: () => void, base = ''
       });
       if (!response.ok) {
         await response.body?.cancel();
-        if (response.status === 401 || response.status === 403) unauthorized();
+        if (response.status === 401) unauthorized();
         throw new ApiError(response.status, `Image request failed (${response.status})`);
       }
       const type = response.headers.get('content-type')?.split(';')[0].trim();
@@ -95,8 +105,11 @@ export function createApiClient(key: string, unauthorized: () => void, base = ''
       if (response.status === 204 && options.method?.toUpperCase() === 'DELETE') return undefined as T;
       const body = await response.json().catch(() => null);
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) unauthorized();
-        throw new ApiError(response.status, typeof body?.error === 'string' ? body.error : `API request failed (${response.status})`);
+        // A known key may be forbidden from writing while still allowed to read.
+        // Only failed authentication invalidates the whole workspace connection.
+        if (response.status === 401) unauthorized();
+        throw new ApiError(response.status, typeof body?.error === 'string' ? body.error : `API request failed (${response.status})`,
+          typeof body?.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(body.code) ? body.code : undefined);
       }
       if (body === null) throw new Error('API returned invalid JSON');
       return body as T;

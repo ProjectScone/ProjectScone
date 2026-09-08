@@ -28,7 +28,7 @@ async function chooseLayout(page,mode) {
   await page.getByRole('button',{name:'Graph layout',exact:true}).click();
   await page.getByRole('menuitemradio',{name:({constellation:'Constellation',radial:'Radial clusters',flow:'Evidence flow',growth:'Growth spiral'})[mode],exact:true}).click();
 }
-async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,claimBacklog=false,markdownQuote=false,capabilityMode='ok',rustCapabilities=false}={}) {
+async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory=false,crowded=false,review=false,backlog=false,chronological=false,paged=false,beliefs=false,claimBacklog=false,markdownQuote=false,derivedReview=false,capabilityMode='ok',rustCapabilities=false,profileAdvertised}={}) {
   let graphCalls=0, unauthorized=false, revision=1, pageLoads=0;
   let pendingFacts=[{fact_id:41,subject:'Ada',predicate:'prefers',object:'local storage',confidence:1,valid_from:'2026-09-06T03:00:00Z',valid_until:null,status:'proposed',source_episode_id:7,origin:'extracted',quote:null,grounded:false}];
   if(backlog) pendingFacts=[
@@ -39,6 +39,7 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
   if(chronological) pendingFacts=pendingFacts.map(f=>({...f,valid_from:f.fact_id===42?'2020-01-01T00:00:00Z':'2030-01-01T00:00:00Z'}));
   if(paged) pendingFacts=Array.from({length:26},(_,i)=>({...pendingFacts[0],fact_id:41+i}));
   if(markdownQuote) pendingFacts=pendingFacts.map(f=>({...f,quote:'and `target` held at **4.0 GB** afterward · ![proof](https://tracking.invalid/proof.png)',grounded:true}));
+  if(derivedReview) pendingFacts=[...pendingFacts,{...pendingFacts[0],fact_id:44,origin:'inferred',source_episode_id:null,quote:null,grounded:null,object:'storage under her control'}];
   let ledger=[{...pendingFacts[0],status:'active',excluded_reason:null,closed_reason:null}];
   if(claimBacklog)ledger=[...ledger,
     {...ledger[0],fact_id:40,object:'cloud storage',status:'closed',valid_from:'2019-01-01T00:00:00Z',valid_until:'2020-01-01T00:00:00Z'},
@@ -62,7 +63,8 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
       if(capabilityMode==='offline'){res.statusCode=503;return res.end('{"error":"Capability service unavailable"}');}
       if(capabilityMode==='missing'){res.statusCode=404;return res.end('{"error":"Not found"}');}
       if(capabilityMode==='invalid')return res.end('{"schema_version":1,"features":{"facts.review":"false"}}');
-      return res.end(JSON.stringify(capabilityContract[rustCapabilities?'rust':'python']));
+      const contract=capabilityContract[rustCapabilities?'rust':'python'];
+      return res.end(JSON.stringify(profileAdvertised===undefined?contract:{...contract,features:{...contract.features,'profile.read':profileAdvertised}}));
     }
     if(req.url.startsWith('/v1/status'))return res.end(JSON.stringify({space:'launch',name:'launch',episodes:1}));
     if(beliefs && req.url==='/v1/facts?all=true&excluded=true')return res.end(JSON.stringify({facts:ledger}));
@@ -82,7 +84,7 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
     }
     if(req.url.startsWith('/v1/graph')){graphCalls++;return res.end(JSON.stringify({nodes:empty?[]:graphNodes,edges:empty?[]:graphEdges,truncated:false,coverage:{agent:'connector-reported'}}));}
     if(req.url.startsWith('/v1/events'))return res.end(JSON.stringify({events:[],next_after:0,has_more:false}));
-    if(req.url.startsWith('/v1/recall'))return res.end(JSON.stringify({items:[{episode_id:7,text:'Keep launch local',score:1}],facts:[],event_id:12}));
+    if(req.url.startsWith('/v1/recall'))return res.end(JSON.stringify({items:[{episode_id:7,chunk_id:9,text:'Keep launch local',score:1}],facts:[],degraded:[],event_id:12}));
     res.statusCode=404;res.end('{}');
   });
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
@@ -95,6 +97,334 @@ async function fixture(t, {empty=false,mobile=false,dev=false,noKey=false,memory
     for(let s=0;s<3;s++){const id=`session:new:${s}`;graphNodes.push({id,kind:'session',label:'New session',data:{agent:'codex'}});for(let i=0;i<8;i++){const target=`new:${s}:${i}`;graphNodes.push({id:target,kind:'tool_call',label:'Bash'});graphEdges.push({source:id,target,kind:'invoked'});}}
   }};
 }
+for (const width of [1440,1024,390]) test(`global navigation sits above a single contextual sidebar at ${width}px`,async t=>{
+  const {page}=await fixture(t);
+  await page.setViewportSize({width,height:1000});
+  const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
+  await nav.waitFor();
+  const links=await nav.locator('a').all();
+  const boxes=await Promise.all(links.map(link=>link.boundingBox()));
+  assert.ok(boxes.every(box=>box&&Math.abs(box.y-boxes[0].y)<2),'Global destinations share one horizontal row.');
+  const pane=await page.locator('.app-pane').boundingBox();
+  assert.ok(pane.x<2,'There is no global left navigation column.');
+  const rail=await page.locator('.workspace .rail').boundingBox();
+  if(width>800)assert.ok(rail.x<2,'The session rail is the only left sidebar.');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await nav.getByRole('link',{name:'Memory',exact:true}).click();
+  await page.locator('.memory-page').waitFor();
+  assert.equal(await nav.getByRole('link',{name:'Memory',exact:true}).getAttribute('aria-current'),'page');
+});
+
+for (const mobile of [false,true]) test(`workspace action controls keep a consistent usable size, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{review:true,backlog:true,mobile});
+  await page.locator('.proposal').first().waitFor();
+  const controls=[page.getByRole('button',{name:'Refresh queue',exact:true}),page.getByRole('button',{name:'Approve',exact:true}).first(),page.locator('.connection-button')];
+  const measures=[];
+  for(const control of controls)measures.push(await control.evaluate(el=>{
+    const s=getComputedStyle(el);return {height:el.getBoundingClientRect().height,radius:s.borderRadius,font:s.fontSize};
+  }));
+  for(const measure of measures){
+    assert.ok(measure.height>=36,'Actions must remain easy to target, including compact actions.');
+    assert.deepEqual(measure,measures[0],'Action styling must not depend on the route or legacy button class.');
+  }
+  await page.getByRole('button',{name:'Approve',exact:true}).first().click();
+  await page.waitForFunction(()=>document.querySelectorAll('.proposal').length===2);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+for (const mobile of [false,true]) test(`memory search has a labeled query and real overview metrics, mobile=${mobile}`,async t=>{
+  const {page,requested}=await fixture(t,{memory:true,mobile});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:12,chunks:34,pending_review:3}}));
+  await page.reload();
+  const query=page.getByRole('searchbox',{name:'Search your memory',exact:true});
+  await query.waitFor({timeout:2500});
+  await page.getByRole('region',{name:'Memory overview'}).waitFor();
+  const metrics=await page.locator('.memory-overview div').evaluateAll(els=>els.map(el=>[el.querySelector('dt')?.textContent,el.querySelector('dd')?.textContent]));
+  assert.deepEqual(metrics,[['Sources','12'],['Excerpts','34'],['Awaiting review','3']]);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`workspace-search-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  await query.fill('release criteria');
+  const result=page.waitForResponse(response=>response.url().includes('/v1/recall?')&&new URL(response.url()).searchParams.get('q')==='release criteria');
+  await query.press('Enter');
+  await result;
+  assert.ok(requested.some(url=>url.startsWith('/v1/recall?')&&new URL(url,'http://fixture').searchParams.get('q')==='release criteria'));
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('empty memory offers working browser destinations without inventing data',async t=>{
+  const {page}=await fixture(t,{memory:true});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:0,chunks:0}}));
+  await page.reload();
+  await page.getByRole('heading',{name:'Your memory starts with a source'}).waitFor({timeout:2500});
+  assert.equal(await page.locator('.memory-overview').count(),0);
+  await page.getByRole('link',{name:'Connect an agent',exact:true}).click();
+  await page.locator('#graph').waitFor();
+  assert.match(page.url(),/\/playground$/);
+});
+
+for(const count of [undefined,null])test(`an unreported source count does not hide retained results, count=${count}`,async t=>{
+  const {page}=await fixture(t,{memory:true});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:count}}));
+  await page.reload();
+  await page.getByRole('region',{name:'Memory overview'}).waitFor({timeout:2500});
+  assert.equal(await page.getByRole('heading',{name:'Your memory starts with a source'}).count(),0);
+  assert.match(await page.locator('.rows').innerText(),/Keep launch local/);
+  assert.equal(await page.locator('.memory-overview dd').textContent(),'Not reported');
+});
+
+for (const mobile of [false,true]) test(`shared workspace navigation, palette and canvas remain coherent, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{review:true,backlog:true,mobile});
+  await page.locator('.proposal').first().waitFor();
+  const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
+  assert.equal(await nav.locator('svg[aria-hidden="true"]').count(),4);
+  const navigation=await nav.boundingBox();
+  for(const link of await nav.getByRole('link').all()){
+    const box=await link.boundingBox();
+    assert.ok(box.x>=navigation.x&&box.x+box.width<=navigation.x+navigation.width+1,'all primary destinations are visible without horizontal scrolling');
+    assert.ok(box.height>=42,'primary navigation keeps usable touch targets');
+  }
+  const primary=await page.getByRole('button',{name:'Approve',exact:true}).first().evaluate(el=>getComputedStyle(el).backgroundColor);
+  const sections=await page.getByRole('navigation',{name:'Sections',exact:true}).boundingBox();
+  const content=await page.locator('.memory-page main').boundingBox();
+  if(!mobile)assert.ok(sections.x+sections.width<=content.x+1,'section navigation is a stable left rail');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(!mobile){
+    for(const width of [1280,1024,900,800,600,390]){
+      await page.setViewportSize({width,height:1000});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`review stays in viewport at ${width}px`);
+      for(const link of await nav.getByRole('link').all()){
+        const box=await link.boundingBox();
+        assert.ok(box.x>=0&&box.x+box.width<=width,`primary navigation stays visible at ${width}px`);
+      }
+    }
+    await page.setViewportSize({width:1440,height:1000});
+  }
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`design-review-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  await nav.getByRole('link',{name:'Playground',exact:true}).click();
+  await page.locator('[data-node]').first().waitFor();
+  assert.equal(await page.locator('.recall-form .primary').evaluate(el=>getComputedStyle(el).backgroundColor),primary);
+  let canvas;
+  for(const mode of ['constellation','radial','flow','growth']){
+    await chooseLayout(page,mode);
+    const color=await page.locator('.graph-panel').evaluate(el=>getComputedStyle(el).backgroundColor);
+    if(canvas)assert.equal(color,canvas,'changing layout must not switch the workspace palette');
+    canvas=color;
+    if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`design-${mode}-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  }
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+test('graph node surfaces and hover states follow the shared palette',async t=>{
+  const {page}=await fixture(t);
+  await page.locator('[data-node]').first().waitFor();
+  // A feature-level literal used to leave old cream surfaces and white outlines
+  // behind when the surrounding workspace palette changed.
+  await page.evaluate(()=>{
+    document.documentElement.style.setProperty('--surface','rgb(241, 246, 252)');
+    document.documentElement.style.setProperty('--raised','rgb(222, 233, 247)');
+  });
+  await chooseLayout(page,'constellation');
+  assert.equal(await page.locator('.orb-surface').first().evaluate(el=>getComputedStyle(el).stroke),'rgb(241, 246, 252)');
+  await chooseLayout(page,'flow');
+  const card=page.locator('.atlas-card:not(.session-anchor)').first();
+  await card.hover();
+  assert.equal(await card.locator('.card-surface').evaluate(el=>getComputedStyle(el).fill),'rgb(222, 233, 247)');
+});
+
+for(const mobile of [false,true])test(`processing overview separates stored sources, extraction, inference and review, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{mobile});const writes=[];
+  page.on('request',request=>{if(request.method()!=='GET')writes.push(request.url());});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:12,chunks:30,pending_distill:4,pending_review:7,pending_derivation:2,derivation:'off',semantic_lane:'stopped',revision:5}}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory processing'});
+  await panel.getByRole('heading',{name:'Inference',exact:true}).waitFor();
+  assert.match(await panel.getByRole('article',{name:'Inference'}).innerText(),/2[\s\S]*groups[\s\S]*Off/);
+  assert.match(await panel.getByRole('article',{name:'Extraction'}).innerText(),/4[\s\S]*episodes[\s\S]*Stopped/);
+  assert.match(await panel.getByRole('article',{name:'Review'}).innerText(),/7[\s\S]*proposals/);
+  assert.match(await panel.innerText(),/not a per-document readiness receipt/);
+  await panel.getByRole('link',{name:'Open review'}).click();
+  await page.getByRole('heading',{name:'Review',exact:true}).waitFor();
+  assert.equal(new URL(page.url()).hash,'#review');assert.deepEqual(writes,[]);
+  await page.goto(new URL('/memory#status',page.url()).href);await panel.getByRole('heading',{name:'Inference',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`processing-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+});
+test('processing hides navigation to unadvertised document and review operations',async t=>{
+  const {page}=await fixture(t);
+  await page.route('**/v1/capabilities',async route=>{const response=await route.fetch();const caps=await response.json();caps.features['episodes.list']=false;caps.features['facts.review']=false;await route.fulfill({json:caps});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory processing'});
+  await panel.getByRole('heading',{name:'Inference',exact:true}).waitFor();
+  assert.equal(await panel.getByRole('link',{name:'Open documents'}).count(),0);
+  assert.equal(await panel.getByRole('link',{name:'Open review'}).count(),0);
+});
+test('processing navigation cancels a refresh without restoring stale counts',async t=>{
+  const {page}=await fixture(t);let waiting=false,release;
+  const held=new Promise(resolve=>{release=resolve;});
+  await page.route('**/v1/status',async route=>{if(waiting)await held;await route.fulfill({json:{space:'launch',episodes:18}}).catch(()=>{});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  await page.getByRole('article',{name:'Sources'}).waitFor();
+  waiting=true;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await page.getByRole('button',{name:'Reading status…',exact:true}).waitFor();
+  assert.equal(await page.getByRole('article',{name:'Sources'}).count(),0);
+  await page.locator('nav.sections').getByRole('button',{name:'Search',exact:true}).click();
+  release();await page.getByRole('heading',{name:'Search',exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Memory processing'}).count(),0);
+});
+test('processing on Rust displays scoped failures and model configuration without claiming liveness',async t=>{
+  const {page}=await fixture(t,{rustCapabilities:true});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:2,chunks:3,revision:1,pending_distill:0,failed_distill:2,model:'fixture-extractor',semantic_lane:'active'}}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory processing'});
+  await panel.getByRole('heading',{name:'Extraction',exact:true}).waitFor();
+  assert.match(await panel.getByRole('article',{name:'Extraction'}).innerText(),/0[\s\S]*episodes awaiting extraction[\s\S]*Configured/);
+  assert.match(await panel.getByRole('article',{name:'Extraction'}).innerText(),/2 failed episodes/);
+  assert.doesNotMatch(await panel.innerText(),/server-wide/);
+  await page.getByText('fixture-extractor',{exact:true}).waitFor();
+  assert.match(await panel.getByRole('article',{name:'Inference'}).innerText(),/Not reported/);
+  assert.equal(await page.getByRole('button',{name:'Run integrity check',exact:true}).count(),0);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'processing-failures.png'),fullPage:true});
+});
+for(const model of [null,undefined])test(`processing distinguishes absent model configuration from an unreported field, model=${model}`,async t=>{
+  const {page}=await fixture(t,{rustCapabilities:true});
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:0,pending_distill:0,failed_distill:0,semantic_lane:'paused',model}}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const row=page.locator('.processing-storage dl>div').filter({has:page.getByText('Extraction model',{exact:true})});
+  await row.waitFor();assert.equal(await row.locator('dd').innerText(),model===null?'Not configured':'Not reported');
+  assert.equal(await page.getByRole('article',{name:'Extraction'}).locator('.processing-mode').innerText(),model===null?'Not configured':'Paused');
+  assert.match(await page.getByRole('article',{name:'Extraction'}).innerText(),/0 failed episodes/);
+  assert.equal(await page.locator('.processing-failure').count(),0);
+});
+test('processing refresh clears stale counts and retries malformed or failed reports',async t=>{
+  const {page}=await fixture(t);let mode='good';
+  await page.route('**/v1/status',route=>route.fulfill(mode==='failed'?{status:503,json:{error:'Status unavailable'}}:{json:mode==='bad'?{space:'launch',pending_distill:-2}:{space:'launch',episodes:42}}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory processing'});
+  await panel.getByRole('heading',{name:'Inference',exact:true}).waitFor();
+  assert.match(await panel.getByRole('article',{name:'Inference'}).innerText(),/Not reported/);
+  for(const failure of ['failed','bad']){
+    mode=failure;await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+    await page.getByRole('alert').filter({hasText:/Status unavailable|Invalid memory status/}).waitFor();
+    assert.equal(await page.getByRole('article',{name:'Sources'}).count(),0);
+    mode='good';await page.getByRole('button',{name:'Refresh status',exact:true}).click();await panel.getByRole('heading',{name:'Inference',exact:true}).waitFor();
+  }
+});
+
+const maintenanceReport={space:'launch',scope:'distill',episodes:3,proposed:2,accepted:1,closed:1,skipped:0,parked:0,rejected:1,rejected_reasons:{missing_quote:1},expired:1,derived_sent:1,derived_proposed:1,derived_restated:0,derived_rejected:0,error:null,latency_ms:25};
+async function processingActions(t){
+  const setup=await fixture(t,{mobile:true});const {page}=setup;
+  await page.route('**/v1/capabilities',async route=>{const response=await route.fetch();const caps=await response.json();caps.features['processing.distill']=true;caps.features['processing.derive']=true;await route.fulfill({json:caps});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  return setup;
+}
+test('processing maintenance requires confirmation and reports all effects including partial failure',async t=>{
+  const {page}=await processingActions(t);const writes=[];
+  await page.route('**/v1/consolidate',route=>{writes.push(route.request().postDataJSON());return route.fulfill({json:{...maintenanceReport,error:'Derivation did not finish'}});});
+  await page.getByRole('button',{name:'Run maintenance',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Confirm maintenance pass'});
+  await dialog.getByText(/retention.*forget/i).waitFor();assert.equal(writes.length,0);
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(writes.length,0);
+  await page.getByRole('button',{name:'Run maintenance',exact:true}).click();
+  await dialog.getByRole('button',{name:'Run one maintenance pass',exact:true}).click();
+  const report=page.getByRole('region',{name:'Processing pass result'});
+  await report.getByRole('heading',{name:'Pass reported an error',exact:true}).waitFor();
+  await report.getByText('Derivation did not finish',{exact:true}).waitFor();
+  assert.deepEqual(writes,[{scope:'distill'}]);
+  for(const [label,value] of [['Proposals added','2'],['Claims accepted','1'],['Sources expired','1'],['Inferences proposed','1']]){
+    const row=report.locator('dl>div').filter({has:page.getByText(label,{exact:true})});assert.equal(await row.locator('dd').innerText(),value);
+  }
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+for(const status of [503,422])test(`processing inference is explicit and an unconfirmed ${status} response is never auto-retried`,async t=>{
+  const {page}=await processingActions(t);let writes=0;
+  await page.route('**/v1/consolidate',route=>{writes++;assert.deepEqual(route.request().postDataJSON(),{scope:'derive'});return route.fulfill({status,json:{error:'Response interrupted'}});});
+  await page.getByRole('button',{name:'Run inference',exact:true}).click();
+  await page.getByRole('dialog',{name:'Confirm inference pass'}).getByRole('button',{name:'Run one inference pass',exact:true}).click();
+  await page.getByRole('heading',{name:'Pass outcome unconfirmed',exact:true}).waitFor();assert.equal(writes,1);
+  assert.equal(await page.getByRole('button',{name:'Run inference',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Run maintenance',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Acknowledge unconfirmed outcome',exact:true}).click();
+  assert.equal(writes,1,'Acknowledging must not replay a request');
+});
+test('processing actions remain absent without explicit capabilities and never probe the pass endpoint',async t=>{
+  const {page}=await fixture(t);let calls=0;page.on('request',r=>{if(r.url().includes('/v1/consolidate'))calls++;});
+  await page.goto(new URL('/memory#status',page.url()).href);await page.getByRole('heading',{name:'Memory processing',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/Run maintenance|Run inference/}).count(),0);assert.equal(calls,0);
+});
+
+const integrityClean={space:'launch',episodes:4,chunks:8,facts:3,links:2,tombstones:1,
+  chunks_without_episode:[],vectors_without_chunk:[],facts_citing_forgotten:[],
+  facts_citing_unknown:[],links_with_missing_ends:[],attachments_unlinked:[],not_inspected:[],healthy:true};
+for(const partial of [false,true])test(`integrity is an on-demand read with explicit coverage, partial=${partial}`,async t=>{
+  const {page}=await fixture(t);let checks=0;
+  await page.route('**/v1/doctor',route=>{checks++;assert.equal(route.request().method(),'GET');return route.fulfill({json:partial?{...integrityClean,vectors_without_chunk:null,not_inspected:['vectors']}:integrityClean});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory integrity'});
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).waitFor();assert.equal(checks,0);
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('heading',{name:partial?'Partial check':'No dangling references found',exact:true}).waitFor();
+  assert.equal(checks,1);
+  if(partial)await panel.getByText('Not inspected: vectors',{exact:true}).waitFor();
+  assert.equal(await panel.getByRole('button',{name:/repair|delete|forget/i}).count(),0);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`integrity-${partial?'partial':'clean'}.png`),fullPage:true});
+});
+test('integrity findings distinguish forgotten sources and page actual IDs on mobile',async t=>{
+  const {page}=await fixture(t,{mobile:true});
+  await page.route('**/v1/doctor',route=>route.fulfill({json:{...integrityClean,healthy:false,facts_citing_forgotten:Array.from({length:55},(_,i)=>i+100),facts_citing_unknown:[77]}}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory integrity'});
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('heading',{name:'References need attention',exact:true}).waitFor();
+  await panel.getByText('Claims with forgotten sources',{exact:false}).click();
+  const group=panel.locator('details').filter({hasText:'Claims with forgotten sources'});
+  assert.equal(await group.locator('li').count(),50);
+  await group.getByRole('button',{name:'Show more IDs',exact:true}).click();assert.equal(await group.locator('li').count(),55);
+  assert.equal(await group.locator('li').last().innerText(),'Claim #154');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'integrity-findings-mobile.png'),fullPage:true});
+});
+test('integrity rejects a wrong-space report and retries without any write',async t=>{
+  const {page}=await fixture(t);let checks=0;
+  await page.route('**/v1/doctor',route=>{assert.equal(route.request().method(),'GET');return route.fulfill({json:{...integrityClean,space:++checks===1?'another-space':'launch'}});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory integrity'});
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('alert').waitFor();assert.equal(await panel.locator('.integrity-counts').count(),0);
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('heading',{name:'No dangling references found',exact:true}).waitFor();assert.equal(checks,2);
+});
+test('unsupported hosts never show or request an integrity operation',async t=>{
+  const {page,requested}=await fixture(t,{rustCapabilities:true});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  await page.getByRole('heading',{name:'Status',exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Memory integrity'}).count(),0);
+  assert.equal(requested.some(path=>path.startsWith('/v1/doctor')),false);
+});
+test('integrity prevents overlapping checks and discards results after navigation',async t=>{
+  const {page}=await fixture(t);let checks=0,release;
+  const pending=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  await page.route('**/v1/doctor',async route=>{checks++;await pending;await route.fulfill({json:integrityClean}).catch(()=>{});});
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory integrity'});
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  assert.equal(await panel.getByRole('button',{name:'Checking references…',exact:true}).isDisabled(),true);
+  await page.getByRole('navigation',{name:'Sections',exact:true}).getByRole('button',{name:'Search',exact:true}).click();
+  release();
+  await page.getByRole('navigation',{name:'Sections',exact:true}).getByRole('button',{name:'Status',exact:true}).click();
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).waitFor();
+  assert.equal(checks,1);assert.equal(await panel.locator('.integrity-result').count(),0);
+});
+test('an integrity refresh clears the prior verdict while failure remains retryable',async t=>{
+  const {page}=await fixture(t);let fail=false;
+  await page.route('**/v1/doctor',route=>route.fulfill(fail?{status:503,json:{error:'Check temporarily unavailable'}}:{json:integrityClean}));
+  await page.goto(new URL('/memory#status',page.url()).href);
+  const panel=page.getByRole('region',{name:'Memory integrity'});
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('heading',{name:'No dangling references found',exact:true}).waitFor();fail=true;
+  await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('alert').waitFor();assert.equal(await panel.locator('.integrity-result').count(),0);
+  fail=false;await panel.getByRole('button',{name:'Run integrity check',exact:true}).click();
+  await panel.getByRole('heading',{name:'No dangling references found',exact:true}).waitFor();
+});
+
 test('capability discovery failure is retryable without probing workflows or losing the route',async t=>{
   const {page,requested,restoreCapabilities,capabilityCalls}=await fixture(t,{review:true,capabilityMode:'offline'});
   await page.getByRole('button',{name:'Retry capabilities',exact:true}).waitFor({timeout:2000});
@@ -104,6 +434,110 @@ test('capability discovery failure is retryable without probing workflows or los
   await page.getByRole('button',{name:'Retry capabilities',exact:true}).click();
   await page.locator('.proposal').waitFor();
   assert.equal(capabilityCalls(),2);
+});
+const profileFixture={static_facts:[{fact_id:41,subject:'Ada',predicate:'prefers',object:'local storage',confidence:.8,source_episode_id:7}],dynamic:['Ada prefers **local storage**.'],recent:[{episode_id:7,excerpt:'Ada prefers **local storage**.',created_at:'2026-09-06T03:00:00Z'}]};
+async function openProfile(t,{mobile=false,advertised=true}={}){
+  const setup=await fixture(t,{review:true,mobile,profileAdvertised:advertised});
+  await setup.page.route('**/v1/profile',route=>route.fulfill({json:profileFixture}));
+  await setup.page.goto(new URL('/memory#profile',setup.page.url()).href);
+  setup.page.setDefaultTimeout(2500);
+  return setup;
+}
+for(const mobile of [false,true])test(`profile separates selected claims from source context and opens exact evidence, mobile=${mobile}`,async t=>{
+  const {page,sourceCalls,decisions}=await openProfile(t,{mobile});
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  const recent=page.getByRole('region',{name:'Recent source context',exact:true});
+  assert.equal(await recent.getByText('Episode #7',{exact:true}).count(),1);
+  assert.equal(sourceCalls(),0,'Profile does not fetch full sources until requested.');
+  await recent.getByRole('button',{name:'Read source episode #7',exact:true}).click();
+  await recent.locator('.source-markdown').getByText(/END OF SOURCE/).waitFor();
+  assert.ok((await recent.locator('.formatted-source').boundingBox()).height<=420,'Expanded source text has a bounded reading pane.');
+  assert.equal(sourceCalls(),1);assert.deepEqual(decisions,[]);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`profile-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+});
+test('memory sections follow fragment navigation and browser history without a page reload',async t=>{
+  const {page}=await openProfile(t);
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  await page.goto(new URL('/memory#review',page.url()).href);
+  await page.getByRole('heading',{name:'Review',exact:true}).waitFor();
+  await page.goBack();
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  await page.goto(new URL('/memory#not-a-section',page.url()).href);
+  await page.getByRole('heading',{name:'Search',exact:true}).waitFor();
+  assert.match(page.url(),/#search$/);
+});
+test('skip to workspace preserves the selected memory page and focuses its content',async t=>{
+  const {page}=await openProfile(t);
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  const skip=page.getByRole('link',{name:'Skip to workspace',exact:true});
+  await skip.focus();await page.keyboard.press('Enter');
+  assert.match(page.url(),/#profile$/);
+  assert.equal(await page.evaluate(()=>document.activeElement?.id),'main');
+  assert.equal(await page.getByRole('region',{name:'Selected claim context',exact:true}).count(),1);
+});
+test('unsupported profile is not probed or presented as an empty context',async t=>{
+  const {page,requested}=await openProfile(t,{advertised:false});
+  await page.getByRole('heading',{name:'This page is not available on this server'}).waitFor();
+  assert.equal(requested.some(url=>url==='/v1/profile'),false);
+  assert.equal(await page.getByRole('button',{name:'Profile',exact:true}).count(),0);
+});
+test('profile lists every native claim source without duplicate disclosure controls',async t=>{
+  const {page,sourceCalls}=await openProfile(t);
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  await page.route('**/v1/profile',route=>route.fulfill({json:{...profileFixture,static_facts:[{...profileFixture.static_facts[0],sources:[7,8]}]}}));
+  await page.getByRole('button',{name:'Refresh profile',exact:true}).click();
+  const claims=page.getByRole('region',{name:'Selected claim context',exact:true});
+  await claims.getByRole('button',{name:'Read source episode #8',exact:true}).waitFor();
+  assert.equal(await claims.getByRole('button',{name:'Read source episode #7',exact:true}).count(),1);
+  assert.equal(sourceCalls(),0);
+});
+test('profile refresh clears old evidence and invalid responses recover without writes',async t=>{
+  const {page}=await openProfile(t);
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  await page.route('**/v1/profile',route=>route.fulfill({json:{...profileFixture,recent:[]}}));
+  await page.getByRole('button',{name:'Refresh profile',exact:true}).click();
+  await page.getByRole('alert').waitFor();
+  assert.equal(await page.getByRole('region',{name:'Selected claim context',exact:true}).count(),0);
+  await page.route('**/v1/profile',route=>route.fulfill({json:{static_facts:[],recent:[],dynamic:[]}}));
+  await page.getByRole('button',{name:'Retry profile',exact:true}).click();
+  await page.getByRole('heading',{name:'No profile context yet',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Open documents',exact:true}).click();
+  await page.getByRole('heading',{name:'Documents',exact:true}).waitFor();
+  assert.match(page.url(),/#documents$/);
+});
+test('profile evidence rejects mismatched source identities and distinguishes forgotten support',async t=>{
+  const {page}=await openProfile(t);
+  await page.getByRole('region',{name:'Recent source context',exact:true}).waitFor();
+  await page.route('**/v1/episodes/7',route=>route.fulfill({json:{episode_id:99,content:'Wrong private source'}}));
+  const recent=page.getByRole('region',{name:'Recent source context',exact:true});
+  await recent.getByRole('button',{name:'Read source episode #7',exact:true}).click();
+  await recent.getByRole('alert').waitFor();assert.equal(await page.getByText('Wrong private source').count(),0);
+  await page.route('**/v1/episodes/7',route=>route.fulfill({status:410,json:{error:'forgotten'}}));
+  await recent.getByRole('button',{name:'Retry source',exact:true}).click();
+  await recent.getByText('This source was forgotten. Its text is no longer retained.',{exact:true}).waitFor();
+});
+test('late profile responses cannot replace another memory page',async t=>{
+  const {page}=await openProfile(t);let finish,entered;
+  await page.getByRole('region',{name:'Selected claim context',exact:true}).waitFor();
+  const waiting=new Promise(resolve=>{entered=resolve;});
+  await page.route('**/v1/profile',async route=>{entered();await new Promise(resolve=>{finish=resolve;});await route.fulfill({json:profileFixture}).catch(()=>{});});
+  await page.getByRole('button',{name:'Refresh profile',exact:true}).click();await waiting;
+  await page.getByRole('button',{name:'Search',exact:true}).click();finish();
+  await page.getByRole('heading',{name:'Search',exact:true}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Profile context',exact:true}).count(),0);
+});
+for(const mobile of [false,true])test(`unavailable memory is a contained actionable workspace state, mobile=${mobile}`,async t=>{
+  const {page,restoreCapabilities}=await fixture(t,{review:true,capabilityMode:'offline',mobile});
+  const alert=page.getByRole('alert');await alert.waitFor();
+  const box=await alert.boundingBox();
+  const treatment=await alert.evaluate(el=>{const s=getComputedStyle(el);return {padding:parseFloat(s.paddingLeft),border:parseFloat(s.borderTopWidth),background:s.backgroundColor};});
+  assert.ok(treatment.padding>=18&&treatment.border>=1,'Service failures must have the same intentional containment as working panels.');
+  assert.notEqual(treatment.background,'rgba(0, 0, 0, 0)');
+  const retry=page.getByRole('button',{name:'Retry capabilities',exact:true});
+  const control=await retry.boundingBox();assert.ok(control.x>=box.x&&control.x+control.width<=box.x+box.width);
+  restoreCapabilities();await retry.click();await page.locator('.proposal').waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Server capabilities unavailable'}).count(),0);
 });
 test('Rust capabilities enable individual review without implying exclusion or analytics support',async t=>{
   const {page,decisions}=await fixture(t,{review:true,beliefs:true,rustCapabilities:true});
@@ -293,6 +727,19 @@ test('review sources render Markdown without executing HTML or loading remote im
   assert.equal(await content.locator('a[href^="javascript:"],script,iframe,img').count(),0);
   assert.equal(await page.evaluate(()=>window.sourceExecuted),undefined);
   assert.deepEqual(remote,[]);
+  const sourcePalette=await content.evaluate(el=>{
+    const probe=document.createElement('span');el.append(probe);
+    probe.style.color='var(--accent)';const accent=getComputedStyle(probe).color;
+    probe.style.color='var(--muted)';const muted=getComputedStyle(probe).color;
+    probe.style.backgroundColor='var(--raised)';const raised=getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return {accent,muted,raised,link:getComputedStyle(el.querySelector('a')).color,
+      summary:getComputedStyle(el.querySelector('.source-original>summary')).color,
+      code:getComputedStyle(el.querySelector('p code')).backgroundColor};
+  });
+  assert.equal(sourcePalette.link,sourcePalette.accent,'Source links must share the workspace accent.');
+  assert.equal(sourcePalette.summary,sourcePalette.muted,'Original-source controls must share workspace text tones.');
+  assert.equal(sourcePalette.code,sourcePalette.raised,'Code excerpts must share workspace surfaces.');
   await content.getByText('View original Markdown',{exact:true}).click();
   assert.equal(await content.getByLabel('Original source text',{exact:true}).textContent(),source);
   assert.equal(decisions.length,0,'formatting source text must not make a decision');
@@ -308,6 +755,81 @@ test('review quotations format emphasis and code while retaining inert image des
   assert.equal(await quote.locator('img').count(),0);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
 });
+for(const mobile of [false,true]) test(`derived review separates premise evidence and bulk decisions, mobile=${mobile}`,async t=>{
+  const {page,decisions,requested}=await fixture(t,{review:true,derivedReview:true,mobile});
+  const derived=page.locator('.proposal[data-fact-id="44"]');
+  await derived.waitFor();
+  assert.match(await derived.innerText(),/Inferred from claims/);
+  assert.doesNotMatch(await derived.innerText(),/No checked quote|No source episode recorded|Source quote checked/);
+  assert.equal(requested.includes('/v1/facts/44'),false,'Premises are fetched only when opened');
+  await page.route('**/v1/facts/44',route=>route.fulfill({json:{fact:{fact_id:44,subject:'Ada',predicate:'prefers',object:'storage under her control',status:'proposed',origin:'inferred',source_episode_id:null,quote:null,confidence:.8,valid_from:'2026-09-06T03:00:00Z',valid_until:null},sources:[],links:[
+    {link_id:9,from_fact:44,to_fact:41,kind:'derived_from',created_at:'2026-09-06T03:00:00Z',source_episode_id:null,quote:null},
+    {link_id:10,from_fact:50,to_fact:44,kind:'derived_from',created_at:'2026-09-06T03:00:00Z',source_episode_id:null,quote:null},
+  ]}}));
+  await derived.getByRole('button',{name:'Inspect premises for claim #44'}).click();
+  await page.getByRole('heading',{name:'Inference premises (1)',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Derived from · claim #41',exact:true}).count(),1);
+  assert.equal(await page.getByRole('button',{name:'Used to derive · claim #50',exact:true}).count(),1);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`inference-premises-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  await page.route('**/v1/facts/41',route=>route.fulfill({json:{fact:{fact_id:41,subject:'Ada',predicate:'prefers',object:'local storage',status:'closed',origin:'extracted',source_episode_id:7,quote:'Ada prefers local storage.',confidence:1,valid_from:'2026-09-05T03:00:00Z',valid_until:'2026-09-06T03:00:00Z'},sources:[7],links:[]}}));
+  await page.getByRole('button',{name:'Derived from · claim #41',exact:true}).click();
+  await page.getByText('Closed · historical record',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Read source episode #7',exact:true}).click();
+  await page.getByRole('paragraph').filter({hasText:'END OF SOURCE'}).waitFor();
+  await page.getByRole('button',{name:'Back to previous claim',exact:true}).click();
+  await page.getByRole('heading',{name:'Inference premises (1)',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.getByRole('combobox',{name:'Evidence',exact:true}).selectOption('inferred');
+  assert.deepEqual(await page.locator('.proposal').evaluateAll(rows=>rows.map(row=>row.dataset.factId)),['44']);
+  await page.getByRole('combobox',{name:'Evidence',exact:true}).selectOption('unchecked');
+  assert.deepEqual(await page.locator('.proposal').evaluateAll(rows=>rows.map(row=>row.dataset.factId)),['41']);
+  await page.getByRole('combobox',{name:'Evidence',exact:true}).selectOption('all');
+  await page.getByRole('button',{name:'Approve all matching (2)'}).click();
+  const dialog=page.getByRole('dialog');
+  assert.match(await dialog.innerText(),/1 inferred proposal/);
+  assert.match(await dialog.innerText(),/1 other proposal.*no checked source quote/);
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert.equal(decisions.length,0,'Inspecting, filtering and cancelling never approves a claim');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`inference-review-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+});
+
+test('derived review does not manufacture missing premises or hide read failures',async t=>{
+  const {page,decisions}=await fixture(t,{review:true,derivedReview:true});
+  let fail=true;
+  await page.route('**/v1/facts/44',route=>fail?route.fulfill({status:503,json:{error:'Premise service unavailable'}}):route.fulfill({json:{fact:{fact_id:44,subject:'Ada',predicate:'prefers',object:'storage under her control',status:'proposed',origin:'inferred',confidence:.8,valid_from:'2026-09-06T03:00:00Z',valid_until:null},sources:[],links:[]}}));
+  await page.getByRole('button',{name:'Inspect premises for claim #44'}).click();
+  await page.getByRole('alert').filter({hasText:'No claim details were confirmed'}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:/Inference premises/}).count(),0);
+  fail=false;
+  await page.getByRole('button',{name:'Refresh claim',exact:true}).click();
+  await page.getByRole('heading',{name:'Inference premises (0)',exact:true}).waitFor();
+  await page.getByText('No premise links were returned. Support for this inference has not been established here.',{exact:true}).waitFor();
+  assert.equal(decisions.length,0);
+});
+
+test('derived review names unavailable premise inspection without probing unsupported hosts',async t=>{
+  const {page,requested,decisions}=await fixture(t,{review:true,derivedReview:true});
+  await page.route('**/v1/capabilities',route=>route.fulfill({json:{...capabilityContract.python,features:{...capabilityContract.python.features,'facts.links':false}}}));
+  await page.reload();
+  const derived=page.locator('.proposal[data-fact-id="44"]');
+  await derived.getByText(/This host does not expose premise inspection/).waitFor();
+  assert.equal(await derived.getByRole('button',{name:'Inspect premises for claim #44'}).count(),0);
+  assert.equal(requested.includes('/v1/facts/44'),false);
+  assert.equal(decisions.length,0);
+});
+
+test('derived review expands premises independently of other relationships',async t=>{
+  const {page}=await fixture(t,{review:true,derivedReview:true});
+  await page.route('**/v1/facts/44',route=>route.fulfill({json:{fact:{fact_id:44,subject:'Ada',predicate:'prefers',object:'storage under her control',status:'proposed',origin:'inferred',confidence:.8,valid_from:'2026-09-06T03:00:00Z',valid_until:null},sources:[],links:Array.from({length:42},(_,i)=>({link_id:i+1,from_fact:i<21?44:100+i,to_fact:i<21?i+1:44,kind:'derived_from',created_at:'2026-09-06T03:00:00Z',source_episode_id:null,quote:null}))}}));
+  await page.getByRole('button',{name:'Inspect premises for claim #44'}).click();
+  await page.getByRole('button',{name:'Show more premises (20 of 21)',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:/^Derived from · claim #/}).count(),21);
+  assert.equal(await page.getByRole('button',{name:/^Used to derive · claim #/}).count(),20,'Expanding premises must not expand another list');
+  await page.getByRole('button',{name:'Show more relationships (20 of 21)',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:/^Used to derive · claim #/}).count(),21);
+});
+
 test('review backlog groups and filters without eagerly fetching sources',async t=>{
   const {page,sourceCalls}=await fixture(t,{review:true,backlog:true});
   await page.locator('.proposal').first().waitFor();
@@ -371,6 +893,18 @@ test('bulk review stops on uncertain failure and reports unattempted records',as
   assert.match(await page.locator('.review-result').innerText(),/1 approved/);
   assert.match(await page.locator('.review-result').innerText(),/1 not attempted/);
   assert.equal(await page.getByRole('button',{name:/Approve all matching/}).isDisabled(),true);
+});
+test('bulk permission denial reports acknowledged, denied and unattempted decisions separately',async t=>{
+  const {page,decisions}=await fixture(t,{review:true,backlog:true});
+  await page.route('**/v1/facts/42/approve',route=>route.fulfill({status:403,json:{error:'review permission revoked'}}));
+  await page.getByRole('button',{name:'Approve all matching (3)',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm approval',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'review access'}).waitFor();
+  assert.deepEqual(decisions.map(d=>d.path),['/v1/facts/41/approve']);
+  const receipt=await page.locator('.review-result').innerText();
+  assert.match(receipt,/1 approved/);assert.match(receipt,/1 denied/);assert.match(receipt,/0 unconfirmed/);assert.match(receipt,/1 not attempted/);
+  assert.equal(await page.locator('.proposal').count(),2);
+  assert.equal(await page.locator('.server-state').innerText(),'Authenticated');
 });
 test('review source failures offer retry without claiming evidence was deleted',async t=>{
   const {page}=await fixture(t,{review:true});
@@ -516,6 +1050,128 @@ test('agent setup distinguishes received activity from a verified live connectio
   assert.equal(await dialog.isVisible(),false);
 });
 // Spatial projection is a view change, never a relationship generator.
+test('a claim with an omitted source explains its missing session path without inventing an edge',async t=>{
+  const {page}=await fixture(t);
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:[...nodes,{id:'claim:88',kind:'claim',label:'A sourced claim',data:{source_episode_id:777}}],edges,truncated:true,provenance_omitted:3,coverage:{agent:'connector-reported'}}}));
+  await page.reload();
+  await page.locator('[data-node="claim:88"]').click();
+  const inspector=page.getByRole('complementary',{name:'Source inspector'});
+  await inspector.getByText('Episode #777 is referenced by this claim but is not included in this snapshot.',{exact:true}).waitFor({timeout:2000});
+  assert.match(await inspector.innerText(),/No recorded session path is available in this snapshot/);
+  assert.equal(await page.locator('[data-edge]').count(),4);
+  assert.equal(await inspector.locator('.relation').count(),0);
+  assert.match(await page.locator('#coverage').innerText(),/3 source episodes outside snapshot/);
+  assert.match(await page.locator('#coverage').innerText(),/Partial snapshot/);
+});
+
+test('depth clears stale highlighting when polling removes a selected record',async t=>{
+  const {page}=await fixture(t);
+  await page.getByRole('button',{name:'Depth view'}).click();
+  await page.locator('[data-node="turn:1"]').focus();await page.keyboard.press('Enter');
+  await page.locator('#inspector').waitFor();
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:nodes.filter(n=>n.id!=='turn:1'),edges:edges.filter(e=>e.source!=='turn:1'&&e.target!=='turn:1'),truncated:true,coverage:{agent:'connector-reported'}}}));
+  await page.waitForFunction(()=>!document.querySelector('[data-node="turn:1"]'));
+  assert.equal(await page.locator('.depth-node.is-dimmed').count(),0,'An expired selection must not dim the current snapshot.');
+});
+
+test('depth exposes directed relationship labels and only captures intentional zoom gestures',async t=>{
+  const {page}=await fixture(t);
+  await page.getByRole('button',{name:'Depth view'}).click();
+  await page.locator('[data-node="turn:1"]').focus();
+  assert.deepEqual(await page.locator('.depth-edge-caption').allTextContents(),['has','captured as']);
+  const activeEdges=await page.locator('[data-edge].highlight').evaluateAll(items=>items.map(el=>el.getAttribute('marker-end')));
+  assert.ok(activeEdges.every(marker=>marker&&marker.startsWith('url(')),'Stored direction remains visible.');
+  for(const ctrlKey of [false,true]){
+    const canceled=await page.locator('#graph').evaluate((el,ctrl)=>{const event=new WheelEvent('wheel',{deltaY:40,ctrlKey:ctrl,bubbles:true,cancelable:true});el.dispatchEvent(event);return event.defaultPrevented;},ctrlKey);
+    assert.equal(canceled,ctrlKey,'Ordinary page scrolling must not be trapped.');
+  }
+});
+
+test('depth orbits individual records in 3D without changing stored relationships',async t=>{
+  const {page}=await fixture(t,{crowded:true});
+  await page.getByRole('button',{name:'Depth view'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#graph [data-node]').length===241,{},{timeout:3000});
+  const coordinates=await page.locator('#graph [data-node]').evaluateAll(items=>items.map(el=>({z:Number(el.getAttribute('data-z')),transform:el.getAttribute('transform')})));
+  assert.ok(new Set(coordinates.map(p=>p.z)).size>10,'The records must occupy real Z coordinates.');
+  assert.equal(await page.locator('#graph [data-edge]').count(),240);
+  const graph=page.locator('#graph');
+  await graph.focus();
+  await page.keyboard.press('ArrowRight');
+  const rotated=await page.locator('#graph [data-node]').evaluateAll(items=>items.map(el=>el.getAttribute('transform')));
+  assert.notDeepEqual(rotated,coordinates.map(p=>p.transform),'Orbit must project different node positions.');
+  assert.equal(await page.locator('#graph [data-edge]').count(),240);
+  await page.getByRole('button',{name:'Reset 3D camera'}).click();
+  await page.locator('[data-node="tool:0"]').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.inspector').waitFor();
+  assert.match(await page.locator('.inspector').innerText(),/tool:0/);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'depth-records.png'),fullPage:true});
+});
+
+test('mobile depth controls fit, and pointer orbit changes the projected scene',async t=>{
+  const {page}=await fixture(t,{mobile:true});
+  await page.getByRole('button',{name:'Depth view'}).click();
+  const map=page.locator('#graph'),before=await page.locator('[data-node]').evaluateAll(els=>els.map(el=>el.getAttribute('transform')));
+  await map.scrollIntoViewIfNeeded();
+  const box=await map.boundingBox();
+  await page.mouse.move(box.x+30,box.y+box.height/2);
+  await page.mouse.down();await page.mouse.move(box.x+95,box.y+box.height/2+30,{steps:8});await page.mouse.up();
+  await page.waitForFunction(old=>JSON.stringify([...document.querySelectorAll('[data-node]')].map(el=>el.getAttribute('transform')))!==JSON.stringify(old),before);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  const controls=await page.locator('.zoom').boundingBox();
+  assert.ok(controls.x>=box.x&&controls.x+controls.width<=box.x+box.width+1);
+  const help=await page.locator('.depth-help').boundingBox(),legend=await page.locator('.atlas-legend').boundingBox();
+  assert.ok(help.y+help.height<=legend.y,'Help must not overlap the legend.');
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'depth-mobile.png'),fullPage:true});
+});
+
+test('depth pages very large ledgers without silently dropping records',async t=>{
+  const {page}=await fixture(t);
+  const large=Array.from({length:1250},(_,i)=>({id:'claim:'+String(i).padStart(4,'0'),kind:'claim',label:'Claim '+i}));
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:large,edges:[],truncated:false}}));
+  await page.reload();await page.getByRole('button',{name:'Depth view'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#graph [data-node]').length>0);
+  assert.equal(await page.locator('#graph [data-node]').count(),1000);
+  await page.getByRole('button',{name:'Next 3D page'}).click();
+  assert.equal(await page.locator('#graph [data-node]').count(),250);
+  assert.equal(await page.getByRole('button',{name:'Next 3D page'}).isEnabled(),false);
+  await page.locator('[data-node="claim:1249"]').focus();await page.keyboard.press('Enter');
+  assert.match(await page.locator('#inspector').innerText(),/claim:1249/);
+});
+
+test('source inspector spells out incoming and outgoing evidence direction',async t=>{
+  const {page}=await fixture(t);
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:[...nodes,{id:'claim:88',kind:'claim',label:'Sourced claim',data:{source_episode_id:7}}],edges:[...edges,{source:'episode:7',target:'claim:88',kind:'source_of'}],truncated:false}}));
+  await page.reload();await page.locator('[data-node="claim:88"]').click();
+  const relation=page.locator('#inspector .relation');
+  assert.match(await relation.innerText(),/episode:7 → source of → claim:88/);
+  await relation.click();
+  assert.match(await page.locator('#inspector').innerText(),/This record → claim:88/);
+});
+
+for(const mobile of [false,true])test(`depth traces an off-page claim source back to its session${mobile?' on mobile':''}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  const claims=Array.from({length:1250},(_,i)=>({id:`claim:${String(i).padStart(4,'0')}`,kind:'claim',label:`Claim ${i}`}));
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:[...claims,...nodes.slice(0,3)],edges:[...edges.slice(0,2),{source:'episode:7',target:'claim:0000',kind:'source_of'}],truncated:false}}));
+  await page.reload();await page.getByRole('button',{name:'Depth view'}).click();
+  await page.locator('[data-node="claim:0000"]').focus();await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#graph [data-node="episode:7"]').count(),0);
+  await page.getByRole('button',{name:'Trace connections',exact:true}).click({timeout:2000});
+  assert.equal(await page.locator('#graph [data-node]').count(),2);
+  assert.equal(await page.locator('#graph [data-source="episode:7"][data-target="claim:0000"]').count(),1);
+  await page.locator('#inspector .relation').click();
+  assert.equal(await page.locator('#graph [data-node="turn:1"]').count(),1);
+  await page.locator('#inspector .relation').filter({hasText:'turn:1'}).click();
+  assert.equal(await page.locator('#graph [data-node="session:codex:s1"]').count(),1);
+  assert.equal(await page.locator('#graph [data-source="session:codex:s1"][data-target="turn:1"]').count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`depth-trace-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  await page.getByRole('button',{name:'All records',exact:true}).click();
+  assert.equal(await page.locator('#graph [data-node]').count(),253);
+  await page.getByRole('button',{name:'Previous 3D page'}).click();
+  assert.equal(await page.locator('#graph [data-node]').count(),1000);
+});
+
 test('depth view preserves exact recorded relationships and inspector access',async t=>{
   const {page}=await fixture(t);
   await page.getByRole('button',{name:'Depth view'}).click({timeout:3000});
@@ -572,11 +1228,11 @@ test('crowded graph expands paged groups without tiny unbounded stacks',async t=
   await page.getByRole('button',{name:'Next group page'}).click();
   const second=await page.locator('[data-node]').evaluateAll(es=>es.map(e=>e.dataset.node));
   assert.notDeepEqual(first,second);
-  await page.getByRole('button',{name:'Depth view'}).click();
-  assert.equal(await page.locator('[data-node]').count(),9);
   const boxes=await page.locator('[data-node] rect').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};}));
   for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++)assert.ok(boxes[i].x+boxes[i].w<=boxes[j].x||boxes[j].x+boxes[j].w<=boxes[i].x||boxes[i].y+boxes[i].h<=boxes[j].y||boxes[j].y+boxes[j].h<=boxes[i].y);
   assert.ok(boxes.every(b=>b.w>100));
+  await page.getByRole('button',{name:'Depth view'}).click();
+  assert.equal(await page.locator('[data-node]').count(),241,'3D explores individual snapshot records, not 2D overview groups.');
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'playground-grouped.png'),fullPage:true});
 });
 
@@ -672,6 +1328,47 @@ test('source composer requires advertised support and cancellation sends no writ
     assert.equal(requested.includes('/v1/episodes'),false);assert.equal(requested.includes('/v1/attachments'),false);
   }
 });
+test('a denied source write retains the draft without claiming an uncertain save',async t=>{
+  const {page}=await fixture(t,{memory:true});
+  await page.route('**/v1/episodes',route=>route.fulfill({status:403,json:{error:'key role read cannot write'}}));
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  const input=page.getByRole('textbox',{name:'Source note',exact:true});await input.fill('Retain this unsaved draft');
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:/write access/}).waitFor();
+  assert.equal(await input.inputValue(),'Retain this unsaved draft');
+  assert.equal(await page.getByText(/The save is unconfirmed/).count(),0);
+  assert.equal(await page.locator('.server-state').innerText(),'Authenticated');
+  assert.equal(await page.getByRole('button',{name:'Save source',exact:true}).isEnabled(),true);
+});
+
+test('a forbidden verification read cannot erase an acknowledged source write',async t=>{
+  const {page}=await fixture(t,{memory:true});
+  await page.route('**/v1/episodes',route=>route.fulfill({json:{episode_id:9,deduplicated:false}}));
+  await page.route('**/v1/episodes/9',route=>route.fulfill({status:403,json:{error:'source read forbidden'}}));
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  await page.getByRole('textbox',{name:'Source note',exact:true}).fill('An acknowledged write');
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await page.getByText(/The save is unconfirmed/).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Save source',exact:true}).isDisabled(),true);
+  assert.equal(await page.locator('.server-state').innerText(),'Authenticated');
+});
+
+test('a denied source link preserves the acknowledged upload and prevents repeating the write',async t=>{
+  const {page}=await fixture(t,{memory:true});let uploads=0;
+  const bytes=Buffer.from('an opaque raster fixture'),id=createHash('sha256').update(bytes).digest('hex');
+  await page.route('**/v1/attachments',route=>{uploads++;return route.fulfill({json:{attachment_id:id,media_type:'image/png',bytes:bytes.length}});});
+  await page.route('**/v1/episodes',route=>route.fulfill({status:403,json:{error:'key role changed after upload'}}));
+  await page.getByRole('button',{name:'Add source',exact:true}).click();
+  await page.getByRole('textbox',{name:'Source note',exact:true}).fill('An image with a refused link');
+  await page.getByLabel('Original image',{exact:true}).setInputFiles({name:'source.png',mimeType:'image/png',buffer:bytes});
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await page.getByText(/The save is unconfirmed/).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Save source',exact:true}).isDisabled(),true);
+  await page.locator('.source-composer form').evaluate(form=>form.requestSubmit());
+  assert.equal(uploads,1);
+  assert.equal(await page.locator('.server-state').innerText(),'Authenticated');
+});
+
 test('source composer blocks repeated writes and reports an unconfirmed save honestly',async t=>{
   const {page}=await fixture(t);let calls=0, release;
   const pending=new Promise(resolve=>{release=resolve;});
@@ -786,6 +1483,50 @@ test('text imports do not call changed or deduplicated text an exact saved origi
   assert.equal(await page.getByRole('button',{name:'Save source',exact:true}).isDisabled(),true);
   await page.locator('.source-composer form').evaluate(form=>form.requestSubmit());assert.equal(writes,1);
 });
+for(const surface of ['memory','playground'])test(`${surface} recall follows an exact source page without treating an excerpt as the original`,async t=>{
+  const {page,requested}=await fixture(t);
+  await page.route('**/v1/episodes/7',route=>route.fulfill({json:{episode_id:7,kind:'note',source:'launch-original.md',content:'The retained **original** includes context beyond the excerpt.',created_at:'2026-09-06T03:00:00Z',attachments:[]}}));
+  if(surface==='memory'){
+    await page.route('**/v1/recall?**',route=>route.fulfill({json:memoryRecall('Keep launch local')}));
+    await page.goto(new URL('/memory?q=launch#search',page.url()).href);
+  }else{
+    await page.getByRole('textbox',{name:'Test memory recall'}).fill('launch');
+    await page.getByRole('button',{name:'Recall',exact:true}).click();
+  }
+  const result=surface==='memory'?page.locator('.rows .row').first():page.locator('.recall-card').first();
+  const link=result.getByRole('link',{name:'Open source page',exact:true});
+  await link.waitFor({timeout:2500});
+  assert.equal(await link.getAttribute('href'),'/memory/sources/7?space=launch');
+  assert.equal(requested.filter(url=>url==='/v1/episodes/7').length,0,'Link preparation does not read originals');
+  await link.click();
+  await page.getByRole('heading',{name:'launch-original.md',exact:true}).waitFor();
+  await page.getByRole('region',{name:'Source original'}).locator('strong').filter({hasText:'original'}).waitFor();
+  await page.reload();await page.getByRole('heading',{name:'launch-original.md',exact:true}).waitFor();
+});
+
+test('source links share discovery and never link malformed episode identities',async t=>{
+  const {page,requested}=await fixture(t);
+  const recall=memoryRecall('matching excerpt');
+  recall.items=Array.from({length:20},(_,i)=>({...recall.items[0],chunk_id:i+1,episode_id:i===0?0:i+1}));
+  await page.route('**/v1/recall?**',route=>route.fulfill({json:recall}));
+  await page.goto(new URL('/memory?q=matching#search',page.url()).href);
+  await page.locator('.rows .row').nth(19).getByRole('link',{name:'Open source page',exact:true}).waitFor({timeout:2500});
+  assert.equal(await page.locator('.rows .row').first().getByRole('link',{name:'Open source page',exact:true}).count(),0);
+  assert.ok(requested.filter(url=>url==='/v1/status').length<=4,'Connection discovery is not repeated for every search result');
+  assert.ok(requested.filter(url=>url==='/v1/capabilities').length<=4,'Capabilities are shared rather than per-result requests');
+  assert.equal(requested.filter(url=>/^\/v1\/episodes\//.test(url)).length,0);
+});
+
+test('unadvertised source reads never produce a source link in search',async t=>{
+  const {page,requested}=await fixture(t);
+  await page.route('**/v1/capabilities',route=>route.fulfill({json:{...capabilityContract.python,features:{...capabilityContract.python.features,'episodes.read':false}}}));
+  await page.route('**/v1/recall?**',route=>route.fulfill({json:memoryRecall('Known excerpt')}));
+  await page.goto(new URL('/memory?q=known#search',page.url()).href);
+  await page.locator('.rows').getByText('Original pages are not supported by this server.',{exact:true}).waitFor({timeout:2500});
+  assert.equal(await page.locator('.rows').getByRole('link',{name:'Open source page',exact:true}).count(),0);
+  assert.equal(requested.filter(url=>/^\/v1\/episodes\//.test(url)).length,0);
+});
+
 test('Memory Search removes old passages and image URLs while a new query is pending',async t=>{
   const {page}=await fixture(t);
   let held;const waiting=new Promise(resolve=>{held=resolve;});
@@ -932,4 +1673,24 @@ test('live topology growth refits newly visible session groups into the canvas',
     return [...document.querySelectorAll('[data-node] rect,[data-group] rect')].every(e=>{const b=e.getBoundingClientRect();return b.x>=canvas.x&&b.y>=canvas.y&&b.right<=canvas.right+1&&b.bottom<=canvas.bottom+1;});
   },{},{timeout:4000});
   assert.equal(await page.locator('[data-group]').count(),4);
+});
+
+test('dense Depth keeps visible markers separate and keyboard focus local to the node',async t=>{
+  const {page}=await fixture(t,{crowded:true});
+  await page.getByRole('button',{name:'Depth view'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#graph [data-node]').length===241);
+  const overlap=await page.locator('.depth-sphere').evaluateAll(circles=>{
+    const points=circles.map(el=>{const box=el.getBoundingClientRect();return {x:box.x+box.width/2,y:box.y+box.height/2,r:box.width/2};});
+    return points.filter((p,i)=>points.some((q,j)=>i!==j&&Math.hypot(p.x-q.x,p.y-q.y)<p.r+q.r)).length/points.length;
+  });
+  assert.ok(overlap<.35,`Too many overlapping node markers: ${Math.round(overlap*100)}%`);
+  const node=page.locator('[data-node="tool:0"]');
+  await node.focus();
+  assert.equal(await node.evaluate(el=>getComputedStyle(el).outlineStyle),'none','Use the node focus ring, not a rectangle around its label.');
+  assert.ok((await node.boundingBox()).width<40,'The node hit area must not expand across its text label.');
+  await page.keyboard.press('Enter');
+  await page.locator('.inspector').waitFor();
+  assert.match(await page.locator('.inspector').innerText(),/tool:0/);
+  assert.equal(await page.locator('#graph [data-node]').count(),241);
+  assert.equal(await page.locator('#graph [data-edge]').count(),240);
 });
