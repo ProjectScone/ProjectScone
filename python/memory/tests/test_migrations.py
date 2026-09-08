@@ -68,9 +68,12 @@ def test_the_known_step_brings_a_v5_file_forward_and_keeps_everything(tmp_path):
     path = tmp_path / "live.db"
     write_v5_file(path)
     before = snapshot(path)
+    assert 'chunks_window' not in before['indexes']
 
     store = SqliteDocumentStore(path)  # opening applies every step, 5 -> 6 -> 7 -> 8 -> 9 -> 10
     assert schema_version(store.conn) == SCHEMA_VERSION == 11
+    assert 'chunks_window' in snapshot(path)['indexes']
+    assert 'chunks_window' not in snapshot(path.with_name(path.name + '.v5.bak'))['indexes']
     cols = [r[1] for r in store.conn.execute("PRAGMA table_info(facts)")]
     assert "quote" in cols
     assert store.conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'inflight'").fetchone()[0] == 1
@@ -184,6 +187,7 @@ def test_other_versions_are_still_refused_not_rewritten(tmp_path):
         probe = sqlite3.connect(path)
         assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == version
         assert probe.execute("SELECT content FROM episodes").fetchone()[0] == "old row", "the file was left as it was"
+        assert probe.execute("SELECT name FROM sqlite_master WHERE name='chunks_window'").fetchone() is None
         assert not (tmp_path / f"v{version}.db.v{version}.bak").exists(), "no backup for a refused file"
 
 

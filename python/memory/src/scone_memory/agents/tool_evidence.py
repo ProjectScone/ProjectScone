@@ -69,7 +69,10 @@ async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallS
             if len(sources) >= 64:
                 raise ValueError('tool evidence unavailable')
             episode = await documents.get_episode(space, episode_id)
-            if (episode is None or episode.episode_id != episode_id or episode.space != space
+            if episode is None:
+                raise ValueError('tool evidence changed')
+            episode = Episode.model_validate(episode.model_dump(warnings=False), strict=True).model_copy(deep=True)
+            if (episode.episode_id != episode_id or episode.space != space
                     or not _source_matches(episode, TextFilter(**scope.kwargs()), excluded_session)
                     or parse_rfc3339(episode.created_at) > now):
                 raise ValueError('tool evidence changed')

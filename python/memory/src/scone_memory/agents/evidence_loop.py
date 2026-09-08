@@ -48,7 +48,7 @@ class ToolModel(Protocol):
 class ToolOutcome(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     call_id: str
-    name: Literal['search_memory', 'trace_memory', 'unknown_tool']
+    name: Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool']
     status: Literal['prepared', 'empty', 'unavailable']
     error: str | None
     output_bytes: int
@@ -102,6 +102,7 @@ class EvidenceToolLoop:
         transcript = cast(list[dict[str, object]], json.loads(_json(messages)))
         seen: set[str] = set()
         known_facts: set[int] = set()
+        known_chunks: set[int] = set()
         prepared: list[PreparedToolEvidence] = []
         outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
@@ -123,6 +124,8 @@ class EvidenceToolLoop:
                 schemas = self._tools.openai() if enabled else []
                 if not known_facts:
                     schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'trace_memory']
+                if not known_chunks:
+                    schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'read_memory']
                 try:
                     # Independent copies stop an adapter from mutating the
                     # authoritative transcript, schemas, or paired call IDs.
@@ -179,6 +182,9 @@ class EvidenceToolLoop:
                         seed = call.arguments.get('seed_fact_id')
                         if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
                             payload = _denied('search_for_seed_first')
+                        elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
+                                or call.arguments['chunk_id'] not in known_chunks):
+                            payload = _denied('search_for_chunk_first')
                         else:
                             evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
                             check_deadline()
@@ -190,6 +196,8 @@ class EvidenceToolLoop:
                                 prepared.append(evidence)
                                 known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
                                                    if key.startswith('fact:'))
+                                known_chunks.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
+                                                    if key.startswith('chunk:'))
                     tool_bytes += len(payload.encode())
                     if tool_bytes > limits.max_tool_bytes:
                         raise RuntimeError('tool output byte limit')
@@ -198,11 +206,11 @@ class EvidenceToolLoop:
                     error = packet.get('error')
                     codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                              'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
-                             'search_for_seed_first'}
+                             'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window'}
                     # Model-authored IDs/unknown names can contain source text.
                     # Keep them only in the transient provider protocol.
-                    name = cast(Literal['search_memory', 'trace_memory', 'unknown_tool'],
-                                call.name if call.name in ('search_memory', 'trace_memory') else 'unknown_tool')
+                    name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool'],
+                                call.name if call.name in ('search_memory', 'trace_memory', 'read_memory') else 'unknown_tool')
                     outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                         error=error if isinstance(error, str) and error in codes else None,
                         output_bytes=len(payload.encode())))

@@ -115,6 +115,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     # Derived retrieval indices follow schema validation/migration: adding them
     # before check_schema would change the historical backup or failed upgrade.
     conn.executescript("""BEGIN;
+CREATE INDEX IF NOT EXISTS chunks_window ON chunks(space, episode_id, ordinal, id);
 CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
@@ -378,6 +379,14 @@ class SqliteDocumentStore:
             "SELECT * FROM chunks WHERE space = ? AND episode_id = ? ORDER BY ordinal", (space, episode_id)
         ).fetchall()
         return [_chunk(r) for r in rows]
+
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        rows = self.conn.execute(
+            'SELECT * FROM chunks WHERE space = ? AND episode_id = ? AND ordinal >= ? ORDER BY ordinal, id LIMIT ?',
+            (space, episode_id, start_ordinal, limit)).fetchall()
+        return [_chunk(row) for row in rows]
 
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         self.conn.execute("INSERT OR IGNORE INTO inflight (space, content_hash) VALUES (?, ?)", (space, content_hash))

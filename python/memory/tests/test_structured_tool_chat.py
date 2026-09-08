@@ -63,6 +63,29 @@ async def test_tools_disabled_allows_only_final_answer():
     assert [row['properties']['action']['const'] for row in schema['anyOf']] == ['answer']
 
 
+@pytest.mark.parametrize('chunk_id', [7, 999, True])
+async def test_structured_read_requires_a_discovered_chunk_and_uses_bounded_offsets(chunk_id):
+    messages = [
+        {'role':'user','content':'Read nearby'},
+        {'role':'assistant','content':None,'tool_calls':[{'id':'search','type':'function',
+            'function':{'name':'search_memory','arguments':'{"query":"Juniper"}'}}]},
+        {'role':'tool','tool_call_id':'search','content':json.dumps({'status':'prepared','items':[{'chunk_id':7}]})},
+    ]
+    requests = []
+    provider = model({'action':'read_memory','chunk_id':chunk_id,'before':1,'after':2}, requests)
+    if type(chunk_id) is not int or chunk_id != 7:
+        with pytest.raises(RuntimeError, match='tool model unavailable'):
+            await provider.complete(messages, schemas())
+        return
+    step = await provider.complete(messages, schemas())
+    assert step.calls[0].name == 'read_memory'
+    assert step.calls[0].arguments == {'chunk_id':7,'before':1,'after':2}
+    branch = next(row for row in requests[0]['response_format']['json_schema']['schema']['anyOf']
+                  if row['properties']['action']['const'] == 'read_memory')
+    assert branch['properties']['chunk_id']['enum'] == [7]
+    assert branch['properties']['after']['enum'] == [0,1,2,3,4]
+
+
 @pytest.mark.parametrize('action', [
     {'action':'search_memory', 'query':' '},
     {'action':'search_memory', 'query':'Juniper', 'where':{'team':'red'}},

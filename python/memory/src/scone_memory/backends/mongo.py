@@ -108,6 +108,7 @@ class MongoDocumentStore:
         await self.episodes.create_index([("space", 1), ("content_hash", 1)], unique=True)
         await self.episodes.create_index([("space", 1), ("created_at", -1)])
         await self.chunks.create_index([("episode_id", 1)])
+        await self.chunks.create_index([("space", 1), ("episode_id", 1), ("ordinal", 1), ("_id", 1)])
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
@@ -226,6 +227,12 @@ class MongoDocumentStore:
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         cursor = self.chunks.find({"space": space, "episode_id": episode_id}).sort("ordinal", 1)
         return [_chunk(doc) async for doc in cursor]
+
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        cursor = self.chunks.find({'space':space, 'episode_id':episode_id, 'ordinal':{'$gte':start_ordinal}})
+        return [_chunk(doc) async for doc in cursor.sort([('ordinal', 1), ('_id', 1)]).limit(limit)]
 
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         await self.inflight_marks.update_one(

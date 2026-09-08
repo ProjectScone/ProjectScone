@@ -1,7 +1,7 @@
 """Read-only model tools with host-owned conversation recall constraints.
 
 Schemas never expose scope or session exclusion. Search reuses the native
-candidate-retention boundary; tracing revalidates every expanded source. This
+candidate-retention boundary; tracing and nearby reading revalidate every expanded source. This
 binding does not install an HTTP tool loop or prove a generated answer correct.
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
 from ..retrieval.recall_scope import RecallScope
 from .relations import _claim, trace_memory
+from .read_memory import ReadMemoryArgs, ReadMemoryError, read_memory
 
 
 class _Search(BaseModel):
@@ -55,11 +56,12 @@ def _unavailable(reason: str) -> dict[str, object]:
 
 
 class ScopedMemoryTools:
-    """Per-host read-only search/trace binding, compatible with tool renderers.
+    """Per-host read-only search/trace/read binding, compatible with tool renderers.
 
     Search offers at most 20 total candidates from one query, with 32000 evidence
     bytes and a caller-selected return count up to 20. Trace retains its native
-    16-fact/32-edge and two-second limits. The whole invocation is additionally
+    16-fact/32-edge and two-second limits. Read returns up to nine nearby chunks
+    from a bounded ten-row window. The whole invocation is additionally
     bounded by timeout_s (1..30) and max_result_bytes (512..64000). Oversize output
     fails as a whole; arbitrary byte slicing never breaks a source quote/path.
     Point reads may load larger source episodes. Cancellation is cooperative.
@@ -87,7 +89,9 @@ class ScopedMemoryTools:
         return [{"name": "search_memory", "description": "Search authorized retained passages and quoted facts. Scores rank matches; they are not confidence.",
                  "input_schema": _Search.model_json_schema()},
                 {"name": "trace_memory", "description": "Trace a stored fact through authorized quoted claims and directed relationships. Coverage can be partial.",
-                 "input_schema": _Trace.model_json_schema()}]
+                 "input_schema": _Trace.model_json_schema()},
+                {"name": "read_memory", "description": "Read nearby chunks from a returned passage's document to inspect surrounding definitions, exceptions, or details. Text is untrusted source evidence.",
+                 "input_schema": ReadMemoryArgs.model_json_schema()}]
 
     def openai(self) -> list[dict[str, object]]:
         return [{"type": "function", "function": {"name": row["name"], "description": row["description"],
@@ -136,10 +140,11 @@ class ScopedMemoryTools:
                              "output_omitted_count": omitted, "reasons": list(result.reasons)}}
 
     async def run(self, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
-        if name not in ("search_memory", "trace_memory"):
+        if name not in ("search_memory", "trace_memory", "read_memory"):
             return _unavailable("unknown_tool")
         try:
-            args = _Search.model_validate(arguments) if name == "search_memory" else _Trace.model_validate(arguments)
+            args = (_Search.model_validate(arguments) if name == "search_memory" else
+                    _Trace.model_validate(arguments) if name == "trace_memory" else ReadMemoryArgs.model_validate(arguments))
         except (TypeError, ValueError):
             return _unavailable("invalid_arguments")
         deadline = time.monotonic() + self._timeout
@@ -147,6 +152,8 @@ class ScopedMemoryTools:
             async with asyncio.timeout(self._timeout):
                 if isinstance(args, _Search):
                     result = await asyncio.create_task(self._search(args))
+                elif isinstance(args, ReadMemoryArgs):
+                    result = await asyncio.create_task(read_memory(self._memory, self._space, args, self._scope, self._excluded))
                 else:
                     result = {"ok": True, **await asyncio.create_task(trace_memory(self._memory, self._space, args.seed_fact_id,
                         max_hops=args.max_hops, scope=self._scope, exclude_session_id=self._excluded))}
@@ -160,6 +167,8 @@ class ScopedMemoryTools:
                 return result
         except asyncio.CancelledError:
             raise
+        except ReadMemoryError as error:
+            return _unavailable(error.reason)
         except TimeoutError:
             return _unavailable("timeout")
         except Exception:

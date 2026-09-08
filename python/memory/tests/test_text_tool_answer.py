@@ -29,6 +29,46 @@ def unused_factory():
     raise AssertionError('tool mode must not create the ordinary text provider')
 
 
+async def test_neighbor_read_sources_survive_conversation_receipt_and_capture(engine):
+    from test_chunk_window import document
+
+    added, chunks = await document(engine, metadata={'team':'blue'})
+    model = Script()
+
+    async def read_neighbors():
+        packet = json.loads(model.requests[-1][-1]['content'])
+        seed_id = packet['items'][0]['chunk_id']
+        return ToolStep(calls=(ToolCall(id='read', name='read_memory',
+            arguments={'chunk_id':seed_id, 'before':4, 'after':4}),))
+
+    model.steps = [ToolStep(calls=(ToolCall(id='search', name='search_memory',
+        arguments={'query':'calibration', 'limit':1}),)), read_neighbors,
+        ToolStep(content='The manual records calibration samples.')]
+    conversation = TextConversation(engine, 'alpha', 'neighbor-receipt',
+        where={'team':'blue'}, tool_model_factory=lambda:model)
+    observed = []
+    async def observe(text):
+        observed.append(text)
+
+    try:
+        result = await conversation.reply('What do the surrounding sections say?', on_text=observe)
+        receipt = result['memory_context']['tool_retrieval']
+        window = json.loads(model.requests[-1][-1]['content'])
+        returned_ids = {row['chunk_id'] for row in window['items']}
+        assert len(returned_ids) > 1
+        assert returned_ids <= {row.chunk_id for row in chunks}
+        assert {f'chunk:{key}' for key in returned_ids} <= set(receipt['evidence_ids'])
+        assert receipt['outcomes'][-1]['name'] == 'read_memory'
+        assert receipt['source_status'] == 'retained'
+        assert all(row['episode_id'] == added.episode_id for row in window['items'])
+        assert observed == [result['text']]
+        episodes = await engine.episodes('alpha', {'session_id':'neighbor-receipt'})
+        assert episodes[-1].content == result['text']
+        assert episodes[-1].metadata['completion_evidence'] == 'source_checked_tool_answer'
+    finally:
+        await conversation.close()
+
+
 async def test_native_tools_publish_only_final_and_preserve_scoped_receipt_history(engine):
     await engine.remember('alpha', 'Juniper uses Polaris.', metadata={'team': 'blue'})
     await engine.remember('alpha', 'Juniper PRIVATE_MARKER', metadata={'team': 'red'})

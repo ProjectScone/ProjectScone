@@ -149,6 +149,7 @@ class PostgresDocumentStore:
         tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED);
     CREATE INDEX IF NOT EXISTS chunks_tsv ON {s}.chunks USING GIN (tsv);
     CREATE INDEX IF NOT EXISTS chunks_episode ON {s}.chunks (episode_id);
+    CREATE INDEX IF NOT EXISTS chunks_window ON {s}.chunks (space, episode_id, ordinal, id);
     CREATE INDEX IF NOT EXISTS chunks_space_created ON {s}.chunks (space, created_at);
     CREATE TABLE IF NOT EXISTS {s}.facts (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
@@ -298,6 +299,14 @@ class PostgresDocumentStore:
             f"SELECT * FROM {self.schema}.chunks WHERE space = %s AND episode_id = %s ORDER BY ordinal", (space, episode_id)
         )
         return [_chunk(r) for r in rows]
+
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        rows = await self._rows(
+            f'SELECT * FROM {self.schema}.chunks WHERE space = %s AND episode_id = %s AND ordinal >= %s ORDER BY ordinal, id LIMIT %s',
+            (space, episode_id, start_ordinal, limit))
+        return [_chunk(row) for row in rows]
 
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         await self._rows(

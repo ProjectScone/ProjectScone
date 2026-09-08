@@ -479,7 +479,7 @@ schema = box.openai()  # or box.anthropic()
 found = await box.run("search_memory", {"query": "Juniper", "limit": 5})
 ```
 
-This binding offers only `search_memory` and `trace_memory`. Space, metadata,
+This binding offers `search_memory`, `trace_memory`, and `read_memory`. Space, metadata,
 source kind/prefix, inclusive source dates and excluded session are fixed by the
 host and cannot be supplied or widened in tool arguments. There are no write or
 unfiltered profile operations. Search returns retained passage bytes and quoted
@@ -487,6 +487,18 @@ fact provenance; it makes one native retrieval request and no assessor-model
 call. It uses a 20-candidate / 32,000-byte evidence window, then returns at most
 `limit` combined facts and passages (facts first). Omitted output is counted and
 marked truncated. Search coverage never certifies completeness for the question.
+
+`read_memory` accepts a retained `chunk_id` and `before`/`after` counts in 0–4
+(both default to 1). It returns up to nine exact neighboring chunks from the same
+authorized source, preserving their IDs and byte spans. Its optional document
+store port, `ChunkWindowLookup.page_chunks`, filters by space, episode and ordinal
+before limiting the read to ten rows, including one look-ahead row. Memory,
+SQLite, MongoDB, PostgreSQL and Elasticsearch implement this port; older custom
+stores return `unsupported_chunk_window` instead of loading every chunk.
+Coverage records the returned ordinals and whether later chunks were observed;
+it never claims document or answer completeness. Read items use a placeholder
+score of `0.0`, not a relevance or confidence estimate. Source validation can
+still load the full episode through point reads.
 
 Each call has a configurable 1–30 second cooperative deadline (default 2) and a
 512–64,000 UTF-8 byte result cap (default 64,000). Oversized output is refused as a
@@ -521,7 +533,9 @@ packets = reply.evidence_packets
 ```
 
 The model chooses search queries. Tracing becomes available after retained facts
-are discovered and accepts only IDs returned during that turn. Host scope still
+are discovered; nearby reading becomes available after retained chunks are
+discovered. Both accept only IDs returned during that turn. This discovery gate
+belongs to the loop; standalone `box.run()` enforces scope without turn history. Host scope still
 applies to every expanded source. Every declared call receives a matching tool
 response, including denials. Attempts consume the call budget; both results and
 denials consume the aggregate tool-byte budget. If complete pairing cannot fit,
@@ -558,9 +572,9 @@ model = SelfHostedStructuredToolChat(
 )
 ```
 
-It requests one schema-constrained search, trace, or answer action, validates it
+It requests one schema-constrained search, trace, read, or answer action, validates it
 again on the host, and translates it into the existing bounded tool protocol.
-Trace seeds must be retained IDs. Scope, execution, source checks, and budgets
+Trace and read seeds must be retained IDs. Scope, execution, source checks, and budgets
 remain in the host controller. This adapter does not silently repair JSON or
 execute ordinary prose. Tool results are rendered as explicitly marked evidence
 messages for providers without native tool-message support. It is opt-in; native

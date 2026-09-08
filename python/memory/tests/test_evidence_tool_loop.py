@@ -31,6 +31,40 @@ def binding(engine):
                              exclude_session_id='current')
 
 
+async def test_read_tool_is_only_available_after_search_returns_a_chunk(engine):
+    from test_chunk_window import document
+    await document(engine, metadata={'team':'blue'})
+    model = Script()
+
+    async def read_discovered():
+        messages, tools = model.requests[-1]
+        packet = json.loads(messages[-1]['content'])
+        assert 'read_memory' in [row['function']['name'] for row in tools]
+        return ToolStep(calls=(ToolCall(id='neighbors', name='read_memory',
+            arguments={'chunk_id':packet['items'][0]['chunk_id'], 'before':1, 'after':2}),))
+
+    model.steps = [search(query='Section 4 calibration', limit=1), read_discovered, ToolStep(content='Checked nearby evidence.')]
+    result = await EvidenceToolLoop(model, binding(engine)).run([{'role':'user','content':'What does Section 4 say?'}])
+    assert [row['function']['name'] for row in model.requests[0][1]] == ['search_memory']
+    packet = json.loads(result.evidence_packets[-1])
+    assert packet['coverage']['mode'] == 'chunk_window' and len(packet['items']) > 1
+    assert result.tool_outcomes[-1].name == 'read_memory' and await result.validate()
+
+
+async def test_read_cannot_probe_an_undiscovered_chunk_even_inside_scope(engine, monkeypatch):
+    from test_chunk_window import document
+    _, chunks = await document(engine, metadata={'team':'blue'})
+    tools = binding(engine)
+    async def forbidden(*args):
+        pytest.fail('undiscovered chunk reached storage')
+    monkeypatch.setattr(tools, 'prepare', forbidden)
+    model = Script(ToolStep(calls=(ToolCall(id='probe', name='read_memory', arguments={'chunk_id':chunks[0].chunk_id}),)),
+                   ToolStep(content='Search first.'))
+    result = await EvidenceToolLoop(model, tools).run([{'role':'user','content':'Read memory'}])
+    assert result.tool_outcomes[0].error == 'search_for_chunk_first'
+    assert result.source_status == 'none'
+
+
 async def test_search_is_paired_and_final_answer_has_retained_sources(engine):
     episode = await engine.remember('alpha', 'Juniper uses Polaris.', metadata={'team': 'blue'})
     await engine.remember('alpha', 'Juniper PRIVATE_MARKER', metadata={'team': 'red'})
@@ -261,7 +295,7 @@ async def test_trace_is_exposed_only_after_retained_fact_discovery(engine):
     model = Script(search(), ToolStep(content='Juniper uses Polaris.'))
     await EvidenceToolLoop(model, binding(engine)).run([{'role': 'user', 'content': 'Juniper?'}])
     assert [row['function']['name'] for row in model.requests[0][1]] == ['search_memory']
-    assert [row['function']['name'] for row in model.requests[1][1]] == ['search_memory', 'trace_memory']
+    assert [row['function']['name'] for row in model.requests[1][1]] == ['search_memory', 'trace_memory', 'read_memory']
 
 
 async def test_fabricated_trace_seed_never_reaches_tools(engine, monkeypatch):

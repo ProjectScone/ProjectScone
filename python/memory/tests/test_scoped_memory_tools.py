@@ -80,8 +80,8 @@ async def test_no_write_or_scope_override_can_reach_engine(engine, monkeypatch, 
 
 def test_schemas_expose_only_supported_read_operations():
     tools=box(None)
-    assert [r['function']['name'] for r in tools.openai()] == ['search_memory','trace_memory']
-    assert [r['name'] for r in tools.anthropic()] == ['search_memory','trace_memory']
+    assert [r['function']['name'] for r in tools.openai()] == ['search_memory','trace_memory','read_memory']
+    assert [r['name'] for r in tools.anthropic()] == ['search_memory','trace_memory','read_memory']
     assert all('space' not in r['function']['parameters']['properties'] for r in tools.openai())
 
 

@@ -348,6 +348,14 @@ class ElasticsearchDocumentStore:
         hits = await self._search("chunks", query={"bool": {"filter": [{"term": {"space": space}}, {"terms": {"chunk_id": list(chunk_ids)}}]}}, size=len(chunk_ids))
         return [_chunk(h) for h in hits]
 
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        hits = await self._search('chunks', query={'bool':{'filter':[
+            {'term':{'space':space}}, {'term':{'episode_id':episode_id}}, {'range':{'ordinal':{'gte':start_ordinal}}}]}},
+            size=limit, sort=[{'ordinal':'asc'}, {'chunk_id':'asc'}])
+        return [_chunk(hit) for hit in hits]
+
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         out: list[Chunk] = []
         after: Optional[list] = None
