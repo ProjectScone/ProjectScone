@@ -254,7 +254,7 @@ class MemoryEngine:
         record_queries: bool = False,
         contextual_embeddings: bool = False,
         similarity_floor: Optional[float] = None,
-        demote_restated: bool = False,
+        demote_restated: bool = True,
         blobs: Optional[BlobStore] = None,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
@@ -285,8 +285,16 @@ class MemoryEngine:
         #: never quoted without it.
         self.contextual_embeddings = contextual_embeddings
         #: Order a restated claim ahead of what it replaces (fusion.
-        #: demote_restated). Off until the effect on ordinary retrieval is
-        #: measured on E21's slice; see memory/EXPERIMENTS.md E34.
+        #: Within one result, a statement and the statement that replaced
+        #: it score almost the same, because they differ only at the end,
+        #: so insertion order decided which came first. On MemoryAgentBench
+        #: Conflict Resolution the superseded one led in 72 of 74 questions
+        #: (E34); with this it leads in 1 (E35). On ordinary retrieval it
+        #: changed nothing at all: every one of LongMemEval-S's stratified
+        #: 60 came back identical, because the rule never found a pair to
+        #: reorder (E32d). Measured cost nothing, measured benefit large,
+        #: so it is on. Nothing is dropped either way, only ordered, and a
+        #: caller who wants what was believed at the time turns it off.
         self.demote_restated = demote_restated
         #: Experiment 9: with a floor, a recall whose best vector hit sits
         #: below it is flagged low_confidence so a reader can abstain
