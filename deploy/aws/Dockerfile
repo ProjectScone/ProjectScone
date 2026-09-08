@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 # Build from the repository root; this file's allowlist excludes private infra.
 FROM node:24-bookworm-slim AS web
-ARG PNPM_VERSION=10.28.2
+ARG PNPM_VERSION=9.9.0
 RUN npm install --global "pnpm@${PNPM_VERSION}"
 WORKDIR /build/Webapp
-COPY Webapp/package.json Webapp/package-lock.json ./
-RUN pnpm import && pnpm install --frozen-lockfile
+COPY Webapp/package.json Webapp/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY Webapp/ ./
 COPY scripts/python-layout.cjs /build/scripts/python-layout.cjs
 RUN pnpm exec tsc --noEmit && pnpm exec vite build \

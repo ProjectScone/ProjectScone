@@ -10,8 +10,9 @@ python3 deploy/aws/smoke.py scone-aws:local
 
 The build defaults to `linux/amd64`; set `SCONE_BUILD_PLATFORM=linux/arm64` for an
 ARM deployment or local Apple Silicon smoke. Node and pnpm exist only in the web
-build stage. The existing npm lock is imported inside that stage; no lock or
-generated web artifact is rewritten in the workspace. The runtime is Python
+build stage. Like CI, that stage uses pnpm 9.9.0 and installs directly from
+`Webapp/pnpm-lock.yaml` with `--frozen-lockfile`; no lock or generated web
+artifact is rewritten in the workspace. The runtime is Python
 3.14, UID/GID 10001, and includes `api,agents,remote-embed,aws,qdrant` extras. No model weights
 are downloaded or bundled. The Dockerfile-specific context allowlist excludes
 Terraform files, state, credentials, local datasets and model caches.

@@ -2,7 +2,7 @@
 !Webapp/
 Webapp/**
 !Webapp/package.json
-!Webapp/package-lock.json
+!Webapp/pnpm-lock.yaml
 !Webapp/index.html
 !Webapp/tsconfig.json
 !Webapp/vite.config.ts

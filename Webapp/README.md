@@ -5,8 +5,8 @@ Work here, not in generated native package HTML copies.
 
 ```sh
 cd Webapp
-npm ci
-npm run dev
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
 Open http://127.0.0.1:5173/memory. Vite supplies React Fast Refresh during development.
@@ -21,22 +21,24 @@ transcripts. If no single key is exposed, the access-key dialog remains availabl
 Keys stay in page memory, never `localStorage` or `VITE_` environment variables.
 
 ```sh
-npm test
-npm run typecheck
-npm run build
-npm run check:assets
+pnpm test
+pnpm typecheck
+pnpm build
+pnpm check:assets
 ```
 
 Production packaging embeds built JS, CSS and the original Scone mark into both
 native playground distributions and the Python Memory console. Node is not required to run the packaged Rust
 or Python server. `dist/` and `node_modules/` are ignored. The lockfile belongs to
-this app; upstream projects under `../reference/` are ignored reference material.
+this app; CI and the AWS image use pnpm 9.9.0 with `pnpm-lock.yaml` as the primary
+lockfile. Keep the retained npm compatibility lock synchronized when changing
+dependencies. Upstream projects under `../reference/` are ignored reference material.
 
 To test a backend-dependent UI before publishing it to running native servers:
 
 ```sh
-npm run typecheck
-npm exec vite build
+pnpm typecheck
+pnpm exec vite build
 node scripts/package.mjs --output /private/tmp/scone-preview.html
 ```
 
