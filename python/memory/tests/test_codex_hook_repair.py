@@ -1,4 +1,4 @@
-"""Installed-hook repair preserves security decisions and Claude output."""
+"""Codex-cache repairs preserve security decisions without host environment flags."""
 import contextlib
 import importlib.util
 import io
@@ -20,18 +20,18 @@ def emit_metrics(payload):
 '''
 
 
-@pytest.mark.parametrize('host',['CODEX_THREAD_ID','CODEX_SESSION_ID','claude'])
+@pytest.mark.parametrize('host',['CODEX_THREAD_ID','CODEX_SESSION_ID','no_codex_environment'])
 def test_metadata_conversion_preserves_findings_and_blocking(monkeypatch,host):
     monkeypatch.delenv('CODEX_THREAD_ID',raising=False)
     monkeypatch.delenv('CODEX_SESSION_ID',raising=False)
-    if host!='claude':monkeypatch.setenv(host,'synthetic')
+    if host!='no_codex_environment':monkeypatch.setenv(host,'synthetic')
     payload={'metrics':{'skipped':False},'rewakeSummary':'summary','decision':'block','reason':'review this',
              'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'security finding'}}
     namespace={}
     exec(repair.compatible_security_source(SOURCE),namespace)
     output=io.StringIO()
     with contextlib.redirect_stdout(output):namespace['emit_metrics'](payload)
-    expected=payload if host=='claude' else {k:v for k,v in payload.items() if k not in ('metrics','rewakeSummary')}
+    expected={k:v for k,v in payload.items() if k not in ('metrics','rewakeSummary')}
     assert json.loads(output.getvalue())==expected
 
 
@@ -50,12 +50,43 @@ def test_repair_is_idempotent_and_rejects_unrecognized_output_layout():
     with pytest.raises(ValueError):repair.compatible_security_source('print("unexpected")')
 
 
+def test_bootstrap_emits_one_response_and_preserves_startup_notice():
+    source='''import json
+def main():
+    print(json.dumps({"async": True, "asyncTimeout": 180000}), flush=True)
+    print(json.dumps({"metrics": {"sdk_bootstrap": 1}, "systemMessage": "reviewer notice"}), flush=True)
+'''
+    namespace={}
+    exec(repair.compatible_security_source(source),namespace)
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):namespace['main']()
+    assert json.loads(output.getvalue())=={'systemMessage':'reviewer notice'}
+
+
+def test_upgrade_v1_removes_environment_dependency():
+    source='''import json, os
+# Scone Codex hook-output compatibility v1
+def _scone_print_hook_json(serialized, *, flush=False):
+    print(serialized, flush=flush)
+def emit_metrics(payload):
+    _scone_print_hook_json(json.dumps(payload), flush=True)
+'''
+    updated=repair.compatible_security_source(source)
+    assert 'compatibility v1' not in updated
+    assert repair.MARKER in updated
+
+
 def test_cli_backs_up_hook_and_restores_missing_version_without_changing_trust(tmp_path):
     cache=tmp_path/'plugins/cache/claude-plugins-official'
     hook=cache/'security-guidance/2.0.7/hooks/security_reminder_hook.py'
     hook.parent.mkdir(parents=True)
     hook.write_text(SOURCE)
     hook.chmod(0o755)
+    bootstrap=hook.with_name('ensure_agent_sdk.py')
+    bootstrap.write_text(SOURCE.replace('emit_metrics', 'main'))
+    claude_hook=tmp_path/'claude/plugins/security_reminder_hook.py'
+    claude_hook.parent.mkdir(parents=True)
+    claude_hook.write_text(SOURCE)
     current=cache/'remember/0.29.1'
     current.mkdir(parents=True)
     config=tmp_path/'config.toml'
@@ -71,6 +102,8 @@ def test_cli_backs_up_hook_and_restores_missing_version_without_changing_trust(t
     assert repair.MARKER in hook.read_text()
     assert hook.stat().st_mode & 0o777==0o755
     backups=list((tmp_path/'backups').glob('*/security-guidance/*/hooks/*.py'))
-    assert len(backups)==1
-    assert backups[0].read_text()==SOURCE
+    assert len(backups)==2
+    assert next(p for p in backups if p.name==hook.name).read_text()==SOURCE
+    assert repair.MARKER in bootstrap.read_text()
+    assert claude_hook.read_text()==SOURCE
     assert config.read_text()=='# Existing trust configuration\n'

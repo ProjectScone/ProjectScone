@@ -9,18 +9,19 @@ from pathlib import Path
 import re
 import shutil
 
-MARKER = '# Scone Codex hook-output compatibility v1'
+MARKER = '# Scone Codex hook-output compatibility v2'
 COMPAT = '''
-# Scone Codex hook-output compatibility v1
+# Scone Codex hook-output compatibility v2
 def _scone_print_hook_json(serialized, *, flush=False):
-    # Preserve decisions, reasons and findings. Only Claude-specific telemetry
-    # fields are omitted from Codex's response; Claude keeps its original output.
-    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID"):
-        output = json.loads(serialized)
-        if isinstance(output, dict):
-            output.pop("metrics", None)
-            output.pop("rewakeSummary", None)
-            serialized = json.dumps(output)
+    # This adapter is installed only into Codex's plugin cache. Hook processes
+    # need not inherit CODEX_* variables from agent shell commands.
+    output = json.loads(serialized)
+    if isinstance(output, dict):
+        if output.get("async") is True and set(output) <= {"async", "asyncTimeout"}:
+            return  # Claude's stdout handshake is not a Codex response.
+        output.pop("metrics", None)
+        output.pop("rewakeSummary", None)
+        serialized = json.dumps(output)
     print(serialized, flush=flush)
 
 '''
@@ -29,6 +30,17 @@ def _scone_print_hook_json(serialized, *, flush=False):
 def compatible_security_source(source: str) -> str:
     if MARKER in source:
         return source
+    legacy_marker = '# Scone Codex hook-output compatibility v1'
+    if legacy_marker in source:
+        tree = ast.parse(source)
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                   and node.name == '_scone_print_hook_json']
+        if len(helpers) != 1 or helpers[0].end_lineno is None:
+            raise ValueError('unrecognized previous repair; no files changed')
+        lines = source.splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if line.strip() == legacy_marker)
+        source = ''.join(lines[:start] + lines[helpers[0].end_lineno:])
+        source = source.replace('_scone_print_hook_json(json.dumps(', 'print(json.dumps(')
     tree = ast.parse(source)
     replacements = 0
     for node in ast.walk(tree):
@@ -40,7 +52,7 @@ def compatible_security_source(source: str) -> str:
             replacements += 1
     if not replacements or source.count('print(json.dumps(') != replacements:
         raise ValueError('unrecognized security hook output layout; no files changed')
-    anchor = 'def emit_metrics('
+    anchor = 'def emit_metrics(' if 'def emit_metrics(' in source else 'def main('
     if anchor not in source:
         raise ValueError('security hook metrics function not found; no files changed')
     updated = source.replace('print(json.dumps(', '_scone_print_hook_json(json.dumps(')
@@ -57,7 +69,9 @@ def main() -> None:
     args = parser.parse_args()
     cache = args.codex_dir/'plugins/cache/claude-plugins-official'
     changes = []
-    for hook in (cache/'security-guidance').glob('*/hooks/security_reminder_hook.py'):
+    hook_files = [hook for name in ('security_reminder_hook.py', 'ensure_agent_sdk.py')
+                  for hook in (cache/'security-guidance').glob(f'*/hooks/{name}')]
+    for hook in hook_files:
         source = hook.read_text()
         updated = compatible_security_source(source)
         if updated != source:
