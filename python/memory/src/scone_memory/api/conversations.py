@@ -91,6 +91,11 @@ def _without_cached_graph(result):
     context = dict(result["memory_context"])
     if context.pop("evidence_graph", None) is not None or "evidence_graph_status" in context:
         context["evidence_graph_status"] = "unavailable"
+    if isinstance(context.get('tool_retrieval'), dict):
+        tools = dict(context['tool_retrieval'])
+        tools.pop('packets', None)
+        tools['packets_status'] = 'unavailable'
+        context['tool_retrieval'] = tools
     return {**result, "memory_context": context}
 
 

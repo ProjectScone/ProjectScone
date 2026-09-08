@@ -131,6 +131,7 @@ class ContextReceipt(TypedDict):
     adaptive_errors: NotRequired[list[str]]
     adaptive_atomic_group_omitted_count: NotRequired[int]
     adaptive_graph_expansions: NotRequired[list[dict[str, object]]]
+    tool_retrieval: NotRequired[dict[str, object]]
 
 
 class MemoryContext:

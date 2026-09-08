@@ -545,8 +545,48 @@ and oversized responses. Logs contain outcome and elapsed time, not message text
 HTTP resources are closed before a reply is accepted; cooperative cleanup can
 run beyond the deadline, but late success is rejected.
 
-This is a library controller, not yet mounted in the Conversations HTTP service.
-It does not persist workflow checkpoints or automatically capture chat messages.
+The controller does not persist workflow checkpoints or automatically capture
+chat messages. For conversation history, capture, and public callbacks, opt in
+through `TextConversation`:
+
+```python
+from scone_memory.realtime.text import TextConversation
+
+conversation = TextConversation(engine, "default", "chat-1",
+    tool_model_factory=lambda: SelfHostedToolChat(
+        os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+        api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+    ),
+    where={"collection": "manuals"},
+    tool_limits=ToolLoopLimits(max_tool_calls=4),
+    turn_timeout=120,
+)
+try:
+    reply = await conversation.reply("What is the Juniper dependency chain?")
+    receipt = reply["memory_context"]["tool_retrieval"]
+finally:
+    await conversation.close()
+```
+
+Tool mode uses the actual conversation history, with current-session records
+excluded from tool searches. It bypasses prompt-based memory preparation and
+cannot be combined with independent adaptive retrieval, answer review, or
+extractive selection. The usual conversation deadline and reply/history byte
+limits still apply. A public callback receives one final reply after source and
+history checks; sources are checked again before assistant capture. A callback
+can observe a reply whose later capture fails, so the terminal result remains
+the confirmation of completion. ToolModel adapters own per-request resources.
+
+Receipts include call outcomes (including content-free error codes), retained
+IDs, source IDs, and fingerprints. Direct replies also contain transient source
+packets. Outcome IDs are host-assigned ordinals (`tool-1`, etc.); unknown tool
+names are normalized so model-authored strings cannot become cached diagnostics.
+Custom `create_conversation_app` runtimes can use this mode today;
+cached HTTP receipts discard the packets and rebuild the existing graph from
+matching retained source/fact/link fingerprints. Deleted or changed evidence
+disappears on refresh. Graph inspection remains bounded and may be partial.
+The default server factory/model catalog does not yet select native tool mode.
+
 `source_status="retained"` confirms source revalidation, not answer entailment;
 `verified_accuracy` remains false. A model can still skip search, misunderstand
 a relation, or emit a tool request as prose. In a synthetic 3B Ollama development

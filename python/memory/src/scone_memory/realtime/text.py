@@ -14,6 +14,8 @@ from contextvars import ContextVar
 from typing import Literal
 from uuid import uuid4
 
+from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolModel
+from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
@@ -23,6 +25,7 @@ from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_ev
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
 from .review_evidence import prepare_review_evidence
+from .tool_answer import tool_context_receipt
 
 _OWNER = ContextVar("scone_text_owner", default=None)
 
@@ -64,10 +67,19 @@ class TextConversation:
     Optional evidence selection instead constructs answers from checked source
     cards without a generation provider. Turns without prepared memory retain
     normal generation and streaming, with a skipped evidence-answer receipt.
+    Native tool mode instead runs a bounded ToolModel over ordinary history,
+    checks retained sources before publication and again before capture, and
+    returns transient evidence packets plus cacheable identifiers/fingerprints.
+    ToolModel adapters own and close resources within each complete() call.
     """
 
+    _memory: MemoryEngine
+    _space: str
+    _session_id: str
+    _scope: RecallScope
+
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
-                 model_factory: Callable[[], TextModel], *,
+                 model_factory: Callable[[], TextModel] | None = None, *,
                  system_prompt=DEFAULT_SYSTEM_PROMPT,
                  where: Mapping[str, str] | None = None, kind=None,
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
@@ -75,12 +87,23 @@ class TextConversation:
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
                  review_policy: Literal["report", "require_supported"] = "report",
-                 evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0):
+                 evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0,
+                 tool_model_factory: Callable[[], ToolModel] | None = None,
+                 tool_limits: ToolLoopLimits | None = None):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
-        if not callable(model_factory):
+        if not callable(model_factory) and not (model_factory is None and tool_model_factory is not None):
             raise ValueError("model_factory must supply a fresh model")
+        if tool_model_factory is not None and not callable(tool_model_factory):
+            raise ValueError("tool_model_factory must supply a fresh native tool model")
+        if tool_limits is not None and (tool_model_factory is None or not isinstance(tool_limits, ToolLoopLimits)):
+            raise ValueError("tool limits require a tool model and ToolLoopLimits")
+        if tool_model_factory is not None and any(value is not None for value in
+                (answer_reviewer, evidence_selector, adaptive_retriever)):
+            raise ValueError("tool mode cannot combine independent retrieval, review, or extractive evidence")
+        self._tool_factory = tool_model_factory
+        self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
         if not isinstance(system_prompt, str) or not system_prompt.strip():
             raise ValueError("system_prompt must be nonempty text")
         if isinstance(turn_timeout, bool) or not isinstance(turn_timeout, (float, int)) or not math.isfinite(turn_timeout) or turn_timeout <= 0:
@@ -170,7 +193,7 @@ class TextConversation:
             if cancelled:
                 raise asyncio.CancelledError()
 
-    async def _record(self, turn_id, role, text, *, extractive=False):
+    async def _record(self, turn_id, role, text, *, extractive=False, tool_source_status=None):
         started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
@@ -179,6 +202,9 @@ class TextConversation:
         if role == "assistant":
             metadata.update(completion_evidence="source_checked_extractive_answer" if extractive else "adapter_end_and_stream_closed",
                             provider_completion="unverified")
+            if tool_source_status is not None:
+                metadata['completion_evidence'] = ('source_checked_tool_answer' if tool_source_status == 'retained'
+                                                   else 'native_tool_answer')
         try:
             [added] = await self._memory.remember_many(self._space, [Record(
                 text, kind="conversation", source=self._session_id, metadata=metadata,
@@ -208,7 +234,8 @@ class TextConversation:
                 if self._closed or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
                 assistant_id = await self._record(turn_id, "assistant", text,
-                    extractive=evidence_answer is not None and evidence_answer.get("status") != "skipped")
+                    extractive=evidence_answer is not None and evidence_answer.get("status") != "skipped",
+                    tool_source_status=receipt.get('tool_retrieval', {}).get('source_status'))
                 self._history = complete
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
@@ -222,6 +249,8 @@ class TextConversation:
             _OWNER.reset(token)
 
     async def _execute(self, messages, on_text):
+        if self._tool_factory is not None:
+            return await self._execute_tools(messages, on_text)
         request, receipt = await self._context.prepare(messages)
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
@@ -237,6 +266,25 @@ class TextConversation:
         text, answer_review = await self._review_draft(messages[-1]["content"], draft, request, receipt)
         await self._emit_final(messages, text, on_text)
         return text, receipt, answer_review, None
+
+    async def _execute_tools(self, messages, on_text):
+        factory = self._tool_factory
+        if factory is None:
+            raise RuntimeError('tool model unavailable')
+        try:
+            model = factory()
+            if not callable(getattr(model, 'complete', None)):
+                raise ValueError()
+        except Exception:
+            raise RuntimeError('tool model unavailable') from None
+        tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
+                                  exclude_session_id=self._session_id)
+        result = await EvidenceToolLoop(model, tools, limits=self._tool_limits).run(messages)
+        receipt = tool_context_receipt(result, self._session_id)
+        await self._emit_final(messages, result.text, on_text)
+        if not await result.validate():
+            raise RuntimeError('tool evidence changed before capture')
+        return result.text, receipt, None, None
 
     async def _emit_final(self, messages, text, on_text):
         if len(text.encode("utf-8")) > self._max_reply:
@@ -331,7 +379,10 @@ class TextConversation:
         return reviewed.answer, receipt
 
     async def _generate(self, request, on_text):
-        model = self._factory()
+        factory = self._factory
+        if factory is None:
+            raise RuntimeError('text model unavailable')
+        model = factory()
         if not callable(getattr(model, "aclose", None)):
             raise TypeError("model must implement respond and aclose")
         safe_cancel = True

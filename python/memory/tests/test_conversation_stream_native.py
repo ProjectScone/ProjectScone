@@ -166,3 +166,46 @@ async def test_server_shutdown_closes_idle_stream_before_waiting_for_http_tasks(
             assert [line async for line in lines] == []
     assert not model.ended
     assert [e.content for e in await memory.episodes("alpha", {"session_id": session["session_id"]})] == ["Hi"]
+
+
+async def test_native_tool_turn_streams_only_final_reply_and_keeps_scoped_source_receipt(tmp_path):
+    from test_text_tool_answer import Script, search
+    from scone_memory.agents.evidence_loop import ToolStep
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.remember('alpha', 'Juniper uses Polaris.', metadata={'team':'blue'})
+    await memory.remember('alpha', 'Juniper PRIVATE_SOURCE_MARKER', metadata={'team':'red'})
+    ready, release = asyncio.Event(), asyncio.Event()
+    async def finish():
+        ready.set()
+        await release.wait()
+        return ToolStep(content='Juniper uses Polaris.')
+    def factory(space, sid, scope, **options):
+        model = Script(search(), finish)
+        return TextConversation(memory, space, sid, tool_model_factory=lambda: model, **scope.kwargs(), **options)
+    app = create_conversation_app(memory, {'alpha-key':'alpha'}, tmp_path / 'native-tools.db', None,
+                                  scoped_runtime_factory=factory, public_text_streaming=True)
+    try:
+        async with serving(app) as client:
+            session = (await client.post('/v1/conversations', json={'request_id':'new', 'capture':True,
+                'recall_scope':{'where':{'team':'blue'}}})).json()
+            url = '/v1/conversations/' + session['session_id']
+            submitted = await client.post(url + '/turns', json={'request_id':'turn', 'text':'Juniper?',
+                'expected_revision':session['revision']})
+            assert submitted.status_code == 202
+            await asyncio.wait_for(ready.wait(), 3)
+            transcript = (await client.get(url + '/transcript')).json()['episodes']
+            assert [row['content'] for row in transcript] == ['Juniper?']
+            async with client.stream('GET', url + '/turns/turn/stream') as response:
+                lines = response.aiter_lines()
+                release.set()
+                assert await next_event(lines) == ('text', {'sequence':1, 'text':'Juniper uses Polaris.', 'provisional':True}, '1')
+                assert await next_event(lines) == ('terminal', {'request_id':'turn', 'status':'completed', 'read_receipt':True}, None)
+                assert [line async for line in lines] == []
+            receipt = (await client.get(url + '/turns/turn')).json()['result']
+            assert receipt['memory_context']['tool_retrieval']['source_status'] == 'retained'
+            assert receipt['memory_context']['tool_retrieval']['packets_status'] == 'unavailable'
+            assert 'PRIVATE_SOURCE_MARKER' not in json.dumps(receipt)
+            assert receipt['memory_context']['evidence_graph_status'] == 'prepared'
+    finally:
+        release.set()
+        await memory.close()

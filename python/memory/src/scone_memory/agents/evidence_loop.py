@@ -8,8 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
-from typing import Protocol, cast
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +45,15 @@ class ToolModel(Protocol):
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep: ...
 
 
+class ToolOutcome(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
+    call_id: str
+    name: Literal['search_memory', 'trace_memory', 'unknown_tool']
+    status: Literal['prepared', 'empty', 'unavailable']
+    error: str | None
+    output_bytes: int
+
+
 @dataclass(frozen=True)
 class ToolLoopResult:
     text: str
@@ -52,7 +62,13 @@ class ToolLoopResult:
     evidence_ids: tuple[str, ...]
     source_status: str
     evidence_packets: tuple[str, ...]
+    tool_outcomes: tuple[ToolOutcome, ...]
+    _validator: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
     verified_accuracy: bool = False
+
+    async def validate(self) -> bool:
+        """Recheck before later capture, within the original turn deadline."""
+        return await self._validator()
 
 
 def _json(value: object) -> str:
@@ -87,6 +103,7 @@ class EvidenceToolLoop:
         seen: set[str] = set()
         known_facts: set[int] = set()
         prepared: list[PreparedToolEvidence] = []
+        outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
         deadline = time.monotonic() + limits.timeout_s
 
@@ -130,15 +147,25 @@ class EvidenceToolLoop:
                 if not step.calls:
                     if not step.content.strip() or len(step.content.encode()) > limits.max_reply_bytes:
                         raise RuntimeError('tool reply byte limit or empty reply')
-                    for evidence in prepared:
-                        valid = await asyncio.create_task(evidence.validate())
-                        check_deadline()
-                        if not valid:
-                            raise RuntimeError('tool evidence changed before publication')
+                    retained = tuple(prepared)
+
+                    async def validate() -> bool:
+                        async with asyncio.timeout_at(deadline):
+                            check_deadline()
+                            for evidence in retained:
+                                valid = await asyncio.create_task(evidence.validate())
+                                check_deadline()
+                                if not valid:
+                                    return False
+                            return True
+
+                    if not await validate():
+                        raise RuntimeError('tool evidence changed before publication')
                     evidence_ids = tuple(dict.fromkeys(key for evidence in prepared for key in evidence.evidence_ids))
                     return ToolLoopResult(step.content, model_calls, calls, evidence_ids,
                                           'retained' if evidence_ids else 'none',
-                                          tuple(evidence.payload for evidence in prepared if evidence.evidence_ids))
+                                          tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
+                                          tuple(outcomes), validate)
                 rounds += 1
                 seen.update(ids)
                 transcript.append({'role': 'assistant', 'content': step.content or None, 'tool_calls': [
@@ -152,22 +179,30 @@ class EvidenceToolLoop:
                         seed = call.arguments.get('seed_fact_id')
                         if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
                             payload = _denied('search_for_seed_first')
-                            tool_bytes += len(payload.encode())
-                            if tool_bytes > limits.max_tool_bytes:
-                                raise RuntimeError('tool output byte limit')
-                            transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
-                            continue
-                        evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
-                        check_deadline()
-                        size = len(evidence.payload.encode())
-                        if tool_bytes + size > limits.max_tool_bytes:
-                            payload = _denied('tool_output_budget')
                         else:
-                            payload = evidence.payload
-                            prepared.append(evidence)
-                            known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
-                                               if key.startswith('fact:'))
+                            evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
+                            check_deadline()
+                            size = len(evidence.payload.encode())
+                            if tool_bytes + size > limits.max_tool_bytes:
+                                payload = _denied('tool_output_budget')
+                            else:
+                                payload = evidence.payload
+                                prepared.append(evidence)
+                                known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
+                                                   if key.startswith('fact:'))
                     tool_bytes += len(payload.encode())
                     if tool_bytes > limits.max_tool_bytes:
                         raise RuntimeError('tool output byte limit')
                     transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
+                    packet = json.loads(payload)
+                    error = packet.get('error')
+                    codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
+                             'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
+                             'search_for_seed_first'}
+                    # Model-authored IDs/unknown names can contain source text.
+                    # Keep them only in the transient provider protocol.
+                    name = cast(Literal['search_memory', 'trace_memory', 'unknown_tool'],
+                                call.name if call.name in ('search_memory', 'trace_memory') else 'unknown_tool')
+                    outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
+                        error=error if isinstance(error, str) and error in codes else None,
+                        output_bytes=len(payload.encode())))
