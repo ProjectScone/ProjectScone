@@ -164,6 +164,7 @@ class Settings:
     answer_review_model: str | None = None
     answer_review_api_key: str | None = field(default=None, repr=False)
     answer_review_timeout: float = 20.0
+    answer_review_quote_mode: str = "text"
     adaptive_retrieval: bool = False
     adaptive_url: str | None = None
     adaptive_model: str | None = None
@@ -325,6 +326,7 @@ class Settings:
             answer_review_model=env.get("SCONE_ANSWER_REVIEW_MODEL") or None,
             answer_review_api_key=env.get("SCONE_ANSWER_REVIEW_API_KEY") or None,
             answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
+            answer_review_quote_mode=env.get("SCONE_ANSWER_REVIEW_QUOTE_MODE", "text"),
             adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
             adaptive_url=env.get("SCONE_ADAPTIVE_URL") or None,
             adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or None,

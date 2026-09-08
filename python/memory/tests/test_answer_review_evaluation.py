@@ -208,7 +208,9 @@ def test_cli_reports_real_adapter_results_without_labels_or_credentials_in_outpu
     report = json.loads(output.read_text())
     assert report["metrics"]["approval_precision"] == 1
     assert report["model"] == "installed-model"
-    assert received == [(("http://127.0.0.1:11434/v1", "installed-model"), {"api_key": "PRIVATE-review-key", "timeout": 20})]
+    assert report['quote_mode'] == 'text'
+    assert received == [(("http://127.0.0.1:11434/v1", "installed-model"),
+                        {"api_key": "PRIVATE-review-key", "timeout": 20, 'quote_mode':'text'})]
     assert "PRIVATE" not in output.read_text() + capsys.readouterr().out
     assert "Mira works on Platform." not in output.read_text()
     with pytest.raises(ValueError, match="output must be a new file"):

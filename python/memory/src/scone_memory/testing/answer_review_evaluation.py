@@ -204,6 +204,8 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="An already installed reviewer model")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=20)
+    parser.add_argument('--quote-mode', choices=('text', 'spans'), default='text',
+                        help='Copy draft quotes or select host-owned draft spans')
     args = parser.parse_args()
     fixture = load_fixture(args.fixture)
     if args.output.exists() or args.output.resolve() == args.fixture.resolve():
@@ -211,9 +213,10 @@ def main() -> None:
     from ..providers.answer_reviewer import SelfHostedAnswerReviewer
 
     reviewer = SelfHostedAnswerReviewer(args.endpoint, args.model,
-        api_key=os.environ.get("SCONE_ANSWER_REVIEW_API_KEY") or None, timeout=args.timeout)
+        api_key=os.environ.get("SCONE_ANSWER_REVIEW_API_KEY") or None, timeout=args.timeout, quote_mode=args.quote_mode)
     report = asyncio.run(evaluate_reviews(reviewer, fixture, repeats=args.repeats, timeout_s=args.timeout))
-    payload = report.model_dump(mode="json") | {"model": args.model, "timeout_s": args.timeout, "repeats": args.repeats}
+    payload = report.model_dump(mode="json") | {"model": args.model, "timeout_s": args.timeout,
+                                              "repeats": args.repeats, "quote_mode": args.quote_mode}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as output:
         output.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")

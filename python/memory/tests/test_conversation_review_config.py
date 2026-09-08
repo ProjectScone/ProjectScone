@@ -39,6 +39,7 @@ def test_review_settings_are_explicit_and_do_not_borrow_extraction_credentials(t
     {"SCONE_ANSWER_REVIEW_TIMEOUT": "nan"}, {"SCONE_ANSWER_REVIEW_TIMEOUT": "0"},
     {"SCONE_ANSWER_REVIEW_TIMEOUT": "181"}, {"SCONE_ANSWER_REVIEW_URL": "https://api.openai.com/v1"},
     {"SCONE_CONVERSATIONS_JOURNAL": ""},
+    {"SCONE_ANSWER_REVIEW_QUOTE_MODE": "auto"}, {"SCONE_ANSWER_REVIEW_QUOTE_MODE": ""},
 ])
 def test_incomplete_or_invalid_review_configuration_refuses_startup(tmp_path, changes):
     with pytest.raises(InvalidInput):
@@ -205,7 +206,8 @@ async def test_reviewed_http_turn_buffers_draft_and_obeys_publication_policy(tmp
     assert "PRIVATE" not in (tmp_path / "sessions.db").read_bytes().decode("utf-8", errors="ignore")
 
 
-def test_review_connection_receives_only_its_explicit_credentials(tmp_path, monkeypatch):
+@pytest.mark.parametrize('quote_mode', ['text', 'spans'])
+def test_review_connection_receives_only_its_explicit_credentials(tmp_path, monkeypatch, quote_mode):
     from scone_memory.providers import answer_reviewer
     from scone_memory.runtime.conversation_review import build_conversation_review
 
@@ -220,9 +222,17 @@ def test_review_connection_receives_only_its_explicit_credentials(tmp_path, monk
 
     monkeypatch.setattr(answer_reviewer, "SelfHostedAnswerReviewer", Reviewer)
     configured = build_conversation_review(Settings.from_env(environment(tmp_path) | {
-        "SCONE_CHAT_API_KEY": "extraction-key", "SCONE_ANSWER_REVIEW_API_KEY": "review-key"}))
+        "SCONE_CHAT_API_KEY": "extraction-key", "SCONE_ANSWER_REVIEW_API_KEY": "review-key",
+        "SCONE_ANSWER_REVIEW_QUOTE_MODE": quote_mode}))
     assert configured is not None
-    assert received == [(("http://127.0.0.1:11434/v1", "review-model"), {"api_key": "review-key", "timeout": 12.0})]
+    assert received == [(("http://127.0.0.1:11434/v1", "review-model"),
+                        {"api_key": "review-key", "timeout": 12.0, "quote_mode": quote_mode})]
+
+
+def test_span_protocol_requires_an_enabled_reviewer():
+    assert Settings.from_env({}).answer_review_quote_mode == 'text'
+    with pytest.raises(InvalidInput, match='require SCONE_ANSWER_REVIEW_POLICY'):
+        Settings.from_env({'SCONE_ANSWER_REVIEW_QUOTE_MODE':'spans'})
 
 
 @pytest.mark.parametrize("review_enabled", [True, False])

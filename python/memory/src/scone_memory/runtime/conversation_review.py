@@ -41,12 +41,14 @@ class ConversationReview:
 def validate_review_settings(settings: Settings) -> None:
     if settings.answer_review_policy not in ("off", "report", "require_supported"):
         raise InvalidInput("SCONE_ANSWER_REVIEW_POLICY must be off, report, or require_supported")
+    if settings.answer_review_quote_mode not in ('text', 'spans'):
+        raise InvalidInput('SCONE_ANSWER_REVIEW_QUOTE_MODE must be text or spans')
     timeout = settings.answer_review_timeout
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 180:
         raise InvalidInput("SCONE_ANSWER_REVIEW_TIMEOUT must be finite in 1..180 seconds")
     if settings.answer_review_policy == "off":
         if (settings.answer_review_url is not None or settings.answer_review_model is not None
-                or settings.answer_review_api_key is not None or timeout != 20.0):
+                or settings.answer_review_api_key is not None or timeout != 20.0 or settings.answer_review_quote_mode != 'text'):
             raise InvalidInput("answer review connection settings require SCONE_ANSWER_REVIEW_POLICY")
         return
     if not settings.conversations_journal:
@@ -71,8 +73,9 @@ def build_conversation_review(settings: Settings) -> ConversationReview | None:
     from ..providers.answer_reviewer import SelfHostedAnswerReviewer
 
     assert settings.answer_review_url is not None and settings.answer_review_model is not None
+    quote_mode: Literal['text', 'spans'] = 'spans' if settings.answer_review_quote_mode == 'spans' else 'text'
     reviewer = SelfHostedAnswerReviewer(settings.answer_review_url, settings.answer_review_model,
-        api_key=settings.answer_review_api_key, timeout=settings.answer_review_timeout)
+        api_key=settings.answer_review_api_key, timeout=settings.answer_review_timeout, quote_mode=quote_mode)
     policy: Literal["report", "require_supported"] = (
         "require_supported" if settings.answer_review_policy == "require_supported" else "report")
     return ConversationReview(reviewer, policy, AnswerReviewLimits(timeout_s=float(settings.answer_review_timeout)))

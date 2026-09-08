@@ -1344,6 +1344,7 @@ SCONE_ANSWER_REVIEW_POLICY=require_supported
 SCONE_ANSWER_REVIEW_URL=http://127.0.0.1:11434/v1
 SCONE_ANSWER_REVIEW_MODEL=YOUR_INSTALLED_MODEL
 SCONE_ANSWER_REVIEW_TIMEOUT=20
+SCONE_ANSWER_REVIEW_QUOTE_MODE=text
 # SCONE_ANSWER_REVIEW_API_KEY=  # Only when your reviewer requires authentication.
 ```
 
@@ -1354,6 +1355,24 @@ standard `serve` launcher applies review to custom-model, saved-connection and
 persona **text** sessions. Voice sessions are unchanged. The authenticated
 conversation capabilities endpoint reports `answer_review.configured` and
 `answer_review.policy`, independently of text-model availability.
+
+`SCONE_ANSWER_REVIEW_QUOTE_MODE=spans` selects an alternative structured review
+protocol. The host gives the reviewer numbered draft excerpts; each issue
+selects one excerpt instead of copying its text. The host returns that exact
+text through the existing `answer_quote` field. Only an `incomplete_answer`
+omission can select no span. Unknown spans, extra fields and foreign evidence
+identifiers are rejected. Set `quote_mode="spans"` on `SelfHostedAnswerReviewer`
+for the same behavior in the SDK. The default `text` protocol is unchanged.
+
+The span catalog preserves the whole draft, with at most 128 excerpts of at
+most 2,000 characters each. Sentence/newline boundaries are preferred; long
+units are split, and highly fragmented drafts use fixed-size excerpts to stay
+bounded. These are mechanical spans, not claims inferred by another model.
+The catalog adds input text but no model requests. It prevents altered draft
+quotations, not incorrect review judgments; measure correct-answer rejection
+as well as false approval before choosing a reviewer or protocol. The isolated
+review evaluator accepts `--quote-mode spans` and records the selection in its
+report. Compare both modes using the same model, corpus and limits.
 
 Native and structured tool conversations can use the same review settings.
 Review receives the exact retained tool packets, including quoted claims,
