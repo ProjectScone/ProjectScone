@@ -673,6 +673,12 @@ reply byte limits retain `ToolLoopLimits` defaults. Startup refuses combinations
 with adaptive retrieval, answer review, trusted custom model factories or custom
 persona catalogs. Those integrations can still bind their own SDK pipelines.
 
+The structured adapter renders tool results as explicitly labeled, untrusted
+evidence in plain chat roles. After a completed tool exchange it repeats the
+latest actual user question so the provider's answer target does not become the
+last source packet. This rendering does not change stored conversation history;
+the expanded history is checked against the adapter's 1 MB limit before sending.
+
 `/v1/conversations/capabilities` exposes `tool_retrieval` protocol, budgets and
 whether a text connection is configured. This is configuration availability,
 not a model-health probe or an accuracy claim. Without a saved chat connection,
@@ -693,7 +699,15 @@ follow-up SQLite and MongoDB/Qdrant probes both returned the requested cutoff
 and outage exception for the explicitly guided question. The general question
 still omitted the cutoff despite retaining its evidence. These two synthetic
 questions used a hash embedder and are integration probes, not a retrieval or
-generation accuracy benchmark. Served mode stays opt-in.
+generation accuracy benchmark. A subsequent controlled replay identified plain-role
+message ordering as a contributor to the omitted cutoff: restoring the real
+question after tool results produced both requested facts with the same three
+tool calls. An actual served SQLite probe confirmed both facts for both questions.
+The guided question used four calls instead of two, including a duplicate read;
+this change does not establish more efficient tool planning. Eight simpler
+fixed-evidence cases retained both requested answer details with either rendering.
+These are synthetic development observations, not general accuracy guarantees.
+Served mode stays opt-in.
 
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,

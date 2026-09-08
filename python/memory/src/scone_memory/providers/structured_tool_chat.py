@@ -85,6 +85,7 @@ def _history(messages: list[dict[str, object]]) -> tuple[list[dict[str, str]], s
     used: set[str] = set()
     facts: set[int] = set()
     chunks: set[int] = set()
+    latest_question: str | None = None
     for row in messages:
         role, content = row.get('role'), row.get('content')
         if pending and role != 'tool':
@@ -129,10 +130,18 @@ def _history(messages: list[dict[str, object]]) -> tuple[list[dict[str, str]], s
         elif role in ('system', 'user', 'assistant') and isinstance(content, str):
             assert isinstance(role, str)
             rendered.append({'role':role, 'content':content})
+            if role == 'user':
+                latest_question = content
         else:
             raise ValueError('invalid action history')
     if pending or len(facts) > 320 or len(chunks) > 320:
         raise ValueError('invalid action history')
+    # Plain-role providers see tool evidence as user messages. Restore the
+    # actual answer target, never a question or instruction from source text.
+    if messages and messages[-1].get('role') == 'tool' and latest_question is not None:
+        rendered.append({'role':'user', 'content':latest_question})
+    if len(json.dumps(rendered, ensure_ascii=False, allow_nan=False).encode()) > 1000000:
+        raise ValueError('action history byte limit')
     return rendered, facts, chunks
 
 
