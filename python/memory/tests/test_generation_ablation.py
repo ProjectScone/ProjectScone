@@ -189,11 +189,12 @@ async def test_ordered_quotes_rejects_non_boolean(tmp_path):
     assert not (tmp_path / "invalid.json").exists()
 
 
+@pytest.mark.parametrize("failure_policy", ["empty", "retain_verified"])
 @pytest.mark.parametrize("group_relations", [False, True])
 @pytest.mark.parametrize("baseline_paths", [False, True])
 @pytest.mark.parametrize("assessment_fails", [False, True])
 async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visible(tmp_path, monkeypatch,
-                                                                                   baseline_paths, assessment_fails, group_relations):
+                                                                                   baseline_paths, assessment_fails, group_relations, failure_policy):
     from scone_memory.retrieval.adaptive import EvidenceDecision
     from scone_memory.testing import generation_ablation
     expected_group_relations = group_relations
@@ -219,8 +220,9 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", Assessor, raising=False)
     report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "adaptive.json",
         endpoint="http://127.0.0.1:1234/v1", model_factory=Streaming, repeats=2, ordered_quotes=True,
-        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths, group_relations=group_relations)
+        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths, group_relations=group_relations, adaptive_failure_policy=failure_policy)
     assert report["state"] == "completed"
+    assert report["adaptive_failure_policy"] == failure_policy
     assert report["group_relations"] is group_relations
     assert report["assessment_max_evidence_bytes"] == 16000
     assert report["adaptive_model"] == "local-assessor"
@@ -239,8 +241,15 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     for row in rows:
         if row["variant"] == "candidate":
             assert row["context_receipt"]["adaptive_status"] == ("uncertain" if assessment_fails else "sufficient")
-            assert row["evidence_coverage"] == (0 if assessment_fails else 1)
+            retained_fallback = assessment_fails and failure_policy == "retain_verified"
+            assert row["adaptive_failure_policy"] == failure_policy
+            assert row["evidence_coverage"] == (0 if assessment_fails and not retained_fallback else 1)
+            assert row["context_receipt"]["adaptive_evidence_basis"] == (
+                "verified_candidates" if retained_fallback else "none" if assessment_fails else "assessed_selection")
+            assert row["context_receipt"]["adaptive_fallback_status"] == ("retained" if retained_fallback else "not_used")
+            assert bool(row["context_receipt"]["adaptive_errors"]) is assessment_fails
         else:
+            assert row["adaptive_failure_policy"] is None
             assert "adaptive_status" not in row["context_receipt"]
             assert row["evidence_coverage"] == 1
         assert row["scope_leaks"] == row["invalid_provenance"] == 0
@@ -251,6 +260,8 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
 
 
 @pytest.mark.parametrize("options,match", [
+    ({"adaptive_failure_policy": "anything"}, "adaptive_failure_policy"),
+    ({"adaptive_failure_policy": True}, "adaptive_failure_policy"),
     ({"baseline_paths": 1}, "baseline_paths"),
     ({"baseline_paths": True}, "adaptive_model"),
     ({"group_relations": True}, "adaptive_model"),

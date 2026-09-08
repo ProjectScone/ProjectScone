@@ -127,7 +127,7 @@ async def test_malicious_or_invalid_decisions_do_not_control_retrieval(memory: M
         decision = EvidenceDecision.model_construct(_fields_set=set(), **data)
         return decision.model_copy(update={"scope": data["scope"]}) if invalid == "scope" else decision
 
-    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    result = await AdaptiveRetriever(memory, Assessor(assess), failure_policy="empty").retrieve("alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "uncertain" and not result.recall.items and not result.recall.facts
     assert result.errors == ("invalid_or_failed_assessment",)
     assert result.queries_used == 1
@@ -254,7 +254,7 @@ async def test_timeout_discards_evidence_and_cancellation_propagates(memory: Mem
         await asyncio.Event().wait()
         return await sufficient(question, candidates)
 
-    retriever = AdaptiveRetriever(memory, Assessor(blocked), limits=AdaptiveLimits(timeout_s=1.0))
+    retriever = AdaptiveRetriever(memory, Assessor(blocked), limits=AdaptiveLimits(timeout_s=1.0), failure_policy="empty")
     result = await retriever.retrieve("alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "uncertain" and result.errors == ("timeout",)
     assert result.recall.items == [] and result.truncated
@@ -384,7 +384,7 @@ async def test_exception_text_never_enters_receipts(memory: MemoryEngine) -> Non
     async def failing(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
         raise RuntimeError("secret token and entire prompt")
 
-    result = await AdaptiveRetriever(memory, Assessor(failing)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    result = await AdaptiveRetriever(memory, Assessor(failing), failure_policy="empty").retrieve("alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "uncertain" and not result.recall.items
     assert "secret" not in result.model_dump_json() and "Aster" not in result.model_dump_json()
 
@@ -399,7 +399,7 @@ async def test_late_return_after_swallowed_cancellation_is_discarded(memory: Mem
             return await sufficient(question, candidates)
         return await sufficient(question, candidates)
 
-    result = await AdaptiveRetriever(memory, Assessor(late), limits=AdaptiveLimits(timeout_s=1.0)).retrieve(
+    result = await AdaptiveRetriever(memory, Assessor(late), limits=AdaptiveLimits(timeout_s=1.0), failure_policy="empty").retrieve(
         "alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "uncertain" and not result.recall.items
     assert result.errors == ("timeout",)
@@ -423,7 +423,7 @@ async def test_assessment_failure_receipt_preserves_only_safe_codes(memory: Memo
         error.reason = reason  # A caller-owned adapter may bypass the constructor's sanitization.
         raise error
 
-    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    result = await AdaptiveRetriever(memory, Assessor(assess), failure_policy="empty").retrieve("alpha", "Aster", scope=RecallScope.validated())
     expected = "invalid_or_failed_assessment" if reason == "private error" else reason
     assert result.errors == (expected,)
     assert result.status == "uncertain" and not result.recall.items and not result.recall.facts
@@ -534,7 +534,7 @@ async def test_unvalidated_atomic_groups_fail_closed(memory: MemoryEngine,
         return EvidenceDecision.model_construct(status="sufficient", selected_ids=selected,
                                                 selected_groups=groups, followup_queries=())
 
-    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    result = await AdaptiveRetriever(memory, Assessor(assess), failure_policy="empty").retrieve("alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "uncertain" and result.recall.facts == []
     assert result.selected_groups == () and result.errors == ("invalid_or_failed_assessment",)
 
@@ -594,3 +594,300 @@ async def test_atomic_carry_prunes_partial_group_before_next_assessment(memory: 
     assert result.status == "sufficient" and result.selected_groups == ()
     assert result.recall.facts == ([first, fresh] if recall_first_again else [fresh])
     assert "atomic_group_omitted" in result.reasons
+
+
+@pytest.mark.parametrize("failure", ["invalid", "provider", "timeout", "mutated_candidate"])
+async def test_default_fallback_returns_only_fresh_verified_unassessed_candidates(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    recall = AsyncMock(return_value=RecallResult(facts=[stored]))
+    monkeypatch.setattr(memory, "recall", recall)
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        if failure == "invalid":
+            return EvidenceDecision.model_construct(status="sufficient", selected_ids=("fact:99999",),
+                selected_groups=((candidates[0].id, "fact:99999"),), followup_queries=("malicious follow-up",))
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        if failure == "mutated_candidate":
+            object.__setattr__(candidates[0], "text", "invented model replacement")
+        raise EvidenceAssessmentError("assessment_provider_failed")
+
+    assessor = Assessor(assess)
+    retriever = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0))
+    result = await retriever.retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert retriever.failure_policy == "retain_verified"
+    assert result.status == "uncertain" and result.evidence_basis == "verified_candidates"
+    assert result.fallback_status == "retained" and result.recall.facts == [stored]
+    assert result.selected_groups == ()
+    assert recall.await_count == 1 and len(assessor.calls) == 1 and result.queries_used == 1
+    assert result.rounds[-1].selected_count == 0
+    assert "malicious follow-up" not in str(recall.call_args_list)
+    assert "invented model replacement" not in result.model_dump_json()
+    assert result.errors == (("invalid_or_failed_assessment",) if failure == "invalid" else
+                             ("timeout",) if failure == "timeout" else ("assessment_provider_failed",))
+
+
+@pytest.mark.parametrize("mutation", ["delete", "content", "scope", "session", "source", "fact"])
+async def test_failed_assessment_fallback_rechecks_sources_and_authorization(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, mutation: str) -> None:
+    changed = await fact(memory, "Aster", "depends on", "Beacon", metadata={"team": "blue"}, source="public/a")
+    stable = await fact(memory, "Beacon", "owned by", "Cedar", metadata={"team": "blue"}, source="public/b")
+    changed_id = changed.source_episode_id
+    assert changed_id is not None
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[changed, stable])))
+    source = memory.documents.get_episode
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        if mutation == "delete":
+            await memory.forget("alpha", changed_id)
+        elif mutation == "fact":
+            await memory.documents.update_fact(changed.model_copy(update={"excluded_reason": "removed"}))
+        else:
+            async def altered(space: str, episode_id: int) -> Episode | None:
+                episode = await source(space, episode_id)
+                if not isinstance(episode, Episode):
+                    return None
+                if episode_id != changed_id:
+                    return episode
+                updates: dict[str, object]
+                if mutation == "content":
+                    updates = {"content": "different content"}
+                elif mutation == "scope":
+                    updates = {"metadata": {"team": "red"}}
+                elif mutation == "session":
+                    updates = {"metadata": {"team": "blue", "session_id": "current"}}
+                else:
+                    updates = {"source": "private/a"}
+                return episode.model_copy(update=updates)
+            monkeypatch.setattr(memory.documents, "get_episode", altered)
+        raise RuntimeError("private provider failure")
+
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster",
+        scope=RecallScope.validated(where={"team": "blue"}, source_prefix="public/"), exclude_session_id="current")
+    assert result.recall.facts == [stable] and result.status == "uncertain"
+    assert result.fallback_status == "retained" and result.evidence_basis == "verified_candidates"
+    assert "stale_evidence" in result.reasons and "private provider failure" not in result.model_dump_json()
+
+
+async def test_fallback_drops_incomplete_prior_atomic_group(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    first = await fact(memory, "Aster", "depends on", "Beacon")
+    removed = await fact(memory, "Beacon", "owned by", "Cedar")
+    fresh = await fact(memory, "Cedar", "located in", "Denver")
+    removed_id = removed.source_episode_id
+    assert removed_id is not None
+    calls = 0
+
+    async def recall(space: str, query: str, **kwargs: object) -> RecallResult:
+        return RecallResult(facts=[first, removed] if calls == 0 else [fresh])
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ids = tuple(candidate.id for candidate in candidates)
+            return EvidenceDecision(status="insufficient", selected_ids=ids, selected_groups=(ids,),
+                                    followup_queries=("Cedar location",))
+        await memory.forget("alpha", removed_id)
+        raise EvidenceAssessmentError("invalid_assessment")
+
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.recall.facts == [fresh] and result.selected_groups == ()
+    assert result.fallback_status == "retained" and result.evidence_basis == "verified_candidates"
+    assert result.status == "uncertain" and "atomic_group_omitted" in result.reasons
+
+
+@pytest.mark.parametrize("failure", ["exception", "timeout", "no_survivors"])
+async def test_fallback_verification_failure_never_emits_unverified_content(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    source_id = stored.source_episode_id
+    assert source_id is not None
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[stored])))
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        if failure == "no_survivors":
+            await memory.forget("alpha", source_id)
+        else:
+            async def unavailable(space: str, fact_id: int) -> Fact | None:
+                if failure == "timeout":
+                    await asyncio.Event().wait()
+                raise RuntimeError("private store detail")
+            monkeypatch.setattr(memory.documents, "get_fact", unavailable)
+        raise EvidenceAssessmentError("assessment_provider_failed")
+
+    result = await AdaptiveRetriever(memory, Assessor(assess), limits=AdaptiveLimits(timeout_s=1.0)).retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
+    assert result.recall.facts == [] and result.selected_groups == () and result.evidence_basis == "none"
+    assert result.status == "uncertain" and result.errors == ("assessment_provider_failed",)
+    assert result.fallback_status == {"exception": "verification_failed", "timeout": "verification_timeout",
+                                      "no_survivors": "empty"}[failure]
+    assert "private store detail" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("stage", ["assessment", "fallback"])
+async def test_external_cancellation_never_returns_fallback(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[stored])))
+    entered = asyncio.Event()
+    reads = 0
+    source = memory.documents.get_fact
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        nonlocal reads
+        if stage == "assessment":
+            entered.set()
+            await asyncio.Event().wait()
+        async def blocked(space: str, fact_id: int) -> Fact | None:
+            nonlocal reads
+            reads += 1
+            entered.set()
+            await asyncio.Event().wait()
+            result = await source(space, fact_id)
+            return result if isinstance(result, Fact) else None
+        monkeypatch.setattr(memory.documents, "get_fact", blocked)
+        raise EvidenceAssessmentError("assessment_provider_failed")
+
+    task = asyncio.create_task(AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster",
+                                                                                 scope=RecallScope.validated()))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reads == (0 if stage == "assessment" else 1)
+
+
+@pytest.mark.parametrize("stage", ["retrieval", "verification"])
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_non_assessment_failures_do_not_enable_fallback(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, stage: str, timeout: bool) -> None:
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    recalls = 0
+
+    async def fail() -> None:
+        if timeout:
+            await asyncio.Event().wait()
+        raise RuntimeError("private storage failure")
+
+    async def recall(space: str, query: str, **kwargs: object) -> RecallResult:
+        nonlocal recalls
+        recalls += 1
+        if stage == "retrieval" and recalls == 2:
+            await fail()
+        return RecallResult(facts=[stored])
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        if stage == "verification":
+            async def unavailable(space: str) -> int:
+                await fail()
+                return 0
+            monkeypatch.setattr(memory.documents, "revision", unavailable)
+        return EvidenceDecision(status="insufficient", selected_ids=(candidates[0].id,), followup_queries=("Beacon",))
+
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess), limits=AdaptiveLimits(timeout_s=1.0)).retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "uncertain" and not result.recall.facts
+    assert result.evidence_basis == "none" and result.fallback_status == "not_used"
+    assert result.errors == (("timeout",) if timeout else ("retrieval_failed",))
+
+
+async def test_fallback_reserve_stays_within_original_deadline(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from scone_memory.retrieval import adaptive
+
+    class Clock:
+        value = 0.0
+        def monotonic(self) -> float:
+            return self.value
+
+    clock = Clock()
+    monkeypatch.setattr(adaptive, "time", clock)
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[stored])))
+    current = memory.documents.get_fact
+    observed: list[float] = []
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        clock.value = 9.0  # Ten-second budget reserves exactly its last second.
+        async def delayed(space: str, fact_id: int) -> Fact | None:
+            observed.append(clock.value)
+            clock.value = 10.01
+            result = await current(space, fact_id)
+            return result if isinstance(result, Fact) else None
+        monkeypatch.setattr(memory.documents, "get_fact", delayed)
+        return await sufficient(question, candidates)
+
+    result = await AdaptiveRetriever(memory, Assessor(assess), limits=AdaptiveLimits(timeout_s=10.0)).retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
+    assert observed == [9.0]
+    assert result.status == "uncertain" and result.fallback_status == "verification_timeout"
+    assert result.evidence_basis == "none" and result.recall.facts == []
+
+
+async def test_slow_assessor_cancellation_can_exhaust_fallback_reserve(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from scone_memory.retrieval import adaptive
+
+    class Clock:
+        value = 0.0
+        def monotonic(self) -> float:
+            return self.value
+
+    clock = Clock()
+    monkeypatch.setattr(adaptive, "time", clock)
+    stored = await fact(memory, "Aster", "depends on", "Beacon")
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[stored])))
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        clock.value = 1.1
+        return await sufficient(question, candidates)
+
+    result = await AdaptiveRetriever(memory, Assessor(assess), limits=AdaptiveLimits(timeout_s=1.0)).retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "uncertain" and result.fallback_status == "verification_timeout"
+    assert not result.recall.facts and result.errors == ("timeout",)
+
+
+async def test_normal_selection_and_explicit_empty_policy_label_their_basis(memory: MemoryEngine) -> None:
+    await memory.remember("alpha", "Aster depends on Beacon.", created_at=STAMP)
+    selected = await AdaptiveRetriever(memory, Assessor(sufficient)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert selected.evidence_basis == "assessed_selection" and selected.fallback_status == "not_used"
+
+    async def invalid(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        raise ValueError("invalid model response")
+
+    empty = await AdaptiveRetriever(memory, Assessor(invalid), failure_policy="empty").retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
+    assert empty.evidence_basis == "none" and empty.fallback_status == "not_used" and empty.recall.items == []
+
+
+@pytest.mark.parametrize("value", ["retry", "RETAIN_VERIFIED", "", 1, None, True])
+async def test_failure_policy_rejects_invalid_runtime_values(memory: MemoryEngine, value: object) -> None:
+    from typing import cast
+    from scone_memory.retrieval.adaptive import FailurePolicy
+
+    with pytest.raises(ValueError, match="failure_policy"):
+        AdaptiveRetriever(memory, Assessor(sufficient), failure_policy=cast(FailurePolicy, value))
+
+
+@pytest.mark.parametrize("reason", [None, [], 7])
+async def test_missing_or_wrong_typed_assessment_reason_still_recovers_verified_candidates(memory: MemoryEngine,
+        reason: object) -> None:
+    await memory.remember("alpha", "Aster depends on Beacon.", created_at=STAMP)
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        error = EvidenceAssessmentError("assessment_provider_failed")
+        if reason is None:
+            del error.reason
+        else:
+            setattr(error, "reason", reason)
+        raise error
+
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.errors == ("invalid_or_failed_assessment",)
+    assert result.status == "uncertain" and result.fallback_status == "retained"
+    assert result.evidence_basis == "verified_candidates" and result.recall.items

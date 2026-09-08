@@ -113,7 +113,7 @@ async def test_changed_source_during_assessment_is_removed(memory):
     assert "stale_evidence" in receipt["adaptive_reasons"]
 
 
-async def test_failed_assessment_has_safe_receipt_and_never_falls_back(memory):
+async def test_explicit_empty_failure_policy_has_safe_receipt_and_never_falls_back(memory):
     await memory.remember("alpha", "Juniper calibration PRIVATE source.")
 
     def fail(_, candidates):
@@ -121,8 +121,10 @@ async def test_failed_assessment_has_safe_receipt_and_never_falls_back(memory):
 
     assessor = ScriptedAssessor(fail)
     messages = [{"role": "user", "content": "Juniper calibration?"}]
-    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=retriever(memory, assessor)).prepare(messages)
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=AdaptiveRetriever(memory, assessor,
+        limits=AdaptiveLimits(timeout_s=1.0), failure_policy="empty")).prepare(messages)
     assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_evidence_basis"] == "none" and receipt["adaptive_fallback_status"] == "not_used"
     assert receipt["adaptive_status"] == "uncertain"
     assert receipt["adaptive_errors"] == ["invalid_or_failed_assessment"]
     assert receipt["low_confidence"] is None and receipt["references"] == []
@@ -212,7 +214,8 @@ async def test_text_conversation_uses_adaptive_stage_and_stores_only_public_repl
     await conversation.close()
 
 
-async def test_equal_deadlines_preserve_adaptive_timeout_diagnostics(memory):
+@pytest.mark.parametrize("failure_policy", ["empty", "retain_verified"])
+async def test_equal_deadlines_preserve_adaptive_timeout_diagnostics(memory, failure_policy):
     await memory.remember("alpha", "Juniper calibration depends on Meridian.")
 
     class WaitingAssessor:
@@ -220,10 +223,16 @@ async def test_equal_deadlines_preserve_adaptive_timeout_diagnostics(memory):
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
-    adaptive = AdaptiveRetriever(memory, WaitingAssessor(), limits=AdaptiveLimits(timeout_s=1.0))
+    adaptive = AdaptiveRetriever(memory, WaitingAssessor(), limits=AdaptiveLimits(timeout_s=1.0), failure_policy=failure_policy)
     messages = [{"role": "user", "content": "Juniper calibration?"}]
     request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive, recall_timeout=1.0).prepare(messages)
-    assert request == messages and receipt["status"] == "empty"
+    if failure_policy == "empty":
+        assert request == messages and receipt["status"] == "empty"
+        assert receipt["adaptive_fallback_status"] == "not_used"
+    else:
+        assert receipt["status"] == "prepared" and len(request) == 2
+        assert receipt["adaptive_fallback_status"] == "retained"
+        assert payload(request)["coverage"]["adaptive"]["model_selected"] is False
     assert receipt["adaptive_status"] == "uncertain" and receipt["adaptive_truncated"] is True
     assert receipt["adaptive_errors"] == ["timeout"]
 
@@ -371,7 +380,7 @@ async def test_typed_assessment_errors_preserve_safe_native_receipt(memory, reas
     def fail(_, candidates):
         raise EvidenceAssessmentError(reason)
 
-    adaptive = retriever(memory, ScriptedAssessor(fail))
+    adaptive = AdaptiveRetriever(memory, ScriptedAssessor(fail), limits=AdaptiveLimits(timeout_s=1.0), failure_policy="empty")
     messages = [{"role": "user", "content": "Juniper calibration?"}]
     request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
     assert request == messages and receipt["status"] == "empty"
@@ -530,3 +539,75 @@ async def test_ordinary_context_also_omits_confirmed_stale_graph_sources(memory,
     assert request == messages and receipt["status"] == "empty"
     assert receipt["evidence_graph_status"] == "unavailable" and receipt["evidence_graph_stale"] is True
     assert receipt["references"] == [] and receipt["claim_count"] == 0
+
+
+@pytest.mark.parametrize("reason", ["assessment_provider_failed", "assessment_timeout", "invalid_assessment"])
+async def test_assessor_failure_delivers_verified_candidates_with_unassessed_fallback_labels(memory, reason):
+    from scone_memory.retrieval.adaptive import EvidenceAssessmentError
+
+    episode = await memory.remember("alpha", "Juniper calibration uses the Meridian reference.")
+
+    def fail(_, candidates):
+        raise EvidenceAssessmentError(reason)
+
+    assessor = ScriptedAssessor(fail)
+    adaptive = retriever(memory, assessor)
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Juniper calibration?"}])
+    assert receipt["status"] == "prepared" and {ref["episode_id"] for ref in receipt["references"]} == {episode.episode_id}
+    assert receipt["adaptive_status"] == "uncertain" and receipt["adaptive_errors"] == [reason]
+    assert receipt["adaptive_evidence_basis"] == "verified_candidates" and receipt["adaptive_fallback_status"] == "retained"
+    coverage = payload(request)["coverage"]["adaptive"]
+    assert coverage["evidence_basis"] == "verified_candidates" and coverage["fallback_status"] == "retained"
+    assert coverage["assessment_basis"] == "unassessed_fallback" and coverage["model_selected"] is False
+    assert coverage["verified_sufficiency"] is False and coverage["assessment_status"] == "uncertain"
+    assert len(assessor.calls) == 1
+
+
+async def test_fallback_discards_source_deleted_when_assessment_fails(memory):
+    from scone_memory.retrieval.adaptive import EvidenceAssessmentError
+
+    deleted = await memory.remember("alpha", "Juniper calibration obsolete source.")
+    retained = await memory.remember("alpha", "Juniper calibration retained independent source.")
+
+    class DeleteThenFail:
+        async def assess(self, question, candidates):
+            await memory.forget("alpha", deleted.episode_id)
+            raise EvidenceAssessmentError("assessment_provider_failed")
+
+    adaptive = AdaptiveRetriever(memory, DeleteThenFail(), limits=AdaptiveLimits(timeout_s=1.0))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Juniper calibration?"}])
+    assert {source["episode_id"] for source in payload(request)["sources"]} == {retained.episode_id}
+    assert receipt["adaptive_fallback_status"] == "retained" and receipt["adaptive_status"] == "uncertain"
+    assert "stale_evidence" in receipt["adaptive_reasons"]
+    assert "obsolete" not in json.dumps(payload(request))
+
+
+async def test_fallback_preserves_known_atomic_group_under_context_byte_limit(memory):
+    from scone_memory.retrieval.adaptive import EvidenceAssessmentError
+
+    independent = await memory.remember("alpha", "Juniper calibration independent scheduling note.")
+    left = await memory.remember("alpha", "Juniper calibration grouped left: " + "Meridian reference details. " * 13)
+    right = await memory.remember("alpha", "Juniper calibration grouped right: " + "Celeste maintains reference. " * 13)
+
+    def decide(round_number, candidates):
+        if round_number > 1:
+            raise EvidenceAssessmentError("assessment_provider_failed")
+        ids = {candidate.episode_id: candidate.id for candidate in candidates if candidate.id.startswith("chunk:")}
+        return EvidenceDecision(status="insufficient",
+            selected_ids=(ids[independent.episode_id], ids[left.episode_id], ids[right.episode_id]),
+            selected_groups=((ids[left.episode_id], ids[right.episode_id]),),
+            followup_queries=("Juniper calibration scheduling reference",))
+
+    adaptive = retriever(memory, ScriptedAssessor(decide))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           max_context_bytes=1900).prepare([
+        {"role": "user", "content": "Juniper calibration?"}])
+    data = payload(request)
+    assert {source["episode_id"] for source in data["sources"]} == {independent.episode_id}
+    assert receipt["adaptive_fallback_status"] == "retained" and receipt["adaptive_status"] == "uncertain"
+    assert receipt["adaptive_atomic_group_omitted_count"] == 1
+    assert data["coverage"]["adaptive"]["model_selected"] is False
+    assert data["coverage"]["adaptive"]["selected_omitted_count"] == 2
+    assert receipt["context_bytes"] <= 1900

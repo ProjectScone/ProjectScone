@@ -506,13 +506,30 @@ The assessor's `sufficient` verdict is a fallible model judgment, not an answer
 accuracy guarantee. This option remains off by default and does not automatically
 enable itself in the HTTP service when a model is loaded.
 
+The default `failure_policy="retain_verified"` recovers from assessor errors,
+invalid decisions, and assessment timeouts by independently rechecking the last
+bounded candidate snapshot. It reserves `min(1 second, timeout_s / 4)` within the
+existing deadline for that check; it does not retry the model or run new searches.
+Changed, deleted, out-of-scope, or unverifiable evidence is omitted. Retrieval
+and source-verification failures still return no evidence. Cancellation propagates.
+
+Recovered evidence has `status="uncertain"`, `evidence_basis="verified_candidates"`,
+and `fallback_status="retained"`; the original sanitized assessment error remains
+visible. This is an unassessed candidate pool, not a sufficient answer or a model
+selection. Recovery preserves atomic groups from prior valid decisions only; a
+failed response cannot establish new groups. Native context receipts expose the
+basis, fallback status, and delivery completeness separately. Use
+`failure_policy="empty"` when any assessment failure should discard all evidence.
+
 For a controlled comparison against existing compact paths, add
 `--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30
 --adaptive-rounds 3` to the generation evaluator. Each row records the selected
 variant and adaptive diagnostics; frozen answer checks remain separate from
 source coverage and manual semantic review. The assessment transport timeout
 uses the requested adaptive budget; the retriever enforces the remaining total
-budget across all calls. Reports record both limits. Receipts distinguish
+budget across all calls. Reports record both limits and the failure policy; use
+`--adaptive-failure-policy empty` to compare the explicit empty-on-failure behavior.
+Receipts distinguish
 assessment timeouts, provider failures and invalid model decisions without
 including raw provider errors or source text.
 

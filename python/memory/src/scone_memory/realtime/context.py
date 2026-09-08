@@ -119,6 +119,8 @@ class ContextReceipt(TypedDict):
     multihop_status: NotRequired[str]
     multihop_coverage: NotRequired[dict[str, object]]
     adaptive_status: NotRequired[str]
+    adaptive_evidence_basis: NotRequired[str]
+    adaptive_fallback_status: NotRequired[str]
     adaptive_round_count: NotRequired[int]
     adaptive_queries_used: NotRequired[int]
     adaptive_truncated: NotRequired[bool]
@@ -136,6 +138,8 @@ class MemoryContext:
     effect when ``structured_paths`` is disabled or no complete path fits.
     An optional adaptive retriever must use this engine and fit ``recall_timeout``.
     Its sufficiency assessment is a model judgment, not verified answer quality.
+    Resilient assessor failures can retain independently verified candidates;
+    coverage identifies these as unassessed fallback rather than model selection.
     Adaptive search owns its deadline so equal timers cannot hide its timeout
     receipt. Ordinary search and overview retain this context's timeout.
     A store revision change during graph verification discards cached evidence,
@@ -264,14 +268,18 @@ class MemoryContext:
                         errors = sorted({error if error in _ADAPTIVE_DIAGNOSTICS else "unknown"
                                          for error in adaptive.errors})
                         receipt.update({"adaptive_status": adaptive.status,
+                            "adaptive_evidence_basis": adaptive.evidence_basis, "adaptive_fallback_status": adaptive.fallback_status,
                             "adaptive_round_count": len(adaptive.rounds), "adaptive_queries_used": adaptive.queries_used,
                             "adaptive_truncated": adaptive.truncated, "adaptive_reasons": reasons,
                             "adaptive_errors": errors})
                         adaptive_selected_ids = ({f"chunk:{item.chunk_id}" for item in result.items}
                                                  | {f"fact:{fact.fact_id}" for fact in result.facts})
                         adaptive_groups = adaptive.selected_groups
+                        assessment_basis = ("unassessed_fallback" if adaptive.evidence_basis == "verified_candidates"
+                            else "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment")
                         adaptive_coverage = {"assessment_status": adaptive.status,
-                            "assessment_basis": "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment",
+                            "assessment_basis": assessment_basis, "evidence_basis": adaptive.evidence_basis,
+                            "fallback_status": adaptive.fallback_status, "model_selected": adaptive.evidence_basis == "assessed_selection",
                             "verified_sufficiency": False, "bounded": True, "truncated": adaptive.truncated,
                             "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
                             "reasons": reasons, "errors": errors, "selection_complete": False,

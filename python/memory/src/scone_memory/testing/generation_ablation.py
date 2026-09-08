@@ -43,7 +43,7 @@ from ..providers.self_hosted import validate_self_hosted_identifier
 from ..realtime.context import MemoryContext, _PREFIX
 from ..realtime.events import ReplyCompleted, TextDelta, TextModel
 from ..realtime.text import DEFAULT_SYSTEM_PROMPT
-from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever
+from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, FailurePolicy
 from .edge_retrieval_benchmark import EdgeFixture, FixtureCase, STAMP, _CachedBGE, _seed
 
 MAX_BYTES = 16_000
@@ -219,7 +219,10 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        ordered_quotes: bool = False,
                        adaptive_model: str | None = None, adaptive_timeout: float = 30.0,
                        adaptive_rounds: int = 3, baseline_paths: bool = False, group_relations: bool = False,
+                       adaptive_failure_policy: FailurePolicy = "retain_verified",
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if type(adaptive_failure_policy) is not str or adaptive_failure_policy not in ("empty", "retain_verified"):
+        raise ValueError("adaptive_failure_policy must be empty or retain_verified")
     if type(ordered_quotes) is not bool:
         raise ValueError("ordered_quotes must be a boolean")
     if type(group_relations) is not bool:
@@ -264,6 +267,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "code_provenance": _CODE_PROVENANCE,
         "ordered_quotes": ordered_quotes,
         "adaptive_model": adaptive_model, "adaptive_timeout_seconds": adaptive_timeout,
+        "adaptive_failure_policy": adaptive_failure_policy if assessor is not None else None,
         "assessment_timeout_seconds": adaptive_timeout if assessor is not None else None,
         "adaptive_rounds": adaptive_rounds, "baseline_paths": baseline_paths, "group_relations": group_relations,
         "assessment_max_evidence_bytes": 16_000 if assessor is not None else None,
@@ -293,7 +297,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                 episodes, _ = await _seed(engine, corpus, 0)
                 labels = {episode_id: document_id for document_id, episode_id in episodes.items()}
                 adaptive = (AdaptiveRetriever(engine, assessor,
-                    limits=AdaptiveLimits(timeout_s=float(adaptive_timeout), max_rounds=adaptive_rounds))
+                    limits=AdaptiveLimits(timeout_s=float(adaptive_timeout), max_rounds=adaptive_rounds),
+                    failure_policy=adaptive_failure_policy)
                     if assessor is not None else None)
                 for case in corpus.cases:
                     for trial in range(repeats):
@@ -314,6 +319,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                             row: dict[str, object] = {"case_id": case.id, "split": case.split, "query": case.query,
                                 "trial": trial, "variant": "candidate" if candidate else "baseline",
                                 "adaptive_retrieval": adaptive_retriever is not None,
+                                "adaptive_failure_policy": adaptive_failure_policy if adaptive_retriever is not None else None,
                                 "group_relations": group_relations and adaptive_retriever is not None,
                                 "structured_paths": structured, "ordered_quotes": ordered_quotes and candidate,
                                 "context_ms": round(context_ms, 3),
@@ -357,11 +363,14 @@ def main() -> None:
     parser.add_argument("--adaptive-rounds", type=int, default=3, help="Maximum adaptive assessment rounds (1..4)")
     parser.add_argument("--baseline-paths", action="store_true", help="Use structured paths for the baseline; requires --adaptive-model")
     parser.add_argument("--group-relations", action="store_true", help="Select exact fact components atomically; requires --adaptive-model")
+    parser.add_argument("--adaptive-failure-policy", choices=("empty", "retain_verified"), default="retain_verified",
+                        help="On assessor failure, reverify candidates (default) or return empty evidence")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
         adaptive_model=args.adaptive_model, adaptive_timeout=args.adaptive_timeout,
-        adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations))
+        adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations,
+        adaptive_failure_policy=args.adaptive_failure_policy))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 

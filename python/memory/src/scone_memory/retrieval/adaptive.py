@@ -8,6 +8,7 @@ RAGFlow sufficiency/query-generation reference, without its code or dependencies
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -27,6 +28,9 @@ from .recall_scope import RecallScope
 from .reranking import candidate_is_retained
 
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
+EvidenceBasis = Literal["assessed_selection", "verified_candidates", "none"]
+FallbackStatus = Literal["not_used", "retained", "empty", "verification_failed", "verification_timeout"]
+FailurePolicy = Literal["empty", "retain_verified"]
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact):[1-9][0-9]*$", max_length=64)]
 EvidenceGroup = Annotated[tuple[EvidenceId, ...], Field(min_length=2, max_length=100)]
 EvidenceGroups = Annotated[tuple[EvidenceGroup, ...], Field(max_length=100)]
@@ -103,6 +107,8 @@ class AdaptiveResult(BaseModel):
     recall: RecallResult = Field(default_factory=RecallResult)
     selected_groups: EvidenceGroups = ()
     status: EvidenceStatus = "uncertain"
+    evidence_basis: EvidenceBasis = "none"
+    fallback_status: FallbackStatus = "not_used"
     rounds: tuple[AdaptiveRound, ...] = ()
     queries_used: int = 0
     truncated: bool = False
@@ -144,14 +150,25 @@ class _Evidence:
     fact: Fact | None = None
 
 
+class _AssessmentFailed(Exception):
+    """Signal recovery outside the workflow timer; diagnostics stay on the run."""
+
+
 class _Run:
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, limits: AdaptiveLimits,
-                 space: str, question: str, scope: RecallScope, excluded: str | None) -> None:
+                 space: str, question: str, scope: RecallScope, excluded: str | None,
+                 failure_policy: FailurePolicy) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
         self.filter = TextFilter(**scope.kwargs())
         self.boundary = memory.clock()
-        self.deadline = time.monotonic() + limits.timeout_s
+        self.failure_policy = failure_policy
+        self.hard_deadline = time.monotonic() + limits.timeout_s
+        reserve = min(1.0, limits.timeout_s / 4) if failure_policy == "retain_verified" else 0.0
+        self.deadline = self.hard_deadline - reserve
+        self.stage: Literal["retrieval", "assessment", "verification"] = "retrieval"
+        self.fallback_pool: dict[str, _Evidence] = {}
+        self.fallback_groups: tuple[tuple[str, ...], ...] = ()
         self.rounds: list[AdaptiveRound] = []
         self.reasons: list[str] = []
         self.errors: list[str] = []
@@ -301,7 +318,8 @@ class _Run:
         return {key: evidence for key, evidence in pool.items() if key not in omitted}, retained
 
     def result(self, pool: dict[str, _Evidence], status: EvidenceStatus,
-               groups: tuple[tuple[str, ...], ...] = ()) -> AdaptiveResult:
+               groups: tuple[tuple[str, ...], ...] = (), *, basis: EvidenceBasis | None = None,
+               fallback_status: FallbackStatus = "not_used") -> AdaptiveResult:
         items = [evidence.item for evidence in pool.values() if evidence.item is not None]
         facts = [evidence.fact for evidence in pool.values() if evidence.fact is not None]
         recall = RecallResult(items=items, facts=facts,
@@ -309,8 +327,33 @@ class _Run:
                 + sum(len((fact.quote or "").encode("utf-8")) for fact in facts),
             degraded=[f"adaptive: {reason}" for reason in [*self.reasons, *self.errors]])
         return AdaptiveResult(recall=recall, selected_groups=groups, status=status, rounds=tuple(self.rounds),
+            evidence_basis=(basis or "assessed_selection") if pool else "none", fallback_status=fallback_status,
             queries_used=len(self.queries), truncated=self.truncated,
             reasons=tuple(self.reasons), errors=tuple(self.errors))
+
+    async def recover_assessment(self) -> AdaptiveResult:
+        """Recheck original candidates once, using only the remaining deadline."""
+        if self.failure_policy == "empty":
+            return self.result({}, "uncertain")
+        self.deadline = self.hard_deadline
+        self.stage = "verification"
+        remaining = self.hard_deadline - time.monotonic()
+        if remaining <= 0:
+            self.notice("timeout", truncated=True)
+            return self.result({}, "uncertain", fallback_status="verification_timeout")
+        try:
+            verified = await asyncio.wait_for(self.verify(self.fallback_pool), timeout=remaining)
+            verified, groups = self.prune_groups(verified, self.fallback_groups)
+            self.check_deadline()
+            return self.result(verified, "uncertain", groups, basis="verified_candidates",
+                               fallback_status="retained" if verified else "empty")
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            self.notice("timeout", truncated=True)
+            return self.result({}, "uncertain", fallback_status="verification_timeout")
+        except Exception:
+            return self.result({}, "uncertain", fallback_status="verification_failed")
 
     async def execute(self) -> AdaptiveResult:
         pending = [self.question]
@@ -331,7 +374,9 @@ class _Run:
                     break
                 self.queries.add(key)
                 hashes.append(hashlib.sha256(key.encode("utf-8")).hexdigest())
+                self.stage = "retrieval"
                 pool, selected_groups = await self.gather(query, pool, selected_groups)
+            self.stage = "verification"
             pool = await self.verify(pool)
             pool, selected_groups = self.prune_groups(pool, selected_groups)
             if not pool:
@@ -345,6 +390,11 @@ class _Run:
             self.rounds.append(AdaptiveRound(round_number=round_number, query_hashes=tuple(hashes),
                 candidate_count=len(candidates), evidence_bytes=evidence_payload_bytes(candidates),
                 selected_count=0, status="uncertain"))
+            # The adapter receives separate candidate objects. Recovery must not
+            # inherit even deliberately bypassed mutations of frozen models.
+            self.fallback_pool = deepcopy(pool)
+            self.fallback_groups = selected_groups
+            self.stage = "assessment"
             try:
                 raw_decision = await self.assessor.assess(self.question, candidates)
                 self.check_deadline()
@@ -363,13 +413,15 @@ class _Run:
                 raise
             except EvidenceAssessmentError as error:
                 # Recheck the code: caller-owned adapters can mutate exceptions.
-                reason = error.reason if error.reason in ASSESSMENT_FAILURE_REASONS else "invalid_or_failed_assessment"
+                supplied_reason = getattr(error, "reason", None)
+                reason = supplied_reason if type(supplied_reason) is str and supplied_reason in ASSESSMENT_FAILURE_REASONS else "invalid_or_failed_assessment"
                 self.errors.append(reason)
-                return self.result({}, "uncertain")
+                raise _AssessmentFailed() from None
             except Exception:
                 # Exceptions may embed prompts, endpoints or secret values.
                 self.errors.append("invalid_or_failed_assessment")
-                return self.result({}, "uncertain")
+                raise _AssessmentFailed() from None
+            self.stage = "verification"
             pool = await self.verify(pool)
             selected = {key: pool[key] for key in decision.selected_ids if key in pool}
             selected, selected_groups = self.prune_groups(selected, decision.selected_groups)
@@ -420,12 +472,19 @@ class AdaptiveRetriever:
     exclusions are applied to source records because MemoryEngine.recall has no
     session-exclusion parameter; a bounded candidate window can underfill.
     The cooperative deadline includes recall, assessment and source checks.
-    Timeout or unexpected failures discard evidence which cannot be verified.
+    By default a failed assessment may return freshly reverified candidates,
+    explicitly unassessed and uncertain. A small verification reserve stays
+    within the same deadline. ``failure_policy="empty"`` disables this fallback.
+    Recovery preserves only atomic groups from prior valid decisions; a failed
+    provider response establishes no new grouping or selection authority.
     """
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, *,
-                 limits: AdaptiveLimits | None = None) -> None:
+                 limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified") -> None:
+        if type(failure_policy) is not str or failure_policy not in ("empty", "retain_verified"):
+            raise ValueError("failure_policy must be empty or retain_verified")
         self._memory, self.assessor = memory, assessor
         self._limits = AdaptiveLimits.model_validate((limits or AdaptiveLimits()).model_dump(), strict=True)
+        self._failure_policy = failure_policy
 
     @property
     def memory(self) -> MemoryEngine:
@@ -435,6 +494,10 @@ class AdaptiveRetriever:
     def limits(self) -> AdaptiveLimits:
         return self._limits
 
+    @property
+    def failure_policy(self) -> FailurePolicy:
+        return self._failure_policy
+
     async def retrieve(self, space: str, query: str, *, scope: RecallScope,
                        exclude_session_id: str | None = None) -> AdaptiveResult:
         check_space(space)
@@ -443,14 +506,19 @@ class AdaptiveRetriever:
         if exclude_session_id is not None and not isinstance(exclude_session_id, str):
             raise InvalidInput("exclude_session_id must be a string")
         fixed_scope = RecallScope.validated(**scope.kwargs())
-        run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id)
+        run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
+                   self.failure_policy)
         try:
-            return await asyncio.wait_for(run.execute(), timeout=self.limits.timeout_s)
+            return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:
             raise
+        except _AssessmentFailed:
+            return await run.recover_assessment()
         except asyncio.TimeoutError:
             run.notice("timeout", truncated=True)
             run.errors.append("timeout")
+            if run.stage == "assessment":
+                return await run.recover_assessment()
             return run.result({}, "uncertain")
         except Exception:
             run.errors.append("retrieval_failed")
