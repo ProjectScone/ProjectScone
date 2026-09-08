@@ -3,6 +3,10 @@ reference/
 /.env
 /.env.*
 !/.env.example
+/terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
 # Local upstream application reference; never vendor it into Scone.
 /supermemory/
 /pipecat/
