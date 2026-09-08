@@ -235,7 +235,11 @@ async def test_http_runtime_retains_fingerprints_and_refreshes_graph_without_cac
 
 @pytest.mark.parametrize('cancel', [False, True])
 async def test_post_observer_validation_deadline_or_cancel_prevents_capture(monkeypatch, cancel):
+    from functools import partial
     from scone_memory import MemoryEngine, InMemoryDocumentStore, InMemoryVectorIndex, HashEmbedder
+    from scone_memory.integrations.scoped_tools import ScopedMemoryTools
+    # Test the turn deadline, with the per-source timeout deliberately later.
+    monkeypatch.setattr('scone_memory.realtime.text.ScopedMemoryTools', partial(ScopedMemoryTools, timeout_s=20))
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await engine.remember('alpha', 'Juniper uses Polaris.')
     original_get = engine.documents.get_episode
@@ -250,10 +254,12 @@ async def test_post_observer_validation_deadline_or_cancel_prevents_capture(monk
         monkeypatch.setattr(engine.documents, 'get_episode', slow_get)
     conversation = TextConversation(engine, 'alpha', 'post-validation', unused_factory,
         tool_model_factory=lambda: Script(search(), ToolStep(content='Juniper uses Polaris.')),
-        tool_limits=ToolLoopLimits(timeout_s=1.0 if cancel else 0.1))
+        # Allow retrieval/publication to finish before exercising the blocked read.
+        # Cancellation must win over the deadline in its own branch.
+        tool_limits=ToolLoopLimits(timeout_s=30.0 if cancel else 5.0))
+    task = asyncio.create_task(conversation.reply('Juniper?', on_text=observe))
     try:
-        task = asyncio.create_task(conversation.reply('Juniper?', on_text=observe))
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(10):
             await entered.wait()
         if cancel:
             task.cancel()
@@ -263,6 +269,10 @@ async def test_post_observer_validation_deadline_or_cancel_prevents_capture(monk
         episodes = await engine.episodes('alpha', {'session_id': 'post-validation'})
         assert [row.metadata['role'] for row in episodes] == ['user']
     finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        monkeypatch.setattr(engine.documents, 'get_episode', original_get)
         await conversation.close()
         await engine.close()
 
