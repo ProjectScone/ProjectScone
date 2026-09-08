@@ -96,7 +96,7 @@ class MongoDocumentStore:
         self.episodes = self.db["episodes"]
         self.chunks = self.db["chunks"]
         self.facts = self.db["facts"]
-        self.fact_links = self.db["fact_links"]
+        self._fact_links = self.db["fact_links"]
         self.tombstones = self.db["tombstones"]
         self.counters = self.db["counters"]
         self.revisions = self.db["revisions"]
@@ -110,8 +110,8 @@ class MongoDocumentStore:
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
-        await self.fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
-        await self.fact_links.create_index([("space", 1), ("to_fact", 1)])
+        await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
+        await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
         await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -145,6 +145,8 @@ class MongoDocumentStore:
         doc = await self.counters.find_one_and_update(
             {"_id": name}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
         )
+        if doc is None:
+            raise SconeError("MongoDB counter update returned no document")
         return int(doc["seq"])
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
@@ -178,10 +180,10 @@ class MongoDocumentStore:
             chunk_ids=chunk_ids,
             episodes=await self.episodes.count_documents({"space": space}),
             facts=await self.facts.count_documents({"space": space}),
-            links=await self.fact_links.count_documents({"space": space}),
+            links=await self._fact_links.count_documents({"space": space}),
             tombstones=await self.tombstones.count_documents({"space": space}),
         )
-        for collection in (self.chunks, self.episodes, self.fact_links, self.facts, self.tombstones, self.inflight_marks):
+        for collection in (self.chunks, self.episodes, self._fact_links, self.facts, self.tombstones, self.inflight_marks):
             await collection.delete_many({"space": space})
         await self.revisions.delete_one({"_id": space})
         await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
@@ -270,14 +272,14 @@ class MongoDocumentStore:
 
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
-        pipeline = [
+        pipeline: list[dict[str, object]] = [
             {"$match": {"space": space}},
             {"$group": {"_id": None, "n": {"$sum": 1}, "b": {"$sum": {"$binarySize": "$content"}}}},
         ]
         async for doc in await self.episodes.aggregate(pipeline):
             counts.episodes, counts.bytes = doc["n"], doc["b"]
         counts.chunks = await self.chunks.count_documents({"space": space})
-        tag_pipeline = [
+        tag_pipeline: list[dict[str, object]] = [
             {"$match": {"space": space}},
             {"$unwind": "$tags"},
             {"$group": {"_id": "$tags", "n": {"$sum": 1}}},
@@ -333,7 +335,10 @@ class MongoDocumentStore:
             await self.tombstones.insert_one(dict(new.__dict__))
         except DuplicateKeyError:
             pass
-        return _tombstone(await self.tombstones.find_one({"space": new.space, "episode_id": new.episode_id}))
+        doc = await self.tombstones.find_one({"space": new.space, "episode_id": new.episode_id})
+        if doc is None:
+            raise SconeError("MongoDB tombstone disappeared during insert")
+        return _tombstone(doc)
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self.tombstones.find_one({"space": space, "episode_id": episode_id})
@@ -350,24 +355,28 @@ class MongoDocumentStore:
         from pymongo.errors import DuplicateKeyError
 
         key = {"space": new.space, "from_fact": new.from_fact, "to_fact": new.to_fact, "kind": new.kind}
-        existing = await self.fact_links.find_one(key)
+        existing = await self._fact_links.find_one(key)
         if existing is None:
             doc = {"_id": await self._next_id("fact_links"), **new.__dict__}
             try:
-                await self.fact_links.insert_one(doc)
+                await self._fact_links.insert_one(doc)
                 return _fact_link(doc)
             except DuplicateKeyError:
-                existing = await self.fact_links.find_one(key)
+                existing = await self._fact_links.find_one(key)
+        if existing is None:
+            raise SconeError("MongoDB fact link disappeared during insert")
         return _fact_link(existing)
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
-        cursor = self.fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
+        cursor = self._fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
         return [_fact_link(doc) async for doc in cursor]
 
     async def bump_revision(self, space: str) -> int:
         doc = await self.revisions.find_one_and_update(
             {"_id": space}, {"$inc": {"revision": 1}}, upsert=True, return_document=True
         )
+        if doc is None:
+            raise SconeError("MongoDB revision update returned no document")
         return int(doc["revision"])
 
     async def revision(self, space: str) -> int:
