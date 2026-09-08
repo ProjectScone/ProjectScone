@@ -6,7 +6,8 @@ import json
 import logging
 import math
 import time
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal, cast
 
 from ..agents.evidence_loop import ToolCall, ToolStep
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
@@ -109,13 +110,17 @@ class SelfHostedToolChat:
         self._max_tokens, self._transport = max_tokens, transport
 
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
-        import httpx
-
         body: dict[str, object] = {'model': self._model, 'messages': messages, 'stream': False,
                                   'temperature': 0, 'max_tokens': self._max_tokens,
                                   'tool_choice': 'auto' if tools else 'none'}
         if tools:
             body['tools'] = tools
+        return await self._request(body, lambda raw: _step(raw, bool(tools)))
+
+    async def _request(self, body: dict[str, object], parse: Callable[[bytes], ToolStep], *,
+                       protocol: Literal['native', 'structured_action'] = 'native') -> ToolStep:
+        import httpx
+
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1100000:
             raise ValueError('tool model request byte limit')
@@ -135,7 +140,7 @@ class SelfHostedToolChat:
                         if len(raw) + len(part) > self._max_bytes:
                             raise ValueError('tool response byte limit')
                         raw.extend(part)
-                    result = _step(bytes(raw), bool(tools))
+                    result = parse(bytes(raw))
             return result
 
         try:
@@ -155,5 +160,5 @@ class SelfHostedToolChat:
             raise RuntimeError('tool model unavailable') from None
         finally:
             # No prompts, responses, endpoint credentials, or exception text.
-            logger.info('tool_model.finished outcome=%s elapsed_ms=%.3f', outcome,
+            logger.info('tool_model.finished protocol=%s outcome=%s elapsed_ms=%.3f', protocol, outcome,
                         (time.monotonic() - started) * 1000)

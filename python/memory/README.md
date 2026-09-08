@@ -545,6 +545,36 @@ and oversized responses. Logs contain outcome and elapsed time, not message text
 HTTP resources are closed before a reply is accepted; cooperative cleanup can
 run beyond the deadline, but late success is rejected.
 
+For an explicitly configured model with unreliable native tool calls but JSON
+schema support, `SelfHostedStructuredToolChat` implements the same `ToolModel`
+interface:
+
+```python
+from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
+
+model = SelfHostedStructuredToolChat(
+    os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+    api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+)
+```
+
+It requests one schema-constrained search, trace, or answer action, validates it
+again on the host, and translates it into the existing bounded tool protocol.
+Trace seeds must be retained IDs. Scope, execution, source checks, and budgets
+remain in the host controller. This adapter does not silently repair JSON or
+execute ordinary prose. Tool results are rendered as explicitly marked evidence
+messages for providers without native tool-message support. It is opt-in; native
+and ordinary chat adapters retain their existing behavior.
+
+Protocol compatibility is not evidence of better answers. In a nine-case
+synthetic development comparison on `llama3.2-ctx8k`, structured actions fixed a
+malformed native trace-call case, but the model still invented a missing bridge,
+reversed a dependency, conflated `painted by` with `depends on`, and answered a
+manufacturer question without searching. The checked-in cases are in
+`tests/fixtures/tool_action_cases.json`; their expectations require manual
+source-grounded adjudication. These are development findings, not a held-out
+accuracy score, and do not justify enabling this adapter by default.
+
 The controller does not persist workflow checkpoints or automatically capture
 chat messages. For conversation history, capture, and public callbacks, opt in
 through `TextConversation`:
