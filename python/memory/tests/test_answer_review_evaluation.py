@@ -201,14 +201,18 @@ def test_original_development_fixture_contains_both_labels_and_known_failure_cat
         assert {case.expected_acceptable for case in cases if case.category == category} == {True, False}
 
 
-def test_contrastive_fixture_pairs_change_answers_without_changing_evidence():
-    cases = load_fixture(Path(__file__).parent / 'fixtures' / 'answer_review' / 'contrastive.json').cases
+@pytest.mark.parametrize('filename,categories', [
+    ('contrastive.json', {'negation', 'units', 'temporal', 'multi_source', 'causality',
+                         'quantifiers', 'scope', 'table', 'conflict', 'source_instructions'}),
+    ('completeness.json', {'answer_completeness'}),
+])
+def test_contrastive_fixture_pairs_change_answers_without_changing_evidence(filename, categories):
+    cases = load_fixture(Path(__file__).parent / 'fixtures' / 'answer_review' / filename).cases
     pairs = {}
     for case in cases:
         assert case.split == 'development'
         pairs.setdefault((case.category, case.question), []).append(case)
-    assert {'negation', 'units', 'temporal', 'multi_source', 'causality',
-            'quantifiers', 'scope', 'table', 'conflict', 'source_instructions'} <= {case.category for case in cases}
+    assert categories <= {case.category for case in cases}
     for pair in pairs.values():
         assert len(pair) == 2
         assert {case.expected_acceptable for case in pair} == {True, False}

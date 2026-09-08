@@ -1442,6 +1442,12 @@ tables, conflicting observations and instructions embedded in source text.
 Pass that path to `--fixture` to compare reviewers on these cases. Reporting a
 low false-approval rate alone is insufficient: a reviewer that rejects both
 members of every pair accepts none of the correct answers.
+`tests/fixtures/answer_review/completeness.json` adds eight development drafts
+where both members contain supported statements, but only one answers every
+explicitly requested part. It covers a receiver's storage medium, owner plus
+date, conditional action plus deadline, and attribution of conflicting values.
+These cases distinguish answering the question from merely saying something
+true about the sources. They are not held-out evidence of general accuracy.
 Each call reviews the original draft once; proposed revisions are recorded only
 as a boolean and are not adopted. This isolates reviewer judgment from generation
 and correction quality. Labels, categories and splits never enter model inputs.
