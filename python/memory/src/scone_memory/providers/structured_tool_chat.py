@@ -32,6 +32,7 @@ class _Search(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     action: Literal['search_memory']
     query: str = Field(min_length=1, max_length=8000)
+    limit: int = Field(default=5, ge=1, le=20)
 
 
 class _Trace(BaseModel):
@@ -145,13 +146,18 @@ def _schema(names: set[str], facts: set[int], chunks: set[int]) -> dict[str, obj
     # self-hosted grammar compilers; token/response limits bound generation.
     branches = []
     if 'search_memory' in names:
-        branches.append(_branch('search_memory', {'query': {'type':'string'}}))
+        branches.append(_branch('search_memory', {'query': {'type':'string'},
+            'limit':{'type':'integer', 'enum':list(range(1, 21)),
+                     'description':'Maximum combined passages and facts to return. Use 5 unless another result budget is needed.'}}))
     if 'trace_memory' in names and facts:
         branches.append(_branch('trace_memory', {'seed_fact_id':{'type':'integer', 'enum':sorted(facts)},
                                                 'max_hops':{'type':'integer', 'enum':[1,2,3,4,5,6]}}))
     if 'read_memory' in names and chunks:
         branches.append(_branch('read_memory', {'chunk_id':{'type':'integer', 'enum':sorted(chunks)},
-            'before':{'type':'integer', 'enum':[0,1,2,3,4]}, 'after':{'type':'integer', 'enum':[0,1,2,3,4]}}))
+            'before':{'type':'integer', 'enum':[0,1,2,3,4],
+                      'description':'Earlier neighboring chunks to read. Use 1 for preceding context; 0 adds no earlier context.'},
+            'after':{'type':'integer', 'enum':[0,1,2,3,4],
+                     'description':'Later neighboring chunks to read. Use 1 for following context; 0 adds no later context.'}}))
     branches.append(_branch('answer', {'answer':{'type':'string'}}))
     return {'anyOf':branches}
 
@@ -165,10 +171,13 @@ def _action(raw: bytes, names: set[str], facts: set[int], chunks: set[int]) -> T
             raise ValueError('invalid action answer')
         return ToolStep(content=answer)
     if action == 'search_memory' and action in names:
-        query = _Search.model_validate(packet).query
+        search = _Search.model_validate(packet)
+        query = search.query
         if not query.strip() or len(query.encode()) > 8000:
             raise ValueError('invalid action query')
         arguments: dict[str, object] = {'query':query}
+        if 'limit' in search.model_fields_set:
+            arguments['limit'] = search.limit
     elif action == 'trace_memory' and action in names:
         trace = _Trace.model_validate(packet)
         if trace.seed_fact_id not in facts:

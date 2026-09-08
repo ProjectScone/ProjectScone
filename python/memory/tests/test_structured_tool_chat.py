@@ -36,6 +36,23 @@ async def test_structured_search_becomes_one_valid_host_tool_call():
     assert {row['properties']['action']['const'] for row in schema['anyOf']} == {'search_memory', 'answer'}
 
 
+@pytest.mark.parametrize('limit', [1, 5, 20])
+async def test_structured_search_preserves_requested_result_budget(limit):
+    requests = []
+    step = await model({'action':'search_memory', 'query':'Juniper', 'limit':limit}, requests).complete(
+        [{'role':'user', 'content':'Search for one passage.'}], schemas()[:1])
+    assert step.calls[0].arguments == {'query':'Juniper', 'limit':limit}
+    branch = requests[0]['response_format']['json_schema']['schema']['anyOf'][0]
+    assert branch['properties']['limit']['enum'] == list(range(1, 21))
+
+
+@pytest.mark.parametrize('limit', [0, 21, True, '1', 1.5, None])
+async def test_structured_search_rejects_invalid_result_budget(limit):
+    with pytest.raises(RuntimeError, match='tool model unavailable'):
+        await model({'action':'search_memory', 'query':'Juniper', 'limit':limit}).complete(
+            [{'role':'user', 'content':'Juniper?'}], schemas()[:1])
+
+
 async def test_trace_schema_uses_only_previously_returned_fact_ids_and_renders_plain_roles():
     requests = []
     messages = [
