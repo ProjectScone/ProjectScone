@@ -643,6 +643,47 @@ Cancellation propagates instead of producing a success receipt.
 
 #### Adaptive evidence retrieval
 
+For applications with an explicit question plan, the SDK also provides a
+model-free `StructuredEvidenceAssessor`. Each requirement asks for recorded
+values of an exact subject/predicate, or a simple directed path of one exact
+predicate to a named endpoint. Every requirement needs a complete witness before
+its verdict is `sufficient`; this verdict describes the supplied plan and
+records, not semantic truth or general question-answer accuracy.
+
+```python
+from scone_memory.retrieval.structured_evidence import (
+    EvidenceRequirement, StructuredEvidenceAssessor,
+)
+from scone_memory.retrieval.adaptive import AdaptiveRetriever
+from scone_memory.retrieval.recall_scope import RecallScope
+
+question = "Which dependency path connects aster to denver?"
+assessor = StructuredEvidenceAssessor(question, (
+    EvidenceRequirement(kind="path", subject="aster", predicate="depends on",
+                        object="denver", max_hops=3),
+))
+result = await AdaptiveRetriever(memory, assessor).retrieve(
+    "authorized-space", question,
+    scope=RecallScope.validated(where={"collection": "manuals"}),
+)
+```
+
+The application authors the requirements and binds them to the exact question.
+There is no automatic intent parser or implicit HTTP activation. Identity matching
+is literal: synonyms, case differences and alternate predicates need an explicit
+application mapping. Terminal, negative, and whole-index completeness claims are
+unsupported. A missing path means no witness within the supplied candidate and
+hop bounds; it does not prove there is no path in the knowledge store.
+
+The assessor accepts 1–8 requirements and at most 100 candidates / 128,000 UTF-8
+candidate bytes. Path-edge work defaults to 256 and is configurable up to 2,048;
+exhaustion returns `uncertain`, preserving other witnessed requirements. It emits
+up to three follow-up search queries for missing requirements. Competing recorded
+values around witnesses remain together in atomic groups; no winner is inferred.
+The native retriever still owns candidate discovery, scope, timing, and source
+revalidation. Invalidated selected groups are omitted together. This does not
+turn a passage that looks like a triple into a stored fact.
+
 An optional bounded loop assesses retrieved evidence, keeps selected records,
 and searches for missing information before generation. The host supplies an
 `EvidenceAssessor`; the core fixes the memory space and session filters for every
