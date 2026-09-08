@@ -85,3 +85,64 @@ async def test_derivations_are_validated_like_extractions(engine):
     await engine.assert_fact("other", "b", "is", "c")
     with pytest.raises(DistillError):
         await Deriver(engine, FakeChat(["no json here"])).derive("other")
+
+
+REFUSAL = "I can't provide information or guidance on illegal or harmful activities."
+
+
+async def two_groups(engine):
+    """Two groups that share nothing, so each is sent to the model once."""
+    await engine.assert_fact("default", "mark", "works_at", "acme")
+    await engine.assert_fact("default", "acme", "based_in", "lisbon")
+    await engine.assert_fact("default", "juniper", "sleeps_on", "the sofa")
+    await engine.assert_fact("default", "the sofa", "is_in", "the study")
+
+
+async def test_a_model_that_refuses_one_group_does_not_end_the_pass(engine):
+    """A real corpus contains something a model will not answer about.
+    Tonight a benchmark leg died on exactly this: one refusal, and every
+    group after it went unread. What the model would not touch has to
+    cost that group and nothing else."""
+    await two_groups(engine)
+    inference = {"subject": "juniper", "predicate": "sleeps_in", "object": "the study",
+                 "premises": [3, 4], "confidence": 0.6}
+    chat = FakeChat([REFUSAL, reply(inference)])
+
+    outcome = await Deriver(engine, chat).derive("default")
+
+    assert len(outcome.proposed) == 1, "the group the model would answer about was still derived"
+    assert outcome.sent == 2, "both groups were tried"
+    assert [r.reason for r in outcome.rejected] == ["unreadable_reply"]
+    assert outcome.as_payload()["rejected_reasons"] == {"unreadable_reply": 1}
+
+
+async def test_a_model_that_refuses_everything_is_a_failure_not_an_empty_answer(engine):
+    """Nothing follows and nothing could be read are different results.
+    Reporting the second as the first is how a pass that achieved nothing
+    is recorded as a pass that found nothing to do."""
+    await two_groups(engine)
+    chat = FakeChat([REFUSAL, REFUSAL])
+
+    with pytest.raises(DistillError, match="no group could be read"):
+        await Deriver(engine, chat).derive("default")
+
+
+async def test_a_group_the_model_never_answered_is_tried_again_next_pass(engine):
+    """A refusal is settled and there is no point asking twice. A call
+    that never arrived is not settled, and dropping it would lose the
+    group silently until something else changed its membership."""
+    from scone_memory.providers.llm import ChatError
+
+    await two_groups(engine)
+    inference = {"subject": "juniper", "predicate": "sleeps_in", "object": "the study",
+                 "premises": [3, 4], "confidence": 0.6}
+    chat = FakeChat([ChatError("chat server unreachable"), reply(inference)])
+    first = await Deriver(engine, chat).derive("default")
+    assert [r.reason for r in first.rejected] == ["unreachable"]
+
+    again = FakeChat([reply({"subject": "mark", "predicate": "works_in", "object": "lisbon",
+                             "premises": [1, 2], "confidence": 0.7})])
+    second = await Deriver(engine, chat=again).derive("default")
+
+    assert len(second.proposed) == 1, "the group that never got an answer was asked again"
+    assert second.sent == 1, "and the group that did answer was not asked twice"
