@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, cast
 
 from ..agents.evidence_loop import ToolCall, ToolStep
+from .llm import _thinking_options
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 
 if TYPE_CHECKING:
@@ -125,8 +126,7 @@ class SelfHostedToolChat:
                        protocol: Literal['native', 'structured_action', 'structured_answer'] = 'native') -> ToolStep:
         import httpx
 
-        if self._think is not None:
-            body = {**body, 'think':self._think}
+        body = {**body, **_thinking_options(self._think)}
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1100000:
             raise ValueError('tool model request byte limit')

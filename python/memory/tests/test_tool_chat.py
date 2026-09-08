@@ -48,9 +48,10 @@ async def test_explicit_thinking_setting_reaches_provider_without_capturing_reas
     assert step.content == 'Hello.'
     assert 'PRIVATE_REASONING' not in step.model_dump_json()
     if think is None:
-        assert 'think' not in requests[0]
+        assert 'reasoning_effort' not in requests[0]
     else:
-        assert requests[0]['think'] is think
+        assert requests[0]['reasoning_effort']==('medium' if think else 'none')
+    assert 'think' not in requests[0]
 
 
 @pytest.mark.parametrize('think', [0, 1, 'false', []])

@@ -929,6 +929,12 @@ when the selected endpoint supports disabling that option. Tool mode cannot be
 combined with the independent adaptive, extractive, or path-projection
 candidate options. No fixture answer labels or required quotes reach the model.
 
+Chat-completions adapters translate explicit `think=False` to
+`reasoning_effort="none"` and `think=True` to `reasoning_effort="medium"`.
+Leaving `think=None` preserves the server default. The endpoint and model must
+support the requested reasoning effort; Ollama's native `think` field does not
+control reasoning on its OpenAI-compatible endpoint.
+
 Tool candidates can also use `--review-model YOUR_INSTALLED_REVIEWER
 --review-quote-mode spans --review-policy require_supported`. The reviewer uses
 the same retained-packet review helper as text conversations: it receives the
