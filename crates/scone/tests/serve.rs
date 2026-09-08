@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used)]
 //! HTTP API tested hermetically via tower oneshot — no ports, no network.
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use scone::serve::{keys_from_config, router, Role, ServeConfig, SpaceKey};
-use scone_core::embed::HashEmbedder;
+use scone::serve::{Role, ServeConfig, SpaceKey, keys_from_config, router};
 use scone_core::Engine;
+use scone_core::embed::HashEmbedder;
 use tower::ServiceExt;
 
 fn app(dir: &std::path::Path) -> axum::Router {
@@ -102,10 +102,12 @@ async fn source_pages_and_canonical_memory_serve_the_workspace_without_an_api_ca
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
-            assert!(response.headers()[header::CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .starts_with("text/html"));
+            assert!(
+                response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/html")
+            );
             let body = response.into_body().collect().await.unwrap().to_bytes();
             if method == "GET" {
                 assert!(String::from_utf8_lossy(&body).contains("id=\"root\""));
@@ -340,10 +342,12 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
-            assert!(response.headers()[header::CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .starts_with("text/html"));
+            assert!(
+                response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/html")
+            );
             if method == "GET" {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let text = String::from_utf8_lossy(&body);
@@ -427,11 +431,13 @@ async fn evidence_is_scoped_persistent_and_retries_do_not_duplicate() {
     drop(server);
     let reopened = app(dir.path());
     let (_, graph) = call(&reopened, "GET", "/v1/graph", Some("sk-alice"), None).await;
-    assert!(graph["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|n| n["data"]["text"] == "Keep launch local"));
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["data"]["text"] == "Keep launch local")
+    );
 }
 
 #[tokio::test]
@@ -463,12 +469,16 @@ async fn evidence_links_capture_and_recall_only_to_scoped_records() {
     assert!(recall["event_id"].as_i64().is_some());
     let (_, graph) = call(&server, "GET", "/v1/graph", Some("sk-alice"), None).await;
     let edges = graph["edges"].as_array().unwrap();
-    assert!(edges
-        .iter()
-        .any(|e| e["kind"] == "captured_as" && e["target"] == "episode:1"));
-    assert!(edges
-        .iter()
-        .any(|e| e["kind"] == "returned" && e["target"] == "chunk:1"));
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["kind"] == "captured_as" && e["target"] == "episode:1")
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["kind"] == "returned" && e["target"] == "chunk:1")
+    );
     assert!(!edges.iter().any(|e| e["kind"] == "similar"));
     let (status, _) = call(&server, "GET", "/v1/episodes/1", Some("sk-bob"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -951,7 +961,7 @@ async fn the_facts_list_carries_the_space_revision() {
 #[tokio::test]
 async fn a_fact_names_the_episodes_it_came_from() {
     use scone_core::llm::ExtractedFact;
-    use scone_core::{auth, IngestInput, IngestOutcome};
+    use scone_core::{IngestInput, IngestOutcome, auth};
 
     let dir = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
@@ -1008,7 +1018,7 @@ async fn a_fact_names_the_episodes_it_came_from() {
 #[tokio::test]
 async fn a_proposal_can_be_listed_and_settled_over_http() {
     use scone_core::llm::ExtractedFact;
-    use scone_core::{auth, IngestInput, IngestOutcome};
+    use scone_core::{IngestInput, IngestOutcome, auth};
 
     let dir = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
@@ -1144,23 +1154,32 @@ async fn a_proposal_can_be_listed_and_settled_over_http() {
 #[test]
 fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     let source = include_str!("../src/serve.rs");
+    // The path may sit on the line after `.route(`: rustfmt breaks the call
+    // once it grows, and a guard a formatter can switch off is not a guard.
+    // One call takes a variable rather than a literal, the loop over
+    // LEARN_PAGES, and those are named and checked by the test above.
     let mut routes: Vec<&str> = source
-        .match_indices(".route(\"")
-        .map(|(at, marker)| {
-            let rest = &source[at + marker.len()..];
-            &rest[..rest.find('"').expect("a closing quote on the route path")]
+        .match_indices(".route(")
+        .filter_map(|(at, marker)| {
+            let rest = source[at + marker.len()..].trim_start().strip_prefix('"')?;
+            Some(&rest[..rest.find('"').expect("a closing quote on the route path")])
         })
         .collect();
     routes.sort_unstable();
     routes.dedup();
 
-    // Named HTML entry points use the existing source-read API; no new /v1 API.
+    // Named HTML entry points, which use the existing source-read API and add
+    // no /v1 surface: the console at the root, the playground, and the two
+    // memory pages. The concept pages are the LEARN_PAGES loop above.
     let html: Vec<_> = routes
         .iter()
         .copied()
         .filter(|path| !path.starts_with("/v1/"))
         .collect();
-    assert_eq!(html, ["/memory", "/memory/sources/{id}"]);
+    assert_eq!(
+        html,
+        ["/", "/memory", "/memory/sources/{id}", "/playground"]
+    );
     routes.retain(|path| path.starts_with("/v1/"));
 
     let frozen = [

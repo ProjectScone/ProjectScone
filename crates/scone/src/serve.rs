@@ -10,12 +10,12 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxPath, Query, Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use scone_core::{auth, Engine, IngestOutcome, RecallOpts, SpaceReceipt};
+use scone_core::{Engine, IngestOutcome, RecallOpts, SpaceReceipt, auth};
 
 const MAX_CONTENT: usize = 100_000;
 const MAX_QUERY: usize = 1_000;
