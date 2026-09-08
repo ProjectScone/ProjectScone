@@ -237,6 +237,17 @@ Additional package APIs provide [query evidence](src/scone_memory/retrieval/evid
 The [retrieval workflow builder](src/scone_memory/agents/retrieval.py) composes
 both frameworks with retained-source checks.
 
+`GET /v1/recall?graph_analysis=true` adds bounded community, hub and bridge
+analysis to the scoped query result. Set `evidence_graph=true` as well to receive
+the nodes and retained-source relationships behind those IDs; both options share
+one graph build. The pure Python API is
+`scone_memory.retrieval.graph_analysis.analyze_evidence_graph`.
+Its versioned algorithm analyzes unique undirected recorded relationships and
+reports directional hub counts separately. Coverage and omissions describe the
+supplied graph, not the entire memory store; connectivity is not confidence.
+Analysis failures leave ordinary recall available with an explicit unavailable
+status. Neither option enables external services or model calls.
+
 The [self-hosted reranking evaluator](src/scone_memory/testing/self_hosted_reranking.py)
 and [Qdrant comparison](src/scone_memory/testing/qdrant_comparison.py) are runnable
 package modules. They use isolated fixtures and record failures as well as

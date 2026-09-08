@@ -25,6 +25,7 @@
       "recall": true,
       "recall.conditions": true,
       "recall.evidence_graph": true,
+      "recall.graph_analysis": true,
       "recall.candidate_budget": true,
       "recall.reranking": false,
       "facts.read": true,

@@ -344,7 +344,7 @@ def create_app(
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
-            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "facts.read": True, "facts.review": True,
+            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
             "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
             "recall.structural_context": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
@@ -641,6 +641,7 @@ def create_app(
         until: Optional[str] = None,
         conditions: Optional[str] = None,
         evidence_graph: bool = False,
+        graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
         rerank: bool = True,
         structural_context: bool = False,
@@ -671,7 +672,7 @@ def create_app(
         }
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
-        if evidence_graph or structural_context or multi_hop:
+        if evidence_graph or graph_analysis or structural_context or multi_hop:
             from ..core.ports import TextFilter
             from ..memory.engine import normalise_metadata, normalise_tags, normalise_time
             from ..retrieval.evidence_graph import QueryEvidenceGraph, build_query_evidence_graph
@@ -686,14 +687,25 @@ def create_app(
                 until=normalise_time(until) if until else None,
                 conditions=parse_filter(parsed_conditions) if parsed_conditions is not None else None,
             )
-            if evidence_graph:
+            if evidence_graph or graph_analysis:
+                graph_available = True
                 try:
                     graph = await asyncio.wait_for(
                         build_query_evidence_graph(engine.documents, space, q, result, scope=scope), timeout=1.0,
                     )
                 except Exception:
+                    graph_available = False
                     graph = QueryEvidenceGraph(notices=["Query evidence graph is unavailable; recall results are still shown."])
-                response["evidence_graph"] = graph.model_dump(mode="json")
+                if evidence_graph:
+                    response["evidence_graph"] = graph.model_dump(mode="json")
+                if graph_analysis:
+                    from ..retrieval.graph_analysis import GraphAnalysisResult, analyze_evidence_graph
+                    try:
+                        analysis = (analyze_evidence_graph(graph) if graph_available else
+                                    GraphAnalysisResult.unavailable("evidence_graph_unavailable"))
+                    except Exception:
+                        analysis = GraphAnalysisResult.unavailable("analysis_unavailable")
+                    response["graph_analysis"] = analysis.model_dump(mode="json")
             if structural_context:
                 from ..retrieval.structural import StructuralLimits, expand_structural_context
                 try:
