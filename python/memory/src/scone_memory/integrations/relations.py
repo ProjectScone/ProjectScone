@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 from typing import Sequence
 
 from ..core.models import Fact
@@ -12,6 +14,7 @@ from ..memory.engine import MemoryEngine, check_space, normalise_tags
 from ..retrieval.evidence_records import EvidenceRecord, EvidenceRecords
 from ..retrieval.multihop import MultiHopLimits, MultiHopResult, expand_multihop
 from ..retrieval.path_evidence import ordered_evidence_paths
+from ..retrieval.recall_scope import RecallScope
 
 logger = logging.getLogger(__name__)
 TRACE_TIMEOUT_SECONDS = 2.0
@@ -60,9 +63,9 @@ def _unavailable(reason: str) -> dict[str, object]:
 
 
 async def _trace(memory: MemoryEngine, space: str, seed_fact_id: int,
-                 max_hops: int, scope: TextFilter) -> dict[str, object]:
+                 max_hops: int, scope: TextFilter, exclude_session_id: str | None = None) -> dict[str, object]:
     revision = await memory.documents.revision(space)
-    expansion = await expand_multihop(memory.documents, space, seed_fact_ids=[seed_fact_id], scope=scope,
+    expansion = await expand_multihop(memory.documents, space, seed_fact_ids=[seed_fact_id], scope=scope, exclude_session_id=exclude_session_id,
         limits=MultiHopLimits(max_hops=max_hops, max_nodes=16, max_edges=32, max_bytes=32_000))
     if await memory.documents.revision(space) != revision:
         return _unavailable("stale_evidence")
@@ -75,7 +78,8 @@ async def _trace(memory: MemoryEngine, space: str, seed_fact_id: int,
 
 
 async def trace_memory(memory: MemoryEngine, space: str, seed_fact_id: int, *,
-                       max_hops: int = 3, tags: Sequence[str] = ()) -> dict[str, object]:
+                       max_hops: int = 3, tags: Sequence[str] = (),
+                       scope: RecallScope | None = None, exclude_session_id: str | None = None) -> dict[str, object]:
     """Trace a claim within the host-bound space; no model, retrieval or write.
 
     Traversal is capped to 16 facts, 32 edges, 256 candidates/store calls and
@@ -90,9 +94,22 @@ async def trace_memory(memory: MemoryEngine, space: str, seed_fact_id: int, *,
         raise ValueError("seed_fact_id must be a positive signed 64-bit integer")
     if type(max_hops) is not int or not 1 <= max_hops <= 6:
         raise ValueError("max_hops must be from 1 to 6")
-    scope = TextFilter(tags=normalise_tags(tags))
+    if scope is not None and not isinstance(scope, RecallScope):
+        raise ValueError("scope must be RecallScope")
+    fixed = RecallScope.validated(**scope.kwargs()) if scope is not None else RecallScope.validated()
+    if exclude_session_id is not None and (not isinstance(exclude_session_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", exclude_session_id)):
+        raise ValueError("exclude_session_id must be an opaque session identifier")
+    source_filter = TextFilter(tags=normalise_tags(tags), **fixed.kwargs())
+    deadline = time.monotonic() + TRACE_TIMEOUT_SECONDS
     try:
-        return await asyncio.wait_for(_trace(memory, space, seed_fact_id, max_hops, scope), TRACE_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(_trace(memory, space, seed_fact_id, max_hops, source_filter, exclude_session_id), TRACE_TIMEOUT_SECONDS)
+        active = asyncio.current_task()
+        if active is not None and active.cancelling():
+            raise asyncio.CancelledError()
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError()
+        return result
     except asyncio.TimeoutError:
         logger.warning("memory_trace_unavailable reason=timeout")
         return _unavailable("timeout")

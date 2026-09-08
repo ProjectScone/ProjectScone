@@ -223,3 +223,26 @@ async def test_stored_relations_also_reach_query_graph_inspection(box):
     assert records.relations == [{"link_id": stored.link_id, "from_fact": second.fact_id,
         "to_fact": first.fact_id, "kind": "supports", "source_episode_id": second.source_episode_id,
         "quote": second.quote}]
+
+
+async def test_native_deadline_rejects_store_that_suppresses_timeout(box, monkeypatch):
+    import asyncio
+    from scone_memory.integrations import relations
+    first = await claim(box, 'Juniper', 'uses', 'Polaris')
+    original = box.engine.documents.revision
+    pending = True
+    async def slow_revision(space):
+        nonlocal pending
+        if pending:
+            pending = False
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(.01)
+        return await original(space)
+    monkeypatch.setattr(box.engine.documents, 'revision', slow_revision)
+    monkeypatch.setattr(relations, 'TRACE_TIMEOUT_SECONDS', .01)
+    result = await relations.trace_memory(box.engine, 'alpha', first.fact_id)
+    assert result['ok'] is False
+    assert result['coverage']['reasons'] == ['timeout']
+    assert result['claims'] == []

@@ -463,6 +463,42 @@ failures return an unavailable result without partial quotes. Direct adapter
 writes require adapter transaction discipline. Coverage describes this seed's
 bounded neighborhood, never completeness of an answer to an arbitrary query.
 
+For read tools that must preserve a conversation or application's narrower
+scope, use `ScopedMemoryTools`:
+
+```python
+from scone_memory.integrations.scoped_tools import ScopedMemoryTools
+from scone_memory.retrieval.recall_scope import RecallScope
+
+box = ScopedMemoryTools(engine, "default",
+    scope=RecallScope.validated(where={"collection": "manuals"},
+                               kind="file", source_prefix="manuals/"),
+    exclude_session_id="current-session",
+)
+schema = box.openai()  # or box.anthropic()
+found = await box.run("search_memory", {"query": "Juniper", "limit": 5})
+```
+
+This binding offers only `search_memory` and `trace_memory`. Space, metadata,
+source kind/prefix, inclusive source dates and excluded session are fixed by the
+host and cannot be supplied or widened in tool arguments. There are no write or
+unfiltered profile operations. Search returns retained passage bytes and quoted
+fact provenance; it makes one native retrieval request and no assessor-model
+call. It uses a 20-candidate / 32,000-byte evidence window, then returns at most
+`limit` combined facts and passages (facts first). Omitted output is counted and
+marked truncated. Search coverage never certifies completeness for the question.
+
+Each call has a configurable 1–30 second cooperative deadline (default 2) and a
+512–64,000 UTF-8 byte result cap (default 64,000). Oversized output is refused as a
+whole, without clipped quotations or paths. Tracing also retains its stricter
+native two-second deadline, checked before accepting output even if a backend
+suppressed cancellation. Source point reads may load larger episodes and
+cooperative cleanup can exceed deadlines. Errors are content-free codes;
+external cancellation propagates. Tool results are checked snapshots, not
+permanent evidence: an enclosing answer pipeline must revalidate sources before
+publishing an answer based on them. No HTTP tool loop or automatic tool execution
+is installed by constructing this binding.
+
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,
 `[llamaindex]`, `[openai-agents]`) and says so if it is missing.
