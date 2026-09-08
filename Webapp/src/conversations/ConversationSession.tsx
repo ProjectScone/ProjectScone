@@ -5,9 +5,11 @@ import {DeleteConversation} from './DeleteConversation';
 import {RecallScopeSummary} from './RecallScopeControls';
 import {LiveReply} from './LiveReply';
 import {VoiceControls} from './VoiceControls';
+import {useTranscriptHeight} from './useTranscriptHeight';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
 export function ConversationSession({api,sid,onSession,textConfigured,voiceSupported,deletionSupported,cancellationSupported,paginationSupported,streamingSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;voiceSupported:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;streamingSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
+  const threadRef=useTranscriptHeight();
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [voiceVerified,setVoiceVerified]=useState(false),[audioStopRequested,setAudioStopRequested]=useState(false);
@@ -136,7 +138,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
   }
   const terminal=current&&['ended','failed','interrupted'].includes(current.state);
   const voice=current?.mode==='voice';
-  return <><section className="conversation-thread" aria-label={voice?'Voice conversation':'Text conversation'}>
+  return <><section ref={threadRef} className="conversation-thread" aria-label={voice?'Voice conversation':'Text conversation'}>
     <header className="conversation-thread-header"><div><span className="eyebrow">{voice?'Voice':'Text'} session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
       {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
     {current&&<RecallScopeSummary scope={current.recall_scope}/>}

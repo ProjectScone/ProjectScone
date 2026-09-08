@@ -4,9 +4,11 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const http=require('node:http');
-const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
+const browserName=process.env.SCONE_BROWSER_ENGINE||'chromium';
+assert.ok(['chromium','firefox','webkit'].includes(browserName),'Unsupported browser engine');
 let browser;
-before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
+before(async()=>{browser=await playwright[browserName].launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,...(browserName==='chromium'?{args:['--disable-gpu']}: {})});});
 after(async()=>{await browser?.close();});
 
 for(const mobile of [false,true])test(`product navigation remains readable and shares the workspace surface, mobile=${mobile}`,async t=>{
@@ -98,6 +100,36 @@ test('conversation frame keeps session controls and evidence usable across viewp
     if(process.env.SCONE_SCREENSHOT_DIR&&[390,1440,1600].includes(width))await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`workspace-conversation-${width}.png`),fullPage:true});
   }
 });
+test('transcript retains readable height with session controls in short and narrow windows',async t=>{
+  const {page}=await fixture(t,{pagination:true,scoped:true,defaultPersona:true});
+  await page.getByRole('link',{name:/previous ended/}).click();
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  for(const viewport of [{width:1440,height:720},{width:1440,height:560},{width:1024,height:768},{width:768,height:600},{width:390,height:664}]){
+    await page.setViewportSize(viewport);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const metrics=await page.locator('.conversation-messages').evaluate(el=>({height:el.clientHeight,minimum:15*parseFloat(getComputedStyle(document.documentElement).fontSize),overflow:document.documentElement.scrollWidth>innerWidth}));
+    assert.ok(metrics.height>=metrics.minimum,`Transcript collapsed to ${metrics.height}px at ${JSON.stringify(viewport)}`);
+    assert.equal(metrics.overflow,false);
+    const composer=page.locator('.conversation-composer');
+    await composer.scrollIntoViewIfNeeded();
+    const bounds=await composer.boundingBox();
+    assert.ok(bounds.y>=0&&bounds.y+bounds.height<=viewport.height+1,'Composer remains reachable');
+  }
+  const heightAt=async height=>{
+    await page.setViewportSize({width:1440,height});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    return page.locator('.conversation-messages').evaluate(el=>el.clientHeight);
+  };
+  const shorter=await heightAt(1400),taller=await heightAt(1600);
+  assert.ok(Math.abs(taller-shorter-200)<=2,'Transcript must grow with the actual available viewport');
+  await page.locator('.conversation-workspace').evaluate(el=>{
+    el.style.height='2400px';
+    const notice=document.createElement('div');notice.className='conversation-notice';
+    notice.textContent='Connection restored';el.querySelector('.conversation-layout').before(notice);
+  });
+  await page.waitForFunction(previous=>document.querySelector('.conversation-messages').clientHeight<previous,taller);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`conversation-sizing-${browserName}.png`),fullPage:true});
+});
 for(const voiceState of ['created','running','ended'])test(`saved voice session preserves evidence without text controls or microphone acquisition: ${voiceState}`,async t=>{
   const {page,posts}=await fixture(t,{voiceState});
   let microphoneRequests=0;page.on('websocket',()=>{microphoneRequests++;});
@@ -116,9 +148,9 @@ for(const voiceState of ['created','running','ended'])test(`saved voice session 
     assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
   }
 });
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse,defaultPersona=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
-  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
+  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(defaultPersona?{persona:null}:{}),...(recovered?{latest_request_id:'a-newer'}:{})}];
   if(voiceState){sessions[0].mode='voice';sessions[0].state=voiceState;}
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
