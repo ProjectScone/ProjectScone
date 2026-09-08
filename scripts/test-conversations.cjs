@@ -179,7 +179,7 @@ for(const voiceState of ['created','running','ended'])test(`saved voice session 
     assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
   }
 });
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse,defaultPersona=false}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse,defaultPersona=false,reducedMotion='reduce',trackMotion=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(defaultPersona?{persona:null}:{}),...(recovered?{latest_request_id:'a-newer'}:{})}];
   if(voiceState){sessions[0].mode='voice';sessions[0].state=voiceState;}
@@ -266,7 +266,17 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     res.statusCode=404;res.end('{"error":"not found"}');
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1440,height:1000},reducedMotion:'reduce'});
+  const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1440,height:1000},reducedMotion});
+  if(trackMotion)await page.addInitScript(()=>{
+    window.conversationAnimations=[];
+    const animate=Element.prototype.animate;
+    Element.prototype.animate=function(frames,options){
+      if(this.matches('.conversation-source-transition,.conversation-delivery-transition')){
+        window.conversationAnimations.push({className:this.className,frames,duration:options?.duration??0});
+      }
+      return animate.call(this,frames,options);
+    };
+  });
   page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{releaseCapabilities();releaseList();await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
@@ -315,7 +325,7 @@ for(const status of [404,410,503])test(`source inspector retries a cached ${stat
 });
 
 test('source inspector clears the previous original while another source loads',async t=>{
-  const {page}=await fixture(t);
+  const {page}=await fixture(t,{reducedMotion:'no-preference'});
   await page.route('**/previous/transcript*',route=>route.fulfill({json:{episodes:[{episode_id:2,content:'First message',metadata:{}},{episode_id:7,content:'Second message',metadata:{}}],has_more:false}}));
   await page.getByRole('link',{name:/previous/}).click();
   await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
@@ -335,6 +345,46 @@ test('source inspector clears the previous original while another source loads',
   await evidence.locator('.source-markdown').getByText('Earlier conversation.',{exact:true}).waitFor();
   release();await finished;await cancelled;
   assert.equal(await evidence.locator('.source-markdown').textContent(),'Earlier conversation.');
+});
+
+for(const reducedMotion of ['reduce','no-preference'])test(`conversation motion only fades status and sources without moving the composer: ${reducedMotion}`,async t=>{
+  const {page}=await fixture(t,{reducedMotion,trackMotion:true});
+  await page.route('**/previous/transcript*',route=>route.fulfill({json:{episodes:[{episode_id:2,content:'Earlier conversation.',metadata:{}},{episode_id:7,content:'Second message',metadata:{}}],has_more:false}}));
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  await page.locator('.conversation-source-text').waitFor();
+  assert.equal(await page.locator('.conversation-source-transition').count(),1,'Source transitions have one current panel');
+  const samples=await page.evaluate(()=>new Promise(resolve=>{
+    const frames=[],started=performance.now();
+    const sample=()=>{
+      const composer=document.querySelector('.conversation-composer').getBoundingClientRect();
+      const transcript=document.querySelector('.conversation-messages').getBoundingClientRect();
+      frames.push({composerY:composer.y,composerHeight:composer.height,transcriptHeight:transcript.height,
+        sourceOpacity:getComputedStyle(document.querySelector('.conversation-source-transition')).opacity});
+      if(performance.now()-started<220)requestAnimationFrame(sample);else resolve(frames);
+    };sample();
+  }));
+  for(const frame of samples){
+    for(const field of ['composerY','composerHeight','transcriptHeight'])assert.ok(Math.abs(frame[field]-samples[0][field])<1,`${field} moved during a fade`);
+    if(reducedMotion==='reduce')assert.equal(frame.sourceOpacity,'1');
+  }
+  const animations=await page.evaluate(()=>window.conversationAnimations.filter(item=>item.duration>0));
+  if(reducedMotion==='reduce')assert.deepEqual(animations,[],'Reduced motion never starts a timed fade');
+  else{
+    for(const className of ['conversation-source-transition','conversation-delivery-transition'])assert.ok(animations.some(item=>item.className===className),`${className} should use Motion`);
+    for(const animation of animations){
+      const properties=Array.isArray(animation.frames)?animation.frames.flatMap(frame=>Object.keys(frame)):Object.keys(animation.frames);
+      assert.ok(properties.every(key=>['opacity','offset','easing','composite'].includes(key)),'Only opacity may animate');
+      assert.ok(animation.duration<=200,'Status transitions stay brief');
+    }
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await page.evaluate(()=>{window.conversationAnimations=[];});
+    await page.getByRole('button',{name:'Inspect message episode 7',exact:true}).click();
+    await page.locator('.conversation-source-text .source-markdown').getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.conversationAnimations.filter(item=>item.duration>0)),[],'A live reduced-motion change disables later source fades');
+    assert.equal(await page.locator('.conversation-source-transition').evaluate(el=>getComputedStyle(el).opacity),'1');
+  }
 });
 
 for(const mobile of [false,true])test(`source inspector retains exact Markdown alongside its formatted original, mobile=${mobile}`,async t=>{
