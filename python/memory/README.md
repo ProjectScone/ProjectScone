@@ -885,6 +885,12 @@ from `scone_memory.runtime.conversation_review`; custom runtime factories must
 accept and honor its `answer_reviewer`, `review_policy` and `review_limits`
 keywords. The standard server supplies compatible native factories.
 
+The review endpoint must support structured JSON output with `anyOf` and `const`.
+Status-specific branches prevent a constrained decoder from returning, for
+example, `supported` alongside a proposed correction. Host validation still
+checks quotations, evidence IDs and response bounds; schema validity does not
+establish that the review judgment is correct.
+
 #### Optional extractive answers
 
 For memory questions where exact recorded wording matters, a model can select

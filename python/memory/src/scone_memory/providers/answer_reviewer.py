@@ -49,6 +49,40 @@ def _decision(response: str, answer: str, evidence_ids: tuple[str, ...], max_ans
     return result
 
 
+def _review_schema(evidence_ids: tuple[str, ...]) -> dict[str, object]:
+    id_schema: dict[str, object] = {"type": "string"}
+    if evidence_ids:
+        id_schema["enum"] = list(evidence_ids)
+    issue = {
+        "type": "object", "additionalProperties": False,
+        "required": ["code", "answer_quote", "evidence_ids"],
+        "properties": {
+            "code": {"type": "string", "enum": ["unsupported_claim", "contradiction", "incomplete_answer", "broken_path"]},
+            "answer_quote": {"type": "string"},
+            "evidence_ids": {"type": "array", "uniqueItems": True, "maxItems": min(32, len(evidence_ids)), "items": id_schema},
+        },
+    }
+    branches = []
+    for status in ("supported", "needs_revision", "uncertain"):
+        issues: dict[str, object] = {"type": "array", "maxItems": 0 if status == "supported" else 8, "items": issue}
+        if status == "needs_revision":
+            issues["minItems"] = 1
+        branches.append({
+            "type": "object", "additionalProperties": False,
+            "required": ["status", "issues", "revised_answer"],
+            "properties": {
+                "status": {"type": "string", "const": status},
+                "issues": issues,
+                # Large bounded strings explode some self-hosted grammar compilers.
+                # Host validation retains character/byte caps; generation has a token cap.
+                "revised_answer": {"type": ["string", "null"]} if status == "needs_revision" else {"type": "null"},
+            },
+        })
+    # Make contradictory statuses unrepresentable for schema-constrained decoders.
+    # The host still validates every response, including exact draft quotations.
+    return {"anyOf": branches}
+
+
 class SelfHostedAnswerReviewer:
     """One structured review per call; correction acceptance belongs to the host.
 
@@ -83,27 +117,7 @@ class SelfHostedAnswerReviewer:
                 or any(not isinstance(value, str) or len(value) > 64 or _ID.fullmatch(value) is None for value in evidence_ids)
                 or len(set(evidence_ids)) != len(evidence_ids)):
             raise ValueError("invalid evidence IDs")
-        id_schema: dict[str, object] = {"type": "string"}
-        if evidence_ids:
-            id_schema["enum"] = list(evidence_ids)
-        schema: dict[str, object] = {
-            "type": "object", "additionalProperties": False,
-            "required": ["status", "issues", "revised_answer"],
-            "properties": {
-                "status": {"type": "string", "enum": ["supported", "needs_revision", "uncertain"]},
-                "issues": {"type": "array", "maxItems": 8, "items": {
-                    "type": "object", "additionalProperties": False,
-                    "required": ["code", "answer_quote", "evidence_ids"],
-                    "properties": {
-                        "code": {"type": "string", "enum": ["unsupported_claim", "contradiction", "incomplete_answer", "broken_path"]},
-                        "answer_quote": {"type": "string"},
-                        "evidence_ids": {"type": "array", "uniqueItems": True, "maxItems": min(32, len(evidence_ids)), "items": id_schema},
-                    }}},
-                # Large bounded strings explode some self-hosted grammar compilers.
-                # Host validation retains character/byte caps; generation has a token cap.
-                "revised_answer": {"type": ["string", "null"]},
-            },
-        }
+        schema = _review_schema(evidence_ids)
         payload = json.dumps({"question": question, "answer": answer, "evidence": evidence,
                               "evidence_ids": evidence_ids}, ensure_ascii=False, separators=(",", ":"))
         try:

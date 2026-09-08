@@ -32,9 +32,20 @@ async def test_private_provider_sends_only_given_evidence_and_strict_schema():
     assert request["model"] == "installed-model"
     assert request["temperature"] == 0
     assert request["max_tokens"] == 2048
-    properties = request["response_format"]["json_schema"]["schema"]["properties"]
-    assert "maxLength" not in properties["revised_answer"]
-    assert "maxLength" not in properties["issues"]["items"]["properties"]["answer_quote"]
+    schema = request["response_format"]["json_schema"]["schema"]
+    branches = {branch["properties"]["status"]["const"]: branch for branch in schema["anyOf"]}
+    assert set(branches) == {"supported", "needs_revision", "uncertain"}
+    for branch in branches.values():
+        assert branch["additionalProperties"] is False
+        assert set(branch["required"]) == {"status", "issues", "revised_answer"}
+        properties = branch["properties"]
+        assert "maxLength" not in properties["revised_answer"]
+        assert "maxLength" not in properties["issues"]["items"]["properties"]["answer_quote"]
+    assert branches["supported"]["properties"]["issues"]["maxItems"] == 0
+    assert branches["supported"]["properties"]["revised_answer"] == {"type": "null"}
+    assert branches["needs_revision"]["properties"]["issues"]["minItems"] == 1
+    assert branches["needs_revision"]["properties"]["revised_answer"]["type"] == ["string", "null"]
+    assert branches["uncertain"]["properties"]["revised_answer"] == {"type": "null"}
     payload = json.loads(request["messages"][-1]["content"])
     assert payload == {"question": "Where does it finish?", "answer": "It finishes at the vault.",
                        "evidence": '{"claims":["source text"]}', "evidence_ids": ["fact:1"]}
@@ -69,6 +80,8 @@ async def test_proposed_revision_is_returned_for_independent_second_review():
     decision("unsupported-status"),
     decision("needs_revision"),
     decision(revised_answer="unasked rewrite"),
+    decision(issues=[{"code": "contradiction", "answer_quote": "answer", "evidence_ids": ["fact:1"]}]),
+    decision("uncertain", revised_answer="unasked rewrite"),
     decision("needs_revision", issues=[{"code": "contradiction", "answer_quote": "answer", "evidence_ids": ["fact:99"]}]),
     decision("needs_revision", issues=[{"code": "unknown", "answer_quote": "answer", "evidence_ids": []}]),
     decision("needs_revision", issues=[{"code": "contradiction", "answer_quote": "not in draft", "evidence_ids": ["fact:1"]}]),
