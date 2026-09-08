@@ -469,6 +469,53 @@ references, recall event ID when available, context hash/bytes, omissions and
 sanitized degradation/error types. They prove preparation—not delivery or use.
 Cancellation propagates instead of producing a success receipt.
 
+#### Adaptive evidence retrieval
+
+An optional bounded loop assesses retrieved evidence, keeps selected records,
+and searches for missing information before generation. The host supplies an
+`EvidenceAssessor`; the core fixes the memory space and session filters for every
+search. Model output can select existing IDs and propose queries, but cannot
+change authorization or run tools. Candidate, query, round, byte and time limits
+are independent. Source changes during assessment invalidate the affected
+evidence; errors and timeouts return an explicit uncertain result.
+
+```python
+from scone_memory.providers.evidence_assessor import SelfHostedEvidenceAssessor
+from scone_memory.providers.llm import OpenAICompatibleTextModel
+from scone_memory.retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever
+from scone_memory.realtime.text import TextConversation
+
+endpoint = "http://inference.home.arpa:11434/v1"
+model = "my-installed-model"
+adaptive = AdaptiveRetriever(
+    memory, SelfHostedEvidenceAssessor(endpoint, model, timeout=30),
+    limits=AdaptiveLimits(max_rounds=3, max_queries=6, timeout_s=30.0),
+)
+conversation = TextConversation(
+    memory, "authorized-space", "session-1",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    where={"collection": "manuals"}, adaptive_retriever=adaptive,
+    recall_timeout=30, turn_timeout=90,
+)
+```
+
+Use and close the conversation as above. The retriever must bind the same
+engine; `recall_timeout` must cover its deadline, and the full turn also needs
+time for generation. Greetings and overview retrieval keep their existing flow.
+The assessor's `sufficient` verdict is a fallible model judgment, not an answer
+accuracy guarantee. This option remains off by default and does not automatically
+enable itself in the HTTP service when a model is loaded.
+
+For a controlled comparison against existing compact paths, add
+`--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30
+--adaptive-rounds 3` to the generation evaluator. Each row records the selected
+variant and adaptive diagnostics; frozen answer checks remain separate from
+source coverage and manual semantic review. The assessment transport timeout
+uses the requested adaptive budget; the retriever enforces the remaining total
+budget across all calls. Reports record both limits. Receipts distinguish
+assessment timeouts, provider failures and invalid model decisions without
+including raw provider errors or source text.
+
 See [the executable native example](examples/realtime_conversation.py). It uses
 real Scone memory and scheduling with a scripted provider, not live inference.
 

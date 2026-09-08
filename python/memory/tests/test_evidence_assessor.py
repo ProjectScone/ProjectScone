@@ -50,6 +50,7 @@ async def test_invalid_decisions_are_sanitized_without_repairs(content):
     with pytest.raises(EvidenceAssessmentError) as error:
         await assessor.assess("Iris storage", candidates())
     assert str(error.value) == "evidence assessment failed"
+    assert error.value.reason == "invalid_assessment"
     assert len(seen) == 1
 
 
@@ -101,3 +102,18 @@ async def test_http_assessment_cancellation_propagates():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize("failure,reason", [
+    (httpx.ReadTimeout("private request"), "assessment_timeout"),
+    (httpx.ConnectError("private endpoint"), "assessment_provider_failed"),
+])
+async def test_transport_failure_has_safe_distinct_reason(failure, reason):
+    def handle(request):
+        raise failure
+    assessor = SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", transport=httpx.MockTransport(handle))
+    with pytest.raises(EvidenceAssessmentError) as error:
+        await assessor.assess("Iris storage", candidates())
+    assert error.value.reason == reason
+    assert str(error.value) == "evidence assessment failed"
+    assert error.value.__cause__ is None

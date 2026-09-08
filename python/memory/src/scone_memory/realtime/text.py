@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
+from ..retrieval.adaptive import AdaptiveRetriever
 from .context import MemoryContext
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
@@ -48,7 +49,8 @@ class TextConversation:
                  system_prompt=DEFAULT_SYSTEM_PROMPT,
                  where: Mapping[str, str] | None = None, kind=None,
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
-                 max_reply_bytes=64000, max_history_bytes=128000):
+                 max_reply_bytes=64000, max_history_bytes=128000,
+                 adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -67,7 +69,8 @@ class TextConversation:
         self._memory, self._space, self._session_id = memory, space, session_id
         self._factory = model_factory
         scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
-        self._context = MemoryContext(memory, space, session_id, **scope.kwargs())
+        self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
+                                      adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False

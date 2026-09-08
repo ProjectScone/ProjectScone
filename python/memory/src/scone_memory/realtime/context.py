@@ -14,6 +14,7 @@ from typing import NotRequired, TypedDict
 
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.recall_scope import RecallScope
+from ..retrieval.adaptive import AdaptiveRetriever
 from ..retrieval.conversation_plan import overview_evidence, plan_conversation_retrieval
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
@@ -43,6 +44,13 @@ _CURRENT_CHAT_RECAP = re.compile(
     r"what (?:has|have) our conversations? been|"
     r"(?:summari[sz]e|recap) (?:this|our) (?:chat|conversation))(?: so far)?"
 )
+_ADAPTIVE_DIAGNOSTICS = frozenset({
+    "stale_evidence", "degraded_recall", "candidate_window", "candidate_limit",
+    "filtered_evidence", "max_evidence_bytes", "duplicate_queries", "max_queries",
+    "no_evidence", "no_followup_queries", "no_new_queries", "max_rounds", "timeout",
+    "invalid_or_failed_assessment", "retrieval_failed",
+    "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
+})
 
 
 def _conversation_only(query: str, messages: list[dict[str, object]]) -> bool:
@@ -108,6 +116,12 @@ class ContextReceipt(TypedDict):
     path_search_truncated: NotRequired[bool]
     multihop_status: NotRequired[str]
     multihop_coverage: NotRequired[dict[str, object]]
+    adaptive_status: NotRequired[str]
+    adaptive_round_count: NotRequired[int]
+    adaptive_queries_used: NotRequired[int]
+    adaptive_truncated: NotRequired[bool]
+    adaptive_reasons: NotRequired[list[str]]
+    adaptive_errors: NotRequired[list[str]]
 
 
 class MemoryContext:
@@ -117,12 +131,17 @@ class MemoryContext:
     mutable last-result slot. Provider delivery and use are not established here.
     ``path_quotes`` optionally repeats verified quotes in path order. It has no
     effect when ``structured_paths`` is disabled or no complete path fits.
+    An optional adaptive retriever must use this engine and fit ``recall_timeout``.
+    Its sufficiency assessment is a model judgment, not verified answer quality.
+    Adaptive search owns its deadline so equal timers cannot hide its timeout
+    receipt. Ordinary search and overview retain this context's timeout.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
                  kind: str | None = None, source_prefix: str | None = None, since: str | None = None, until: str | None = None,
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
-                 structured_paths: bool = True, path_quotes: bool = False) -> None:
+                 structured_paths: bool = True, path_quotes: bool = False,
+                 adaptive_retriever: AdaptiveRetriever | None = None) -> None:
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise ValueError("session_id must contain 1..128 characters")
@@ -136,11 +155,17 @@ class MemoryContext:
             raise ValueError("structured_paths must be a boolean")
         if type(path_quotes) is not bool:
             raise ValueError("path_quotes must be a boolean")
+        if adaptive_retriever is not None:
+            if adaptive_retriever.memory is not memory:
+                raise ValueError("adaptive_retriever must use the same memory engine")
+            if recall_timeout < adaptive_retriever.limits.timeout_s:
+                raise ValueError("recall_timeout must be at least adaptive_retriever.limits.timeout_s")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._limit, self._max_bytes, self._timeout = limit, max_context_bytes, recall_timeout
         self._structured_paths = structured_paths
         self._path_quotes = path_quotes
+        self._adaptive_retriever = adaptive_retriever
 
     async def _overview(self) -> OverviewResult:
         items: list[RecallItem] = []
@@ -206,10 +231,13 @@ class MemoryContext:
             logger.info("recall.routed", extra={"event": "recall.routed",
                         "session_id": self._session_id, "stage": plan.mode})
             recalled_facts: list[Fact] = []
+            adaptive_selected_ids: set[str] | None = None
+            adaptive_coverage: dict[str, object] | None = None
             low_confidence: bool | None
             event_id: int | None
             degraded: list[str]
-            async with asyncio.timeout(self._timeout):
+            search_timeout = None if plan.mode == "search" and self._adaptive_retriever is not None else self._timeout
+            async with asyncio.timeout(search_timeout):
                 if plan.mode == "overview":
                     overview = await self._overview()
                     items = overview_evidence(overview.items, limit=len(overview.items))
@@ -219,7 +247,30 @@ class MemoryContext:
                                     "has_more": overview.has_more, "next_before": overview.next_before})
                     coverage = _overview_coverage(overview.considered, overview.has_more)
                 else:
-                    result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                    if self._adaptive_retriever is None:
+                        result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                    else:
+                        adaptive = await self._adaptive_retriever.retrieve(self._space, plan.query,
+                            scope=self._scope, exclude_session_id=self._session_id)
+                        result = adaptive.recall
+                        reasons = sorted({reason if reason in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                          for reason in adaptive.reasons})
+                        errors = sorted({error if error in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                         for error in adaptive.errors})
+                        receipt.update({"adaptive_status": adaptive.status,
+                            "adaptive_round_count": len(adaptive.rounds), "adaptive_queries_used": adaptive.queries_used,
+                            "adaptive_truncated": adaptive.truncated, "adaptive_reasons": reasons,
+                            "adaptive_errors": errors})
+                        adaptive_selected_ids = ({f"chunk:{item.chunk_id}" for item in result.items}
+                                                 | {f"fact:{fact.fact_id}" for fact in result.facts})
+                        adaptive_coverage = {"assessment_status": adaptive.status,
+                            "assessment_basis": "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment",
+                            "verified_sufficiency": False, "bounded": True, "truncated": adaptive.truncated,
+                            "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
+                            "reasons": reasons, "errors": errors, "selection_complete": False,
+                            "selected_omitted_count": len(adaptive_selected_ids)}
+                        coverage.update({"complete_history": False, "context_omitted_count": len(result.items),
+                                         "adaptive": adaptive_coverage})
                     items, low_confidence, event_id, degraded = result.items, result.low_confidence, result.event_id, result.degraded
                     candidate_count = len(items)
                     recalled_facts = result.facts
@@ -243,9 +294,28 @@ class MemoryContext:
                                 exclude_session_id=self._session_id,
                                 limits=MultiHopLimits(max_nodes=MAX_FACTS, max_edges=MAX_LINKS,
                                     max_bytes=self._max_bytes, max_store_calls=128, max_candidates=128, per_node_limit=16))
+                        selection_omitted_facts = 0
+                        if adaptive_selected_ids is not None:
+                            selected_facts = {fact.fact_id: fact for fact in recalled_facts}
+                            selection_omitted_facts = sum(selected_facts.get(fact.fact_id) != fact for fact in expansion.facts)
+                            expansion.facts = [fact for fact in expansion.facts if selected_facts.get(fact.fact_id) == fact]
+                            selected_fact_ids = {fact.fact_id for fact in expansion.facts}
+                            expansion.edges = [edge for edge in expansion.edges
+                                if edge.from_fact in selected_fact_ids and edge.to_fact in selected_fact_ids
+                                and set(edge.source_fact_ids).issubset(selected_fact_ids)]
+                            selected_edge_ids = {edge.id for edge in expansion.edges}
+                            expansion.paths = [path for path in expansion.paths
+                                if set(path.fact_ids).issubset(selected_fact_ids) and set(path.edge_ids).issubset(selected_edge_ids)]
+                            expansion.seed_fact_ids = [fact_id for fact_id in expansion.seed_fact_ids if fact_id in selected_fact_ids]
+                            if selection_omitted_facts:
+                                expansion.coverage.complete = False
+                                expansion.coverage.reasons.append("adaptive_selection")
                         recalled_facts = expansion.facts
                         receipt["multihop_status"] = "prepared"
                         receipt["multihop_coverage"] = expansion.coverage.model_dump(mode="json")
+                        if adaptive_selected_ids is not None:
+                            receipt["multihop_coverage"].update(selection_restricted=True,
+                                selection_omitted_facts=selection_omitted_facts)
                     except Exception as error:
                         receipt["multihop_status"] = "timeout" if isinstance(error, TimeoutError) else "unavailable"
                         receipt["multihop_coverage"] = {"complete": False, "reasons": [receipt["multihop_status"]]}
@@ -267,6 +337,7 @@ class MemoryContext:
                         break
                 # One bounded verification pass serves inference and inspection.
                 # A failed optional graph read still leaves ordinary passages usable.
+                # Adaptive passages must pass this post-assessment source check.
                 try:
                     async with asyncio.timeout(min(self._timeout, 1.0)):
                         graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
@@ -283,7 +354,8 @@ class MemoryContext:
                     receipt["evidence_graph_status"] = "unavailable"
                     logger.warning("evidence_graph.failed", extra={"event": "evidence_graph.failed",
                         "session_id": self._session_id, "exception_type": type(graph_error).__name__})
-                retained_chunks = {node.data.get("chunk_id") for node in graph.nodes if node.kind == "chunk"} if graph else None
+                retained_chunks = ({node.data.get("chunk_id") for node in graph.nodes if node.kind == "chunk"}
+                                   if graph else set() if adaptive_selected_ids is not None else None)
                 eligible = [item for item in provisional_items
                             if (retained_chunks is None or item.chunk_id in retained_chunks)
                             and item.metadata.get("session_id") != self._session_id
@@ -332,6 +404,13 @@ class MemoryContext:
                         sources.append(candidate)
                         selected_items.append(item)
                 if sources or claims:
+                    if "adaptive" in coverage:
+                        coverage["context_omitted_count"] = candidate_count - len(sources)
+                    if adaptive_coverage is not None and adaptive_selected_ids is not None:
+                        supplied_ids = ({f"chunk:{item.chunk_id}" for item in selected_items}
+                                        | {f"fact:{claim['fact_id']}" for claim in claims})
+                        omitted_ids = adaptive_selected_ids - supplied_ids
+                        adaptive_coverage.update(selection_complete=not omitted_ids, selected_omitted_count=len(omitted_ids))
                     block = _source_block(sources, coverage, claims, relations, paths)
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
             lanes = {d.partition(":")[0] for d in degraded}

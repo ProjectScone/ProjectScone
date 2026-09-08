@@ -71,11 +71,14 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["loaded_code_identity_verified"] is False
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
-    expected = {"realtime/context.py", "retrieval/path_evidence.py", "providers/llm.py", "testing/generation_ablation.py"}
+    expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
+                "providers/evidence_assessor.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
     assert [row["structured_paths"] for row in report["results"]] == [False, True, True, False]
+    assert [row["variant"] for row in report["results"]] == ["baseline", "candidate", "candidate", "baseline"]
+    assert all(row["adaptive_retrieval"] is False for row in report["results"])
     assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in calls)
     assert all(row["prompt_bytes"] <= 16000 for row in report["results"])
     assert all(row["evidence_coverage"] == 1 for row in report["results"])
@@ -184,3 +187,81 @@ async def test_ordered_quotes_rejects_non_boolean(tmp_path):
     with pytest.raises(ValueError, match="ordered_quotes"):
         await run_ablation(fixture_file(tmp_path), output=tmp_path / "invalid.json", ordered_quotes=1)
     assert not (tmp_path / "invalid.json").exists()
+
+
+@pytest.mark.parametrize("baseline_paths", [False, True])
+@pytest.mark.parametrize("assessment_fails", [False, True])
+async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visible(tmp_path, monkeypatch,
+                                                                                   baseline_paths, assessment_fails):
+    from scone_memory.retrieval.adaptive import EvidenceDecision
+    from scone_memory.testing import generation_ablation
+    assessment_inputs = []
+    generation_inputs = []
+    class Assessor:
+        def __init__(self, endpoint, model, *, timeout):
+            assert (endpoint, model, timeout) == ("http://127.0.0.1:1234/v1", "local-assessor", 20)
+        async def assess(self, question, candidates):
+            assessment_inputs.append((question, candidates))
+            if assessment_fails:
+                raise RuntimeError("private provider failure")
+            return EvidenceDecision(status="sufficient", selected_ids=tuple(item.id for item in candidates))
+    class Streaming:
+        async def respond(self, messages):
+            generation_inputs.append(messages)
+            yield TextDelta("The probe uses 18 volts.")
+            yield ReplyCompleted()
+        async def aclose(self):
+            pass
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", Assessor, raising=False)
+    report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "adaptive.json",
+        endpoint="http://127.0.0.1:1234/v1", model_factory=Streaming, repeats=2, ordered_quotes=True,
+        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths)
+    assert report["state"] == "completed"
+    assert report["adaptive_model"] == "local-assessor"
+    assert report["adaptive_timeout_seconds"] == 20
+    assert report["assessment_timeout_seconds"] == 20
+    assert report["adaptive_rounds"] == 2
+    assert report["baseline_paths"] is baseline_paths
+    rows = report["results"]
+    assert [row["variant"] for row in rows] == ["baseline", "candidate", "candidate", "baseline"]
+    assert [row["adaptive_retrieval"] for row in rows] == [False, True, True, False]
+    assert [row["structured_paths"] for row in rows] == [baseline_paths, True, True, baseline_paths]
+    assert [row["ordered_quotes"] for row in rows] == [False, True, True, False]
+    assert len(assessment_inputs) == 2
+    assert all(row["status"] == "completed" for row in rows)
+    for row in rows:
+        if row["variant"] == "candidate":
+            assert row["context_receipt"]["adaptive_status"] == ("uncertain" if assessment_fails else "sufficient")
+            assert row["evidence_coverage"] == (0 if assessment_fails else 1)
+        else:
+            assert "adaptive_status" not in row["context_receipt"]
+            assert row["evidence_coverage"] == 1
+        assert row["scope_leaks"] == row["invalid_provenance"] == 0
+    assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in generation_inputs)
+    assert all("EVALUATION_ONLY_CANARY" not in question + "".join(item.text for item in candidates)
+               for question, candidates in assessment_inputs)
+    assert "private provider failure" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("options,match", [
+    ({"baseline_paths": 1}, "baseline_paths"),
+    ({"baseline_paths": True}, "adaptive_model"),
+    ({"adaptive_model": "local-assessor"}, "endpoint"),
+    ({"adaptive_model": " "}, "adaptive_model"),
+    ({"adaptive_model": True}, "adaptive_model"),
+    ({"adaptive_timeout": True}, "adaptive_timeout"),
+    ({"adaptive_timeout": "30"}, "adaptive_timeout"),
+    ({"adaptive_timeout": float("nan")}, "adaptive_timeout"),
+    ({"adaptive_timeout": 0.5}, "adaptive_timeout"),
+    ({"adaptive_timeout": 181}, "adaptive_timeout"),
+    ({"adaptive_rounds": True}, "adaptive_rounds"),
+    ({"adaptive_rounds": 1.5}, "adaptive_rounds"),
+    ({"adaptive_rounds": 0}, "adaptive_rounds"),
+    ({"adaptive_rounds": 5}, "adaptive_rounds"),
+])
+async def test_adaptive_options_validate_before_output_creation(tmp_path, options, match):
+    from scone_memory.testing.generation_ablation import run_ablation
+    output = tmp_path / "new-directory" / "invalid.json"
+    with pytest.raises(ValueError, match=match):
+        await run_ablation(fixture_file(tmp_path), output=output, **options)
+    assert not output.parent.exists()

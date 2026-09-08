@@ -29,6 +29,17 @@ from .reranking import candidate_is_retained
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact):[1-9][0-9]*$", max_length=64)]
 FollowupQuery = Annotated[str, Field(min_length=1, max_length=MAX_QUERY)]
+ASSESSMENT_FAILURE_REASONS = frozenset({
+    "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
+})
+
+
+class EvidenceAssessmentError(ValueError):
+    """Content-free assessment failure shared by model-neutral adapters."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("evidence assessment failed")
+        self.reason = reason if reason in ASSESSMENT_FAILURE_REASONS else "invalid_or_failed_assessment"
 
 
 class EvidenceCandidate(BaseModel):
@@ -315,6 +326,11 @@ class _Run:
                 raise
             except asyncio.TimeoutError:
                 raise
+            except EvidenceAssessmentError as error:
+                # Recheck the code: caller-owned adapters can mutate exceptions.
+                reason = error.reason if error.reason in ASSESSMENT_FAILURE_REASONS else "invalid_or_failed_assessment"
+                self.errors.append(reason)
+                return self.result({}, "uncertain")
             except Exception:
                 # Exceptions may embed prompts, endpoints or secret values.
                 self.errors.append("invalid_or_failed_assessment")

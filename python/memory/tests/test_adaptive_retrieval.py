@@ -14,7 +14,7 @@ from scone_memory.backends.sqlite import SqliteDocumentStore
 from scone_memory.core.models import Episode, Fact, RecallResult
 from scone_memory.core.ports import NewFact
 from scone_memory.retrieval.adaptive import (AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate,
-    EvidenceDecision, evidence_payload_bytes)
+    EvidenceDecision, EvidenceAssessmentError, evidence_payload_bytes)
 from scone_memory.retrieval.recall_scope import RecallScope
 
 STAMP = "2025-01-01T00:00:00Z"
@@ -412,3 +412,19 @@ def test_sufficient_cannot_request_more_queries_and_decision_fields_are_bounded(
         EvidenceDecision(status="uncertain", selected_ids=(), followup_queries=tuple(str(i) for i in range(13)))
     with pytest.raises(ValidationError):
         EvidenceCandidate(id="chunk:1", episode_id=0, text="text")
+
+
+@pytest.mark.parametrize("reason", ["assessment_timeout", "assessment_provider_failed", "invalid_assessment", "private error"])
+async def test_assessment_failure_receipt_preserves_only_safe_codes(memory: MemoryEngine, reason: str) -> None:
+    await memory.remember("alpha", "Aster depends on Beacon.", created_at=STAMP)
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        error = EvidenceAssessmentError(reason)
+        error.reason = reason  # A caller-owned adapter may bypass the constructor's sanitization.
+        raise error
+
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    expected = "invalid_or_failed_assessment" if reason == "private error" else reason
+    assert result.errors == (expected,)
+    assert result.status == "uncertain" and not result.recall.items and not result.recall.facts
+    assert "private error" not in result.model_dump_json()

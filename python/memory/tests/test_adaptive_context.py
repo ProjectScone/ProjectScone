@@ -1,0 +1,406 @@
+"""Adaptive conversation retrieval uses retained evidence without storing assessment."""
+
+import asyncio
+import copy
+import json
+from collections.abc import AsyncIterator, Callable
+
+import pytest
+
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.realtime.context import MemoryContext
+from scone_memory.realtime.events import ReplyCompleted, TextDelta
+from scone_memory.realtime.text import TextConversation
+from scone_memory.retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
+
+
+@pytest.fixture
+async def memory() -> MemoryEngine:
+    return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+
+class ScriptedAssessor:
+    def __init__(self, decide: Callable[[int, tuple[EvidenceCandidate, ...]], EvidenceDecision]) -> None:
+        self.decide = decide
+        self.calls: list[tuple[str, tuple[EvidenceCandidate, ...]]] = []
+
+    async def assess(self, question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        self.calls.append((question, candidates))
+        return self.decide(len(self.calls), candidates)
+
+
+def select_all(round_number: int, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+    return EvidenceDecision(status="sufficient", selected_ids=tuple(c.id for c in candidates))
+
+
+def retriever(memory: MemoryEngine, assessor: ScriptedAssessor) -> AdaptiveRetriever:
+    return AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0))
+
+
+def payload(request: list[dict[str, object]]) -> dict:
+    block = next(message["content"] for message in request
+                 if isinstance(message.get("content"), str) and "Scone retrieved source material" in message["content"])
+    assert isinstance(block, str)
+    return json.loads(block.split("\n", 1)[1])
+
+
+async def test_two_hop_followup_preserves_fixed_scope_and_only_selected_evidence(memory):
+    options = dict(kind="file", source="manuals/approved", created_at="2026-09-02T10:00:00Z", metadata={"team": "science"})
+    bridge = await memory.remember("alpha", "Juniper calibration depends on the Meridian reference.", **options)
+    endpoint = await memory.remember("alpha", "The Meridian reference is maintained by Celeste.", **options)
+    await memory.remember("alpha", "Juniper cafeteria serves scones.", **options)
+    for space, changes in [("beta", {}), ("alpha", {"metadata": {"team": "legal"}}),
+                           ("alpha", {"source": "private/manual"}),
+                           ("alpha", {"created_at": "2026-08-01T10:00:00Z"}),
+                           ("alpha", {"metadata": {"team": "science", "session_id": "current"}})]:
+        await memory.remember(space, "Juniper Meridian PRIVATE source", **(options | changes))
+
+    def decide(round_number, candidates):
+        assert all("PRIVATE" not in c.text for c in candidates)
+        useful = tuple(c.id for c in candidates if c.episode_id in {bridge.episode_id, endpoint.episode_id})
+        return EvidenceDecision(status="insufficient" if round_number == 1 else "sufficient", selected_ids=useful,
+                                followup_queries=("Who maintains the Meridian reference?",) if round_number == 1 else ())
+
+    assessor = ScriptedAssessor(decide)
+    where = {"team": "science"}
+    context = MemoryContext(memory, "alpha", "current", where=where, kind="file", source_prefix="manuals/",
+                            since="2026-09-01T00:00:00Z", until="2026-09-06T23:59:59Z",
+                            adaptive_retriever=retriever(memory, assessor))
+    where["team"] = "legal"
+    messages = [{"role": "user", "content": "Who maintains Juniper's calibration reference?"}]
+    request, receipt = await context.prepare(messages)
+    assert receipt["status"] == "prepared"
+    assert {r["episode_id"] for r in receipt["references"]} == {bridge.episode_id, endpoint.episode_id}
+    assert receipt["adaptive_status"] == "sufficient"
+    assert receipt["adaptive_round_count"] == 2 and receipt["adaptive_queries_used"] == 2
+    assert len(assessor.calls) == 2
+    assert [c[0] for c in assessor.calls] == [messages[0]["content"]] * 2
+    assert "cafeteria" not in request[0]["content"]
+    adaptive = payload(request)["coverage"]["adaptive"]
+    assert adaptive["assessment_status"] == "sufficient" and adaptive["assessment_basis"] == "model_judgment"
+    assert adaptive["verified_sufficiency"] is False and adaptive["bounded"] is True
+
+
+@pytest.mark.parametrize("status", ["insufficient", "uncertain"])
+async def test_missing_link_retains_useful_evidence_with_incomplete_coverage(memory, status):
+    await memory.remember("alpha", "Juniper calibration depends on Meridian; its maintainer is not recorded.")
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status=status, selected_ids=(candidates[0].id,)))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=retriever(memory, assessor)).prepare([
+        {"role": "user", "content": "Who maintains Juniper calibration?"}])
+    assert receipt["status"] == "prepared" and receipt["adaptive_status"] == status
+    assert receipt["references"] and receipt["low_confidence"] is None
+    coverage = payload(request)["coverage"]
+    assert coverage["adaptive"]["assessment_status"] == status
+    assert coverage["adaptive"]["assessment_basis"] == "bounded_retrieval_assessment"
+    assert coverage["complete_history"] is False
+    assert coverage["context_omitted_count"] == 0
+    assert "no_followup_queries" in receipt["adaptive_reasons"]
+
+
+async def test_changed_source_during_assessment_is_removed(memory):
+    episode = await memory.remember("alpha", "Juniper calibration uses Meridian.")
+
+    class DeletingAssessor:
+        async def assess(self, question, candidates):
+            await memory.forget("alpha", episode.episode_id)
+            return EvidenceDecision(status="sufficient", selected_ids=(candidates[0].id,))
+
+    adaptive = AdaptiveRetriever(memory, DeletingAssessor(), limits=AdaptiveLimits(timeout_s=1.0))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_status"] == "uncertain" and receipt["references"] == []
+    assert "stale_evidence" in receipt["adaptive_reasons"]
+
+
+async def test_failed_assessment_has_safe_receipt_and_never_falls_back(memory):
+    await memory.remember("alpha", "Juniper calibration PRIVATE source.")
+
+    def fail(_, candidates):
+        raise RuntimeError("PRIVATE model response and API key")
+
+    assessor = ScriptedAssessor(fail)
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=retriever(memory, assessor)).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_status"] == "uncertain"
+    assert receipt["adaptive_errors"] == ["invalid_or_failed_assessment"]
+    assert receipt["low_confidence"] is None and receipt["references"] == []
+    assert "PRIVATE" not in json.dumps(receipt)
+
+
+async def test_explicit_optout_preserves_existing_context_payload(memory):
+    await memory.remember("alpha", "Juniper calibration uses Meridian.")
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    ordinary, ordinary_receipt = await MemoryContext(memory, "alpha", "current").prepare(messages)
+    opted_out, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=None).prepare(messages)
+    assert opted_out == ordinary
+    assert not any(key.startswith("adaptive_") for key in receipt)
+    assert receipt["references"] == ordinary_receipt["references"]
+    assert payload(opted_out)["coverage"] == {"mode": "ranked_search"}
+
+
+@pytest.mark.parametrize("question,expected", [("Hello!", "skipped"), ("Catch me up", "prepared")])
+async def test_overview_and_social_routing_skip_assessor(memory, question, expected):
+    await memory.remember("alpha", "Juniper calibration completed yesterday. We are preparing the local microphone interface for testing.")
+    assessor = ScriptedAssessor(select_all)
+    _, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=retriever(memory, assessor)).prepare([
+        {"role": "user", "content": question}])
+    assert receipt["status"] == expected
+    assert not assessor.calls and "adaptive_status" not in receipt
+
+
+async def test_adaptive_cancellation_propagates(memory):
+    await memory.remember("alpha", "Juniper calibration uses Meridian.")
+    entered = asyncio.Event()
+
+    class WaitingAssessor:
+        async def assess(self, question, candidates):
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    adaptive = AdaptiveRetriever(memory, WaitingAssessor(), limits=AdaptiveLimits(timeout_s=1.0))
+    context = MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive)
+    task = asyncio.create_task(context.prepare([{"role": "user", "content": "Juniper calibration?"}]))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.parametrize("entrypoint", ["context", "conversation"])
+async def test_adaptive_rejects_other_engine_and_short_timeout(memory, entrypoint):
+    other = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    assessor = ScriptedAssessor(select_all)
+    make = (lambda **kwargs: MemoryContext(memory, "alpha", "current", **kwargs)) if entrypoint == "context" else (
+        lambda **kwargs: TextConversation(memory, "alpha", "current", PublicModel, **kwargs))
+    with pytest.raises(ValueError, match="same memory"):
+        make(adaptive_retriever=retriever(other, assessor))
+    with pytest.raises(ValueError, match="recall_timeout.*timeout_s"):
+        make(adaptive_retriever=AdaptiveRetriever(memory, assessor))
+    make(adaptive_retriever=AdaptiveRetriever(memory, assessor), recall_timeout=30.0)
+
+
+class PublicModel:
+    def __init__(self) -> None:
+        self.requests: list[list[dict[str, str]]] = []
+
+    async def respond(self, messages: list[dict[str, str]]) -> AsyncIterator[TextDelta | ReplyCompleted]:
+        self.requests.append(copy.deepcopy(messages))
+        yield TextDelta("Celeste maintains the Meridian reference.")
+        yield ReplyCompleted()
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_text_conversation_uses_adaptive_stage_and_stores_only_public_reply(memory):
+    await memory.remember("alpha", "Juniper calibration uses the Meridian reference maintained by Celeste.")
+    assessor = ScriptedAssessor(select_all)
+    model = PublicModel()
+    conversation = TextConversation(memory, "alpha", "current", lambda: model,
+                                    adaptive_retriever=retriever(memory, assessor), recall_timeout=2.0)
+    question = "Who maintains Juniper calibration?"
+    response = await conversation.reply(question)
+    assert response["memory_context"]["adaptive_status"] == "sufficient"
+    assert "model_judgment" in model.requests[0][1]["content"]
+    episodes = await memory.episodes("alpha", {"session_id": "current"})
+    assert [episode.content for episode in episodes] == [question, "Celeste maintains the Meridian reference."]
+    assert len(assessor.calls) == 1
+    assert all(candidate.episode_id != response["user_episode_id"] for candidate in assessor.calls[0][1])
+    await conversation.close()
+
+
+async def test_equal_deadlines_preserve_adaptive_timeout_diagnostics(memory):
+    await memory.remember("alpha", "Juniper calibration depends on Meridian.")
+
+    class WaitingAssessor:
+        async def assess(self, question, candidates):
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    adaptive = AdaptiveRetriever(memory, WaitingAssessor(), limits=AdaptiveLimits(timeout_s=1.0))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive, recall_timeout=1.0).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_status"] == "uncertain" and receipt["adaptive_truncated"] is True
+    assert receipt["adaptive_errors"] == ["timeout"]
+
+
+async def test_bounded_assessment_and_context_omissions_are_visible_to_model(memory):
+    for index in range(3):
+        await memory.remember("alpha", f"Juniper calibration note {index}: Meridian reference details remain incomplete.")
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status="insufficient",
+        selected_ids=tuple(c.id for c in candidates), followup_queries=("Meridian maintainer",)))
+    adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(max_rounds=1, timeout_s=1.0))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           limit=1, max_context_bytes=1800).prepare([
+        {"role": "user", "content": "Juniper calibration?"}])
+    assert receipt["status"] == "prepared" and receipt["context_bytes"] <= 1800
+    assert receipt["adaptive_truncated"] is True and receipt["omitted_count"] == 2
+    coverage = payload(request)["coverage"]
+    assert coverage["adaptive"]["truncated"] is True
+    assert coverage["adaptive"]["reasons"] == ["max_rounds"]
+    assert coverage["context_omitted_count"] == 2
+    assert coverage["adaptive"]["selection_complete"] is False
+    assert coverage["adaptive"]["selected_omitted_count"] == 2
+
+
+async def test_followup_retrieves_endpoint_missing_from_first_candidate_window(memory):
+    bridge = await memory.remember("alpha", "Juniper calibration depends on the Meridian reference.")
+    endpoint = await memory.remember("alpha", "The Meridian reference is maintained by Celeste.")
+    distractor = await memory.remember("alpha", "Juniper cafeteria serves scones.")
+
+    def decide(round_number, candidates):
+        if round_number == 1:
+            assert {c.episode_id for c in candidates} == {bridge.episode_id, distractor.episode_id}
+            return EvidenceDecision(status="insufficient", selected_ids=tuple(c.id for c in candidates if c.episode_id == bridge.episode_id),
+                                    followup_queries=("Who maintains the Meridian reference?",))
+        assert {c.episode_id for c in candidates} == {bridge.episode_id, endpoint.episode_id}
+        return EvidenceDecision(status="sufficient", selected_ids=tuple(c.id for c in candidates))
+
+    assessor = ScriptedAssessor(decide)
+    adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(candidate_limit=2, timeout_s=1.0))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Juniper calibration"}])
+    assert receipt["adaptive_status"] == "sufficient" and receipt["adaptive_round_count"] == 2
+    assert {s["episode_id"] for s in payload(request)["sources"]} == {bridge.episode_id, endpoint.episode_id}
+    assert receipt["adaptive_queries_used"] == 2
+
+
+async def test_context_rechecks_sources_after_adaptive_return(memory):
+    episode = await memory.remember("alpha", "Juniper calibration depends on Meridian.")
+
+    class DeleteAfterRetrieval(AdaptiveRetriever):
+        async def retrieve(self, *args, **kwargs):
+            result = await super().retrieve(*args, **kwargs)
+            await memory.forget("alpha", episode.episode_id)
+            return result
+
+    adaptive = DeleteAfterRetrieval(memory, ScriptedAssessor(select_all), limits=AdaptiveLimits(timeout_s=1.0))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["references"] == [] and receipt["omitted_count"] == 1
+
+
+async def test_adaptive_paths_connect_selected_facts_without_resurfacing_rejected_neighbor(memory):
+    facts, episodes = [], []
+    for subject, predicate, obj in [("juniper", "depends on", "meridian"),
+                                    ("meridian", "operated by", "celeste"),
+                                    ("celeste", "located in", "REJECTED_LOCATION")]:
+        quote = f"{subject} {predicate} {obj}."
+        episode = await memory.remember("alpha", quote)
+        facts.append(await memory.assert_fact("alpha", subject, predicate, obj,
+                                              source_episode_id=episode.episode_id, quote=quote))
+        episodes.append(episode)
+    selected_facts = {facts[0].fact_id, facts[1].fact_id}
+
+    def decide(_, candidates):
+        assert f"fact:{facts[2].fact_id}" in {candidate.id for candidate in candidates}
+        selected = tuple(candidate.id for candidate in candidates
+                         if candidate.id in {f"fact:{fact_id}" for fact_id in selected_facts}
+                         or (candidate.id.startswith("chunk:") and candidate.episode_id == episodes[0].episode_id))
+        return EvidenceDecision(status="sufficient", selected_ids=selected)
+
+    adaptive = retriever(memory, ScriptedAssessor(decide))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Juniper Meridian Celeste"}])
+    data = payload(request)
+    assert receipt["adaptive_status"] == "sufficient"
+    assert {claim["fact_id"] for claim in data["claims"]} == selected_facts
+    assert {source["episode_id"] for source in data["sources"]} == {episodes[0].episode_id}
+    assert data["paths"] == [{"fact_ids": [facts[0].fact_id, facts[1].fact_id], "steps": [
+        {"from_fact": facts[0].fact_id, "to_fact": facts[1].fact_id, "kind": "subject_object", "direction": "forward"}]}]
+    assert "REJECTED_LOCATION" not in json.dumps(data)
+    assert receipt["multihop_coverage"]["selection_restricted"] is True
+    assert receipt["multihop_coverage"]["selection_omitted_facts"] == 1
+    assert data["coverage"]["adaptive"]["selection_complete"] is True
+    assert data["coverage"]["adaptive"]["selected_omitted_count"] == 0
+
+
+async def test_byte_budget_reports_partial_delivery_of_sufficient_selection(memory):
+    for index in range(2):
+        await memory.remember("alpha", f"Juniper calibration note {index}: " + "Meridian reference details. " * 15)
+    adaptive = retriever(memory, ScriptedAssessor(select_all))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           max_context_bytes=1600).prepare(messages)
+    data = payload(request)
+    assert len(data["sources"]) == 1
+    assert receipt["adaptive_status"] == "sufficient"
+    assert data["coverage"]["adaptive"]["selection_complete"] is False
+    assert data["coverage"]["adaptive"]["selected_omitted_count"] == 1
+    assert data["coverage"]["adaptive"]["verified_sufficiency"] is False
+    assert len(request[0]["content"].encode()) == receipt["context_bytes"] <= 1600
+    complete, _ = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert len(payload(complete)["sources"]) == 2
+    assert payload(complete)["coverage"]["adaptive"]["selection_complete"] is True
+    assert payload(complete)["coverage"]["adaptive"]["selected_omitted_count"] == 0
+
+
+async def test_adaptive_graph_failure_never_supplies_deleted_selected_source(memory, monkeypatch):
+    episode = await memory.remember("alpha", "Juniper calibration depends on Meridian.")
+
+    class DeleteAfterRetrieval(AdaptiveRetriever):
+        async def retrieve(self, *args, **kwargs):
+            result = await super().retrieve(*args, **kwargs)
+            await memory.forget("alpha", episode.episode_id)
+            return result
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("PRIVATE graph failure")
+
+    monkeypatch.setattr("scone_memory.realtime.context.build_query_evidence_graph", unavailable)
+    adaptive = DeleteAfterRetrieval(memory, ScriptedAssessor(select_all), limits=AdaptiveLimits(timeout_s=1.0))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["references"] == [] and receipt["omitted_count"] == 1
+    assert receipt["evidence_graph_status"] == "unavailable"
+    assert "PRIVATE" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("reason", ["assessment_timeout", "assessment_provider_failed", "invalid_assessment"])
+async def test_typed_assessment_errors_preserve_safe_native_receipt(memory, reason):
+    from scone_memory.retrieval.adaptive import EvidenceAssessmentError
+
+    await memory.remember("alpha", "Juniper calibration PRIVATE source.")
+
+    def fail(_, candidates):
+        raise EvidenceAssessmentError(reason)
+
+    adaptive = retriever(memory, ScriptedAssessor(fail))
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_status"] == "uncertain" and receipt["adaptive_errors"] == [reason]
+    assert receipt["references"] == [] and "PRIVATE" not in json.dumps(receipt)
+
+
+async def test_changed_selected_fact_cannot_return_through_expansion_under_same_id(memory):
+    first = await memory.remember("alpha", "juniper depends on meridian.")
+    second = await memory.remember("alpha", "meridian operated by old. meridian operated by new.")
+    stable = await memory.assert_fact("alpha", "juniper", "depends on", "meridian",
+                                     source_episode_id=first.episode_id, quote="juniper depends on meridian.")
+    changed = await memory.assert_fact("alpha", "meridian", "operated by", "old",
+                                      source_episode_id=second.episode_id, quote="meridian operated by old.")
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status="sufficient",
+        selected_ids=tuple(candidate.id for candidate in candidates if candidate.id.startswith("fact:"))))
+
+    class ReplaceAfterRetrieval(AdaptiveRetriever):
+        async def retrieve(self, *args, **kwargs):
+            result = await super().retrieve(*args, **kwargs)
+            await memory.documents.update_fact(changed.model_copy(update={"object": "new", "quote": "meridian operated by new."}))
+            return result
+
+    adaptive = ReplaceAfterRetrieval(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "juniper meridian"}])
+    data = payload(request)
+    assert {claim["fact_id"] for claim in data["claims"]} == {stable.fact_id}
+    assert "meridian operated by new." not in json.dumps(data)
+    assert data["coverage"]["adaptive"]["selection_complete"] is False
+    assert data["coverage"]["adaptive"]["selected_omitted_count"] == 1
+    assert receipt["multihop_coverage"]["selection_omitted_facts"] == 1

@@ -10,15 +10,12 @@ import math
 from typing import TYPE_CHECKING
 
 from ..retrieval.adaptive import EvidenceCandidate, EvidenceDecision
+from ..retrieval.adaptive import EvidenceAssessmentError as EvidenceAssessmentError
 from .llm import OpenAICompatibleChat
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 
 if TYPE_CHECKING:
     import httpx
-
-
-class EvidenceAssessmentError(ValueError):
-    """Sanitized provider/decision failure; raw source/model text is not exposed."""
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -89,6 +86,12 @@ class SelfHostedEvidenceAssessor:
                 "and no followup queries. Return only the requested decision fields, not an answer.",
                 payload, schema, max_tokens=1024,
             )
+        except Exception as error:
+            import httpx
+            cause = error.__cause__ or error
+            reason = "assessment_timeout" if isinstance(cause, (httpx.TimeoutException, TimeoutError)) else "assessment_provider_failed"
+            raise EvidenceAssessmentError(reason) from None
+        try:
             if len(response.encode()) > 16000:
                 raise ValueError("assessment response exceeds byte limit")
             raw = json.loads(response, object_pairs_hook=_unique_object)
@@ -107,4 +110,4 @@ class SelfHostedEvidenceAssessor:
                 raise ValueError("sufficient decision must select evidence and finish")
             return decision
         except Exception:
-            raise EvidenceAssessmentError("evidence assessment failed") from None
+            raise EvidenceAssessmentError("invalid_assessment") from None
