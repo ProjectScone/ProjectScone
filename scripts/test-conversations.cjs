@@ -11,11 +11,19 @@ let browser;
 before(async()=>{browser=await playwright[browserName].launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,...(browserName==='chromium'?{args:['--disable-gpu']}: {})});});
 after(async()=>{await browser?.close();});
 
+async function visitSettled(page,route){
+  // Layout comparisons replace the document only after discovery settles;
+  // lifecycle/cancellation tests below exercise in-flight SPA navigation.
+  await page.waitForLoadState('networkidle');
+  await page.goto(new URL(route,page.url()).href);
+  await page.locator('h1').waitFor();
+  await page.waitForLoadState('networkidle');
+}
+
 for(const mobile of [false,true])test(`product navigation remains readable and shares the workspace surface, mobile=${mobile}`,async t=>{
   const {page}=await fixture(t,{mobile});
-  for(const route of ['/memory','/playground','/conversations','/learn']){
-    await page.goto(new URL(route,page.url()).href);
-    await page.locator('h1').waitFor();
+  for(const route of ['/memory','/playground','/conversations']){
+    await visitSettled(page,route);
     const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
     const surface=await page.locator('.server-strip').evaluate(el=>getComputedStyle(el).backgroundColor);
     assert.equal(await page.locator('.topbar').evaluate(el=>getComputedStyle(el).backgroundColor),surface,'Product navigation must not introduce an unrelated theme.');
@@ -31,9 +39,8 @@ for(const mobile of [false,true])test(`product navigation remains readable and s
 test('workspace pages keep the same title hierarchy and conversation rail alignment',async t=>{
   const {page}=await fixture(t);
   const styles=[];
-  for(const route of ['/memory','/playground','/conversations','/learn']){
-    await page.goto(new URL(route,page.url()).href);
-    await page.locator('h1').waitFor();
+  for(const route of ['/memory','/playground','/conversations']){
+    await visitSettled(page,route);
     styles.push(await page.locator('h1').evaluate(el=>{
       const s=getComputedStyle(el);
       return {size:s.fontSize,weight:s.fontWeight,line:s.lineHeight,color:s.color};
@@ -41,7 +48,7 @@ test('workspace pages keep the same title hierarchy and conversation rail alignm
     if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`frame-${route.slice(1)}.png`),fullPage:true});
   }
   for(const style of styles)assert.deepEqual(style,styles[0],'Page navigation must not change the product title scale.');
-  await page.goto(new URL('/conversations',page.url()).href);
+  await visitSettled(page,'/conversations');
   const rail=await page.locator('.conversation-list').boundingBox();
   const strip=await page.locator('.server-strip').boundingBox();
   const heading=await page.locator('h1').boundingBox();
@@ -50,10 +57,17 @@ test('workspace pages keep the same title hierarchy and conversation rail alignm
   assert.ok(heading.x>rail.x+rail.width,'Heading belongs to the working pane, not above session navigation.');
 });
 
-test('application navigation and connection remain reachable while a long workspace scrolls',async t=>{
+test('public documentation keeps a reachable workspace entry and the workspace keeps its connection controls',async t=>{
   const {page}=await fixture(t);
-  await page.goto(new URL('/learn/graph-memory',page.url()).href);
-  await page.locator('h1').waitFor();
+  await visitSettled(page,'/learn/graph-memory');
+  assert.equal(await page.locator('.server-strip').count(),0,'Public documentation does not present private connection state.');
+  assert.equal(await page.getByRole('button',{name:'Memory connection',exact:true}).count(),0);
+  const entry=page.getByRole('link',{name:'Open workspace',exact:false});
+  await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
+  const entryBox=await entry.boundingBox();
+  assert.ok(entryBox.y>=0&&entryBox.y+entryBox.height<=900,'The documentation header retains a visible route into the workspace.');
+  await entry.click();await page.waitForURL(url=>url.pathname==='/memory');await page.locator('h1').waitFor();
+  await page.locator('main').evaluate(el=>{el.style.minHeight='2200px';});
   await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
   const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
   for(const link of await nav.getByRole('link').all()){
@@ -66,6 +80,23 @@ test('application navigation and connection remain reachable while a long worksp
   await connect.click();
   await page.getByRole('dialog').waitFor();
   assert.match(await page.getByRole('dialog').innerText(),/Memory connection/);
+});
+
+for(const mobile of [false,true])test(`public documentation retains its article hierarchy and usable navigation, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  await visitSettled(page,'/learn');
+  const header=page.getByRole('banner',{name:'Scone documentation'});
+  assert.equal(await header.evaluate(el=>getComputedStyle(el).backgroundColor),await page.locator('.documentation').evaluate(el=>getComputedStyle(el).backgroundColor));
+  const entry=header.getByRole('link',{name:'Open workspace',exact:false});
+  assert.equal(await entry.evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.ok((await entry.boundingBox()).height>=44);
+  assert.ok(await page.locator('h1').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=32),'Public articles retain their deliberate title scale.');
+  if(mobile)await page.getByRole('button',{name:'Browse documentation',exact:false}).click();
+  const nav=page.getByRole('navigation',{name:'Scone concepts',exact:true});
+  await nav.getByRole('link',{name:'Graph memory',exact:true}).click();
+  await page.waitForURL(/\/learn\/graph-memory$/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(await page.locator('.server-strip').count(),0);
 });
 
 for(const mobile of [false,true])test(`keyboard skip link stays above the application frame, mobile=${mobile}`,async t=>{
@@ -828,7 +859,9 @@ test('closed session deletion requires confirmation and removes the saved sessio
   await dialog.getByLabel('I understand this cannot be undone').check();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'scone-delete-mobile.png'),fullPage:true});
+  const discoveryRefresh=page.waitForRequest(request=>new URL(request.url()).pathname==='/v1/capabilities');
   await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await discoveryRefresh;
   await page.waitForURL(/\/conversations$/);
   await page.getByText('Conversation deleted.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('link',{name:/previous/}).count(),0);

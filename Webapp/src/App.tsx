@@ -15,7 +15,7 @@ import {SourceNavigation} from './memory/SourceNavigation';
 function RouteFrame({api,enabled,...props}: ComponentProps<typeof AppFrame>&{api:ApiClient;enabled:boolean}) {
   const {pathname}=useLocation();
   if(conceptPages.some(page=>page.path===pathname.replace(/\/$/,''))) return <>{props.children}</>;
-  return <SourceNavigation key={pathname} api={api} enabled={enabled}><AppFrame {...props}/></SourceNavigation>;
+  return <SourceNavigation routeKey={pathname} api={api} enabled={enabled}><AppFrame {...props}/></SourceNavigation>;
 }
 
 export function App({ initialKey }: { initialKey: string }) {
