@@ -1,7 +1,8 @@
 import {readScope,type RecallScope} from './recall-scope.ts';
+import {readPersonaIdentity,type PersonaIdentity} from './personas.ts';
 export type SessionState = 'created'|'running'|'stopping'|'ended'|'failed'|'interrupted';
-export interface ConversationSession {session_id:string;space:string;state:SessionState;revision:number;created_at:string;active_request_id?:string|null;latest_request_id?:string|null;recall_scope?:RecallScope}
-export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean;transcript_pagination:boolean;recall_scope:boolean;streaming:boolean}
+export interface ConversationSession {session_id:string;space:string;state:SessionState;mode?:'text'|'voice';revision:number;created_at:string;active_request_id?:string|null;latest_request_id?:string|null;recall_scope?:RecallScope;persona?:PersonaIdentity|null}
+export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean;transcript_pagination:boolean;recall_scope:boolean;streaming:boolean;voice:boolean;personas:number}
 export interface Episode {episode_id:number;content:string;metadata:Record<string,unknown>;created_at?:string}
 export interface Transcript {episodes:Episode[];has_more:boolean;next_before:string|null}
 export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[]}}
@@ -15,16 +16,24 @@ function text(value:unknown):string{if(typeof value!=='string')throw Error('Inva
 export function capabilities(value:unknown):Capabilities{
   const v=record(value);
   if(v.schema_version!==1||typeof v.text_configured!=='boolean'||v.reply_transport!=='poll'||(v.reply_replay!=='process_lifetime'&&v.reply_replay!=='durable_receipts'))throw Error('This conversation service has an unsupported capability contract.');
+  if(v.personas!==undefined&&(typeof v.personas!=='number'||!Number.isSafeInteger(v.personas)||v.personas<0))throw Error('Invalid persona capability');
   const stream=v.text_stream as Record<string,unknown>|null|undefined;
   const streaming=v.streaming===true&&stream?.transport==='sse'&&stream.replay==='active_window'
     &&typeof stream.max_bytes==='number'&&Number.isSafeInteger(stream.max_bytes)&&stream.max_bytes>0
     &&typeof stream.max_chunks==='number'&&Number.isSafeInteger(stream.max_chunks)&&stream.max_chunks>0;
-  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true,turn_cancellation:v.turn_cancellation===true,transcript_pagination:v.transcript_pagination===true,recall_scope:v.recall_scope===true,streaming};
+  const audio=v.voice_stream as Record<string,unknown>|null|undefined;
+  // Version one has fixed framing and bounds. A boolean alone cannot enable microphone access.
+  const voice=v.voice===true&&audio?.schema_version===1&&audio.transport==='websocket'
+    &&audio.protocol==='scone-pcm-v1'&&audio.authentication==='hello'&&audio.reconnect===false
+    &&audio.pcm==='s16le'&&Array.isArray(audio.input_channels)&&audio.input_channels.includes(1)
+    &&audio.min_sample_rate===8000&&audio.max_sample_rate===192000&&audio.max_input_frame_bytes===64000;
+  return {text_configured:v.text_configured,session_deletion:v.session_deletion===true,turn_cancellation:v.turn_cancellation===true,transcript_pagination:v.transcript_pagination===true,recall_scope:v.recall_scope===true,streaming,voice,personas:v.personas as number|undefined??0};
 }
 export function session(value:unknown):ConversationSession{
   const v=record(value);
   if(!states.includes(String(v.state)))throw Error('Unknown conversation state');
-  return {session_id:identifier(v.session_id),space:text(v.space),state:v.state as SessionState,revision:integer(v.revision),created_at:text(v.created_at),active_request_id:v.active_request_id==null?null:identifier(v.active_request_id),latest_request_id:v.latest_request_id==null?null:identifier(v.latest_request_id),recall_scope:v.recall_scope===undefined?undefined:readScope(v.recall_scope)};
+  if(v.mode!==undefined&&v.mode!=='text'&&v.mode!=='voice')throw Error('Unknown conversation mode');
+  return {session_id:identifier(v.session_id),space:text(v.space),state:v.state as SessionState,mode:v.mode as 'text'|'voice'|undefined,revision:integer(v.revision),created_at:text(v.created_at),active_request_id:v.active_request_id==null?null:identifier(v.active_request_id),latest_request_id:v.latest_request_id==null?null:identifier(v.latest_request_id),recall_scope:v.recall_scope===undefined?undefined:readScope(v.recall_scope),persona:v.persona==null?v.persona as null|undefined:readPersonaIdentity(v.persona)};
 }
 export function sessionPage(value:unknown):{items:ConversationSession[];next_after:string|null;has_more:boolean}{
   const v=record(value);if(!Array.isArray(v.items)||v.items.length>200||typeof v.has_more!=='boolean')throw Error('Invalid session list');

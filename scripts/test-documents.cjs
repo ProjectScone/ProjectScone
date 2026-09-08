@@ -156,7 +156,7 @@ test('opening a later mobile source brings its inspector into view and closing r
 });
 test('older servers do not expose or probe the unsupported inventory',async t=>{
   const {page,requests}=await fixture(t,{supported:false});
-  await page.getByText(/This server does not support this page/).waitFor();
+  await page.getByRole('heading',{name:'This page is not available on this server',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Documents',exact:true}).count(),0);
   assert.equal(requests.some(r=>r.url.pathname==='/v1/sources'),false);
 });

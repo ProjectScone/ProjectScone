@@ -100,7 +100,7 @@ export function layoutGrowth(nodes:ViewNode[]) {
 
 // Ownership is a presentation grouping, not a new evidence relationship.
 // Multi-source records get one deterministic home; their real links remain.
-function owners(nodes: EvidenceNode[], edges: EvidenceEdge[]) {
+export function owners(nodes: EvidenceNode[], edges: EvidenceEdge[]) {
   const known = new Set(nodes.map(n => n.id));
   const result = new Map<string, string>();
   const adjacency = new Map<string, string[]>();
@@ -178,7 +178,7 @@ export function projectGraph(nodes: EvidenceNode[], edges: EvidenceEdge[], scope
   return {nodes:shown, edges:[...links.values()], total, page, pages, grouped:replacements.size > 0,mode};
 }
 
-export function layoutGraph(nodes: ViewNode[], depth: boolean) {
+export function layoutGraph(nodes: ViewNode[]) {
   const points = new Map<string, {x:number;y:number}>();
   const lanes = [...new Set(nodes.map(n => n.owner))].sort();
   let top = 0;
@@ -196,7 +196,7 @@ export function layoutGraph(nodes: ViewNode[], depth: boolean) {
       const expanded = counts[n.category] > 3;
       const x = offsets[n.category] + (expanded ? row % 4 * 264 : 0);
       const y = top + (expanded ? Math.floor(row / 4) : row) * 140;
-      points.set(n.id, depth ? {x:x + (lane === 'unattributed' ? 0 : lanes.indexOf(lane) * 12),y:y + n.category * 14} : {x,y});
+      points.set(n.id, {x,y});
     }
     const bottom = Math.max(top, ...members.map(n => points.get(n.id)!.y));
     top = bottom + 172;

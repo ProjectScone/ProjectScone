@@ -265,6 +265,47 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
     };
     let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
     let console = scone::serve::console_router(engine, config(), "fixture-token");
+    for path in [
+        "/memory",
+        "/playground",
+        "/conversations",
+        "/conversations/example-session",
+    ] {
+        let response = console
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "workspace deep link {path}"
+        );
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("fixture-token"));
+    }
+    for path in [
+        "/v1/not-a-route",
+        "/unrelated-page",
+        "/conversations/id/unknown-child",
+    ] {
+        let response = console
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "unknown path {path}"
+        );
+    }
     for path in scone::serve::LEARN_PAGES {
         for method in ["GET", "HEAD"] {
             let response = console
@@ -1102,6 +1143,11 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     routes.dedup();
 
     let frozen = [
+        // Exact HTML entry points do not add native product API capabilities.
+        "/conversations",
+        "/conversations/{session_id}",
+        "/memory",
+        "/playground",
         "/v1/capabilities",
         "/v1/episodes",
         "/v1/episodes/{id}",

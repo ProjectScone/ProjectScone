@@ -33,7 +33,9 @@
       "status.read": true,
       "episodes.attachments": true,
       "episodes.list": true,
-      "facts.links": true
+      "facts.links": true,
+      "integrity.read": true,
+      "profile.read": true
     }
   }
 }

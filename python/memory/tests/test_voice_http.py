@@ -77,6 +77,38 @@ def create_voice(client, request_id="v1", **extra):
     return client.post("/v1/conversations", json={"request_id": request_id, "capture": True, "persona": "helper",
                                                   "mode": "voice", **extra})
 
+def test_voice_discovery_negotiates_the_browser_protocol(service):
+    body = service.get('/v1/conversations/capabilities').json()
+    assert body.get('voice_stream') == {
+        'schema_version': 1, 'transport': 'websocket', 'protocol': 'scone-pcm-v1',
+        'authentication': 'hello', 'reconnect': False, 'pcm': 's16le',
+        'input_channels': [1, 2], 'min_sample_rate': 8000,
+        'max_sample_rate': 192000, 'max_input_frame_bytes': 64000,
+    }
+
+def test_recreated_waiting_voice_cannot_attach_to_a_changed_persona(tmp_path):
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    original = catalog()
+    journal = tmp_path / 'waiting.db'
+    app = create_conversation_app(engine, KEYS, journal, None, catalog=original)
+    with TestClient(app) as client:
+        client.headers.update(AUTH)
+        receipt = create_voice(client).json()
+    changed = Persona.model_validate({**HELPER, 'instructions': 'A different instruction set.'})
+    registry = ProviderRegistry(reply={('stub', 'echo'): Model}, transcription={('stub', 'ears'): Recognizer},
+                                speech={('stub', 'mouth', 'alto'): Synthesizer})
+    newer = bind_catalog([changed], registry)
+    Model.seen.clear()
+    with TestClient(create_conversation_app(engine, KEYS, journal, None, catalog=newer)) as client:
+        client.headers.update(AUTH)
+        with client.websocket_connect(f"/v1/conversations/{receipt['session_id']}/audio") as socket:
+            socket.send_text(json.dumps(HELLO))
+            refusal = json.loads(socket.receive_text())
+            assert refusal['type'] == 'error' and 'waiting' in refusal['reason']
+        after = client.get(f"/v1/conversations/{receipt['session_id']}").json()
+        assert after['state'] == 'interrupted' and after['revision'] > receipt['revision']
+        assert Model.seen == []
+
 
 def test_a_voice_session_needs_a_persona_and_waits_for_its_audio(service):
     ready = service.get("/v1/conversations/capabilities").json()

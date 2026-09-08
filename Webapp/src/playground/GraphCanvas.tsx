@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { EvidenceEdge, EvidenceNode } from '../types';
 import { projectGraph, projectGrowth, layoutGrowth, layoutGraph, layoutNetwork, CARD_WIDTH, CARD_HEIGHT } from './graph-layout';
 import { LayoutPicker, type GraphLayout } from './LayoutPicker';
+import { DepthCanvas } from './DepthCanvas';
 
 type Point = { x: number; y: number };
 const categories = ['Session', 'Interactions', 'Memories', 'Claims & recall'];
@@ -16,7 +17,11 @@ function RecordGlyph({ category }: { category: number }) {
   return <path d={paths[category] || paths[3]} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />;
 }
 
-export function GraphCanvas({ nodes, edges, selected, select, depth, layout, setLayout }: { nodes: EvidenceNode[]; edges: EvidenceEdge[]; selected: string | null; select: (id: string) => void; depth: boolean; layout:GraphLayout; setLayout:(value:GraphLayout)=>void }) {
+type GraphProps = { nodes: EvidenceNode[]; edges: EvidenceEdge[]; selected: string | null; select: (id: string) => void; depth: boolean; layout:GraphLayout; setLayout:(value:GraphLayout)=>void };
+export function GraphCanvas(props:GraphProps) {
+  return props.depth&&props.layout!=='growth'?<DepthCanvas {...props}/>:<FlatGraphCanvas {...props}/>;
+}
+function FlatGraphCanvas({ nodes, edges, selected, select, layout, setLayout }: GraphProps) {
   const svg = useRef<SVGSVGElement>(null);
   const [group, setGroup] = useState<string | undefined>();
   const [page, setPage] = useState(0);
@@ -31,11 +36,9 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
   const view = useMemo(() => layout==='growth'?projectGrowth(nodes,edges,page):projectGraph(nodes, edges, {group,page,focus}), [nodes,edges,group,page,focus,layout]);
   const points = useMemo(() => {
     if(layout==='growth')return layoutGrowth(view.nodes);
-    if(layout==='flow')return layoutGraph(view.nodes,depth);
-    const result=layoutNetwork(view.nodes,view.edges,layout);
-    if(depth)for(const n of view.nodes){const p=result.get(n.id)!;p.x+=n.category*20;p.y=p.y*.75-n.category*24;}
-    return result;
-  }, [view.nodes,view.edges,depth,layout]);
+    if(layout==='flow')return layoutGraph(view.nodes);
+    return layoutNetwork(view.nodes,view.edges,layout);
+  }, [view.nodes,view.edges,layout]);
   const topology = [...points].map(([id,p])=>`${id}:${p.x}:${p.y}`).sort().join('|');
   const active = keyboardNode || hovered || selected;
   const lanes = [...new Set(view.nodes.map(n => n.owner))].map((owner, index) => {
@@ -61,7 +64,7 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
     const observer=new ResizeObserver(entries=>{const r=entries[0]?.contentRect;if(r)measure(r.width,r.height);});
     if(svg.current)observer.observe(svg.current);return()=>observer.disconnect();
   }, []);
-  useLayoutEffect(() => { fitted.current = false; }, [depth,layout,group,page,focus,topology]);
+  useLayoutEffect(() => { fitted.current = false; }, [layout,group,page,focus,topology]);
   useEffect(() => { if (!nodes.length) {setGroup(undefined);setFocus(undefined);setPage(0);} }, [nodes.length]);
   useLayoutEffect(() => { if (!fitted.current) fit(); }, [fit]);
   const zoomBy = useCallback((factor: number) => { setCamera(c => { const zoom = Math.max(.05, Math.min(2.5, c.zoom * factor)); return { zoom, x: size.width / 2 - (size.width / 2 - c.x) * zoom / c.zoom, y: size.height / 2 - (size.height / 2 - c.y) * zoom / c.zoom }; }); }, [size]);
@@ -97,8 +100,8 @@ export function GraphCanvas({ nodes, edges, selected, select, depth, layout, set
         {layout==='radial'&&<g className="radial-guides" aria-hidden="true">{lanes.map(lane=>{
           const members=view.nodes.filter(n=>n.owner===lane.owner),anchor=members.find(n=>n.kind==='session');
           if(!anchor||members.length<3)return null;
-          const center=points.get(anchor.id)!,radius=Math.max(...members.map(n=>{const p=points.get(n.id)!;return Math.hypot(p.x-center.x,(p.y-center.y)/(depth?.75:1));}));
-          return <g key={lane.owner}><ellipse cx={center.x+112} cy={center.y+54} rx={radius} ry={radius*(depth?.75:1)}/><text x={center.x+112} y={center.y+54-radius*(depth?.75:1)-25} textAnchor="middle">{clip(lane.label,24)} · layout guide</text></g>;
+          const center=points.get(anchor.id)!,radius=Math.max(...members.map(n=>{const p=points.get(n.id)!;return Math.hypot(p.x-center.x,p.y-center.y);}));
+          return <g key={lane.owner}><ellipse cx={center.x+112} cy={center.y+54} rx={radius} ry={radius}/><text x={center.x+112} y={center.y+54-radius-25} textAnchor="middle">{clip(lane.label,24)} · layout guide</text></g>;
         })}</g>}
         {!network && <g className="graph-lanes" aria-hidden="true">{lanes.map(lane=><g key={lane.owner}><rect x={lane.x} y={lane.y} width={lane.width} height={lane.height} rx={16} /><text x={lane.x+14} y={lane.y+19}>{String(lane.index+1).padStart(2,'0')} / {clip(lane.label,26)} · {lane.count} records in view</text></g>)}</g>}
         <g id="edges">{view.edges.map((edge, i) => {

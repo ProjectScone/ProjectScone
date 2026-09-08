@@ -39,10 +39,10 @@ test('adjacent radial clusters reserve clearance for node circles and labels',()
     for(let i=0;i<11;i++){nodes.push({id:`t${s}-${i}`,kind:'turn',label:'Recorded interaction'});edges.push({source:`s${s}`,target:`t${s}-${i}`,kind:'has'});}
   }
   const view=projectGraph(nodes,edges),points=layoutNetwork(view.nodes,view.edges,'radial');
-  for(const depth of [false,true])for(let i=0;i<view.nodes.length;i++)for(let j=i+1;j<view.nodes.length;j++){
+  for(let i=0;i<view.nodes.length;i++)for(let j=i+1;j<view.nodes.length;j++){
     const a=view.nodes[i],b=view.nodes[j],pa=points.get(a.id)!,pb=points.get(b.id)!;
-    const dx=pa.x-pb.x+(depth?(a.category-b.category)*20:0);
-    const dy=(pa.y-pb.y)*(depth?.75:1)-(depth?(a.category-b.category)*24:0);
+    const dx=pa.x-pb.x;
+    const dy=pa.y-pb.y;
     assert.ok(Math.abs(dx)>=165||Math.abs(dy)>=115,'node label envelopes overlap');
   }
 });
@@ -96,7 +96,7 @@ test('crowded graph aggregates by session without losing records or inventing li
   assert.equal(view.edges.length, 4);
   assert.ok(view.edges.every(e => e.count === 60 && e.grouped));
   assert.equal(raw.nodes.length, 244);
-  const points = [...layoutGraph(view.nodes, false).values()];
+  const points = [...layoutGraph(view.nodes).values()];
   assert.ok(Math.max(...points.map(p => p.y)) < 600);
 });
 
@@ -113,13 +113,13 @@ test('group pages expose real records and retain their real incident edges', () 
   assert.ok(first.edges.every(e => raw.edges.some(r => r.source === e.source && r.target === e.target)));
 });
 
-test('small graphs keep exact links; depth changes positions, never evidence', () => {
+test('small graphs keep exact recorded links without grouping', () => {
   const nodes: EvidenceNode[] = [{id:'s',kind:'session',label:'S'}, {id:'t',kind:'turn',label:'Prompt'}, {id:'e',kind:'episode',label:'Evidence'}];
   const edges = [{source:'s',target:'t',kind:'has'}, {source:'t',target:'e',kind:'captured_as'}];
   const view = projectGraph(nodes, edges);
   assert.equal(view.nodes.length, 3);
   assert.deepEqual(view.edges.map(e => [e.source,e.target]), [['s','t'],['t','e']]);
-  assert.notDeepEqual([...layoutGraph(view.nodes, false)], [...layoutGraph(view.nodes, true)]);
+  assert.ok(view.nodes.every(n=>!n.members));
 });
 
 test('focus retains the selected evidence and only its real neighborhood', () => {
@@ -133,8 +133,8 @@ test('expanded columns cannot overlap neighboring record types', () => {
   const nodes: EvidenceNode[] = [{id:'s',kind:'session',label:'S'},...Array.from({length:6},(_,i)=>({id:`t${i}`,kind:'turn' as const,label:'Turn'})),{id:'e',kind:'episode',label:'Source'}];
   const edges = nodes.slice(1).map(n=>({source:'s',target:n.id,kind:'has'}));
   const view=projectGraph(nodes,edges);
-  for(const depth of [false,true]) {
-    const boxes=[...layoutGraph(view.nodes,depth).values()];
+  {
+    const boxes=[...layoutGraph(view.nodes).values()];
     for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++)assert.ok(Math.abs(boxes[i].x-boxes[j].x)>=CARD_WIDTH||Math.abs(boxes[i].y-boxes[j].y)>=CARD_HEIGHT,'record cards overlap');
   }
 });
