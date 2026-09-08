@@ -21,7 +21,7 @@ def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
              "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
-             "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
+             "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py", "realtime/tool_answer.py",
              "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py",
              "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
              "providers/structured_tool_chat.py", "providers/tool_synthesis.py",
@@ -45,12 +45,13 @@ from ..memory.engine import MemoryEngine, normalise_time
 from ..providers.llm import OpenAICompatibleTextModel
 from ..providers.tool_chat import SelfHostedToolChat
 from ..providers.structured_tool_chat import SelfHostedStructuredToolChat
-from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolModel, ToolStep
+from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel, ToolStep
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..providers.evidence_assessor import SelfHostedEvidenceAssessor
 from ..providers.self_hosted import validate_self_hosted_identifier, validate_self_hosted_endpoint
 from ..realtime.context import ContextReceipt, MemoryContext, _PREFIX
 from ..realtime.answer_review import AnswerReviewLimits, review_answer
+from ..realtime.tool_answer import review_tool_answer
 from ..realtime.review_evidence import prepare_review_evidence
 from ..providers.answer_reviewer import SelfHostedAnswerReviewer
 from ..providers.evidence_selector import SelfHostedEvidenceSelector
@@ -318,7 +319,9 @@ def _tool_limits(timeout: float) -> ToolLoopLimits:
 
 
 async def _tool_reply(engine: MemoryEngine, case: GenerationCase, labels: dict[int, str],
-                      provider: ToolModel, timeout: float, initial_search: bool) -> dict[str, object]:
+                      provider: ToolModel, timeout: float, initial_search: bool, *,
+                      reviewer: SelfHostedAnswerReviewer | None = None, review_timeout: float = 20.0,
+                      review_policy: str = 'report') -> dict[str, object]:
     requests: list[dict[str, object]] = []
     observed_packets: dict[str, str] = {}
 
@@ -352,6 +355,9 @@ async def _tool_reply(engine: MemoryEngine, case: GenerationCase, labels: dict[i
                 'outcomes':[outcome.model_dump(mode='json') for outcome in result.tool_outcomes],
                 'source_status':result.source_status, 'evidence_ids':list(result.evidence_ids),
                 'verified_accuracy':False})
+        if reviewer is not None:
+            row['draft_total_ms'] = round((time.perf_counter() - started) * 1000, 3)
+            await _review_tool_result(case, result, row, reviewer, review_timeout, review_policy)
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -359,6 +365,8 @@ async def _tool_reply(engine: MemoryEngine, case: GenerationCase, labels: dict[i
     row.update(total_ms=round((time.perf_counter()-started)*1000,3),
                generation_provider_calls=len(requests), model_requests=requests,
                observed_tool_bytes=sum(len(packet.encode()) for packet in observed_packets.values()))
+    if reviewer is not None:
+        row['first_token_ms'] = row['total_ms'] if row['completed'] and row['answer_text'] else None
     # Audit evidence that reached the provider even when its answer failed.
     # This conversion is never sent to the model and contains no answer labels.
     for raw in observed_packets.values():
@@ -371,6 +379,35 @@ async def _tool_reply(engine: MemoryEngine, case: GenerationCase, labels: dict[i
     return row
 
 
+async def _review_tool_result(case: GenerationCase, result: ToolLoopResult, row: dict[str, object],
+                              reviewer: SelfHostedAnswerReviewer, timeout: float, policy: str) -> None:
+    row['draft_answer_text'], row['draft_completed'], row['draft_status'] = result.text, True, 'completed'
+    started = time.perf_counter()
+    try:
+        reviewed = await review_tool_answer(reviewer, case.query, result,
+            AnswerReviewLimits(timeout_s=timeout, max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES))
+        row['answer_review'] = reviewed.receipt.model_dump(mode='json')
+        if (reviewed.receipt.source_status != 'retained'
+                or (policy == 'require_supported' and reviewed.receipt.status != 'supported')):
+            row.update(status='review_rejected', completed=False, answer_text='', error_type='AnswerReviewRejected')
+        elif not await result.validate():
+            row['answer_review'] = {**reviewed.receipt.model_dump(mode='json'), 'source_status':'stale'}
+            row.update(status='review_rejected', completed=False, answer_text='', error_type='StaleToolEvidence')
+        else:
+            row['answer_text'] = reviewed.answer
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        row['answer_review'] = {**_mapping(row.get('answer_review')), 'status':'unavailable',
+                               'source_status':'unavailable', 'verified_accuracy':False}
+        row.update(status='review_unavailable', completed=False, answer_text='', error_type=type(error).__name__)
+    row['output_bytes'] = len(cast(str, row['answer_text']).encode())
+    source_status = _mapping(row['answer_review'])['source_status']
+    row['tool_retrieval'] = {**_mapping(row['tool_retrieval']),
+        'source_status':result.source_status if source_status == 'retained' else source_status}
+    row['review_ms'] = round((time.perf_counter() - started) * 1000, 3)
+
+
 async def run_ablation(fixture: Path, *, output: Path, model: str | None = None, endpoint: str | None = None,
                        embedding_cache: Path | None = None, repeats: int = 1, timeout: float = 30.0,
                        ordered_quotes: bool = False,
@@ -381,6 +418,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        adaptive_evidence_policy: EvidencePolicy = "model_selected",
                        review_model: str | None = None, review_timeout: float = 20.0,
                        review_policy: Literal["report", "require_supported"] = "report",
+                       review_quote_mode: Literal['text', 'spans'] = 'text',
                        evidence_selector_model: str | None = None, evidence_answer_timeout: float = 20.0,
                        tool_mode: Literal['off', 'native', 'structured'] = 'off', tool_initial_search: bool = True,
                        tool_think: bool | None = None,
@@ -394,7 +432,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
             raise ValueError('tool evaluation requires an explicit model and endpoint')
         validate_self_hosted_identifier(model)
         validate_self_hosted_endpoint(endpoint)
-        if any((adaptive_model, review_model, evidence_selector_model, ordered_quotes, baseline_paths,
+        if any((adaptive_model, evidence_selector_model, ordered_quotes, baseline_paths,
                 group_relations, expand_relations)):
             raise ValueError('tool evaluation cannot combine independent candidate pipelines')
     if evidence_selector_model is not None and review_model is not None:
@@ -411,6 +449,10 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
             raise ValueError("evidence_selector_model requires an explicit self-hosted endpoint")
     if type(review_policy) is not str or review_policy not in ("report", "require_supported"):
         raise ValueError("review_policy must be report or require_supported")
+    if type(review_quote_mode) is not str or review_quote_mode not in ('text', 'spans'):
+        raise ValueError('review_quote_mode must be text or spans')
+    if review_quote_mode != 'text' and review_model is None:
+        raise ValueError('review_quote_mode requires review_model')
     if (isinstance(review_timeout, bool) or not isinstance(review_timeout, (int, float))
             or not math.isfinite(review_timeout) or not 1 <= review_timeout <= 180):
         raise ValueError("review_timeout must be finite in 1..180")
@@ -471,7 +513,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         group_relations=group_relations, max_evidence_bytes=16_000)
                 if adaptive_model is not None and endpoint is not None else None)
     reviewer = (SelfHostedAnswerReviewer(endpoint, review_model, timeout=review_timeout,
-        max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES) if review_model is not None and endpoint is not None else None)
+        max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES, quote_mode=review_quote_mode)
+        if review_model is not None and endpoint is not None else None)
     selector = (SelfHostedEvidenceSelector(endpoint, evidence_selector_model, timeout=evidence_answer_timeout)
                 if evidence_selector_model is not None and endpoint is not None else None)
     graph_limits = MultiHopLimits() if expand_relations else None
@@ -488,6 +531,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "evidence_answer_max_evidence_bytes": MAX_BYTES if selector is not None else None,
         "evidence_answer_max_answer_bytes": MAX_BYTES if selector is not None else None,
         "review_model": review_model, "review_timeout_seconds": review_timeout, "review_policy": review_policy,
+        "review_quote_mode": review_quote_mode if reviewer is not None else None,
         "review_max_rounds": 2 if reviewer is not None else None,
         "review_max_output_tokens": 2048 if reviewer is not None else None,
         "review_max_answer_bytes": MAX_BYTES if reviewer is not None else None,
@@ -540,7 +584,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                                 assert model is not None and endpoint is not None
                                 provider = (SelfHostedStructuredToolChat if tool_mode == 'structured' else SelfHostedToolChat)(
                                     endpoint, model, timeout_s=timeout, max_tokens=512, think=tool_think)
-                                tool_row = await _tool_reply(engine, case, labels, provider, timeout, tool_initial_search)
+                                tool_row = await _tool_reply(engine, case, labels, provider, timeout, tool_initial_search,
+                                    reviewer=reviewer, review_timeout=review_timeout, review_policy=review_policy)
                                 tool_row.update(case_id=case.id, split=case.split, query=case.query, trial=trial, variant='candidate')
                                 tool_row.update(score_answer(cast(str, tool_row['answer_text']), case.answer_checks))
                                 tool_row['successful_key_fact_coverage'] = tool_row['key_fact_coverage'] if tool_row['completed'] else 0.0
@@ -640,6 +685,7 @@ def main() -> None:
     parser.add_argument("--review-model", help="Explicit installed answer reviewer model for the candidate")
     parser.add_argument("--review-timeout", type=float, default=20, help="Whole answer review budget including source checks")
     parser.add_argument("--review-policy", choices=("report", "require_supported"), default="report")
+    parser.add_argument('--review-quote-mode', choices=('text', 'spans'), default='text')
     parser.add_argument("--evidence-selector-model", help="Select source cards for a host-rendered candidate answer; mutually exclusive with --review-model")
     parser.add_argument("--evidence-answer-timeout", type=float, default=20, help="Whole extractive answer budget including source checks")
     args = parser.parse_args()
@@ -652,6 +698,7 @@ def main() -> None:
         adaptive_empty_selection_policy=args.adaptive_empty_selection_policy,
         adaptive_evidence_policy=args.adaptive_evidence_policy,
         review_model=args.review_model, review_timeout=args.review_timeout, review_policy=args.review_policy,
+        review_quote_mode=args.review_quote_mode,
         evidence_selector_model=args.evidence_selector_model, evidence_answer_timeout=args.evidence_answer_timeout))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 

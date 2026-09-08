@@ -73,7 +73,7 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
                 "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
-                "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
+                "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py", "realtime/tool_answer.py",
                 "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py",
                 "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
                 "providers/structured_tool_chat.py", "providers/tool_synthesis.py",
@@ -564,6 +564,8 @@ async def test_answer_review_uses_delivered_evidence_and_preserves_public_draft(
     ({"review_timeout": 0}, "review_timeout"),
     ({"review_timeout": float("inf")}, "review_timeout"),
     ({"review_policy": "anything"}, "review_policy"),
+    ({'review_quote_mode':'auto'}, 'review_quote_mode'),
+    ({'review_quote_mode':'spans'}, 'review_model'),
 ])
 async def test_review_options_fail_before_output(tmp_path, options, match):
     from scone_memory.testing.generation_ablation import run_ablation
@@ -806,7 +808,7 @@ async def test_tool_candidate_uses_actual_loop_without_receiving_answer_labels(t
 
 @pytest.mark.parametrize('changes', [
     {'tool_mode':'unknown'}, {'tool_mode':'structured','adaptive_model':'another'},
-    {'tool_mode':'native','review_model':'another'}, {'tool_mode':'structured','ordered_quotes':True},
+    {'tool_mode':'structured','ordered_quotes':True},
     {'tool_mode':'native','evidence_selector_model':'another'}, {'tool_mode':'native','tool_initial_search':'yes'},
 ])
 async def test_tool_ablation_rejects_incompatible_modes_before_output(tmp_path, changes):

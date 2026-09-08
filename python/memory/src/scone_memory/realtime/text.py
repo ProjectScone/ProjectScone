@@ -25,7 +25,7 @@ from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_ev
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
 from .review_evidence import prepare_review_evidence
-from .tool_answer import tool_context_receipt
+from .tool_answer import tool_context_receipt, review_tool_answer
 
 _OWNER = ContextVar("scone_text_owner", default=None)
 
@@ -325,12 +325,7 @@ class TextConversation:
         if reviewer is None:
             raise RuntimeError('answer review unavailable')
         try:
-            # Keep the exact retained packets, including paths and coverage.
-            # Review cannot retrieve new sources or extend the tool deadline.
-            evidence = json.dumps({'tool_results':[json.loads(packet) for packet in result.evidence_packets],
-                'complete':False}, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-            reviewed = await review_answer(reviewer, question, result.text, evidence, result.evidence_ids,
-                limits=self._review_limits, validate_evidence=result.validate, deadline=result.deadline)
+            reviewed = await review_tool_answer(reviewer, question, result, self._review_limits)
             task = asyncio.current_task()
             if self._closed or (task is not None and task.cancelling()):
                 raise asyncio.CancelledError()

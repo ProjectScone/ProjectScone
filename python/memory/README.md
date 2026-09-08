@@ -926,13 +926,28 @@ model, 512 output tokens per request, four tool attempts/rounds, and 16,000-byte
 transcript, aggregate tool-output and reply limits. Initial retrieval defaults
 on; `--no-tool-initial-search` tests model-initiated retrieval. Use `--no-tool-think`
 when the selected endpoint supports disabling that option. Tool mode cannot be
-combined with the independent adaptive, review, extractive, or path-projection
+combined with the independent adaptive, extractive, or path-projection
 candidate options. No fixture answer labels or required quotes reach the model.
+
+Tool candidates can also use `--review-model YOUR_INSTALLED_REVIEWER
+--review-quote-mode spans --review-policy require_supported`. The reviewer uses
+the same retained-packet review helper as text conversations: it receives the
+original tool evidence, may propose one correction, and must confirm that
+correction before adoption. Source checks run before/after review and again
+before accepting the final result. The original `--timeout` tool budget also
+bounds review; `--review-timeout` cannot extend it. Choose both budgets to cover
+the installed models. The baseline remains unreviewed. These are retrieval,
+generation and review evaluations; they do not run conversation capture.
 
 Tool rows record model-request hashes/bytes, provider-call counts, read reuse,
 and post-run coverage of evidence observed at the provider boundary. Failed
 generation keeps its observed evidence coverage but receives zero successful
 answer credit; successful final source retention is reported separately.
+Reviewed rows retain the draft, its elapsed time, review duration and receipt,
+and the final accepted text. Rejected review retains the draft for diagnosis
+but earns no successful answer credit. Generation-call counts exclude review
+calls; the review receipt records its rounds separately. A review verdict is
+not a correctness label.
 Relation quotes participate in the coverage audit for both variants. Tool
 request sizes describe the model-neutral transcript and schemas, not the wire
 encoding of a particular provider. This evaluator uses temporary SQLite storage;
