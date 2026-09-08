@@ -18,7 +18,7 @@ from .adaptive_graph import merge_groups
 class EvidenceRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
     kind: Literal["fact", "path"]
-    subject: str = Field(min_length=1, max_length=128)
+    subject: str | None = Field(default=None, min_length=1, max_length=128)
     predicate: str = Field(min_length=1, max_length=128)
     object: str | None = Field(default=None, min_length=1, max_length=128)
     max_hops: int = Field(default=6, ge=1, le=6)
@@ -27,8 +27,10 @@ class EvidenceRequirement(BaseModel):
     def valid_requirement(self) -> Self:
         if any(value is not None and not value.strip() for value in (self.subject, self.predicate, self.object)):
             raise ValueError("requirement identities must be nonblank")
-        if self.kind == "path" and (self.object is None or self.object == self.subject):
+        if self.kind == "path" and (self.subject is None or self.object is None or self.object == self.subject):
             raise ValueError("a path requires distinct explicit endpoints")
+        if self.kind == "fact" and self.subject is None and self.object is None:
+            raise ValueError("a fact requires at least one explicit endpoint")
         if self.kind == "fact" and self.max_hops != 6:
             raise ValueError("max_hops applies only to paths")
         return self
@@ -49,6 +51,8 @@ def _facts(candidates: tuple[EvidenceCandidate, ...]) -> dict[tuple[str, str], l
 
 def _path(requirement: EvidenceRequirement, index: dict[tuple[str, str], list[EvidenceCandidate]],
           remaining: int) -> tuple[tuple[EvidenceCandidate, ...], int, bool]:
+    if requirement.subject is None:
+        raise ValueError("a path requires an explicit subject")
     pending: deque[tuple[str, tuple[EvidenceCandidate, ...], frozenset[str]]] = deque([
         (requirement.subject, (), frozenset((requirement.subject,)))])
     while pending:
@@ -73,7 +77,8 @@ class StructuredEvidenceAssessor:
     """An AdaptiveRetriever assessor for a fixed question and explicit plan.
 
     Fact requirements request recorded values for an exact subject/predicate,
-    optionally requiring one particular value to occur. Path requirements ask
+    or recorded subjects for an exact predicate/object. With both endpoints,
+    one particular value must occur. Path requirements ask
     for a simple directed path of one exact predicate to a named endpoint.
     Every requirement must be witnessed for ``sufficient``. This means the plan
     has recorded witnesses, not that the records or caller's intent are true.
@@ -115,7 +120,9 @@ class StructuredEvidenceAssessor:
         remaining = self._max_work
         for requirement in self._requirements:
             if requirement.kind == "fact":
-                observations = index.get((requirement.subject, requirement.predicate), [])
+                observations = (index.get((requirement.subject, requirement.predicate), [])
+                    if requirement.subject is not None else [row for (_, predicate), rows in index.items()
+                        if predicate == requirement.predicate for row in rows if row.object == requirement.object])
                 witnesses = tuple(observations) if requirement.object is None or any(
                     row.object == requirement.object for row in observations) else ()
             else:

@@ -69,6 +69,55 @@ async def test_citation_id_without_structured_claim_does_not_cover_a_requirement
     assert selected.card_ids == ('card:1',)
 
 
+async def test_inverse_fact_selection_returns_subject_quotes_without_reversing_them():
+    cards = build_evidence_cards(packet(claims=[claim(1, 'A', 'B'), claim(2, 'C', 'B'), claim(3, 'B', 'D')])).cards
+    selected = await selector(EvidenceRequirement(kind='fact', predicate='routes to', object='B')).select('question', cards)
+    assert selected.card_ids == ('card:1', 'card:2') and selected.atomic is True
+
+
+@pytest.mark.parametrize('delete', [False, True])
+async def test_inverse_lookup_uses_real_scoped_memory_and_checks_deletion(engine, delete):
+    from scone_memory.core.ports import NewFact
+    from scone_memory.realtime.text import TextConversation
+    retained_id = None
+    for space, team, subject in [('alpha', 'blue', 'Juniper'), ('alpha', 'red', 'PRIVATE_TEAM'),
+                                 ('other', 'blue', 'PRIVATE_SPACE')]:
+        quote = f'{subject} uses Polaris.'
+        episode = await engine.remember(space, quote, metadata={'team':team})
+        await engine.documents.insert_fact(NewFact(space=space, subject=subject, predicate='uses', object='Polaris',
+            source_episode_id=episode.episode_id, quote=quote, valid_from='2025-01-01T00:00:00Z'))
+        if space == 'alpha' and team == 'blue':
+            retained_id = episode.episode_id
+    question = 'Who uses Polaris?'
+    planned = StructuredEvidenceSelector(question, (EvidenceRequirement(kind='fact', predicate='uses', object='Polaris'),))
+
+    class SelectThenChange:
+        async def select(self, question, cards):
+            result = await planned.select(question, cards)
+            if delete:
+                await engine.forget('alpha', retained_id)
+            return result
+
+    conversation = TextConversation(engine, 'alpha', 'inverse', evidence_selector=SelectThenChange(),
+        evidence_answer_policy='required', where={'team':'blue'})
+    observed = []
+
+    async def observe(text):
+        observed.append(text)
+
+    if delete:
+        with pytest.raises(RuntimeError, match='evidence answer'):
+            await conversation.reply(question, on_text=observe)
+        assert observed == []
+        assert [row.metadata['role'] for row in await engine.episodes('alpha', {'session_id':'inverse'})] == ['user']
+    else:
+        reply = await conversation.reply(question, on_text=observe)
+        assert reply['evidence_answer']['status'] == 'selected'
+        assert 'Juniper uses Polaris.' in reply['text'] and 'PRIVATE' not in reply['text']
+        assert observed == [reply['text']]
+    await conversation.close()
+
+
 async def test_atomic_output_budget_never_publishes_a_partial_chain():
     evidence = packet(claims=[claim(1, 'A', 'B'), claim(2, 'B', 'C')])
     cards = build_evidence_cards(evidence).cards

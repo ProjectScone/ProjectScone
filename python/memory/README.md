@@ -806,8 +806,8 @@ Cancellation propagates instead of producing a success receipt.
 
 For applications with an explicit question plan, the SDK also provides a
 model-free `StructuredEvidenceAssessor`. Each requirement asks for recorded
-values of an exact subject/predicate, or a simple directed path of one exact
-predicate to a named endpoint. Every requirement needs a complete witness before
+values of an exact subject/predicate, subjects of an exact predicate/object, or
+a simple directed path of one exact predicate to a named endpoint. Every requirement needs a complete witness before
 its verdict is `sufficient`; this verdict describes the supplied plan and
 records, not semantic truth or general question-answer accuracy.
 
@@ -835,6 +835,19 @@ is literal: synonyms, case differences and alternate predicates need an explicit
 application mapping. Terminal, negative, and whole-index completeness claims are
 unsupported. A missing path means no witness within the supplied candidate and
 hop bounds; it does not prove there is no path in the knowledge store.
+
+For “Who uses Polaris?”, leave the subject unknown instead of reversing the
+stored relation:
+
+```python
+users_of_polaris = EvidenceRequirement(kind="fact", predicate="uses", object="Polaris")
+# Matches “Juniper uses Polaris”, not “Polaris uses Juniper”.
+```
+
+Fact requirements must name at least one endpoint; path requirements still need
+both. These lookups inspect the bounded candidate set and retain all matching
+subjects plus competing recorded values around their witnesses. They do not
+claim to enumerate every user across an entire index.
 
 The assessor accepts 1–8 requirements and at most 100 candidates / 128,000 UTF-8
 candidate bytes. Path-edge work defaults to 256 and is configurable up to 2,048;

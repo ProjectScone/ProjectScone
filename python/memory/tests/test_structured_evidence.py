@@ -29,6 +29,41 @@ async def test_direct_lookup_selects_the_answering_fact_not_neighbor():
     assert decision.followup_queries == ()
 
 
+async def test_inverse_fact_lookup_finds_recorded_subjects_without_reversing_predicate():
+    requirement = EvidenceRequirement(kind='fact', predicate='uses', object='Polaris')
+    candidates = (fact(1, 'Juniper', 'uses', 'Polaris'), fact(2, 'Cedar', 'uses', 'Polaris'),
+                  fact(3, 'Polaris', 'uses', 'Beacon'), fact(4, 'Alder', 'manufactured by', 'Polaris'))
+    decision = await assessor(requirement).assess('bound question', candidates)
+    assert decision.status == 'sufficient'
+    assert decision.selected_ids == ('fact:1', 'fact:2')
+    assert decision.selected_groups == (('fact:1', 'fact:2'),)
+
+
+async def test_inverse_requirement_preserves_competing_values_around_witnesses():
+    requirement = EvidenceRequirement(kind='fact', predicate='uses', object='Polaris')
+    candidates = (fact(1, 'Juniper', 'uses', 'Polaris'), fact(2, 'Juniper', 'uses', 'Alder'))
+    decision = await assessor(requirement).assess('bound question', candidates)
+    assert decision.status == 'sufficient' and decision.selected_ids == ('fact:1', 'fact:2')
+
+
+async def test_missing_inverse_value_is_not_witnessed_by_the_forward_relation():
+    requirement = EvidenceRequirement(kind='fact', predicate='uses', object='Polaris')
+    decision = await assessor(requirement).assess('bound question', (fact(1, 'Polaris', 'uses', 'Juniper'),))
+    assert decision.status == 'insufficient' and decision.selected_ids == ()
+    assert decision.followup_queries == ('uses Polaris',)
+
+
+@pytest.mark.parametrize('kind', ['fact', 'path'])
+def test_requirement_cannot_leave_both_endpoints_unknown(kind):
+    with pytest.raises(ValueError):
+        EvidenceRequirement(kind=kind, predicate='uses')
+
+
+def test_path_still_requires_a_named_subject():
+    with pytest.raises(ValueError):
+        EvidenceRequirement(kind='path', predicate='uses', object='Polaris')
+
+
 async def test_path_requires_every_forward_predicate_matched_link():
     decision = await assessor(path()).assess('bound question', CHAIN)
     assert decision.status == 'sufficient'
