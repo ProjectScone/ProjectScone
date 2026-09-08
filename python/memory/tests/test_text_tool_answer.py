@@ -171,7 +171,6 @@ def test_tool_receipt_cache_drops_source_packets_without_mutating_live_result():
     {'tool_limits': ToolLoopLimits()},
     {'tool_model_factory': 'invalid'},
     {'tool_model_factory': lambda: None, 'tool_limits': {}},
-    {'tool_model_factory': lambda: None, 'answer_reviewer': type('Review', (), {'review': lambda *a: None})()},
     {'tool_model_factory': lambda: None, 'evidence_selector': type('Selector', (), {'select': lambda *a: None})()},
 ])
 def test_incompatible_tool_settings_fail_before_runtime(kwargs):

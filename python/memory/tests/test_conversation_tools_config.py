@@ -26,7 +26,6 @@ def environment(tmp_path, mode='structured'):
     {'SCONE_CONVERSATIONS_MODEL_FACTORY':'somewhere:create'},
     {'SCONE_CONVERSATIONS_PERSONAS':'personas.json', 'SCONE_CONVERSATIONS_REGISTRY':'registry:create'},
     {'SCONE_ADAPTIVE_RETRIEVAL':'1', 'SCONE_ADAPTIVE_URL':'http://127.0.0.1:11434/v1', 'SCONE_ADAPTIVE_MODEL':'judge'},
-    {'SCONE_ANSWER_REVIEW_POLICY':'report', 'SCONE_ANSWER_REVIEW_URL':'http://127.0.0.1:11434/v1', 'SCONE_ANSWER_REVIEW_MODEL':'judge'},
     {'SCONE_CONVERSATIONS_TOOL_MAX_CALLS':'0'}, {'SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS':'17'},
     {'SCONE_CONVERSATIONS_TOOL_TIMEOUT':'nan'}, {'SCONE_CONVERSATIONS_TOOL_TIMEOUT':'601'},
     {'SCONE_CONVERSATIONS_TOOL_MODE':'off', 'SCONE_CONVERSATIONS_TOOL_MAX_CALLS':'2'},
@@ -206,3 +205,73 @@ def test_self_hosted_voice_keeps_plain_pipeline_when_text_tools_are_enabled(tmp_
     chosen.voice(None, 'default', 'voice-session', transport_factory=lambda:None, capture=True)
     assert captured[0]['model_factory'] is chosen.model_factory
     assert 'tool_model_factory' not in captured[0] and 'tool_limits' not in captured[0]
+
+
+@pytest.mark.parametrize('mode', ['native', 'structured'])
+@pytest.mark.parametrize('persona', [False, True])
+@pytest.mark.parametrize('verdict', ['supported', 'uncertain', 'deleted'])
+async def test_composed_tool_review_is_enforced_before_capture(tmp_path, monkeypatch, mode, persona, verdict):
+    from scone_memory.agents.evidence_loop import ToolStep
+    from scone_memory.providers import answer_reviewer, structured_tool_chat, tool_chat
+    from scone_memory.realtime.answer_review import AnswerReviewDecision
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    source = await engine.remember('default', 'Juniper uses Polaris.', metadata={'team':'blue'})
+    await engine.remember('default', 'PRIVATE_OTHER_TEAM', metadata={'team':'red'})
+    calls = []
+    class Model:
+        def __init__(self, *args, **kwargs): pass
+        async def complete(self, messages, tools):
+            return ToolStep(content='Juniper uses Polaris.')
+    class Reviewer:
+        def __init__(self, *args, **kwargs): pass
+        async def review(self, question, answer, evidence, ids):
+            calls.append((question, answer, ids))
+            assert 'PRIVATE_' not in evidence and 'Juniper uses Polaris.' in evidence
+            if verdict == 'deleted':
+                await engine.forget('default', source.episode_id)
+            return AnswerReviewDecision(status='uncertain' if verdict == 'uncertain' else 'supported')
+    provider = structured_tool_chat if mode == 'structured' else tool_chat
+    monkeypatch.setattr(provider, 'SelfHostedStructuredToolChat' if mode == 'structured' else 'SelfHostedToolChat', Model)
+    monkeypatch.setattr(answer_reviewer, 'SelfHostedAnswerReviewer', Reviewer)
+    env = environment(tmp_path, mode) | {'SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH':'1',
+        'SCONE_ANSWER_REVIEW_POLICY':'require_supported', 'SCONE_ANSWER_REVIEW_MODEL':'judge',
+        'SCONE_ANSWER_REVIEW_URL':'http://127.0.0.1:11434/v1'}
+    connection = ModelConnection(base_url='http://127.0.0.1:11434/v1', model='installed:model')
+    store = ModelConnectionStore(tmp_path / 'models.json', {})
+    store.replace('chat', connection, expected_revision=0)
+    if persona:
+        store.replace('transcription', connection, expected_revision=1)
+        store.replace('speech', connection.model_copy(update={'voice':'voice', 'sample_rate':24000}), expected_revision=2)
+    try:
+        app = build_app(Settings.from_env(env), engine)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1', headers=AUTH) as client:
+                caps = (await client.get('/v1/conversations/capabilities')).json()
+                assert caps['tool_retrieval']['available'] is True
+                assert caps['answer_review'] == {'configured':True, 'policy':'require_supported'}
+                body = {'request_id':'reviewed-session', 'capture':True, 'recall_scope':{'where':{'team':'blue'}}}
+                if persona: body['persona'] = 'self-hosted-voice'
+                response = await client.post('/v1/conversations', json=body)
+                assert response.status_code == 200, response.text
+                session = response.json()
+                url = '/v1/conversations/' + session['session_id']
+                response = await client.post(url + '/turns', json={'request_id':'turn', 'text':'Juniper?',
+                    'expected_revision':session['revision']})
+                async with asyncio.timeout(5):
+                    while response.json()['status'] == 'pending':
+                        await asyncio.sleep(.01)
+                        response = await client.get(url + '/turns/turn')
+                receipt = response.json()
+                assert len(calls) == 1 and calls[0][0] == 'Juniper?'
+                assert receipt['status'] == ('completed' if verdict == 'supported' else 'failed'), receipt
+                if verdict == 'supported':
+                    assert receipt['result']['answer_review']['status'] == 'supported'
+                else:
+                    assert receipt['answer_review']['status'] == ('uncertain' if verdict == 'uncertain' else 'unavailable')
+                    assert receipt['answer_review']['source_status'] == ('retained' if verdict == 'uncertain' else 'stale')
+                saved = await engine.episodes('default', {'session_id':session['session_id']})
+                assert [row.metadata['role'] for row in saved] == (['user', 'assistant'] if verdict == 'supported' else ['user'])
+                assert (await client.get('/v1/capabilities')).status_code == 200
+    finally:
+        await engine.close()

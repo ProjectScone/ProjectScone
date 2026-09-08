@@ -14,12 +14,12 @@ from contextvars import ContextVar
 from typing import Literal
 from uuid import uuid4
 
-from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolModel
+from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
-from .answer_review import AnswerReviewer, AnswerReviewLimits, review_answer
+from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer
 from .context import ContextReceipt, MemoryContext
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
@@ -81,6 +81,10 @@ class TextConversation:
     _tool_limits: ToolLoopLimits
     _tool_initial_search: bool
     _evidence_answer_policy: Literal["when_available", "required"]
+    _answer_reviewer: AnswerReviewer | None
+    _review_limits: AnswerReviewLimits
+    _review_policy: Literal["report", "require_supported"]
+    _closed: bool
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
                  model_factory: Callable[[], TextModel] | None = None, *,
@@ -112,8 +116,8 @@ class TextConversation:
         if type(tool_initial_search) is not bool or (tool_initial_search and tool_model_factory is None):
             raise ValueError("tool_initial_search requires a boolean and a tool model")
         if tool_model_factory is not None and any(value is not None for value in
-                (answer_reviewer, evidence_selector, adaptive_retriever)):
-            raise ValueError("tool mode cannot combine independent retrieval, review, or extractive evidence")
+                (evidence_selector, adaptive_retriever)):
+            raise ValueError("tool mode cannot combine independent retrieval or extractive evidence")
         self._tool_factory = tool_model_factory
         self._tool_initial_search = tool_initial_search
         self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
@@ -306,10 +310,38 @@ class TextConversation:
         result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
                                        initial_search=self._tool_initial_search).run(messages)
         receipt = tool_context_receipt(result, self._session_id)
-        await self._emit_final(messages, result.text, on_text)
+        text, answer_review = result.text, None
+        if self._answer_reviewer is not None:
+            text, answer_review = await self._review_tool_draft(messages[-1]['content'], result)
+        if len(text.encode('utf-8')) > self._tool_limits.max_reply_bytes:
+            raise RuntimeError('tool reply exceeded the byte limit')
+        await self._emit_final(messages, text, on_text)
         if not await result.validate():
             raise RuntimeError('tool evidence changed before capture')
-        return result.text, receipt, None, None
+        return text, receipt, answer_review, None
+
+    async def _review_tool_draft(self, question: str, result: ToolLoopResult) -> tuple[str, dict[str, object]]:
+        reviewer = self._answer_reviewer
+        if reviewer is None:
+            raise RuntimeError('answer review unavailable')
+        try:
+            # Keep the exact retained packets, including paths and coverage.
+            # Review cannot retrieve new sources or extend the tool deadline.
+            evidence = json.dumps({'tool_results':[json.loads(packet) for packet in result.evidence_packets],
+                'complete':False}, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+            reviewed = await review_answer(reviewer, question, result.text, evidence, result.evidence_ids,
+                limits=self._review_limits, validate_evidence=result.validate, deadline=result.deadline)
+            task = asyncio.current_task()
+            if self._closed or (task is not None and task.cancelling()):
+                raise asyncio.CancelledError()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            code = 'source_validation_timeout' if isinstance(error, TimeoutError) else 'source_validation_failed'
+            failure: dict[str, object] = {'status':'unavailable', 'rounds':0, 'revised':False,
+                'issue_codes':[], 'errors':[code], 'source_status':'unavailable', 'verified_accuracy':False}
+            raise _AnswerReviewFailure('answer review evidence unavailable', failure) from error
+        return self._accept_review(reviewed)
 
     async def _emit_final(self, messages, text, on_text):
         if len(text.encode("utf-8")) > self._max_reply:
@@ -396,6 +428,9 @@ class TextConversation:
             failure: dict[str, object] = {"status": "unavailable", "rounds": 0, "revised": False,
                 "issue_codes": [], "errors": [code], "source_status": "unavailable", "verified_accuracy": False}
             raise _AnswerReviewFailure("answer review evidence unavailable", failure) from error
+        return self._accept_review(reviewed)
+
+    def _accept_review(self, reviewed: ReviewedAnswer) -> tuple[str, dict[str, object]]:
         receipt: dict[str, object] = reviewed.receipt.model_dump(mode="json")
         if reviewed.receipt.source_status != "retained":
             raise _AnswerReviewFailure("answer review evidence is stale or unavailable", receipt)

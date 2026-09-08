@@ -68,6 +68,7 @@ class ToolLoopResult:
     tool_outcomes: tuple[ToolOutcome, ...]
     _validator: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
     verified_accuracy: bool = False
+    deadline: float | None = field(default=None, repr=False, compare=False)
 
     async def validate(self) -> bool:
         """Recheck before later capture, within the original turn deadline."""
@@ -283,7 +284,7 @@ class EvidenceToolLoop:
                     return ToolLoopResult(step.content, model_calls, calls, evidence_ids,
                                           'retained' if evidence_ids else 'none',
                                           tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
-                                          tuple(outcomes), validate)
+                                          tuple(outcomes), validate, deadline=deadline)
                 rounds += 1
                 seen.update(ids)
                 transcript.append({'role': 'assistant', 'content': step.content or None, 'tool_calls': [

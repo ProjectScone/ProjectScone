@@ -635,7 +635,7 @@ finally:
 
 Tool mode uses the actual conversation history, with current-session records
 excluded from tool searches. It bypasses prompt-based memory preparation and
-cannot be combined with independent adaptive retrieval, answer review, or
+cannot be combined with independent adaptive retrieval or
 extractive selection. The usual conversation deadline and reply/history byte
 limits still apply. A public callback receives one final reply after source and
 history checks; sources are checked again before assistant capture. A callback
@@ -681,7 +681,7 @@ bounded by the smaller of that budget and the saved connection timeout. The
 existing whole-conversation turn timeout can end it sooner. Calls and rounds
 accept 1–16; the tool timeout accepts 0.01–600 seconds. Transcript, output and
 reply byte limits retain `ToolLoopLimits` defaults. Startup refuses combinations
-with adaptive retrieval, answer review, trusted custom model factories or custom
+with adaptive retrieval, trusted custom model factories or custom
 persona catalogs. Those integrations can still bind their own SDK pipelines.
 
 The structured adapter renders tool results as explicitly labeled, untrusted
@@ -1345,6 +1345,24 @@ standard `serve` launcher applies review to custom-model, saved-connection and
 persona **text** sessions. Voice sessions are unchanged. The authenticated
 conversation capabilities endpoint reports `answer_review.configured` and
 `answer_review.policy`, independently of text-model availability.
+
+Native and structured tool conversations can use the same review settings.
+Review receives the exact retained tool packets, including quoted claims,
+ordered paths, source identifiers and coverage limits. It performs no new
+retrieval. Even a tool turn with no retained evidence is reviewed, so an early
+answer cannot bypass a required review. `report` permits the original draft
+after an uncertain or failed review only when source validation succeeds;
+`require_supported` withholds it. A proposed replacement is accepted only after
+a second supported verdict. Review remains a fallible model judgment.
+
+The tool turn's original deadline also bounds review and its source checks;
+review cannot start a fresh tool budget. Accepted replacements must fit both
+the tool and conversation reply limits, plus the history limit. Source changes
+block publication regardless of policy, and sources are checked again after
+the public callback before capture. Leave time for review when configuring the
+tool and whole-conversation budgets. This adds up to two reviewer requests;
+the tool receipt's `model_calls` counts generation/tool decisions, while
+`answer_review.rounds` reports review requests separately.
 
 Reviewed text arrives as one final public delta. Failed required reviews save
 no assistant reply and expose a content-free `answer_review` diagnostic in the

@@ -35,8 +35,8 @@ def validate_tool_settings(settings: Settings) -> None:
         raise InvalidInput('conversation tools require SCONE_CONVERSATIONS_JOURNAL and SCONE_MODEL_CONNECTIONS')
     if settings.conversations_model_factory or settings.conversations_personas or settings.conversations_registry:
         raise InvalidInput('conversation tool mode requires the saved self-hosted model runtime')
-    if settings.adaptive_retrieval or settings.answer_review_policy != 'off':
-        raise InvalidInput('conversation tools cannot combine with adaptive retrieval or answer review')
+    if settings.adaptive_retrieval:
+        raise InvalidInput('conversation tools cannot combine with adaptive retrieval')
 
 
 @dataclass(frozen=True)

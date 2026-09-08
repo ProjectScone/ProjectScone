@@ -156,7 +156,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             not isinstance(adaptive_retriever, AdaptiveRetriever) or adaptive_retriever.memory is not engine):
         raise ValueError("adaptive_retriever must use this memory engine")
     if tool_retrieval is not None and (not isinstance(tool_retrieval, ConversationTools)
-            or answer_review is not None or adaptive_retriever is not None):
+            or adaptive_retriever is not None):
         raise ValueError("tool_retrieval requires a compatible ConversationTools binding")
     # A catalog's sessions run the native text runtime, which streams.
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
