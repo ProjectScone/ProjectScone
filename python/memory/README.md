@@ -1014,6 +1014,23 @@ These diagnostics contain requirements and record IDs, without copying candidate
 text. They do not replace scope authorization or source-retention validation.
 The existing `assess()` interface returns the same report's `decision`.
 
+To search from an already reached entity when a route is incomplete, opt into
+`followup_strategy="bridge"` on `StructuredEvidenceAssessor`. For example, if
+the requirement needs `invoice → team → office → location` and the first round
+finds only the first two edges, the follow-up can search `office located in`.
+The partial route is selected as one atomic group so adaptive retrieval carries
+it into the next round and revalidates its sources. It is reported separately in
+`bridge_ids`, with no positive witness and an `insufficient` (or budget-exhausted
+`uncertain`) verdict. Only the complete original requirement can be sufficient.
+
+This deterministic strategy chooses one deepest reached entity per missing
+requirement, breaking depth ties in candidate/traversal order. It reserves a hop
+for the missing relation and retains competing values around the chosen path.
+It does not exhaustively search every branch or backtrack after an unsuccessful
+query. Names longer than the requirement identity limit are never truncated;
+without a usable bridge it falls back to the original requirement query.
+The default `"requirement"` strategy keeps the original query/selection behavior.
+
 For “Who uses Polaris?”, leave the subject unknown instead of reversing the
 stored relation:
 
