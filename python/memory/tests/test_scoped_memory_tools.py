@@ -7,6 +7,7 @@ import pytest
 from scone_memory.core.ports import NewFact
 from scone_memory.integrations.scoped_tools import ScopedMemoryTools
 from scone_memory.retrieval.recall_scope import RecallScope
+from scone_memory.retrieval.multihop import BoundedSubjectFacts
 
 
 async def seed(engine, subject, obj, *, team='blue', space='alpha', kind='file', source='manuals/doc',
@@ -41,14 +42,28 @@ async def test_search_respects_all_host_constraints_and_has_quoted_provenance(en
     assert 'PRIVATE_MARKER' not in json.dumps(result)
 
 
-async def test_trace_restricts_every_expanded_source_not_only_seed(engine):
+@pytest.mark.parametrize('seed_only', [False, True])
+async def test_trace_restricts_every_expanded_source_not_only_seed(engine, monkeypatch, seed_only):
     first=await seed(engine,'aster','beacon')
     bridge=await seed(engine,'beacon','cedar')
     await seed(engine,'cedar','PRIVATE_MARKER',team='red')
+    if seed_only:
+        documents = engine.documents
+        class SeedOnly:
+            async def get_fact(self, *args): return await documents.get_fact(*args)
+            async def get_episode(self, *args): return await documents.get_episode(*args)
+            async def revision(self, *args): return await documents.revision(*args)
+        monkeypatch.setattr(engine, 'documents', SeedOnly())
     result=await box(engine).run('trace_memory', {'seed_fact_id':first.fact_id})
     assert result['ok'] is True
     assert 'PRIVATE_MARKER' not in json.dumps(result)
-    assert {f['fact_id'] for f in result['claims']} == {first.fact_id,bridge.fact_id}
+    if isinstance(engine.documents, BoundedSubjectFacts):
+        assert {f['fact_id'] for f in result['claims']} == {first.fact_id,bridge.fact_id}
+    else:
+        assert {f['fact_id'] for f in result['claims']} == {first.fact_id}
+        assert result['paths'] == []
+        assert result['coverage']['complete'] is False
+        assert 'unsupported_bounded_subjects' in result['coverage']['reasons']
 
 
 @pytest.mark.parametrize('name,args', [('add_memory',{'content':'WRITE_MARKER'}),('read_profile',{}),
