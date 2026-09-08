@@ -1,7 +1,7 @@
 <p align="center"><strong>🥐 Scone</strong></p>
 
 <p align="center">
-  <strong>Evidence-grounded memory for humans, agents, and applications. First-class Rust and Python libraries, local execution, and self-hosting.</strong>
+  <strong>A self-hosted RAG and memory framework for agents and applications.</strong>
 </p>
 
 <p align="center">
@@ -14,11 +14,10 @@
 
 ---
 
-Scone helps software build on what it has already learned: preserve source
-material, retrieve relevant evidence, and inspect dated claims and corrections.
-The ambition is continuity across assistants, applications, and storage providers
-without repeatedly explaining the same context. Portability and consistency are
-engineering promises to test, not consequences of storing something as JSON.
+Scone stores source material, retrieves relevant evidence, and tracks claims,
+relationships, and corrections over time. Use it to give agents persistent
+memory and connect language models to your knowledge through Python and Rust
+libraries, HTTP, and MCP.
 
 Rust and Python are first-class native libraries today. Python also has a
 distinct [HTTP client](python/scone-client). Neither native library requires the
@@ -41,20 +40,18 @@ The native Python real-time pipeline has direct `CartesiaSpeech` and
 `ElevenLabsSpeech` adapters in `scone_memory.providers.speech`. Install the
 `speech` extra to use them. Each requires explicit `api_key`, `model`, and `voice`
 arguments; there is no default account, silent provider fallback or automatic
-retry. They stream bounded signed 16-bit PCM audio through Scone's own audio
-protocol, without a Pipecat runtime dependency. Close interrupted iterators and
+retry. They stream bounded signed 16-bit PCM audio through Scone's audio
+protocol. Close interrupted iterators and
 call `aclose()` on the adapter when its session ends. Provider credentials belong
 on the server, never in browser configuration. Live provider billing and account
 availability are not established by the isolated adapter tests.
 
 ### Roadmap
 
-ProjectScone is building an open-source persistent-memory and real-time agent
-platform, informed by Supermemory and Pipecat. Native Rust and Python memory
-libraries, CLIs, HTTP and MCP servers are available; live capture and the console
-remain previews.
-Streaming voice/media pipelines and complete cross-language portability are
-completion milestones, not current release claims.
+Development focuses on retrieval and answer quality, multimodal ingestion,
+real-time conversations, agent orchestration, and reliable operation on
+self-managed infrastructure. The console and live capture are currently previews;
+full streaming media workflows and cross-language data portability remain in progress.
 
 The locally maintained capability baseline maps 65 capability groups to current
 Rust, Python and webapp behavior, source/test evidence, remaining gaps and seven
@@ -69,12 +66,10 @@ them for the receiving engine. It rejects custom identities and conflicting
 evidence instead of silently losing them. This is a bounded conformance path;
 full cross-language portability remains an M1 completion requirement.
 
-Both reference projects inform the functional scope. Scone's roadmap includes
-connectors, profiles, temporal relationships, multimodal ingestion, streaming
-voice, agent pipelines, client integrations and operational tooling. Completing
-a UI screen or installing a dependency does not complete the underlying feature.
-Each milestone must verify every affected native library, CLI, shared contract
-and web surface. Neither language inherits the other's benchmark results.
+The roadmap also includes connectors, profiles, temporal relationships,
+client integrations, and operational tooling. Validation covers the affected
+libraries, CLIs, shared contracts, and web interfaces. Rust and Python benchmark
+results are reported separately.
 
 | | |
 |---|---|
