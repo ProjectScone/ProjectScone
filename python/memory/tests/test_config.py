@@ -87,3 +87,35 @@ def test_event_sink_follows_the_document_store_by_default(tmp_path):
     from scone_memory.observability.events import MongoEventLog
 
     assert isinstance(build_events(Settings(documents="mongo", mongo_url="mongodb://localhost:1")), MongoEventLog)
+
+
+def test_a_slow_model_host_can_be_given_longer_before_it_is_given_up_on():
+    """Three of 455 episodes timed out at the fixed 180 seconds during a
+    benchmark, on a machine that was busy, and there was no way to say
+    "wait longer" short of editing the source. A local model on a loaded
+    machine is the ordinary case, not the exotic one."""
+    from scone_memory.runtime.config import Settings, build_chat
+
+    settings = Settings.from_env({"SCONE_CHAT_URL": "http://127.0.0.1:11434/v1",
+                             "SCONE_CHAT_MODEL": "llama3.1", "SCONE_CHAT_TIMEOUT": "900"})
+    assert settings.chat_timeout == 900.0
+    assert build_chat(settings).timeout == 900.0
+
+
+def test_the_wait_defaults_to_what_it_was_before():
+    from scone_memory.runtime.config import Settings, build_chat
+
+    settings = Settings.from_env({"SCONE_CHAT_URL": "http://127.0.0.1:11434/v1",
+                             "SCONE_CHAT_MODEL": "llama3.1"})
+    assert build_chat(settings).timeout == 180.0
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon", "", "1e999"])
+def test_a_wait_that_is_not_a_length_of_time_is_refused(value):
+    """Silently falling back to the default would leave a benchmark
+    timing out for the reason it was configured not to."""
+    from scone_memory.runtime.config import Settings
+
+    with pytest.raises(InvalidInput, match="SCONE_CHAT_TIMEOUT"):
+        Settings.from_env({"SCONE_CHAT_URL": "http://x/v1", "SCONE_CHAT_MODEL": "m",
+                      "SCONE_CHAT_TIMEOUT": value})

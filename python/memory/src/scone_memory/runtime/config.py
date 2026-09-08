@@ -29,6 +29,7 @@
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
     SCONE_CHAT_API_KEY                 optional bearer
     SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
+    SCONE_CHAT_TIMEOUT                 seconds one chat call may take (default 180)
     SCONE_DISTILL_INTERVAL_S           seconds between consolidation passes (default 30)
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
@@ -48,6 +49,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +97,10 @@ class Settings:
     chat_model: Optional[str] = None
     chat_api_key: Optional[str] = None
     chat_think: Optional[bool] = None
+    #: Seconds to wait on the chat host before giving up on one call. A
+    #: local model on a busy machine is the ordinary case, and 180 is not
+    #: always enough for it.
+    chat_timeout: float = 180.0
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
@@ -162,6 +168,7 @@ class Settings:
             chat_model=env.get("SCONE_CHAT_MODEL"),
             chat_api_key=env.get("SCONE_CHAT_API_KEY"),
             chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
+            chat_timeout=parse_seconds("SCONE_CHAT_TIMEOUT", env.get("SCONE_CHAT_TIMEOUT"), 180.0),
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
@@ -354,6 +361,22 @@ async def build_in_process_engine(settings: Settings, embedder):
     ).open()
 
 
+def parse_seconds(name: str, value, fallback: float) -> float:
+    """A length of time from the environment, or a refusal naming the
+    setting that was wrong. Falling back to the default without a word
+    would leave a run timing out for the one reason it was configured
+    not to."""
+    if value is None:
+        return fallback
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise InvalidInput(f"{name} must be a positive number of seconds, got {value!r}") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise InvalidInput(f"{name} must be a positive number of seconds, got {value!r}")
+    return seconds
+
+
 def build_chat(settings: Settings):
     """The consolidation model, or None when none is configured."""
     if not settings.chat_url and not settings.chat_model:
@@ -362,7 +385,8 @@ def build_chat(settings: Settings):
         raise InvalidInput("consolidation needs both SCONE_CHAT_URL and SCONE_CHAT_MODEL")
     from ..providers.llm import OpenAICompatibleChat
 
-    return OpenAICompatibleChat(settings.chat_url, settings.chat_model, api_key=settings.chat_api_key, think=settings.chat_think)
+    return OpenAICompatibleChat(settings.chat_url, settings.chat_model, api_key=settings.chat_api_key,
+                                think=settings.chat_think, timeout=settings.chat_timeout)
 
 
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):
