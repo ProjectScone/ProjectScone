@@ -898,6 +898,25 @@ existing output path. Keep private evaluation reports outside version control.
 Add `--ordered-quotes` to test the optional quote projection in the path variant;
 the flat baseline remains unchanged.
 
+Add `--tool-mode native` or `--tool-mode structured` to compare the same baseline
+against the actual scoped `EvidenceToolLoop`. Tool candidates use the installed
+model, 512 output tokens per request, four tool attempts/rounds, and 16,000-byte
+transcript, aggregate tool-output and reply limits. Initial retrieval defaults
+on; `--no-tool-initial-search` tests model-initiated retrieval. Use `--no-tool-think`
+when the selected endpoint supports disabling that option. Tool mode cannot be
+combined with the independent adaptive, review, extractive, or path-projection
+candidate options. No fixture answer labels or required quotes reach the model.
+
+Tool rows record model-request hashes/bytes, provider-call counts, read reuse,
+and post-run coverage of evidence observed at the provider boundary. Failed
+generation keeps its observed evidence coverage but receives zero successful
+answer credit; successful final source retention is reported separately.
+Relation quotes participate in the coverage audit for both variants. Tool
+request sizes describe the model-neutral transcript and schemas, not the wire
+encoding of a particular provider. This evaluator uses temporary SQLite storage;
+omit `--embedding-cache` for a hash-embedder integration check, not a semantic
+retrieval benchmark.
+
 Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
 references, recall event ID when available, context hash/bytes, omissions and
 sanitized degradation/error types. They prove preparation—not delivery or use.

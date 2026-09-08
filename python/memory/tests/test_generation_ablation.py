@@ -74,7 +74,9 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
                 "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
                 "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
-                "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py"}
+                "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py",
+                "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
+                "providers/structured_tool_chat.py", "integrations/scoped_tools.py", "integrations/read_memory.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
@@ -764,3 +766,124 @@ def test_cli_forwards_extractive_options(tmp_path, monkeypatch):
     generation_ablation.main()
     assert captured["evidence_selector_model"] == "selector"
     assert captured["evidence_answer_timeout"] == 12
+
+
+@pytest.mark.parametrize('protocol', ['native', 'structured'])
+async def test_tool_candidate_uses_actual_loop_without_receiving_answer_labels(tmp_path, monkeypatch, protocol):
+    from scone_memory.agents.evidence_loop import ToolStep
+    from scone_memory.testing import generation_ablation as evaluation
+
+    requests = []
+    class ToolModel:
+        async def complete(self, messages, tools):
+            requests.append(messages)
+            assert 'EVALUATION_ONLY_CANARY' not in json.dumps(messages)
+            assert 'The cobalt probe uses 18 volts.' in json.dumps(messages)
+            return ToolStep(content='The cobalt probe uses 18 volts.')
+    class Baseline:
+        async def respond(self, messages):
+            yield TextDelta('The cobalt probe uses 18 volts.')
+            yield ReplyCompleted()
+        async def aclose(self):
+            pass
+    monkeypatch.setattr(evaluation, 'SelfHostedToolChat', lambda *a, **kw: ToolModel())
+    monkeypatch.setattr(evaluation, 'SelfHostedStructuredToolChat', lambda *a, **kw: ToolModel())
+    report = await evaluation.run_ablation(fixture_file(tmp_path),output=tmp_path/'tools.json',
+        model='fixture',endpoint='http://127.0.0.1:11434/v1',model_factory=Baseline,tool_mode=protocol)
+    assert len(requests) == 1
+    candidate = report['results'][1]
+    assert candidate['answer_mode'] == 'tool_generation'
+    assert candidate['tool_retrieval']['tool_calls'] == 1
+    assert candidate['tool_retrieval']['outcomes'][0]['origin'] == 'host'
+    assert candidate['evidence_coverage'] == 1
+    assert candidate['successful_key_fact_coverage'] == 1
+    assert candidate['semantic_entailment'] == 'unmeasured'
+    assert candidate['scope_leaks'] == 0 and candidate['invalid_provenance'] == 0
+    assert candidate['generation_provider_calls'] == 1
+    assert report['candidate_answer_mode'] == 'tool_generation'
+
+
+@pytest.mark.parametrize('changes', [
+    {'tool_mode':'unknown'}, {'tool_mode':'structured','adaptive_model':'another'},
+    {'tool_mode':'native','review_model':'another'}, {'tool_mode':'structured','ordered_quotes':True},
+    {'tool_mode':'native','evidence_selector_model':'another'}, {'tool_mode':'native','tool_initial_search':'yes'},
+])
+async def test_tool_ablation_rejects_incompatible_modes_before_output(tmp_path, changes):
+    from scone_memory.testing.generation_ablation import run_ablation
+    output = tmp_path/'invalid.json'
+    with pytest.raises(ValueError):
+        await run_ablation(fixture_file(tmp_path),output=output,model='fixture',
+            endpoint='http://127.0.0.1:11434/v1',**changes)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('failure', ['provider', 'deleted_source'])
+async def test_failed_tool_candidate_remains_in_report_with_zero_success_credit(tmp_path, monkeypatch, failure):
+    from scone_memory.agents.evidence_loop import ToolStep
+    from scone_memory.testing import generation_ablation as evaluation
+
+    engines = []
+    original_seed = evaluation._seed
+    async def seed(engine, *args):
+        engines.append(engine)
+        return await original_seed(engine, *args)
+    monkeypatch.setattr(evaluation, '_seed', seed)
+    class ToolModel:
+        async def complete(self, messages, tools):
+            if failure == 'provider':
+                raise RuntimeError('PRIVATE_PROVIDER_ERROR')
+            packet = json.loads(messages[-1]['content'])
+            await engines[0].forget('fixture',packet['items'][0]['episode_id'])
+            return ToolStep(content='The cobalt probe uses 18 volts.')
+    class Baseline:
+        async def respond(self, messages):
+            yield TextDelta('The cobalt probe uses 18 volts.')
+            yield ReplyCompleted()
+        async def aclose(self):
+            pass
+    monkeypatch.setattr(evaluation,'SelfHostedStructuredToolChat',lambda *a, **kw: ToolModel())
+    report = await evaluation.run_ablation(fixture_file(tmp_path),output=tmp_path/'failed.json',
+        model='fixture',endpoint='http://127.0.0.1:11434/v1',model_factory=Baseline,tool_mode='structured')
+    assert report['state'] == 'completed'
+    candidate = report['results'][1]
+    assert candidate['status'] == 'failed' and candidate['completed'] is False
+    assert candidate['generation_provider_calls'] == 1
+    assert candidate['successful_key_fact_coverage'] == 0
+    assert candidate['evidence_coverage'] == (1 if failure == 'provider' else 0)
+    assert candidate['tool_retrieval'] is None
+    assert 'PRIVATE_PROVIDER_ERROR' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('endpoint', ['https://example.com/v1', 'http://127.0.0.1:11434/v1?secret=canary'])
+async def test_tool_endpoint_is_validated_before_baseline_or_output(tmp_path, endpoint):
+    from scone_memory.testing.generation_ablation import run_ablation
+    called = []
+    def baseline():
+        called.append(True)
+        pytest.fail('baseline must not start for an invalid tool endpoint')
+    output = tmp_path/'invalid-tool-endpoint.json'
+    with pytest.raises(ValueError):
+        await run_ablation(fixture_file(tmp_path), output=output, model='fixture', endpoint=endpoint,
+                           tool_mode='native', model_factory=baseline)
+    assert not output.exists() and called == []
+
+
+async def test_coverage_audits_relation_quotes_for_both_answer_modes(tmp_path):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.realtime.context import _PREFIX
+    from scone_memory.testing.generation_ablation import load_generation_fixture, _context_coverage
+
+    case = load_generation_fixture(fixture_file(tmp_path)).cases[0]
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        stored = await engine.remember('fixture','The cobalt probe uses 18 volts.',metadata={'project':'edge'})
+        message = {'role':'user','content':_PREFIX + json.dumps({'relations':[
+            {'link_id':7,'source_episode_id':stored.episode_id,'quote':'The cobalt probe uses 18 volts.'}]})}
+        labels = {stored.episode_id:'manual'}
+        ordinary = await _context_coverage(engine,case,[message],labels)
+        selected = await _context_coverage(engine,case,[message],labels,selected_ids=frozenset({'link:7'}))
+        rejected = await _context_coverage(engine,case,[message],labels,selected_ids=frozenset({'link:8'}))
+        assert ordinary['evidence_coverage'] == selected['evidence_coverage'] == 1
+        assert rejected['evidence_coverage'] == 0
+    finally:
+        await engine.close()

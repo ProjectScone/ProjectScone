@@ -22,7 +22,9 @@ def _snapshot_code() -> dict[str, object]:
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
              "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
              "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
-             "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
+             "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py",
+             "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
+             "providers/structured_tool_chat.py", "integrations/scoped_tools.py", "integrations/read_memory.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
@@ -40,8 +42,12 @@ from ..core.ports import Embedder
 from ..embedders.hash import HashEmbedder
 from ..memory.engine import MemoryEngine, normalise_time
 from ..providers.llm import OpenAICompatibleTextModel
+from ..providers.tool_chat import SelfHostedToolChat
+from ..providers.structured_tool_chat import SelfHostedStructuredToolChat
+from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolModel, ToolStep
+from ..integrations.scoped_tools import ScopedMemoryTools
 from ..providers.evidence_assessor import SelfHostedEvidenceAssessor
-from ..providers.self_hosted import validate_self_hosted_identifier
+from ..providers.self_hosted import validate_self_hosted_identifier, validate_self_hosted_endpoint
 from ..realtime.context import ContextReceipt, MemoryContext, _PREFIX
 from ..realtime.answer_review import AnswerReviewLimits, review_answer
 from ..realtime.review_evidence import prepare_review_evidence
@@ -185,9 +191,8 @@ async def _context_coverage(engine: MemoryEngine, case: GenerationCase, request:
             continue
         payload = _mapping(json.loads(serialized))
         record_kinds = [("sources", "episode_id", "text", "chunk", "chunk_id"),
-                        ("claims", "source_episode_id", "quote", "fact", "fact_id")]
-        if selected_ids is not None:
-            record_kinds.append(("relations", "source_episode_id", "quote", "link", "link_id"))
+                        ("claims", "source_episode_id", "quote", "fact", "fact_id"),
+                        ("relations", "source_episode_id", "quote", "link", "link_id")]
         for key, id_key, text_key, kind, evidence_key in record_kinds:
             for record in _records(payload.get(key)):
                 if selected_ids is not None and f"{kind}:{record.get(evidence_key)}" not in selected_ids:
@@ -306,6 +311,65 @@ def _validate_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/")
 
 
+def _tool_limits(timeout: float) -> ToolLoopLimits:
+    return ToolLoopLimits(timeout_s=float(timeout), max_transcript_bytes=MAX_BYTES,
+                          max_tool_bytes=MAX_BYTES, max_reply_bytes=MAX_BYTES)
+
+
+async def _tool_reply(engine: MemoryEngine, case: GenerationCase, labels: dict[int, str],
+                      provider: ToolModel, timeout: float, initial_search: bool) -> dict[str, object]:
+    requests: list[dict[str, object]] = []
+    observed_packets: dict[str, str] = {}
+
+    class ObservedModel:
+        async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
+            raw = json.dumps({'messages':messages, 'tools':tools}, ensure_ascii=False, allow_nan=False).encode()
+            requests.append({'bytes':len(raw), 'sha256':hashlib.sha256(raw).hexdigest()})
+            for message in messages:
+                call_id, content = message.get('tool_call_id'), message.get('content')
+                if message.get('role') == 'tool' and isinstance(call_id, str) and isinstance(content, str):
+                    observed_packets[call_id] = content
+            return await provider.complete(messages, tools)
+
+    row: dict[str, object] = {'answer_mode':'tool_generation', 'structured_paths':False,
+        'adaptive_retrieval':False, 'ordered_quotes':False, 'answer_text':'', 'completed':False,
+        'status':'failed', 'context_status':'unavailable', 'context_bytes':0, 'output_bytes':0,
+        'error_type':None, 'first_token_ms':None, 'tool_retrieval':None}
+    coverage_request: list[dict[str, str]] = []
+    started = time.perf_counter()
+    try:
+        scope = RecallScope.validated(where=case.where, kind=case.kind, source_prefix=case.source_prefix,
+                                      since=case.since, until=case.until)
+        tools = ScopedMemoryTools(engine, case.space, scope=scope)
+        result = await EvidenceToolLoop(ObservedModel(), tools, limits=_tool_limits(timeout), initial_search=initial_search).run(
+            [{'role':'system','content':DEFAULT_SYSTEM_PROMPT}, {'role':'user','content':case.query}])
+        row.update(answer_text=result.text, completed=True, status='completed',
+            context_status='prepared' if result.evidence_ids else 'empty',
+            context_bytes=sum(len(packet.encode()) for packet in result.evidence_packets),
+            output_bytes=len(result.text.encode()), tool_retrieval={
+                'model_calls':result.model_calls, 'tool_calls':result.tool_calls,
+                'outcomes':[outcome.model_dump(mode='json') for outcome in result.tool_outcomes],
+                'source_status':result.source_status, 'evidence_ids':list(result.evidence_ids),
+                'verified_accuracy':False})
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        row.update(status='timeout' if isinstance(error, TimeoutError) else 'failed', error_type=type(error).__name__)
+    row.update(total_ms=round((time.perf_counter()-started)*1000,3),
+               generation_provider_calls=len(requests), model_requests=requests,
+               observed_tool_bytes=sum(len(packet.encode()) for packet in observed_packets.values()))
+    # Audit evidence that reached the provider even when its answer failed.
+    # This conversion is never sent to the model and contains no answer labels.
+    for raw in observed_packets.values():
+        packet = _mapping(json.loads(raw))
+        payload = {'sources':packet.get('items', []),
+                   'claims':[*_records(packet.get('facts')), *_records(packet.get('claims'))],
+                   'relations':packet.get('relations', [])}
+        coverage_request.append({'role':'user', 'content':_PREFIX + json.dumps(payload)})
+    row.update(await _context_coverage(engine, case, coverage_request, labels))
+    return row
+
+
 async def run_ablation(fixture: Path, *, output: Path, model: str | None = None, endpoint: str | None = None,
                        embedding_cache: Path | None = None, repeats: int = 1, timeout: float = 30.0,
                        ordered_quotes: bool = False,
@@ -317,7 +381,21 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        review_model: str | None = None, review_timeout: float = 20.0,
                        review_policy: Literal["report", "require_supported"] = "report",
                        evidence_selector_model: str | None = None, evidence_answer_timeout: float = 20.0,
+                       tool_mode: Literal['off', 'native', 'structured'] = 'off', tool_initial_search: bool = True,
+                       tool_think: bool | None = None,
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if tool_mode not in ('off', 'native', 'structured') or type(tool_initial_search) is not bool:
+        raise ValueError('invalid tool evaluation configuration')
+    if tool_think is not None and type(tool_think) is not bool:
+        raise ValueError('tool_think must be a boolean or None')
+    if tool_mode != 'off':
+        if not model or not endpoint:
+            raise ValueError('tool evaluation requires an explicit model and endpoint')
+        validate_self_hosted_identifier(model)
+        validate_self_hosted_endpoint(endpoint)
+        if any((adaptive_model, review_model, evidence_selector_model, ordered_quotes, baseline_paths,
+                group_relations, expand_relations)):
+            raise ValueError('tool evaluation cannot combine independent candidate pipelines')
     if evidence_selector_model is not None and review_model is not None:
         raise ValueError("evidence_selector_model and review_model are mutually exclusive")
     if (isinstance(evidence_answer_timeout, bool) or not isinstance(evidence_answer_timeout, (int, float))
@@ -400,7 +478,10 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
         "code_provenance": _CODE_PROVENANCE,
         "ordered_quotes": ordered_quotes,
-        "candidate_answer_mode": "extractive" if selector is not None else "model_generation",
+        "candidate_answer_mode": 'tool_generation' if tool_mode != 'off' else "extractive" if selector is not None else "model_generation",
+        "tool_mode": tool_mode, "tool_initial_search": tool_initial_search if tool_mode != 'off' else None,
+        "tool_think": tool_think,
+        "tool_limits": _tool_limits(timeout).model_dump(mode='json') if tool_mode != 'off' else None,
         "evidence_selector_model": evidence_selector_model, "evidence_answer_timeout_seconds": evidence_answer_timeout,
         "evidence_answer_max_cards": MAX_EVIDENCE_CARDS if selector is not None else None,
         "evidence_answer_max_evidence_bytes": MAX_BYTES if selector is not None else None,
@@ -425,7 +506,9 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
             "Host-quoted excerpts can inflate lexical coverage; extractive scores do not measure generative answer accuracy.",
             "Exact phrase alternatives are mechanical key-fact checks, not semantic entailment or unsupported-claim measurement.",
             "Development and held-out splits are declared in the fixture; scores do not guarantee 98–100% general performance.",
-            "Generation failures and partial answers remain visible; evidence coverage is separate from answer checks."]}
+            "Generation failures and partial answers remain visible; evidence coverage is separate from answer checks.",
+            "Tool candidates may make multiple model requests. Their byte counts describe the model-neutral transcript and schemas, not provider wire encoding.",
+            "All candidate evidence is evaluated after the turn; requirement labels never guide its retrieval or generation."]}
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as destination:
         destination.write(json.dumps(report, indent=2) + "\n")
@@ -452,6 +535,17 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                 for case in corpus.cases:
                     for trial in range(repeats):
                         for candidate in ((False, True) if trial % 2 == 0 else (True, False)):
+                            if candidate and tool_mode != 'off':
+                                assert model is not None and endpoint is not None
+                                provider = (SelfHostedStructuredToolChat if tool_mode == 'structured' else SelfHostedToolChat)(
+                                    endpoint, model, timeout_s=timeout, max_tokens=512, think=tool_think)
+                                tool_row = await _tool_reply(engine, case, labels, provider, timeout, tool_initial_search)
+                                tool_row.update(case_id=case.id, split=case.split, query=case.query, trial=trial, variant='candidate')
+                                tool_row.update(score_answer(cast(str, tool_row['answer_text']), case.answer_checks))
+                                tool_row['successful_key_fact_coverage'] = tool_row['key_fact_coverage'] if tool_row['completed'] else 0.0
+                                results.append(tool_row)
+                                checkpoint()
+                                continue
                             structured = candidate or baseline_paths
                             adaptive_retriever = adaptive if candidate else None
                             context = MemoryContext(engine, case.space, f"ablation-{case.id}-{trial}", where=case.where,
@@ -525,6 +619,9 @@ def main() -> None:
     parser.add_argument("--embedding-cache", type=Path)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument('--tool-mode', choices=('off','native','structured'), default='off')
+    parser.add_argument('--tool-initial-search', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--tool-think', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--ordered-quotes", action="store_true", help="Include ordered verbatim quotes only in the structured-path candidate")
     parser.add_argument("--adaptive-model", help="Explicit installed self-hosted evidence assessor model for the candidate")
     parser.add_argument("--adaptive-timeout", type=float, default=30, help="Candidate adaptive retrieval budget in seconds (1..180)")
@@ -547,6 +644,7 @@ def main() -> None:
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
+        tool_mode=args.tool_mode, tool_initial_search=args.tool_initial_search, tool_think=args.tool_think,
         adaptive_model=args.adaptive_model, adaptive_timeout=args.adaptive_timeout,
         adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations,
         adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations,
