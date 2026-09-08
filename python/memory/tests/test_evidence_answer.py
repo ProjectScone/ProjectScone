@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 
 from scone_memory.realtime.context import _PREFIX
-from scone_memory.realtime.evidence_answer import (EvidenceAnswerError, EvidenceCard, EvidenceSelection,
+from scone_memory.realtime.evidence_answer import (EvidenceAnswerError, EvidenceCard, EvidenceCards, EvidenceSelection,
     build_evidence_cards, construct_evidence_answer)
 from scone_memory.realtime.review_evidence import PreparedReviewEvidence
 
@@ -356,3 +356,111 @@ async def test_provider_generic_error_never_leaks_content() -> None:
         await construct_evidence_answer(Selector(select),"question",material(packet(sources=[passage(1)]),("chunk:1",)))
     assert caught.value.reason == "selection_provider_failed"
     assert str(caught.value) == "evidence answer unavailable"
+
+
+def test_exact_same_episode_claim_passage_is_one_offered_card() -> None:
+    row = claim(1,"A","B")
+    result = build_evidence_cards(packet(claims=[row],sources=[passage(1,"A routes to B.")]))
+    assert tuple(card.kind for card in result.cards) == ("claim",)
+    assert result.cards[0].evidence_ids == ("fact:1",)
+    assert result.deduplicated_card_count == 1
+    assert result.omitted_count == 0 and not result.truncated
+
+
+@pytest.mark.parametrize("text", ["A routes to B. ","a routes to B.","A routes to B. Extra context.","A routes to B.\n"])
+def test_passages_with_distinct_exact_text_are_not_deduplicated(text: str) -> None:
+    result = build_evidence_cards(packet(claims=[claim(1,"A","B")],sources=[passage(1,text)]))
+    assert len(result.cards) == 2 and result.deduplicated_card_count == 0
+
+
+def test_unicode_equivalence_does_not_normalize_quote_identity() -> None:
+    row = claim(1,"A","B")
+    row["quote"] = "caf\u00e9"
+    result = build_evidence_cards(packet(claims=[row],sources=[passage(1,"cafe\u0301")]))
+    assert len(result.cards) == 2 and result.deduplicated_card_count == 0
+
+
+def test_identical_text_in_distinct_episodes_keeps_both_cards() -> None:
+    result = build_evidence_cards(packet(claims=[claim(1,"A","B")],sources=[passage(2,"A routes to B.")]))
+    assert len(result.cards) == 2 and result.deduplicated_card_count == 0
+
+
+def test_dedup_frees_count_budget_for_distinct_passage_with_stable_id() -> None:
+    result = build_evidence_cards(packet(claims=[claim(1,"A","B")],
+        sources=[passage(1,"A routes to B."),passage(2,"Other relevant context.")]),max_cards=2)
+    assert tuple(card.id for card in result.cards) == ("card:1","card:3")
+    assert result.deduplicated_card_count == 1 and result.omitted_count == 0
+    assert not result.truncated
+
+
+def test_dedup_frees_exact_byte_budget_for_distinct_passage() -> None:
+    evidence = packet(claims=[claim(1,"A","B")],
+        sources=[passage(1,"A routes to B."),passage(2,"Other context.")])
+    reference = build_evidence_cards(evidence)
+    wanted = tuple(card for card in reference.cards if card.id != "card:2")
+    budget = len(json.dumps([card.model_dump(mode="json") for card in wanted],
+        ensure_ascii=False,separators=(",",":")).encode())
+    result = build_evidence_cards(evidence,max_bytes=budget)
+    assert tuple(card.id for card in result.cards) == ("card:1","card:3")
+    assert result.deduplicated_card_count == 1 and result.omitted_count == 0
+
+
+def test_omitted_claim_does_not_hide_smaller_whole_passage() -> None:
+    row = claim(123456789,"A","B")
+    row["source_episode_id"] = 1
+    evidence = packet(claims=[row],sources=[passage(1,"A routes to B.")])
+    # Card IDs have equal width, so a passage-only proposal gives its exact
+    # serialized size despite the claim occupying the first proposal slot.
+    standalone = build_evidence_cards(packet(sources=[passage(1,"A routes to B.")])).cards[0]
+    budget = len(json.dumps([standalone.model_dump(mode="json")],ensure_ascii=False,separators=(",",":")).encode())
+    result = build_evidence_cards(evidence,max_bytes=budget)
+    assert tuple(card.kind for card in result.cards) == ("passage",)
+    assert result.cards[0].evidence_ids == ("chunk:1",)
+    assert result.omitted_count == 1 and result.truncated
+    assert result.deduplicated_card_count == 0
+
+
+def test_different_claim_records_are_not_collapsed_by_quote() -> None:
+    first,second = claim(1,"A","B"),claim(2,"X","Y")
+    second.update(source_episode_id=1,quote=first["quote"],origin="inferred")
+    result = build_evidence_cards(packet(claims=[first,second],sources=[passage(1,"A routes to B.")]))
+    assert tuple(card.evidence_ids for card in result.cards) == (("fact:1",),("fact:2",))
+    assert result.deduplicated_card_count == 1
+
+
+def test_no_passage_passage_dedup_for_distinct_chunk_records() -> None:
+    first,second = passage(1),passage(2)
+    second.update(episode_id=1,project="different metadata")
+    result = build_evidence_cards(packet(sources=[first,second]))
+    assert len(result.cards) == 2 and result.deduplicated_card_count == 0
+
+
+@pytest.mark.parametrize("atomic", ["path","conflict"])
+def test_budget_omitted_atomic_card_still_blocks_constituent_passage(atomic: str) -> None:
+    claims = [claim(1,"A","B"),claim(2,"B","C")]
+    evidence = packet(claims=claims,sources=[passage(1,"A routes to B.")],
+        paths=[path()] if atomic == "path" else [],relations=[relation(1,1,2)] if atomic == "conflict" else [])
+    result = build_evidence_cards(evidence,max_bytes=200)
+    assert result.cards == () and result.omitted_count == 1
+    assert result.deduplicated_card_count == 0
+
+
+async def test_selected_receipt_counts_dedup_without_invented_chunk_provenance() -> None:
+    evidence = packet(claims=[claim(1,"A","B")],sources=[passage(1,"A routes to B.")])
+    result = await construct_evidence_answer(Selector(),"question",material(evidence,("chunk:1","fact:1")))
+    assert result.answer.count("A routes to B.") == 1
+    assert result.receipt["evidence_ids"] == ["fact:1"]
+    assert result.receipt["selected_card_ids"] == ["card:1"]
+    assert result.receipt["deduplicated_card_count"] == 1
+    assert result.receipt["omitted_card_count"] == 0
+
+
+def test_evidence_cards_dedup_counter_has_backward_compatible_default() -> None:
+    assert EvidenceCards((),0,False).deduplicated_card_count == 0
+
+
+def test_neither_duplicate_fits_counts_budget_omissions_not_deduplication() -> None:
+    result = build_evidence_cards(packet(claims=[claim(1,"A","B")],
+        sources=[passage(1,"A routes to B.")]),max_bytes=2)
+    assert result.cards == () and result.omitted_count == 2 and result.truncated
+    assert result.deduplicated_card_count == 0

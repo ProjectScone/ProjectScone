@@ -69,6 +69,7 @@ class EvidenceCards:
     cards: tuple[EvidenceCard, ...]
     omitted_count: int
     truncated: bool
+    deduplicated_card_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,8 @@ def _cards(material: _Material, max_cards: int, max_bytes: int) -> EvidenceCards
     proposals: list[EvidenceCard] = []
     covered: set[int] = set()
     protected_episodes: set[int] = set()
+    standalone_quotes: dict[str, tuple[int, str]] = {}
+    passage_quotes: dict[str, tuple[int, str]] = {}
 
     def add(kind: Literal["path","claim","passage"], parts: list[str], ids: list[str]) -> None:
         text = "\n\n".join(parts)
@@ -252,19 +255,31 @@ def _cards(material: _Material, max_cards: int, max_bytes: int) -> EvidenceCards
         evidence_ids = [f"fact:{claim.fact_id}"]
         competing(ids,links,[claim.fact_id],parts,evidence_ids)
         add("claim",parts,evidence_ids)
+        if not links:
+            standalone_quotes[proposals[-1].id] = (claim.source_episode_id, claim.quote)
         covered.update(ids)
     for source in material.sources:
         if source.episode_id not in protected_episodes:
             add("passage",[f"Recorded passage [chunk:{source.chunk_id}; episode:{source.episode_id}]\n{source.text}"],
                 [f"chunk:{source.chunk_id}"])
+            passage_quotes[proposals[-1].id] = (source.episode_id, source.text)
     retained: list[EvidenceCard] = []
     omitted = 0
+    deduplicated = 0
+    offered_quotes: set[tuple[int, str]] = set()
     for card in proposals:
+        # Deduplicate only against admitted standalone claims. An oversized
+        # claim must not hide a smaller whole passage carrying the same quote.
+        if passage_quotes.get(card.id) in offered_quotes:
+            deduplicated += 1
+            continue
         if len(retained) >= max_cards or _payload((*retained,card)) > max_bytes:
             omitted += 1
         else:
             retained.append(card)
-    return EvidenceCards(tuple(retained),omitted,omitted>0)
+            if card.id in standalone_quotes:
+                offered_quotes.add(standalone_quotes[card.id])
+    return EvidenceCards(tuple(retained),omitted,omitted>0,deduplicated)
 
 
 def build_evidence_cards(evidence: str, *, max_cards: int = 24, max_bytes: int = 16000) -> EvidenceCards:
@@ -272,6 +287,9 @@ def build_evidence_cards(evidence: str, *, max_cards: int = 24, max_bytes: int =
 
     Packet caps match the canonical evidence graph (24 chunks, 16 claims,
     48 relations), with at most 16 paths. Only the controller checks sources.
+    Exact same-episode passages duplicate an offered standalone claim only;
+    differing claims, passage records, and Unicode/whitespace remain distinct.
+    Deduplicated cards are counted separately from budget omissions.
     """
     _limits(max_cards,max_bytes)
     try:
@@ -385,7 +403,9 @@ async def construct_evidence_answer(
             return ConstructedEvidenceAnswer(answer,dict(status="selected" if delivered else "no_selection",
                 selected_card_ids=[card.id for card in delivered],
                 evidence_ids=list(dict.fromkeys(identifier for card in delivered for identifier in card.evidence_ids)),
-                card_count=len(cards.cards),omitted_card_count=omitted,verified_accuracy=False,source_status="retained",mode="extractive"))
+                card_count=len(cards.cards),omitted_card_count=omitted,
+                deduplicated_card_count=cards.deduplicated_card_count,
+                verified_accuracy=False,source_status="retained",mode="extractive"))
     except asyncio.CancelledError:
         raise
     except TimeoutError:
