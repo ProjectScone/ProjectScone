@@ -117,3 +117,97 @@ async def test_transport_failure_has_safe_distinct_reason(failure, reason):
     assert error.value.reason == reason
     assert str(error.value) == "evidence assessment failed"
     assert error.value.__cause__ is None
+
+
+def connected_facts():
+    return (
+        EvidenceCandidate(id="fact:1", episode_id=1, text="Iris forwards to Fern.", subject="iris", predicate="forwards_to", object="fern"),
+        EvidenceCandidate(id="fact:2", episode_id=2, text="Fern persists through Willow.", subject="fern", predicate="persists_through", object="willow"),
+        EvidenceCandidate(id="fact:3", episode_id=3, text="Willow uses a private journal.", subject="willow", predicate="uses", object="private journal"),
+        EvidenceCandidate(id="fact:4", episode_id=4, text="Copper uses an unrelated archive.", subject="copper", predicate="uses", object="unrelated archive"),
+    )
+
+
+async def test_group_selection_returns_all_connected_fact_ids_and_atomic_contract():
+    seen = []
+    def handle(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        data = json.loads(body["messages"][1]["content"])
+        group = next(record for record in data["candidates"] if record["id"].startswith("group:"))
+        assert {record["id"] for record in group["members"]} == {"fact:1", "fact:2", "fact:3"}
+        content = json.dumps({"status": "sufficient", "selected_ids": [group["id"]], "followup_queries": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+    assessor = SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", group_relations=True,
+                                         transport=httpx.MockTransport(handle))
+    decision = await assessor.assess("Where do Iris records end up?", connected_facts())
+    assert set(decision.selected_ids) == {"fact:1", "fact:2", "fact:3"}
+    assert decision.selected_groups == (("fact:1", "fact:2", "fact:3"),)
+    schema = seen[0]["response_format"]["json_schema"]["schema"]
+    assert "fact:1" not in schema["properties"]["selected_ids"]["items"]["enum"]
+    assert "selected_groups" not in schema["properties"]
+
+
+@pytest.mark.parametrize("extra", [False, True])
+async def test_model_cannot_select_partial_group_or_inject_atomic_contract(extra):
+    content = {"status": "sufficient", "selected_ids": ["fact:1"], "followup_queries": []}
+    if extra:
+        content["selected_groups"] = [["fact:1", "fact:2"]]
+    assessor = SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", group_relations=True,
+                                         transport=transport_for(json.dumps(content), []))
+    with pytest.raises(EvidenceAssessmentError) as error:
+        await assessor.assess("Iris storage?", connected_facts())
+    assert error.value.reason == "invalid_assessment"
+
+
+async def test_grouped_byte_budget_fails_before_model_call():
+    seen = []
+    assessor = SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", group_relations=True,
+        max_evidence_bytes=100, transport=transport_for("{}", seen))
+    with pytest.raises(ValueError):
+        await assessor.assess("Iris storage?", connected_facts())
+    assert seen == []
+
+
+@pytest.mark.parametrize("options", [{"group_relations": 1}, {"max_evidence_bytes": True},
+    {"max_evidence_bytes": 1}, {"max_evidence_bytes": 128001}])
+def test_grouping_configuration_validates_before_network(options):
+    with pytest.raises(ValueError):
+        SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", **options)
+
+
+async def test_grouped_provider_flows_through_native_retrieval_and_context():
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.realtime.context import MemoryContext, _PREFIX
+    from scone_memory.retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        fact_ids = set()
+        for candidate in connected_facts():
+            source = await memory.remember("alpha", candidate.text)
+            fact = await memory.assert_fact("alpha", candidate.subject, candidate.predicate, candidate.object,
+                                           source_episode_id=source.episode_id, quote=candidate.text)
+            if candidate.id != "fact:4":
+                fact_ids.add(fact.fact_id)
+
+        def handle(request):
+            data = json.loads(json.loads(request.content)["messages"][1]["content"])
+            group = next(record for record in data["candidates"] if record["id"].startswith("group:"))
+            content = json.dumps({"status": "sufficient", "selected_ids": [group["id"]], "followup_queries": []})
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+        assessor = SelfHostedEvidenceAssessor("http://localhost:11434/v1", "fixture", group_relations=True,
+                                             transport=httpx.MockTransport(handle))
+        adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0))
+        request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+            {"role": "user", "content": "Where do Iris records go through Fern and Willow?"}])
+        block = next(message["content"] for message in request if message["content"].startswith(_PREFIX.rstrip("\n")))
+        payload = json.loads(block[block.index("{"):])
+        assert {claim["fact_id"] for claim in payload["claims"]} == fact_ids
+        assert payload["coverage"]["adaptive"]["selection_complete"] is True
+        assert receipt["adaptive_atomic_group_omitted_count"] == 0
+        assert payload["paths"] and receipt["path_count"] >= 1
+        assert "unrelated archive" not in block
+    finally:
+        await memory.close()

@@ -50,6 +50,7 @@ _ADAPTIVE_DIAGNOSTICS = frozenset({
     "no_evidence", "no_followup_queries", "no_new_queries", "max_rounds", "timeout",
     "invalid_or_failed_assessment", "retrieval_failed",
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
+    "atomic_group_omitted",
 })
 
 
@@ -106,6 +107,7 @@ class ContextReceipt(TypedDict):
     next_before: NotRequired[int | None]
     evidence_graph: NotRequired[dict[str, object]]
     evidence_graph_status: NotRequired[str]
+    evidence_graph_stale: NotRequired[bool]
     evidence_fingerprints: NotRequired[dict[str, str]]
     claim_fingerprints: NotRequired[dict[str, str]]
     relation_fingerprints: NotRequired[dict[str, str]]
@@ -122,6 +124,7 @@ class ContextReceipt(TypedDict):
     adaptive_truncated: NotRequired[bool]
     adaptive_reasons: NotRequired[list[str]]
     adaptive_errors: NotRequired[list[str]]
+    adaptive_atomic_group_omitted_count: NotRequired[int]
 
 
 class MemoryContext:
@@ -135,6 +138,8 @@ class MemoryContext:
     Its sufficiency assessment is a model judgment, not verified answer quality.
     Adaptive search owns its deadline so equal timers cannot hide its timeout
     receipt. Ordinary search and overview retain this context's timeout.
+    A store revision change during graph verification discards cached evidence,
+    including when the concurrent write was unrelated to the selected records.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
@@ -232,6 +237,7 @@ class MemoryContext:
                         "session_id": self._session_id, "stage": plan.mode})
             recalled_facts: list[Fact] = []
             adaptive_selected_ids: set[str] | None = None
+            adaptive_groups: tuple[tuple[str, ...], ...] = ()
             adaptive_coverage: dict[str, object] | None = None
             low_confidence: bool | None
             event_id: int | None
@@ -263,12 +269,17 @@ class MemoryContext:
                             "adaptive_errors": errors})
                         adaptive_selected_ids = ({f"chunk:{item.chunk_id}" for item in result.items}
                                                  | {f"fact:{fact.fact_id}" for fact in result.facts})
+                        adaptive_groups = adaptive.selected_groups
                         adaptive_coverage = {"assessment_status": adaptive.status,
                             "assessment_basis": "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment",
                             "verified_sufficiency": False, "bounded": True, "truncated": adaptive.truncated,
                             "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
                             "reasons": reasons, "errors": errors, "selection_complete": False,
                             "selected_omitted_count": len(adaptive_selected_ids)}
+                        if adaptive_groups:
+                            # Reserve the largest count before packing so final
+                            # coverage can only shrink the serialized byte cost.
+                            adaptive_coverage["atomic_group_omitted_count"] = len(adaptive_groups)
                         coverage.update({"complete_history": False, "context_omitted_count": len(result.items),
                                          "adaptive": adaptive_coverage})
                     items, low_confidence, event_id, degraded = result.items, result.low_confidence, result.event_id, result.degraded
@@ -336,13 +347,23 @@ class MemoryContext:
                     if len(provisional_items) == self._limit:
                         break
                 # One bounded verification pass serves inference and inspection.
-                # A failed optional graph read still leaves ordinary passages usable.
+                # A failed optional graph read still leaves ordinary passages usable
+                # unless the revision guard confirms that the read became stale.
                 # Adaptive passages must pass this post-assessment source check.
+                graph_stale = False
                 try:
                     async with asyncio.timeout(min(self._timeout, 1.0)):
-                        graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
+                        graph_revision = await self._memory.documents.revision(self._space)
+                        verified_graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
                             RecallResult(items=provisional_items, facts=recalled_facts, event_id=event_id),
                             scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id)
+                        if await self._memory.documents.revision(self._space) != graph_revision:
+                            graph_stale = True
+                            receipt["evidence_graph_stale"] = True
+                            if adaptive_selected_ids is not None and "stale_evidence" not in receipt["adaptive_reasons"]:
+                                receipt["adaptive_reasons"].append("stale_evidence")
+                            raise RuntimeError("memory changed during graph verification")
+                        graph = verified_graph
                     records = canonical_evidence(graph)
                     if expansion is not None:
                         found_paths = ordered_evidence_paths(expansion, records, include_quotes=self._path_quotes)
@@ -355,7 +376,7 @@ class MemoryContext:
                     logger.warning("evidence_graph.failed", extra={"event": "evidence_graph.failed",
                         "session_id": self._session_id, "exception_type": type(graph_error).__name__})
                 retained_chunks = ({node.data.get("chunk_id") for node in graph.nodes if node.kind == "chunk"}
-                                   if graph else set() if adaptive_selected_ids is not None else None)
+                                   if graph else set() if adaptive_selected_ids is not None or graph_stale else None)
                 eligible = [item for item in provisional_items
                             if (retained_chunks is None or item.chunk_id in retained_chunks)
                             and item.metadata.get("session_id") != self._session_id
@@ -403,6 +424,28 @@ class MemoryContext:
                     if len(text.encode()) <= self._max_bytes:
                         sources.append(candidate)
                         selected_items.append(item)
+                if adaptive_groups:
+                    supplied_ids = ({f"chunk:{item.chunk_id}" for item in selected_items}
+                                    | {f"fact:{claim['fact_id']}" for claim in claims})
+                    omitted_groups = [group for group in adaptive_groups if not set(group).issubset(supplied_ids)]
+                    omitted_members = {member for group in omitted_groups for member in group}
+                    selected_items = [item for item in selected_items if f"chunk:{item.chunk_id}" not in omitted_members]
+                    sources = [_source(item) for item in selected_items]
+                    claims = [claim for claim in claims if f"fact:{claim['fact_id']}" not in omitted_members]
+                    retained_fact_ids = {claim["fact_id"] for claim in claims if isinstance(claim["fact_id"], int)}
+                    relations = [relation for relation in relations
+                        if relation["from_fact"] in retained_fact_ids and relation["to_fact"] in retained_fact_ids]
+                    retained_link_ids = {relation["link_id"] for relation in relations if isinstance(relation["link_id"], int)}
+                    retained_paths: list[EvidenceRecord] = []
+                    for path in paths:
+                        components = path_records(path, records)
+                        if (all(claim["fact_id"] in retained_fact_ids for claim in components.claims)
+                                and all(relation["link_id"] in retained_link_ids for relation in components.relations)):
+                            retained_paths.append(path)
+                    paths = retained_paths
+                    receipt["adaptive_atomic_group_omitted_count"] = len(omitted_groups)
+                    if adaptive_coverage is not None:
+                        adaptive_coverage["atomic_group_omitted_count"] = len(omitted_groups)
                 if sources or claims:
                     if "adaptive" in coverage:
                         coverage["context_omitted_count"] = candidate_count - len(sources)

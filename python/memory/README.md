@@ -516,6 +516,27 @@ budget across all calls. Reports record both limits. Receipts distinguish
 assessment timeouts, provider failures and invalid model decisions without
 including raw provider errors or source text.
 
+For optional atomic relation selection, construct the assessor with
+`group_relations=True, max_evidence_bytes=16000`. The pure
+`retrieval.evidence_groups.build_evidence_groups` helper groups supplied facts
+by exact object-to-subject matches, preserving branches and cycles. It does not
+invent semantic links or search beyond the supplied candidate pool. Existing
+stored-link kinds are still handled by the separate graph expansion stage.
+
+A selected group expands to all of its original evidence IDs. The model-neutral
+`EvidenceDecision.selected_groups` contract carries that requirement through
+source revalidation and conversation packing: if any member changes or cannot
+fit, the whole group is omitted. Independent ungrouped evidence can still be
+used. Receipts expose group omissions; a complete group does not prove that the
+answer is sufficient or correct. Grouping stays off by default.
+
+The adapter's `max_evidence_bytes` bounds the serialized evidence array including
+group metadata and joins. It is separate from the core's input-evidence budget
+and the conversation's final context budget; configure all three explicitly.
+Add `--group-relations` to the adaptive evaluator command to compare this mode
+against ordinary compact paths. Every input record is represented once or
+construction fails; no source or group is silently clipped to fit.
+
 See [the executable native example](examples/realtime_conversation.py). It uses
 real Scone memory and scheduling with a scripted provider, not live inference.
 

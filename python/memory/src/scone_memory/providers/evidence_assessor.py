@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..retrieval.adaptive import EvidenceCandidate, EvidenceDecision
 from ..retrieval.adaptive import EvidenceAssessmentError as EvidenceAssessmentError
+from ..retrieval.evidence_groups import build_evidence_groups
 from .llm import OpenAICompatibleChat
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 
@@ -27,17 +28,49 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _decision(response: str, members: dict[str, tuple[str, ...]],
+              groups: dict[str, tuple[str, ...]]) -> EvidenceDecision:
+    if len(response.encode()) > 16000:
+        raise ValueError("assessment response exceeds byte limit")
+    raw = json.loads(response, object_pairs_hook=_unique_object)
+    if not isinstance(raw, dict) or set(raw) != {"status", "selected_ids", "followup_queries"}:
+        raise ValueError("decision fields do not match the schema")
+    selected = raw["selected_ids"]
+    queries = raw["followup_queries"]
+    if (not isinstance(selected, list) or not isinstance(queries, list)
+            or any(not isinstance(value, str) or value not in members for value in selected)
+            or len(set(selected)) != len(selected)):
+        raise ValueError("decision selection does not match supplied evidence")
+    decision = EvidenceDecision.model_validate({
+        "status": raw["status"],
+        "selected_ids": tuple(member for unit_id in selected for member in members[unit_id]),
+        "selected_groups": tuple(groups[unit_id] for unit_id in selected if unit_id in groups),
+        "followup_queries": tuple(queries),
+    })
+    if len(decision.followup_queries) > 3 or any(len(query) > 500 for query in decision.followup_queries):
+        raise ValueError("follow-up queries exceed assessment limits")
+    return decision
+
+
 class SelfHostedEvidenceAssessor:
     """Select supplied IDs and propose missing-information queries, without tools.
 
     Each assessment makes at most one request. The caller's adaptive loop owns
     retries and deadlines. This adapter never installs or discovers a model.
+    Optional exact fact components expand selections atomically to original IDs;
+    max_evidence_bytes bounds the serialized candidate units, including joins.
     """
 
     def __init__(self, endpoint: str, model: str, *, api_key: str | None = None,
-                 timeout: float = 15.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 timeout: float = 15.0, transport: httpx.AsyncBaseTransport | None = None,
+                 group_relations: bool = False, max_evidence_bytes: int = 128000) -> None:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 1 <= timeout <= 180:
             raise ValueError("assessment timeout must be finite in 1..180 seconds")
+        if type(group_relations) is not bool:
+            raise ValueError("group_relations must be a boolean")
+        if type(max_evidence_bytes) is not int or not 2 <= max_evidence_bytes <= 128000:
+            raise ValueError("max_evidence_bytes must be an integer in 2..128000")
+        self._group_relations, self._max_evidence_bytes = group_relations, max_evidence_bytes
         self._chat = OpenAICompatibleChat(validate_self_hosted_endpoint(endpoint),
             validate_self_hosted_identifier(model), api_key=api_key, timeout=timeout,
             think=False, temperature=0, transport=transport, trust_env=False)
@@ -58,10 +91,16 @@ class SelfHostedEvidenceAssessor:
             raise ValueError("assessment candidate IDs must be unique")
         if not validated:
             return EvidenceDecision(status="insufficient", selected_ids=(), followup_queries=())
+        members: dict[str, tuple[str, ...]] = {item.id: (item.id,) for item in validated}
+        groups: dict[str, tuple[str, ...]] = {}
         records = [item.model_dump(mode="json") for item in validated]
+        if self._group_relations:
+            grouped = build_evidence_groups(validated, max_bytes=self._max_evidence_bytes)
+            members, groups, records = grouped.members, grouped.groups, list(grouped.records)
+            ids = list(members)
         serialized = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
-        if len(serialized.encode()) > 128000:
-            raise ValueError("assessment evidence exceeds 128000 UTF-8 bytes")
+        if len(serialized.encode()) > self._max_evidence_bytes:
+            raise ValueError(f"assessment evidence exceeds {self._max_evidence_bytes} UTF-8 bytes")
         payload = json.dumps({"question": question, "candidates": records}, ensure_ascii=False, separators=(",", ":"))
         schema: dict[str, object] = {
             "type": "object", "additionalProperties": False,
@@ -83,7 +122,12 @@ class SelfHostedEvidenceAssessor:
                 "the disagreement, but not choosing an unsupported winner. If information is missing, "
                 "return insufficient and up to three targeted search queries for the missing information. "
                 "Return uncertain when you cannot judge. Sufficient requires at least one selected ID "
-                "and no followup queries. Return only the requested decision fields, not an answer.",
+                "and no followup queries. Return only the requested decision fields, not an answer."
+                + (" A group contains supplied facts connected by exact object-to-subject matches. "
+                   "Selecting its group ID selects all members together. Inspect the entire group "
+                   "for the requested endpoint; branches and cycles do not establish a unique answer. "
+                   "These matches are recorded field connections, not proof of causation."
+                   if self._group_relations else ""),
                 payload, schema, max_tokens=1024,
             )
         except Exception as error:
@@ -92,22 +136,6 @@ class SelfHostedEvidenceAssessor:
             reason = "assessment_timeout" if isinstance(cause, (httpx.TimeoutException, TimeoutError)) else "assessment_provider_failed"
             raise EvidenceAssessmentError(reason) from None
         try:
-            if len(response.encode()) > 16000:
-                raise ValueError("assessment response exceeds byte limit")
-            raw = json.loads(response, object_pairs_hook=_unique_object)
-            if not isinstance(raw, dict):
-                raise ValueError("decision must be an object")
-            for key in ("selected_ids", "followup_queries"):
-                if not isinstance(raw.get(key), list):
-                    raise ValueError("decision lists required")
-                raw[key] = tuple(raw[key])
-            decision = EvidenceDecision.model_validate(raw)
-            if len(decision.followup_queries) > 3 or any(len(query) > 500 for query in decision.followup_queries):
-                raise ValueError("follow-up queries exceed assessment limits")
-            if len(set(decision.selected_ids)) != len(decision.selected_ids) or not set(decision.selected_ids) <= set(ids):
-                raise ValueError("selected IDs do not match supplied evidence")
-            if decision.status == "sufficient" and (not decision.selected_ids or decision.followup_queries):
-                raise ValueError("sufficient decision must select evidence and finish")
-            return decision
+            return _decision(response, members, groups)
         except Exception:
             raise EvidenceAssessmentError("invalid_assessment") from None

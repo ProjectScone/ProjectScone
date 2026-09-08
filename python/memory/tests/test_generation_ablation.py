@@ -72,7 +72,7 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
-                "providers/evidence_assessor.py", "testing/generation_ablation.py"}
+                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
@@ -189,16 +189,20 @@ async def test_ordered_quotes_rejects_non_boolean(tmp_path):
     assert not (tmp_path / "invalid.json").exists()
 
 
+@pytest.mark.parametrize("group_relations", [False, True])
 @pytest.mark.parametrize("baseline_paths", [False, True])
 @pytest.mark.parametrize("assessment_fails", [False, True])
 async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visible(tmp_path, monkeypatch,
-                                                                                   baseline_paths, assessment_fails):
+                                                                                   baseline_paths, assessment_fails, group_relations):
     from scone_memory.retrieval.adaptive import EvidenceDecision
     from scone_memory.testing import generation_ablation
+    expected_group_relations = group_relations
     assessment_inputs = []
     generation_inputs = []
     class Assessor:
-        def __init__(self, endpoint, model, *, timeout):
+        def __init__(self, endpoint, model, *, timeout, group_relations, max_evidence_bytes):
+            assert group_relations is expected_group_relations
+            assert max_evidence_bytes == 16000
             assert (endpoint, model, timeout) == ("http://127.0.0.1:1234/v1", "local-assessor", 20)
         async def assess(self, question, candidates):
             assessment_inputs.append((question, candidates))
@@ -215,8 +219,10 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", Assessor, raising=False)
     report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "adaptive.json",
         endpoint="http://127.0.0.1:1234/v1", model_factory=Streaming, repeats=2, ordered_quotes=True,
-        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths)
+        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths, group_relations=group_relations)
     assert report["state"] == "completed"
+    assert report["group_relations"] is group_relations
+    assert report["assessment_max_evidence_bytes"] == 16000
     assert report["adaptive_model"] == "local-assessor"
     assert report["adaptive_timeout_seconds"] == 20
     assert report["assessment_timeout_seconds"] == 20
@@ -224,6 +230,7 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     assert report["baseline_paths"] is baseline_paths
     rows = report["results"]
     assert [row["variant"] for row in rows] == ["baseline", "candidate", "candidate", "baseline"]
+    assert [row["group_relations"] for row in rows] == [False, group_relations, group_relations, False]
     assert [row["adaptive_retrieval"] for row in rows] == [False, True, True, False]
     assert [row["structured_paths"] for row in rows] == [baseline_paths, True, True, baseline_paths]
     assert [row["ordered_quotes"] for row in rows] == [False, True, True, False]
@@ -246,6 +253,8 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
 @pytest.mark.parametrize("options,match", [
     ({"baseline_paths": 1}, "baseline_paths"),
     ({"baseline_paths": True}, "adaptive_model"),
+    ({"group_relations": True}, "adaptive_model"),
+    ({"group_relations": 1}, "group_relations"),
     ({"adaptive_model": "local-assessor"}, "endpoint"),
     ({"adaptive_model": " "}, "adaptive_model"),
     ({"adaptive_model": True}, "adaptive_model"),

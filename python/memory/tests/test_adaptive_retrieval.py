@@ -428,3 +428,169 @@ async def test_assessment_failure_receipt_preserves_only_safe_codes(memory: Memo
     assert result.errors == (expected,)
     assert result.status == "uncertain" and not result.recall.items and not result.recall.facts
     assert "private error" not in result.model_dump_json()
+
+
+def test_selected_groups_default_to_empty() -> None:
+    from scone_memory.retrieval.adaptive import AdaptiveResult
+
+    assert EvidenceDecision(status="insufficient", selected_ids=()).selected_groups == ()
+    assert AdaptiveResult().selected_groups == ()
+
+
+@pytest.mark.parametrize("groups", [
+    (("fact:1",),),
+    (("fact:1", "fact:1"),),
+    (("fact:1", "fact:2"), ("fact:2", "fact:3")),
+    (("fact:1", "fact:999"),),
+    [["fact:1", "fact:2"]],
+    (["fact:1", "fact:2"],),
+    tuple((f"fact:{i * 2 + 1}", f"fact:{i * 2 + 2}") for i in range(101)),
+])
+def test_atomic_group_schema_rejects_invalid_membership_or_coercion(groups: object) -> None:
+    with pytest.raises(ValidationError):
+        EvidenceDecision.model_validate({"status": "insufficient", "selected_ids": ("fact:1", "fact:2", "fact:3"),
+                                         "selected_groups": groups})
+
+
+@pytest.mark.parametrize("stage", ["assessment", "final_verification"])
+@pytest.mark.parametrize("change", ["delete", "content"])
+async def test_atomic_groups_omit_every_member_after_retention_change(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, stage: str, change: str) -> None:
+    grouped_first = await fact(memory, "Aster", "depends on", "Beacon")
+    grouped_second = await fact(memory, "Beacon", "owned by", "Cedar")
+    independent = await fact(memory, "Aster", "color", "blue")
+    source_id = grouped_second.source_episode_id
+    assert source_id is not None
+    initial = RecallResult(facts=[grouped_first, grouped_second, independent])
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=initial))
+    original_get = memory.documents.get_episode
+    altered = False
+    post_assessment_reads = 0
+
+    async def mutate() -> None:
+        nonlocal altered
+        if change == "delete":
+            await memory.forget("alpha", source_id)
+        altered = True
+
+    async def current_source(space: str, episode_id: int) -> Episode | None:
+        episode = await original_get(space, episode_id)
+        if not isinstance(episode, Episode):
+            return None
+        if altered and change == "content" and episode_id == source_id:
+            return episode.model_copy(update={"content": "changed source"})
+        return episode
+
+    monkeypatch.setattr(memory.documents, "get_episode", current_source)
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        if stage == "assessment":
+            await mutate()
+        else:
+            async def final_source(space: str, episode_id: int) -> Episode | None:
+                nonlocal post_assessment_reads
+                if episode_id == source_id:
+                    post_assessment_reads += 1
+                    # First is the post-model pass, second is the final pass.
+                    if post_assessment_reads == 2:
+                        await mutate()
+                return await current_source(space, episode_id)
+
+            monkeypatch.setattr(memory.documents, "get_episode", final_source)
+        return EvidenceDecision(status="sufficient", selected_ids=tuple(c.id for c in candidates),
+            selected_groups=((f"fact:{grouped_first.fact_id}", f"fact:{grouped_second.fact_id}"),))
+
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "uncertain"
+    assert result.selected_groups == ()
+    assert not {grouped_first.fact_id, grouped_second.fact_id} & {item.fact_id for item in result.recall.facts}
+    # Engine deletion during verification invalidates the whole revision snapshot;
+    # a content-only point-read replacement leaves independent evidence usable.
+    if change == "content" or stage == "assessment":
+        assert result.recall.facts == [independent]
+    assert "atomic_group_omitted" in result.reasons
+
+
+@pytest.mark.parametrize("invalid", ["unknown", "outside_selected", "duplicate", "overlap", "list"])
+async def test_unvalidated_atomic_groups_fail_closed(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, invalid: str) -> None:
+    records = [await fact(memory, "Aster", "depends on", "Beacon"),
+               await fact(memory, "Beacon", "owned by", "Cedar"),
+               await fact(memory, "Cedar", "located in", "Denver")]
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=records)))
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        ids = tuple(c.id for c in candidates)
+        groups: object = ((ids[0], "fact:99999"),)
+        selected = ids
+        if invalid == "outside_selected":
+            selected, groups = ids[:2], ((ids[0], ids[2]),)
+        elif invalid == "duplicate":
+            groups = ((ids[0], ids[0]),)
+        elif invalid == "overlap":
+            groups = ((ids[0], ids[1]), (ids[1], ids[2]))
+        elif invalid == "list":
+            groups = ([ids[0], ids[1]],)
+        return EvidenceDecision.model_construct(status="sufficient", selected_ids=selected,
+                                                selected_groups=groups, followup_queries=())
+
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "uncertain" and result.recall.facts == []
+    assert result.selected_groups == () and result.errors == ("invalid_or_failed_assessment",)
+
+
+async def test_complete_atomic_groups_survive_and_last_decision_controls_delivery(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    records = [await fact(memory, "Aster", "depends on", "Beacon"),
+               await fact(memory, "Beacon", "owned by", "Cedar"),
+               await fact(memory, "Cedar", "located in", "Denver")]
+    calls = 0
+
+    async def recall(space: str, query: str, **kwargs: object) -> RecallResult:
+        return RecallResult(facts=records[:2] if calls == 0 else records[2:])
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        nonlocal calls
+        calls += 1
+        ids = tuple(c.id for c in candidates)
+        return EvidenceDecision(status="insufficient" if calls == 1 else "sufficient", selected_ids=ids,
+            selected_groups=(ids,), followup_queries=("Cedar location",) if calls == 1 else ())
+
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "sufficient" and result.recall.facts == records
+    assert result.selected_groups == (tuple(f"fact:{record.fact_id}" for record in records),)
+
+
+@pytest.mark.parametrize("recall_first_again", [False, True])
+async def test_atomic_carry_prunes_partial_group_before_next_assessment(memory: MemoryEngine,
+        monkeypatch: pytest.MonkeyPatch, recall_first_again: bool) -> None:
+    first = await fact(memory, "Aster", "depends on", "Beacon")
+    removed = await fact(memory, "Beacon", "owned by", "Cedar")
+    fresh = await fact(memory, "Aster", "owner", "Delta")
+    removed_source = removed.source_episode_id
+    assert removed_source is not None
+    calls = 0
+
+    async def recall(space: str, query: str, **kwargs: object) -> RecallResult:
+        if calls == 0:
+            return RecallResult(facts=[first, removed])
+        await memory.forget("alpha", removed_source)
+        return RecallResult(facts=[first, fresh] if recall_first_again else [fresh])
+
+    async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        nonlocal calls
+        calls += 1
+        ids = tuple(c.id for c in candidates)
+        if calls == 1:
+            return EvidenceDecision(status="insufficient", selected_ids=ids, selected_groups=(ids,),
+                                    followup_queries=("Aster owner",))
+        expected = [first, fresh] if recall_first_again else [fresh]
+        assert ids == tuple(f"fact:{record.fact_id}" for record in expected)
+        return EvidenceDecision(status="sufficient", selected_ids=ids)
+
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    assert result.status == "sufficient" and result.selected_groups == ()
+    assert result.recall.facts == ([first, fresh] if recall_first_again else [fresh])
+    assert "atomic_group_omitted" in result.reasons

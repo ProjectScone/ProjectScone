@@ -404,3 +404,129 @@ async def test_changed_selected_fact_cannot_return_through_expansion_under_same_
     assert data["coverage"]["adaptive"]["selection_complete"] is False
     assert data["coverage"]["adaptive"]["selected_omitted_count"] == 1
     assert receipt["multihop_coverage"]["selection_omitted_facts"] == 1
+
+
+async def test_byte_budget_omits_entire_atomic_group_and_keeps_independent_record(memory):
+    independent = await memory.remember("alpha", "Juniper calibration has an independent scheduling note.")
+    left = await memory.remember("alpha", "Juniper calibration grouped left: " + "Meridian reference details. " * 13)
+    right = await memory.remember("alpha", "Juniper calibration grouped right: " + "Celeste maintains reference. " * 13)
+
+    def decide(_, candidates):
+        ids = {candidate.episode_id: candidate.id for candidate in candidates if candidate.id.startswith("chunk:")}
+        return EvidenceDecision(status="sufficient",
+            selected_ids=(ids[independent.episode_id], ids[left.episode_id], ids[right.episode_id]),
+            selected_groups=((ids[left.episode_id], ids[right.episode_id]),))
+
+    adaptive = retriever(memory, ScriptedAssessor(decide))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           max_context_bytes=1800).prepare([
+        {"role": "user", "content": "Juniper calibration?"}])
+    data = payload(request)
+    assert {source["episode_id"] for source in data["sources"]} == {independent.episode_id}
+    assert receipt["adaptive_atomic_group_omitted_count"] == 1
+    assert data["coverage"]["adaptive"]["atomic_group_omitted_count"] == 1
+    assert data["coverage"]["adaptive"]["selected_omitted_count"] == 2
+    assert data["coverage"]["adaptive"]["selection_complete"] is False
+    assert receipt["context_bytes"] == len(request[0]["content"].encode()) <= 1800
+    assert {ref["episode_id"] for ref in receipt["references"]} == {independent.episode_id}
+
+
+@pytest.mark.parametrize("delete_group_member", [False, True])
+async def test_atomic_mixed_group_source_loss_prunes_dependent_paths_and_relations(memory, delete_group_member):
+    first = await memory.remember("alpha", "juniper depends on meridian.")
+    second = await memory.remember("alpha", "meridian operated by celeste.")
+    grouped_source = await memory.remember("alpha", "Juniper calibration group supporting source.")
+    stable = await memory.assert_fact("alpha", "juniper", "depends on", "meridian",
+                                     source_episode_id=first.episode_id, quote="juniper depends on meridian.")
+    grouped_fact = await memory.assert_fact("alpha", "meridian", "operated by", "celeste",
+                                           source_episode_id=second.episode_id, quote="meridian operated by celeste.")
+    await memory.link_facts("alpha", stable.fact_id, grouped_fact.fact_id, "supports",
+                            source_episode_id=first.episode_id, quote="juniper depends on meridian.")
+
+    def decide(_, candidates):
+        chunk_id = next(candidate.id for candidate in candidates
+                        if candidate.episode_id == grouped_source.episode_id and candidate.id.startswith("chunk:"))
+        return EvidenceDecision(status="sufficient",
+            selected_ids=(f"fact:{stable.fact_id}", f"fact:{grouped_fact.fact_id}", chunk_id),
+            selected_groups=((f"fact:{grouped_fact.fact_id}", chunk_id),))
+
+    class DeleteAfterRetrieval(AdaptiveRetriever):
+        async def retrieve(self, *args, **kwargs):
+            result = await super().retrieve(*args, **kwargs)
+            if delete_group_member:
+                await memory.forget("alpha", grouped_source.episode_id)
+            return result
+
+    adaptive = DeleteAfterRetrieval(memory, ScriptedAssessor(decide), limits=AdaptiveLimits(timeout_s=1.0))
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "juniper meridian calibration"}])
+    data = payload(request)
+    if delete_group_member:
+        assert {claim["fact_id"] for claim in data["claims"]} == {stable.fact_id}
+        assert data["sources"] == [] and not data.get("paths") and not data.get("relations")
+        assert receipt["adaptive_atomic_group_omitted_count"] == 1
+        assert data["coverage"]["adaptive"]["selected_omitted_count"] == 2
+        assert data["coverage"]["adaptive"]["selection_complete"] is False
+        assert receipt["path_count"] == 0
+        assert f"claim:{grouped_fact.fact_id}" not in {node["id"] for node in receipt["evidence_graph"]["nodes"]}
+        assert set(receipt["claim_fingerprints"]) == {str(stable.fact_id)}
+    else:
+        assert {claim["fact_id"] for claim in data["claims"]} == {stable.fact_id, grouped_fact.fact_id}
+        assert len(data["sources"]) == 1 and data["paths"] and data["relations"]
+        assert receipt["adaptive_atomic_group_omitted_count"] == 0
+        assert data["coverage"]["adaptive"]["selected_omitted_count"] == 0
+        assert data["coverage"]["adaptive"]["selection_complete"] is True
+
+
+@pytest.mark.parametrize("mutation", ["delete_group_source", "unrelated_write"])
+async def test_atomic_groups_fail_closed_when_memory_changes_during_graph_read(memory, monkeypatch, mutation):
+    episodes, facts = [], []
+    for subject, predicate, obj in [("juniper", "depends on", "meridian"), ("meridian", "operated by", "celeste")]:
+        quote = f"{subject} {predicate} {obj}."
+        episode = await memory.remember("alpha", quote)
+        episodes.append(episode)
+        facts.append(await memory.assert_fact("alpha", subject, predicate, obj,
+                                             source_episode_id=episode.episode_id, quote=quote))
+
+    def decide(_, candidates):
+        selected = tuple(candidate.id for candidate in candidates if candidate.id.startswith("fact:"))
+        return EvidenceDecision(status="sufficient", selected_ids=selected, selected_groups=(selected,))
+
+    original_links = memory.documents.fact_links_between
+
+    async def mutate_after_sources_checked(space, fact_ids, limit):
+        if mutation == "delete_group_source":
+            await memory.forget("alpha", episodes[0].episode_id)
+        else:
+            await memory.remember("alpha", "An unrelated scheduling update arrived during graph verification.")
+        return await original_links(space, fact_ids, limit)
+
+    monkeypatch.setattr(memory.documents, "fact_links_between", mutate_after_sources_checked)
+    adaptive = retriever(memory, ScriptedAssessor(decide))
+    messages = [{"role": "user", "content": "juniper meridian"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           structured_paths=False).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["evidence_graph_status"] == "unavailable"
+    assert receipt["claim_count"] == 0 and receipt["references"] == []
+    assert receipt["adaptive_atomic_group_omitted_count"] == 1
+    assert "stale_evidence" in receipt["adaptive_reasons"]
+    assert "evidence_graph" not in receipt and "claim_fingerprints" not in receipt
+
+
+async def test_ordinary_context_also_omits_confirmed_stale_graph_sources(memory, monkeypatch):
+    episode = await memory.remember("alpha", "juniper depends on meridian.")
+    await memory.assert_fact("alpha", "juniper", "depends on", "meridian",
+                             source_episode_id=episode.episode_id, quote="juniper depends on meridian.")
+    original_links = memory.documents.fact_links_between
+
+    async def delete_after_source_checked(space, fact_ids, limit):
+        await memory.forget("alpha", episode.episode_id)
+        return await original_links(space, fact_ids, limit)
+
+    monkeypatch.setattr(memory.documents, "fact_links_between", delete_after_source_checked)
+    messages = [{"role": "user", "content": "juniper meridian"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", structured_paths=False).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["evidence_graph_status"] == "unavailable" and receipt["evidence_graph_stale"] is True
+    assert receipt["references"] == [] and receipt["claim_count"] == 0

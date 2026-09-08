@@ -20,7 +20,7 @@ from pydantic import Field, model_validator
 def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
-             "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
+             "retrieval/evidence_groups.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
@@ -218,10 +218,14 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        embedding_cache: Path | None = None, repeats: int = 1, timeout: float = 30.0,
                        ordered_quotes: bool = False,
                        adaptive_model: str | None = None, adaptive_timeout: float = 30.0,
-                       adaptive_rounds: int = 3, baseline_paths: bool = False,
+                       adaptive_rounds: int = 3, baseline_paths: bool = False, group_relations: bool = False,
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
     if type(ordered_quotes) is not bool:
         raise ValueError("ordered_quotes must be a boolean")
+    if type(group_relations) is not bool:
+        raise ValueError("group_relations must be a boolean")
+    if group_relations and adaptive_model is None:
+        raise ValueError("group_relations requires adaptive_model")
     if type(baseline_paths) is not bool:
         raise ValueError("baseline_paths must be a boolean")
     if (isinstance(adaptive_timeout, bool) or not isinstance(adaptive_timeout, (int, float))
@@ -252,7 +256,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         model_factory = factory
     elif endpoint is not None:
         _validate_endpoint(endpoint)
-    assessor = (SelfHostedEvidenceAssessor(endpoint, adaptive_model, timeout=adaptive_timeout)
+    assessor = (SelfHostedEvidenceAssessor(endpoint, adaptive_model, timeout=adaptive_timeout,
+        group_relations=group_relations, max_evidence_bytes=16_000)
                 if adaptive_model is not None and endpoint is not None else None)
     results: list[dict[str, object]] = []
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
@@ -260,7 +265,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "ordered_quotes": ordered_quotes,
         "adaptive_model": adaptive_model, "adaptive_timeout_seconds": adaptive_timeout,
         "assessment_timeout_seconds": adaptive_timeout if assessor is not None else None,
-        "adaptive_rounds": adaptive_rounds, "baseline_paths": baseline_paths,
+        "adaptive_rounds": adaptive_rounds, "baseline_paths": baseline_paths, "group_relations": group_relations,
+        "assessment_max_evidence_bytes": 16_000 if assessor is not None else None,
         "model": model or "injected-test-provider", "endpoint": endpoint, "repeats": repeats, "timeout_seconds": timeout,
         "system_prompt_sha256": hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest(), "max_prompt_bytes": MAX_BYTES,
         "max_output_bytes": MAX_BYTES, "max_output_tokens": 512, "results": results,
@@ -308,6 +314,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                             row: dict[str, object] = {"case_id": case.id, "split": case.split, "query": case.query,
                                 "trial": trial, "variant": "candidate" if candidate else "baseline",
                                 "adaptive_retrieval": adaptive_retriever is not None,
+                                "group_relations": group_relations and adaptive_retriever is not None,
                                 "structured_paths": structured, "ordered_quotes": ordered_quotes and candidate,
                                 "context_ms": round(context_ms, 3),
                                 "prompt_bytes": len(prompt), "prompt_sha256": hashlib.sha256(prompt).hexdigest(),
@@ -349,11 +356,12 @@ def main() -> None:
     parser.add_argument("--adaptive-timeout", type=float, default=30, help="Candidate adaptive retrieval budget in seconds (1..180)")
     parser.add_argument("--adaptive-rounds", type=int, default=3, help="Maximum adaptive assessment rounds (1..4)")
     parser.add_argument("--baseline-paths", action="store_true", help="Use structured paths for the baseline; requires --adaptive-model")
+    parser.add_argument("--group-relations", action="store_true", help="Select exact fact components atomically; requires --adaptive-model")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
         adaptive_model=args.adaptive_model, adaptive_timeout=args.adaptive_timeout,
-        adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths))
+        adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 

@@ -28,6 +28,8 @@ from .reranking import candidate_is_retained
 
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact):[1-9][0-9]*$", max_length=64)]
+EvidenceGroup = Annotated[tuple[EvidenceId, ...], Field(min_length=2, max_length=100)]
+EvidenceGroups = Annotated[tuple[EvidenceGroup, ...], Field(max_length=100)]
 FollowupQuery = Annotated[str, Field(min_length=1, max_length=MAX_QUERY)]
 ASSESSMENT_FAILURE_REASONS = frozenset({
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
@@ -56,6 +58,7 @@ class EvidenceDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     status: EvidenceStatus
     selected_ids: tuple[EvidenceId, ...] = Field(max_length=100)
+    selected_groups: EvidenceGroups = ()
     followup_queries: tuple[FollowupQuery, ...] = Field(default=(), max_length=12)
 
     @model_validator(mode="after")
@@ -66,6 +69,7 @@ class EvidenceDecision(BaseModel):
             raise ValueError("sufficient requires selected evidence")
         if self.status == "sufficient" and self.followup_queries:
             raise ValueError("sufficient must not request follow-up retrieval")
+        _validate_groups(self.selected_groups, set(self.selected_ids))
         return self
 
 
@@ -97,12 +101,28 @@ class AdaptiveResult(BaseModel):
     """Selected retained evidence and an explicitly fallible model judgment."""
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     recall: RecallResult = Field(default_factory=RecallResult)
+    selected_groups: EvidenceGroups = ()
     status: EvidenceStatus = "uncertain"
     rounds: tuple[AdaptiveRound, ...] = ()
     queries_used: int = 0
     truncated: bool = False
     reasons: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def check_groups(self) -> AdaptiveResult:
+        delivered = {f"chunk:{item.chunk_id}" for item in self.recall.items}
+        delivered.update(f"fact:{fact.fact_id}" for fact in self.recall.facts)
+        _validate_groups(self.selected_groups, delivered)
+        return self
+
+
+def _validate_groups(groups: tuple[tuple[str, ...], ...], selected_ids: set[str]) -> None:
+    members = [member for group in groups for member in group]
+    if len(set(members)) != len(members):
+        raise ValueError("group members must be unique within and across groups")
+    if not set(members).issubset(selected_ids):
+        raise ValueError("every group member must be selected")
 
 
 def evidence_payload_bytes(candidates: tuple[EvidenceCandidate, ...]) -> int:
@@ -237,12 +257,14 @@ class _Run:
             self.notice("stale_evidence")
         return checked
 
-    async def gather(self, query: str, pool: dict[str, _Evidence]) -> dict[str, _Evidence]:
+    async def gather(self, query: str, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
+                     ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
         result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
             candidate_limit=self.limits.candidate_limit, rerank=False, **self.scope.kwargs())
         self.check_deadline()
         # A follow-up can yield while carried evidence is deleted or replaced.
         pool = await self.verify(pool)
+        pool, groups = self.prune_groups(pool, groups)
         if result.degraded:
             self.notice("degraded_recall")
         if len(result.items) + len(result.facts) >= self.limits.candidate_limit:
@@ -267,16 +289,26 @@ class _Run:
                 self.notice("max_evidence_bytes", truncated=True)
                 continue
             pool[key] = evidence
-        return pool
+        return pool, groups
 
-    def result(self, pool: dict[str, _Evidence], status: EvidenceStatus) -> AdaptiveResult:
+    def prune_groups(self, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
+                     ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
+        retained = tuple(group for group in groups if set(group).issubset(pool))
+        if len(retained) == len(groups):
+            return pool, groups
+        self.notice("atomic_group_omitted")
+        omitted = {member for group in groups if not set(group).issubset(pool) for member in group}
+        return {key: evidence for key, evidence in pool.items() if key not in omitted}, retained
+
+    def result(self, pool: dict[str, _Evidence], status: EvidenceStatus,
+               groups: tuple[tuple[str, ...], ...] = ()) -> AdaptiveResult:
         items = [evidence.item for evidence in pool.values() if evidence.item is not None]
         facts = [evidence.fact for evidence in pool.values() if evidence.fact is not None]
         recall = RecallResult(items=items, facts=facts,
             returned_bytes=sum(len(item.text.encode("utf-8")) for item in items)
                 + sum(len((fact.quote or "").encode("utf-8")) for fact in facts),
             degraded=[f"adaptive: {reason}" for reason in [*self.reasons, *self.errors]])
-        return AdaptiveResult(recall=recall, status=status, rounds=tuple(self.rounds),
+        return AdaptiveResult(recall=recall, selected_groups=groups, status=status, rounds=tuple(self.rounds),
             queries_used=len(self.queries), truncated=self.truncated,
             reasons=tuple(self.reasons), errors=tuple(self.errors))
 
@@ -284,9 +316,11 @@ class _Run:
         pending = [self.question]
         pool: dict[str, _Evidence] = {}
         selected: dict[str, _Evidence] = {}
+        selected_groups: tuple[tuple[str, ...], ...] = ()
         status: EvidenceStatus = "uncertain"
         for round_number in range(1, self.limits.max_rounds + 1):
             hashes: list[str] = []
+            carried_group_count = len(selected_groups)
             for query in pending:
                 key = _query_key(query)
                 if key in self.queries:
@@ -297,12 +331,13 @@ class _Run:
                     break
                 self.queries.add(key)
                 hashes.append(hashlib.sha256(key.encode("utf-8")).hexdigest())
-                pool = await self.gather(query, pool)
+                pool, selected_groups = await self.gather(query, pool, selected_groups)
             pool = await self.verify(pool)
+            pool, selected_groups = self.prune_groups(pool, selected_groups)
             if not pool:
                 self.notice("no_evidence")
                 selected = {}
-                status = "insufficient"
+                status = "uncertain" if len(selected_groups) < carried_group_count else "insufficient"
                 self.rounds.append(AdaptiveRound(round_number=round_number, query_hashes=tuple(hashes),
                     candidate_count=0, evidence_bytes=2, selected_count=0, status=status))
                 break
@@ -337,6 +372,7 @@ class _Run:
                 return self.result({}, "uncertain")
             pool = await self.verify(pool)
             selected = {key: pool[key] for key in decision.selected_ids if key in pool}
+            selected, selected_groups = self.prune_groups(selected, decision.selected_groups)
             status = decision.status
             if len(selected) != len(decision.selected_ids):
                 status = "uncertain"
@@ -370,10 +406,11 @@ class _Run:
             # cannot crowd out the next bounded retrieval window.
             pool = selected.copy()
         verified = await self.verify(selected)
+        verified, selected_groups = self.prune_groups(verified, selected_groups)
         if len(verified) != len(selected):
             status = "uncertain"
         self.check_deadline()
-        return self.result(verified, status)
+        return self.result(verified, status, selected_groups)
 
 
 class AdaptiveRetriever:
