@@ -1,0 +1,416 @@
+{
+  "schema_version": 1,
+  "description": "Original varied source-and-quote fixture for equal-policy vector-backend comparison; not a general accuracy benchmark.",
+  "documents": [
+    {
+      "id": "probe",
+      "content": "Cobalt field handbook. The cobalt probe stabilizes at 18 volts. Calibration requires an isolated supply.",
+      "source": "docs/probe.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "table",
+      "content": "# Service tiers\n\n## Regional limits\n\n| Tier | Requests per minute |\n| --- | ---: |\n| café | 17 |\n| team | 42 |\n\n```text\n# Example only\n| café | 999 |\n```\n",
+      "source": "docs/table.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "unicode",
+      "content": "Zürich handover: Équipe Saphir owns the 東京 gateway. The on-call phrase is crème brûlée.",
+      "source": "docs/unicode.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "threshold-old",
+      "content": "The iris valve retry threshold is four attempts. This policy began in January.",
+      "source": "docs/threshold-old.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "threshold-new",
+      "content": "The iris valve retry threshold is seven attempts. This policy replaces the January threshold.",
+      "source": "docs/threshold-new.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-03-01"
+    },
+    {
+      "id": "conflict-a",
+      "content": "Lab A reports the dusk gate mode as open. This is a recorded observation, not a reconciled conclusion.",
+      "source": "docs/conflict-a.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "conflict-b",
+      "content": "Lab B reports the dusk gate mode as closed. This conflicts with Lab A and remains unresolved.",
+      "source": "docs/conflict-b.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "nonce",
+      "content": "The Orchid diagnostic nonce is brass-29. Use this literal value to identify the signed diagnostic packet.",
+      "source": "docs/nonce.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "lexical-noise",
+      "content": "Orchid diagnostic nonce discussion: a placeholder is not an issued nonce. No diagnostic packet value was approved.",
+      "source": "docs/lexical-noise.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-a",
+      "content": "beacon routes requests to cedar.",
+      "source": "docs/route-a.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-b",
+      "content": "cedar persists through ridge.",
+      "source": "docs/route-b.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-c",
+      "content": "ridge uses an encrypted local journal.",
+      "source": "docs/route-c.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "other-project",
+      "content": "The Orchid diagnostic nonce is glass-88.",
+      "source": "docs/other-project.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "other"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "foreign-space",
+      "content": "The cobalt probe stabilizes at 99 volts.",
+      "source": "docs/foreign-space.md",
+      "space": "foreign-fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    }
+  ],
+  "facts": [
+    {
+      "id": "old",
+      "document_id": "threshold-old",
+      "subject": "iris valve",
+      "predicate": "retry_threshold",
+      "object": "four attempts",
+      "quote": "The iris valve retry threshold is four attempts.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "new",
+      "document_id": "threshold-new",
+      "subject": "iris valve",
+      "predicate": "retry_threshold",
+      "object": "seven attempts",
+      "quote": "The iris valve retry threshold is seven attempts.",
+      "valid_from": "2026-03-01"
+    },
+    {
+      "id": "route-a",
+      "document_id": "route-a",
+      "subject": "beacon",
+      "predicate": "routes_to",
+      "object": "cedar",
+      "quote": "beacon routes requests to cedar.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "route-b",
+      "document_id": "route-b",
+      "subject": "cedar",
+      "predicate": "persists_through",
+      "object": "ridge",
+      "quote": "cedar persists through ridge.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "route-c",
+      "document_id": "route-c",
+      "subject": "ridge",
+      "predicate": "uses",
+      "object": "encrypted local journal",
+      "quote": "ridge uses an encrypted local journal.",
+      "valid_from": "2026-01-01"
+    }
+  ],
+  "cases": [
+    {
+      "id": "prose-voltage",
+      "query": "What voltage stabilizes the cobalt probe?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "probe",
+          "quote": "The cobalt probe stabilizes at 18 volts."
+        }
+      ],
+      "answer_facts": [
+        "18 volts"
+      ]
+    },
+    {
+      "id": "table-limits",
+      "query": "How many requests per minute does the café tier allow?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "table",
+          "quote": "| Tier | Requests per minute |"
+        },
+        {
+          "document_id": "table",
+          "quote": "| café | 17 |"
+        }
+      ],
+      "answer_facts": [
+        "17"
+      ]
+    },
+    {
+      "id": "unicode-owner",
+      "query": "Who owns the 東京 gateway in the Zürich handover?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "unicode",
+          "quote": "Équipe Saphir owns the 東京 gateway."
+        }
+      ],
+      "answer_facts": [
+        "Équipe Saphir"
+      ]
+    },
+    {
+      "id": "historical-policy",
+      "query": "What was the iris valve retry threshold in February?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "threshold-old",
+          "quote": "The iris valve retry threshold is four attempts."
+        }
+      ],
+      "answer_facts": [
+        "four attempts"
+      ],
+      "as_of": "2026-02-15T00:00:00Z"
+    },
+    {
+      "id": "current-policy",
+      "query": "What is the replacement iris valve retry threshold?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "threshold-new",
+          "quote": "The iris valve retry threshold is seven attempts."
+        }
+      ],
+      "answer_facts": [
+        "seven attempts"
+      ],
+      "since": "2026-03-01T00:00:00Z"
+    },
+    {
+      "id": "unresolved-conflict",
+      "query": "What conflicting dusk gate modes do Lab A and Lab B report?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "conflict-a",
+          "quote": "Lab A reports the dusk gate mode as open."
+        },
+        {
+          "document_id": "conflict-b",
+          "quote": "Lab B reports the dusk gate mode as closed."
+        }
+      ],
+      "answer_facts": [
+        "open",
+        "closed"
+      ]
+    },
+    {
+      "id": "literal-nonce",
+      "query": "What is the issued Orchid diagnostic nonce?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "nonce",
+          "quote": "The Orchid diagnostic nonce is brass-29."
+        }
+      ],
+      "answer_facts": [
+        "brass-29"
+      ]
+    },
+    {
+      "id": "multihop-journal",
+      "query": "What storage journal does the beacon route ultimately use?",
+      "mode": "multihop",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "route-a",
+          "quote": "beacon routes requests to cedar."
+        },
+        {
+          "document_id": "route-b",
+          "quote": "cedar persists through ridge."
+        },
+        {
+          "document_id": "route-c",
+          "quote": "ridge uses an encrypted local journal."
+        }
+      ],
+      "answer_facts": [
+        "encrypted local journal"
+      ]
+    }
+  ]
+}

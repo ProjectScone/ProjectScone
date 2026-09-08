@@ -215,6 +215,47 @@ save and does not retry. Inspect the store before repeating it. There is no
 automatic host image capture, missing-image reconstruction or Rust CLI parity
 claim. Export/import still carries references, not a portable copy of image bytes.
 
+## LlamaIndex and LangChain workflows
+
+The optional `llamaindex` and `langchain` extras can coexist over one Scone
+engine. `scone_memory.integrations.llamaindex.SconeRetriever` returns scored
+nodes; `scone_memory.integrations.langchain.SconeRetriever` returns documents,
+and `SconeChatMessageHistory` provides explicit session history.
+
+The packaged [composition API](src/scone_memory/integrations/composition.py) runs
+LlamaIndex retrieval inside a LangChain Runnable workflow while preserving
+source text, chunk/episode IDs and the application's authorized scope. Its
+`retrieve_without_tracing` helper disables hosted tracing per invocation and
+needs no model service. These retriever adapters are separate from the optional
+vector-store bridge below.
+
+Additional package APIs provide [query evidence](src/scone_memory/retrieval/evidence_graph.py),
+[bounded reranking](src/scone_memory/retrieval/reranking.py),
+[structural context](src/scone_memory/retrieval/structural.py),
+[recorded multi-hop retrieval](src/scone_memory/retrieval/multihop.py), and
+[encrypted workflow checkpoints](src/scone_memory/agents/workflow.py).
+The [retrieval workflow builder](src/scone_memory/agents/retrieval.py) composes
+both frameworks with retained-source checks.
+
+`GET /v1/recall?graph_analysis=true` adds bounded community, hub and bridge
+analysis to the scoped query result. Set `evidence_graph=true` as well to receive
+the nodes and retained-source relationships behind those IDs; both options share
+one graph build. The pure Python API is
+`scone_memory.retrieval.graph_analysis.analyze_evidence_graph`.
+Its versioned algorithm analyzes unique undirected recorded relationships and
+reports directional hub counts separately. Coverage and omissions describe the
+supplied graph, not the entire memory store; connectivity is not confidence.
+Analysis failures leave ordinary recall available with an explicit unavailable
+status. Neither option enables external services or model calls.
+
+The [self-hosted reranking evaluator](src/scone_memory/testing/self_hosted_reranking.py)
+and [Qdrant comparison](src/scone_memory/testing/qdrant_comparison.py) are runnable
+package modules. They use isolated fixtures and record failures as well as
+successful retrieval; fixture scores do not establish general answer accuracy.
+The root [.env.example](../../.env.example) lists supported settings without
+credentials. Keep private values in ignored `.env.local` with mode `0600`;
+`scripts/serve-self-hosted.sh --check` validates its format before an explicit launch.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
@@ -356,6 +397,12 @@ not establish buffering guarantees inside a provider's SDK. Empty chunks are
 ignored by the observer. Unsupported events, chunks after completion, observer
 failures, missing completion and cleanup failures prevent completed capture.
 
+`providers.llm.OpenAICompatibleTextModel` accepts an optional
+`max_output_tokens` integer (1–32,768), forwarded as `max_tokens`; omitting it
+preserves the provider's configured limit. A reported token-limit cutoff is a
+failed reply, even when some text arrived. It cannot be saved as a completed
+assistant response.
+
 Each successful result contains `turn_id`, `text`, `user_episode_id`,
 `assistant_episode_id`, `memory_context` and `provider_completion="unverified"`.
 User text is retained before inference. Assistant text is saved only after
@@ -386,6 +433,36 @@ block before the current request; they grant no permissions and are not approved
 facts. That block never enters shared history or captured transcripts. The
 default 8,000-byte budget omits whole passages rather than silently clipping them.
 A low-confidence result supplies no source block.
+
+Ranked queries with recalled claims can expand bounded relationships inside the
+same scope. With `structured_paths=True` (the default), complete ordered paths
+and their quoted claims enter the same context byte budget; related conflicting
+evidence is retained together. Optional `path_quotes=True` adds `ordered_evidence`
+with verbatim quotes, fact IDs and source episode IDs in traversal order. It is
+off by default because extra repetition has not demonstrated a small-model
+generation improvement. Paths preserve stored direction and are evidence
+connections, not generated conclusions. Missing, deleted or out-of-scope links
+cannot complete a path. `structured_paths=False` keeps the prior flat context
+for controlled comparisons. Receipts report path counts and expansion coverage;
+they do not cache raw paths or source text.
+
+Run the paired natural-language evaluator with your installed self-hosted model:
+
+```sh
+python -m scone_memory.testing.generation_ablation \
+  --fixture tests/fixtures/generation/v1.json \
+  --model YOUR_INSTALLED_MODEL --endpoint http://127.0.0.1:11434/v1 \
+  --embedding-cache /path/to/cached/fastembed \
+  --repeats 2 --timeout 60 --output /path/to/private/new-report.json
+```
+
+It uses the actual conversation context builder and synthetic sources, keeps
+both successful and failed public replies, and measures evidence coverage
+separately from completion-gated phrase checks. Phrase matches do not measure
+semantic entailment or unsupported claims. Reports refuse to overwrite an
+existing output path. Keep private evaluation reports outside version control.
+Add `--ordered-quotes` to test the optional quote projection in the path variant;
+the flat baseline remains unchanged.
 
 Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
 references, recall event ID when available, context hash/bytes, omissions and

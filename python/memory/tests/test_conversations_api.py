@@ -62,6 +62,29 @@ async def create(client, request_id="new"):
     return response.json()
 
 
+async def test_timeout_receipt_and_logs_name_failure_without_echoing_private_text(engine, tmp_path, caplog):
+    app, runtimes = configured(engine, tmp_path / "sessions.db")
+    async with client_for(app) as client:
+        session = await create(client)
+
+        async def timed_out(text):
+            raise TimeoutError("private-provider-content")
+
+        runtimes[0].reply = timed_out
+        url = "/v1/conversations/" + session["session_id"]
+        response = await client.post(url + "/turns", json={"request_id": "timeout", "text": "private-user-content", "expected_revision": session["revision"]})
+        assert response.status_code == 202
+        for _ in range(100):
+            receipt = (await client.get(url + "/turns/timeout")).json()
+            if receipt["status"] == "failed":
+                break
+            await asyncio.sleep(.01)
+        assert "timed out" in receipt["error"]
+        assert "TimeoutError" in caplog.text
+        assert "private-user-content" not in caplog.text
+        assert "private-provider-content" not in caplog.text
+
+
 async def test_scoped_factory_receives_immutable_validated_scope_and_retries_cannot_change_it(engine, tmp_path):
     seen = []
     def scoped(space, sid, scope):

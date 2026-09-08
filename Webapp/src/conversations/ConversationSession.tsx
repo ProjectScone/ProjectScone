@@ -11,7 +11,8 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [voiceVerified,setVoiceVerified]=useState(false),[audioStopRequested,setAudioStopRequested]=useState(false);
-  const [delivery,setDelivery]=useState(''),[result,setResult]=useState<TurnResult>(),[selected,setSelected]=useState<number|null>(null);
+  const [delivery,setDelivery]=useState(''),[resultReceipt,setResultReceipt]=useState<{api:ApiClient;sid:string;value:TurnResult|undefined}>(),[selected,setSelected]=useState<number|null>(null);
+  const result=resultReceipt?.api===api&&resultReceipt.sid===sid?resultReceipt.value:undefined;
   const [attempt,setAttempt]=useState(0);
   const [cancelTarget,setCancelTarget]=useState<string|null>(null),[cancelling,setCancelling]=useState(false);
   const [pages,setPages]=useState<(string|null)[]>([null]);
@@ -19,7 +20,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
   const commandGeneration=useRef(0),invalidatedReceipt=useRef<string|null>(null);
   const pendingRequest=useRef<string|null>(null);
   const [liveTarget,setLiveTarget]=useState<string|null>(null),suppressedPreview=useRef<string|null>(null);
-  const streamTerminal=useCallback((id:string)=>{suppressedPreview.current=id;setLiveTarget(null);setAttempt(n=>n+1);},[]);
+  const streamTerminal=useCallback((id:string)=>{suppressedPreview.current=id;setAttempt(n=>n+1);},[]);
   const url=`/v1/conversations/${encodeURIComponent(sid)}`;
   const before=pages[pages.length-1];
   const transcriptUrl=url+'/transcript'+(paginationSupported?'?limit=50'+(before?'&before='+encodeURIComponent(before):''):'');
@@ -27,7 +28,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
     const controller=new AbortController();lifetime.current=controller;
     let timer:ReturnType<typeof setTimeout>;
     function clearUnavailableEvidence(id:string){
-      setResult(undefined);
+      setResultReceipt(undefined);
       // Revoke once, then let people inspect other retained sources normally.
       if(invalidatedReceipt.current!==id){invalidatedReceipt.current=id;setSelected(null);}
     }
@@ -59,7 +60,8 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
             const receipt=turnReceipt(await api.request(url+'/turns/'+encodeURIComponent(active),options));
             if(!isCurrent())return;
             if(receipt.request_id!==active)throw Error('Mismatched reply receipt');
-            setLiveTarget(receipt.status==='pending'&&next.state==='running'&&suppressedPreview.current!==active?active:null);
+            if(receipt.status==='pending'&&next.state==='running'&&suppressedPreview.current!==active)setLiveTarget(active);
+            else if(receipt.status!=='pending'&&(receipt.result_state!=='available'||records.episodes.some(item=>item.episode_id===receipt.result?.assistant_episode_id)))setLiveTarget(null);
             setCancelTarget(receipt.status==='pending'?active:null);
             setDelivery(receipt.status==='cancelled'?'Reply cancelled locally. The provider may still finish processing.':receipt.status==='pending'?'Reply in progress':receipt.status==='completed'?
               receipt.result_state==='forgotten'?'Reply completed; its saved text was forgotten.':
@@ -69,11 +71,11 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
               const newlySettled=settled.current!==active;
               if(pendingRequest.current===active)pendingRequest.current=null;
               settled.current=active;setBusy(receipt.status==='cancelled'&&Boolean(next.active_request_id));
-              if(receipt.result_state==='available'){invalidatedReceipt.current=null;setResult(receipt.result);}
+              if(receipt.result_state==='available'){invalidatedReceipt.current=null;setResultReceipt({api,sid,value:receipt.result});}
               else clearUnavailableEvidence(active);
               // Capture may finish after the transcript request above.
               if(newlySettled){const latest=await readTranscript();
-                if(isCurrent())setSaved(latest);}
+                if(isCurrent()){setSaved(latest);if(latest.episodes.some(item=>item.episode_id===receipt.result?.assistant_episode_id))setLiveTarget(null);}}
             }else setBusy(true);
           }catch{
             if(isCurrent()){setLiveTarget(null);setCancelTarget(null);setDelivery('Reply receipt unavailable. No message was resent.');clearUnavailableEvidence(active);setBusy(Boolean(next.active_request_id)||settled.current!==active);}
@@ -153,15 +155,22 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
         <button onClick={()=>saved?.next_before&&changePage([...pages,saved.next_before])} disabled={!verified||mutation.current||!saved?.next_before}>Older messages</button>
       </div>
     </nav>}
-    <div className={`conversation-messages${saved?.episodes.length===0&&busy?' is-pending-empty':''}`} role="region" aria-label="Saved messages">
+    <div className={`conversation-messages${saved?.episodes.length===0&&busy?' is-pending-empty':''}`} role="region" aria-label="Conversation transcript">
+      <div className="conversation-saved" role="region" aria-label="Saved messages">
       {saved===null?<p role="status">Loading saved messages…</p>:saved.episodes.length?saved.episodes.map(item=><article className={`conversation-message ${item.metadata.role==='user'?'from-user':'from-agent'}`} key={item.episode_id}>
         <div className="conversation-message-label">{item.metadata.role==='user'?'You':item.metadata.role==='assistant'?'Assistant':'Recorded message'}<button onClick={()=>setSelected(item.episode_id)} aria-label={`Inspect message episode ${item.episode_id}`}>↗ Source {item.episode_id}</button></div><p>{item.content}</p>
       </article>):before?<p>No retained messages on this page. Return to a newer page.</p>:busy?<p className="conversation-caption">Waiting for saved messages…</p>:<div className="conversation-welcome"><div className="conversation-orbit" aria-hidden="true">✳</div><h3>{voice?'Your conversation, in words.':'Start with a question.'}</h3><p>{voice?'Completed public transcripts and replies appear here as they are saved.':'Bring your knowledge into the conversation.'}<br/>{voice?'Audio activity is not a saved transcript.':'Public messages and replies will be saved to this space.'}</p></div>}
       {saved?.has_more&&!paginationSupported&&<p className="conversation-notice">This is a partial transcript. This server does not support browsing older messages.</p>}
+      </div>
+      {!voice&&streamingSupported&&liveTarget&&<LiveReply key={liveTarget} api={api} sid={sid} requestId={liveTarget} onTerminal={streamTerminal}/>}
     </div>
-    {!voice&&streamingSupported&&liveTarget&&<LiveReply key={liveTarget} api={api} sid={sid} requestId={liveTarget} onTerminal={streamTerminal}/>}
     {current&&!voice&&<form className="conversation-composer" onSubmit={e=>{e.preventDefault();void send();}}>
-      <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>
+      <label htmlFor="conversation-message">Message</label><textarea id="conversation-message" value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={event=>{
+        if(event.key!=='Enter'||event.shiftKey||event.nativeEvent.isComposing||event.nativeEvent.keyCode===229)return;
+        event.preventDefault();
+        if(!event.repeat)void send();
+      }} aria-describedby="conversation-keyboard-hint" placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>
+      <span id="conversation-keyboard-hint" className="conversation-caption">Enter to send · Shift+Enter for a new line</span>
       <div className="conversation-composer-footer"><span role="status">{delivery|| (terminal?'Saved messages remain in your memory.':streamingSupported?'Live public text · saved replies verified separately':'Completed replies · not a token stream')}</span>
         {cancellationSupported&&cancelTarget&&current?.state==='running'?<button type="button" disabled={!verified||cancelling} onClick={cancelReply}>{cancelling?'Cancelling…':'Cancel reply'}</button>:<button className="primary" type="submit" aria-label="Send message" disabled={!textConfigured||!verified||current?.state!=='running'||busy||!draft.trim()}>Send ↑</button>}
       </div>

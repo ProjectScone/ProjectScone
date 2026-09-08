@@ -71,6 +71,33 @@ def test_a_journal_composes_the_conversation_service_on_the_memory_origin(tmp_pa
     assert (tmp_path / "sessions.db").exists(), "the service owned its journal for the app's life"
 
 
+@pytest.mark.parametrize("path", ["/memory", "/playground", "/conversations", "/conversations/session-one"])
+def test_local_single_key_composed_host_connects_on_page_load(tmp_path, path):
+    settings = settings_for(tmp_path, SCONE_CONVERSATIONS_JOURNAL=str(tmp_path / "sessions.db"))
+    with TestClient(serve.build_app(settings, engine_for()), base_url="http://127.0.0.1",
+                    client=("127.0.0.1", 50000)) as client:
+        page = client.get(path)
+        assert "solo" in page.text
+        assert page.headers["cache-control"] == "no-store"
+        assert client.get("/v1/status").status_code == 401, "API authentication remains required"
+
+
+@pytest.mark.parametrize("host,client_host,base_url,multiple", [
+    ("0.0.0.0", "127.0.0.1", "http://127.0.0.1", False),
+    ("127.0.0.1", "192.168.1.10", "http://127.0.0.1", False),
+    ("127.0.0.1", "127.0.0.1", "http://untrusted.example", False),
+    ("127.0.0.1", "127.0.0.1", "http://127.0.0.1", True),
+])
+def test_composed_auto_connection_is_only_for_local_single_key_access(tmp_path, host, client_host, base_url, multiple):
+    env = {"SCONE_HOST": host, "SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db")}
+    if multiple:
+        env["SCONE_API_KEYS"] = "solo:one,second:two"
+    settings = settings_for(tmp_path, **env)
+    with TestClient(serve.build_app(settings, engine_for()), base_url=base_url,
+                    client=(client_host, 50000)) as client:
+        assert "solo" not in client.get("/memory").text
+
+
 @pytest.mark.parametrize("composed", [False, True])
 def test_the_consolidation_worker_runs_for_the_life_of_either_app(tmp_path, monkeypatch, composed):
     worker = Worker()
@@ -105,6 +132,27 @@ def test_a_trusted_model_factory_marks_text_configured_without_being_called(tmp_
     with TestClient(serve.build_app(settings, engine_for())) as c:
         ready = c.get("/v1/conversations/capabilities", headers=AUTH).json()
         assert ready["text_configured"] is True and ready["streaming"] is True
+
+
+def test_composed_conversations_use_the_configured_model_deadline(tmp_path, monkeypatch):
+    from scone_memory.realtime import text
+    original = text.TextConversation
+    received = []
+
+    def conversation(*args, **kwargs):
+        received.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(text, "TextConversation", conversation)
+    module = ModuleType("deadline_test_provider")
+    module.create = lambda: None
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    settings = settings_for(tmp_path, SCONE_CONVERSATIONS_JOURNAL=str(tmp_path / "sessions.db"),
+                            SCONE_CONVERSATIONS_MODEL_FACTORY="deadline_test_provider:create", SCONE_CHAT_TIMEOUT="73")
+    with TestClient(serve.build_app(settings, engine_for())) as client:
+        response = client.post("/v1/conversations", headers=AUTH, json={"request_id": "deadline", "capture": True})
+        assert response.status_code == 200
+        assert received[0]["turn_timeout"] == 73
 
 
 def test_reloading_pages_re_reads_the_composed_shell(tmp_path, monkeypatch):

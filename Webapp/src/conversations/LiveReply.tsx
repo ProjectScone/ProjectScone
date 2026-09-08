@@ -28,7 +28,10 @@ export function LiveReply({api,sid,requestId,onTerminal}:{api:ApiClient;sid:stri
             // Do not concatenate non-contiguous passages as though nothing was lost.
             cursor.current=event.next-1;received.current='';bytes.current=0;setText('');setMissing(true);
           }else{
-            received.current='';bytes.current=0;setText('');setPhase('waiting');
+            // Completed transport is not yet a saved message. Keep its labelled
+            // preview until the matching assistant episode reaches the transcript.
+            if(event.kind!=='terminal'||event.status!=='completed'){received.current='';bytes.current=0;setText('');}
+            setPhase('waiting');
             if(event.kind==='terminal')onTerminal(requestId);
             return;
           }

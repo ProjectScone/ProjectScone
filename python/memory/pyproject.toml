@@ -28,12 +28,14 @@ classifiers = [
 dependencies = ["pydantic>=2.5"]
 
 [project.optional-dependencies]
+agents = ["cryptography>=42"]
 mongo = ["pymongo>=4.13"]
 qdrant = ["qdrant-client>=1.12"]
 api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 mcp = ["mcp>=2,<3"]
 remote-embed = ["httpx>=0.27"]
 speech = ["httpx>=0.27,<1"]
+vision = ["httpx>=0.27,<1", "Pillow>=10.4"]
 local-embed = ["fastembed>=0.4"]
 postgres = ["psycopg[binary,pool]>=3.2", "pgvector>=0.3"]
 redis = ["redis>=5"]
@@ -46,7 +48,7 @@ langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.12"]
 openai-agents = ["openai-agents>=0.2"]
 all = ["scone-memory[mongo,qdrant,postgres,redis,elasticsearch,milvus,chroma,lancedb,api,mcp,remote-embed,local-embed]"]
-test = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fastapi>=0.115", "mcp>=2,<3"]
+test = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fastapi>=0.115", "mcp>=2,<3", "cryptography>=42"]
 
 [project.scripts]
 scone-memory = "scone_memory.runtime.cli:main"

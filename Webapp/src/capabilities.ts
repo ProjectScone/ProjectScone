@@ -1,7 +1,7 @@
 export const FEATURE_KEYS = ['recall', 'facts.read', 'facts.review', 'facts.close',
   'facts.exclude', 'facts.include', 'events.read', 'metrics.read', 'scopes.read', 'status.read'] as const;
 export type Feature = typeof FEATURE_KEYS[number];
-type OptionalFeature = 'episodes.attachments' | 'episodes.list' | 'episodes.read' | 'facts.links' | 'integrity.read' | 'profile.read' | 'processing.distill' | 'processing.derive' | 'jobs.read' | 'recall.conditions';
+type OptionalFeature = 'images.understand' | 'models.manage' | 'episodes.attachments' | 'episodes.list' | 'episodes.read' | 'facts.links' | 'integrity.read' | 'profile.read' | 'processing.distill' | 'processing.derive' | 'jobs.read' | 'recall.conditions';
 export interface Capabilities {
   schema_version: 1;
   implementation: string;
@@ -26,5 +26,7 @@ export function parseCapabilities(value: unknown): Capabilities {
   if (features['profile.read'] !== undefined && typeof features['profile.read'] !== 'boolean') throw Error('Invalid profile capability flag');
   if(features['jobs.read']!==undefined&&typeof features['jobs.read']!=='boolean')throw Error('Invalid job history capability');
   if(features['recall.conditions']!==undefined&&typeof features['recall.conditions']!=='boolean')throw Error('Invalid recall conditions capability');
-  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true, 'episodes.list':features['episodes.list'] === true, 'episodes.read':features['episodes.read'] === true, 'facts.links':features['facts.links'] === true, 'integrity.read':features['integrity.read'] === true, 'profile.read':features['profile.read'] === true, 'processing.distill':features['processing.distill']===true, 'processing.derive':features['processing.derive']===true, 'jobs.read':features['jobs.read']===true, 'recall.conditions':features['recall.conditions']===true} as Capabilities['features']};
+  if(features['images.understand']!==undefined&&typeof features['images.understand']!=='boolean')throw Error('Invalid image understanding capability');
+  if(features['models.manage']!==undefined&&typeof features['models.manage']!=='boolean')throw Error('Invalid model management capability');
+  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true, 'episodes.list':features['episodes.list'] === true, 'episodes.read':features['episodes.read'] === true, 'facts.links':features['facts.links'] === true, 'integrity.read':features['integrity.read'] === true, 'profile.read':features['profile.read'] === true, 'processing.distill':features['processing.distill']===true, 'processing.derive':features['processing.derive']===true, 'jobs.read':features['jobs.read']===true, 'recall.conditions':features['recall.conditions']===true, 'models.manage':features['models.manage']===true, 'images.understand':features['images.understand']===true} as Capabilities['features']};
 }

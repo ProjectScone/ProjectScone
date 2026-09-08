@@ -93,6 +93,40 @@ async def test_an_empty_completion_is_reported_as_such_for_the_runtime_to_refuse
     assert await collect(model) == [ReplyCompleted()], "the adapter reports; TextConversation refuses an empty reply"
 
 
+@pytest.mark.parametrize("streamed", [True, False])
+async def test_token_limit_finish_is_not_a_completed_reply(streamed):
+    response = (httpx.Response(200, content=sse(delta("Partial answer", "length")),
+                              headers={"content-type": "text/event-stream"}) if streamed else
+                httpx.Response(200, json={"choices": [{"message": {"content": "Partial answer"},
+                                                       "finish_reason": "length"}]}))
+    model = OpenAICompatibleTextModel("http://llm.local/v1", "gpt", transport=httpx.MockTransport(lambda request: response))
+    try:
+        with pytest.raises(ChatError, match="finish"):
+            await collect(model)
+    finally:
+        await model.aclose()
+
+
+async def test_optional_output_token_budget_is_forwarded():
+    bodies = []
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, content=sse(delta("Done", "stop")), headers={"content-type": "text/event-stream"})
+    model = OpenAICompatibleTextModel("http://llm.local/v1", "gpt", max_output_tokens=512,
+                                    transport=httpx.MockTransport(handle))
+    try:
+        await collect(model)
+    finally:
+        await model.aclose()
+    assert bodies[0]["max_tokens"] == 512
+
+
+@pytest.mark.parametrize("budget", [True, 0, -1, 1.5, 32769])
+def test_invalid_output_token_budget_is_rejected_before_opening_transport(budget):
+    with pytest.raises(ValueError, match="max_output_tokens"):
+        OpenAICompatibleTextModel("http://llm.local/v1", "gpt", max_output_tokens=budget)
+
+
 async def test_the_model_drives_a_native_text_conversation():
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     bodies = []

@@ -1,4 +1,8 @@
 reference/
+# Private per-machine environment; only the reviewed template is shareable.
+/.env
+/.env.*
+!/.env.example
 # Local upstream application reference; never vendor it into Scone.
 /supermemory/
 /pipecat/
@@ -29,3 +33,4 @@ python/*/.pytest_cache/
 # Codex keeps the capability ledger; it is not part of the published tree.
 CAPABILITIES.md
 python/*/src/*.egg-info/
+python/memory/examples

@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "description": "Original synthetic edge fixtures: exact retained evidence, structural context and recorded relation chains. No semantic-model accuracy claim.",
+  "documents": [
+    {
+      "id": "manual",
+      "content": "# Beacon recovery manual\n\n## Checkpoint protocol\n\nBeacon checkpoint protocol uses a local durable journal.\n\nDuring recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. During recovery, operators inspect the last committed record before proceeding. The device stays isolated from external services. \n\nThe retry ceiling is three attempts.\n\n| State | Action |\n| --- | --- |\n| committed | reuse recorded output |\n| uncertain | require reconciliation |\n\n## Telemetry\n\nTelemetry stays on the device.\n",
+      "source": "docs/beacon.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "beacon",
+      "content": "beacon routes requests to cedar.",
+      "source": "docs/beacon-routing.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "cedar",
+      "content": "cedar persists through ridge.",
+      "source": "docs/cedar-storage.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "ridge",
+      "content": "ridge uses an encrypted local journal.",
+      "source": "docs/ridge.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "foreign",
+      "content": "beacon routes requests to a public service.",
+      "source": "docs/foreign.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "other"
+      },
+      "created_at": "2026-01-01"
+    }
+  ],
+  "facts": [
+    {
+      "id": "beacon",
+      "document_id": "beacon",
+      "subject": "beacon",
+      "predicate": "routes_to",
+      "object": "cedar",
+      "quote": "beacon routes requests to cedar.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "cedar",
+      "document_id": "cedar",
+      "subject": "cedar",
+      "predicate": "persists_through",
+      "object": "ridge",
+      "quote": "cedar persists through ridge.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "ridge",
+      "document_id": "ridge",
+      "subject": "ridge",
+      "predicate": "uses",
+      "object": "encrypted local journal",
+      "quote": "ridge uses an encrypted local journal.",
+      "valid_from": "2026-01-01"
+    }
+  ],
+  "cases": [
+    {
+      "id": "checkpoint-recovery",
+      "mode": "structural",
+      "query": "Beacon checkpoint protocol",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": "docs/beacon.md",
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "manual",
+          "quote": "Beacon checkpoint protocol uses a local durable journal."
+        },
+        {
+          "document_id": "manual",
+          "quote": "The retry ceiling is three attempts."
+        },
+        {
+          "document_id": "manual",
+          "quote": "| uncertain | require reconciliation |"
+        }
+      ]
+    },
+    {
+      "id": "three-source-routing",
+      "mode": "multihop",
+      "query": "beacon routes",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [
+        "beacon"
+      ],
+      "required": [
+        {
+          "document_id": "beacon",
+          "quote": "beacon routes requests to cedar."
+        },
+        {
+          "document_id": "cedar",
+          "quote": "cedar persists through ridge."
+        },
+        {
+          "document_id": "ridge",
+          "quote": "ridge uses an encrypted local journal."
+        }
+      ]
+    }
+  ]
+}

@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..realtime.catalog import PersonaCatalog
+    from ..runtime.model_runtime import DynamicLocalCatalog
 
 from ..runtime.config import Settings, build_engine, build_worker
+from ..runtime.model_connections import ModelConnectionError
 from .app import create_app
 
 
@@ -17,18 +22,51 @@ def build_app(settings: Settings, engine):
     service composed over it on the same origin when the settings name a
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
     or model factory the operator got wrong, before anything is served."""
-    worker = build_worker(engine, settings, settings.keys.values())
+    from ..runtime.diagnostics import install_http_diagnostics
+
+    store = None
+    model_management = False
+    vision_available = None
+    if settings.model_connections:
+        from ..runtime.model_connections import ModelConnectionStore
+        from ..runtime.model_runtime import LocalModelWorker, connection_defaults, local_admin_enabled
+
+        store = ModelConnectionStore(settings.model_connections, connection_defaults(settings))
+        worker = LocalModelWorker(engine, settings, store)
+        model_management = local_admin_enabled(settings)
+        vision_available = lambda: store.get('vision') is not None
+    else:
+        worker = build_worker(engine, settings, settings.keys.values())
+
+    def finish(app):
+        if store is not None:
+            from .model_connections import mount_model_connection_routes
+            from ..runtime.model_runtime import authorize_local_admin
+
+            app.state.model_connections = store
+            target = getattr(app.state, 'memory_app', app)
+            target.state.model_connections = store
+            mount_model_connection_routes(target, store, authorize_local_admin(settings), on_change=worker.refresh)
+            from .image_understanding import mount_image_understanding_routes
+            from ..runtime.model_runtime import authorize_image_write, local_vision_factory
+
+            mount_image_understanding_routes(target, engine, authorize_image_write(settings, engine),
+                                             local_vision_factory(store))
+        install_http_diagnostics(app)
+        return app
+
     if not settings.conversations_journal:
         # One configured key means one space; bake it so the console opens
         # without a prompt. Several keys: the console asks which.
         only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
-        return create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages,
-                          ingest_concurrency=settings.ingest_concurrency, roles=settings.roles)
+        return finish(create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages,
+                          ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
+                          model_connections_available=model_management, vision_available=vision_available))
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
 
     journal = journal_path(settings, settings.conversations_journal)
-    catalog = None
+    catalog: PersonaCatalog | DynamicLocalCatalog | None = None
     if settings.conversations_personas:
         if not settings.conversations_registry:
             raise ValueError("SCONE_CONVERSATIONS_REGISTRY is required with a persona catalog")
@@ -41,18 +79,31 @@ def build_app(settings: Settings, engine):
         if not isinstance(registry, ProviderRegistry):
             raise ValueError("SCONE_CONVERSATIONS_REGISTRY must return a ProviderRegistry")
         catalog = bind_catalog(load_personas(settings.conversations_personas), registry)
+    elif store is not None:
+        from ..runtime.model_runtime import DynamicLocalCatalog
+
+        catalog = DynamicLocalCatalog(store, think=settings.chat_think)
     scoped = None
+    runtime_available = None
     if settings.conversations_model_factory:
         factory = load_model_factory(settings.conversations_model_factory)
         from ..realtime.text import TextConversation
 
         def scoped(space, sid, scope):
-            return TextConversation(engine, space, sid, factory, **scope.kwargs())
-    # The composed shell never carries a key: the tab asks for one.
-    return create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
+            return TextConversation(engine, space, sid, factory, turn_timeout=settings.chat_timeout, **scope.kwargs())
+    elif store is not None:
+        from ..runtime.model_runtime import local_text_runtime
+
+        scoped = local_text_runtime(engine, store, think=settings.chat_think)
+        runtime_available = lambda: store.get('chat') is not None
+    # Preserve local single-key preview access when conversations are composed.
+    local_key = next(iter(settings.keys)) if len(settings.keys) == 1 and settings.host in {"127.0.0.1", "localhost", "::1"} else None
+    return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    console=True, public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, reload_pages=settings.reload_pages, catalog=catalog,
-                                   ingest_concurrency=settings.ingest_concurrency, roles=settings.roles)
+                                   ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
+                                   local_console_key=local_key, runtime_available=runtime_available,
+                                   model_connections_available=model_management, vision_available=vision_available))
 
 
 def build_server(settings: Settings, app):
@@ -80,6 +131,9 @@ def main(settings: Optional[Settings] = None) -> None:
         print("serving needs uvicorn: pip install 'scone-memory[api]'", file=sys.stderr)
         sys.exit(2)
     async def run() -> None:
+        from ..runtime.diagnostics import configure_diagnostics
+
+        configure_diagnostics(settings.log_path)
         # The engine is built on the loop that serves it. Async database
         # clients (pymongo, psycopg's pool) bind to the loop they were
         # opened on; building on a throwaway loop and serving on uvicorn's
@@ -89,15 +143,21 @@ def main(settings: Optional[Settings] = None) -> None:
         try:
             try:
                 app = build_app(settings, engine)
-            except (ValueError, OSError, ImportError, AttributeError, TypeError) as error:
+            except (ValueError, OSError, ImportError, AttributeError, TypeError, ModelConnectionError) as error:
                 print(f"refusing to serve: {error}", file=sys.stderr)
                 sys.exit(2)
             worker = app.state.worker
+            consolidation_model = settings.chat_model
+            connections = getattr(app.state, 'model_connections', None)
+            if connections is not None:
+                extraction = connections.get('extraction')
+                consolidation_model = extraction.model if extraction is not None else None
             print(
                 f"scone-memory on http://{settings.host}:{settings.port} "
                 f"documents={engine.documents.name} vectors={engine.vectors.name} embedder={engine.embedder.id} "
                 f"spaces={sorted(set(settings.keys.values()))} "
-                + (f"consolidation={settings.chat_model} every {settings.distill_interval_s:g}s" if worker else "consolidation=off")
+                + (f"consolidation={consolidation_model} every {settings.distill_interval_s:g}s"
+                   if worker is not None and getattr(worker, 'distiller', None) is not None else "consolidation=off")
                 + (f" conversations={settings.conversations_journal}" if settings.conversations_journal else ""),
                 file=sys.stderr,
             )

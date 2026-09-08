@@ -119,5 +119,20 @@
 .persona-detail dt { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
 .persona-detail dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .session-persona { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0; padding: 12px 20px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.conversation-page .conversation-layout{align-items:start;min-height:0}
+.conversation-saved{display:contents}
+.conversation-messages .conversation-live{margin:0;flex:none}
+@media(min-width:701px){
+  .conversation-page .conversation-thread{align-self:start;height:calc(100dvh - 330px);min-height:480px;max-height:900px;overflow:hidden}
+  .conversation-page .conversation-evidence{height:calc(100dvh - 330px);min-height:480px;max-height:900px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .conversation-page .conversation-messages{min-height:0;max-height:none;flex:1 1 0;overflow:auto}
+  .conversation-page .conversation-composer{flex:none}
+  .conversation-page .conversation-composer textarea{height:58px;min-height:58px}
+  .conversation-page .conversation-composer label{margin-bottom:6px}
+  .conversation-page .conversation-composer-footer{margin-top:9px;padding-top:9px}
+  .conversation-page .conversation-thread-header,.conversation-page .conversation-transcript-nav{flex:none}
+  .conversation-page .recall-scope-summary[open]{max-height:140px;overflow:auto;flex:none}
+  .conversation-page .session-persona{max-height:90px;overflow:auto;flex:none}
+}
 .session-persona span,.session-persona small { color: var(--muted); }
 @media(max-width:600px) { .persona-options,.persona-detail dl { grid-template-columns: minmax(0,1fr); } }

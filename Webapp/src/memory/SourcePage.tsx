@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import {Link,useLocation,useParams} from 'react-router-dom';
-import {ApiError,type ApiClient} from '../api';
+import {ApiError,type ApiClient,type ImageAttachment} from '../api';
 import {parseCapabilities} from '../capabilities';
 import {SourceContent} from '../components/SourceContent';
 import {SourceImages} from '../components/SourceImages';
@@ -8,14 +8,16 @@ import {WorkspaceState} from '../components/WorkspaceState';
 import {parseRetainedSource} from './source-inventory';
 import {readSourceAddress,sourceAddress,verifiedSpace} from './source-address';
 import './source-page.css';
+import {SourceImageUnderstanding} from './SourceImageUnderstanding';
+import {sourceUnderstandingImages} from './image-understanding';
 
-interface Original {content:string;title:string;kind:string;date:string}
-interface PageData {original?:Original;attachments?:boolean;issue?:string;detail?:string}
+interface Original {content:string;title:string;kind:string;date:string;images:ImageAttachment[]}
+interface PageData {original?:Original;attachments?:boolean;understand?:boolean;models?:boolean;issue?:string;detail?:string}
 function original(value:unknown,id:number):Original {
   const text=parseRetainedSource(value,id);
   const data=value as Record<string,unknown>;
   if(typeof data.kind!=='string'||!data.kind||typeof data.created_at!=='string'||!(data.source==null||typeof data.source==='string'))throw Error('Invalid source metadata');
-  return {content:text.content,title:typeof data.source==='string'&&data.source?data.source:`Source episode #${id}`,kind:data.kind,date:data.created_at};
+  return {content:text.content,title:typeof data.source==='string'&&data.source?data.source:`Source episode #${id}`,kind:data.kind,date:data.created_at,images:sourceUnderstandingImages(data.attachments)};
 }
 
 export function SourcePage({api,enabled}:{api:ApiClient;enabled:boolean}){
@@ -37,7 +39,7 @@ export function SourcePage({api,enabled}:{api:ApiClient;enabled:boolean}){
         const caps=parseCapabilities(await api.request<unknown>('/v1/capabilities',{signal}));
         if(!caps.features['episodes.read']){save({issue:'Source pages are unavailable on this server',detail:'The server does not advertise source reads.'});return;}
         const record=await api.request<unknown>(`/v1/episodes/${episodeId}`,{cache:'no-store',signal});
-        save({original:original(record,episodeId),attachments:caps.features['episodes.attachments']});
+        save({original:original(record,episodeId),attachments:caps.features['episodes.attachments'],understand:caps.features['images.understand'],models:caps.features['models.manage']});
       }catch(error){
         save(error instanceof ApiError&&error.status===410?{issue:'This source was forgotten',detail:'Its retained text is no longer available.'}
           :error instanceof ApiError&&error.status===404?{issue:'Source unavailable',detail:'This source is not available in the linked memory space.'}
@@ -59,7 +61,7 @@ export function SourcePage({api,enabled}:{api:ApiClient;enabled:boolean}){
         {copied.startsWith('Copy unavailable')&&<input aria-label="Source permalink" readOnly value={new URL(sourceAddress(address.episodeId,address.space),window.location.origin).href} onFocus={e=>e.currentTarget.select()}/>}
         <p className="source-page-note">The retained original, not an approved claim. Links require access to this memory space; they do not share your key. Text is not an original-file download.</p>
         <section className="source-page-original" aria-label="Source original"><SourceContent text={current.original.content}/>{current.original.content===''&&<p>No retained text.</p>}</section>
-        {current.attachments&&<SourceImages api={api} episodeId={address.episodeId}/>}<footer><span>Episode #{episodeId} · {space}</span><button className="btn quiet small" onClick={retry}>Refresh source</button></footer>
+        {current.attachments&&<SourceImages api={api} episodeId={address.episodeId}/>}<SourceImageUnderstanding key={`${address.space}:${address.episodeId}`} api={api} episodeId={address.episodeId} space={address.space} images={current.original.images} available={current.understand===true} canSetup={current.models===true}/><footer><span>Episode #{episodeId} · {space}</span><button className="btn quiet small" onClick={retry}>Refresh source</button></footer>
       </article>}
   </main>;
 }

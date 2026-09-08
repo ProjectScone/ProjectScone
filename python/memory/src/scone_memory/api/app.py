@@ -225,6 +225,8 @@ def create_app(
     conversations: bool = False,
     ingest_concurrency: int = 4,
     roles: Optional[Mapping[str, str]] = None,
+    model_connections_available: bool = False,
+    vision_available=None,
 ) -> FastAPI:
     """``console_key`` is baked into the page served at ``/`` so the key
     stays out of the URL and out of anything the user might paste; with
@@ -342,7 +344,11 @@ def create_app(
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
-            "recall": True, "recall.conditions": True, "facts.read": True, "facts.review": True,
+            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
+            "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
+            "recall.structural_context": True,
+            "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
+                                    for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
@@ -356,6 +362,10 @@ def create_app(
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
             features["conversations"] = True
+        if model_connections_available:
+            features["models.manage"] = True
+        if vision_available is not None and vision_available():
+            features["images.understand"] = True
         # Manual passes must share a server-side guard with scheduled work
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
@@ -630,6 +640,15 @@ def create_app(
         since: Optional[str] = None,
         until: Optional[str] = None,
         conditions: Optional[str] = None,
+        evidence_graph: bool = False,
+        graph_analysis: bool = False,
+        candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        rerank: bool = True,
+        structural_context: bool = False,
+        multi_hop: bool = False,
+        max_hops: int = Query(default=3, ge=1, le=6),
+        expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
+                                          description="Byte budget per enabled expansion stage."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -637,8 +656,9 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
+            candidate_limit=candidate_limit, rerank=rerank,
         )
-        return {
+        response: dict[str, object] = {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
             "facts": [fact_json(f) for f in result.facts],
@@ -650,6 +670,61 @@ def create_app(
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
         }
+        if result.rerank is not None:
+            response["rerank"] = result.rerank.model_dump(mode="json")
+        if evidence_graph or graph_analysis or structural_context or multi_hop:
+            from ..core.ports import TextFilter
+            from ..memory.engine import normalise_metadata, normalise_tags, normalise_time
+            from ..retrieval.evidence_graph import QueryEvidenceGraph, build_query_evidence_graph
+            from ..retrieval.filters import parse_filter
+
+            parsed_conditions = read_conditions(conditions)
+            scope = TextFilter(
+                as_of=normalise_time(as_of) if as_of else None,
+                tags=normalise_tags(tag_list), where=normalise_metadata(parse_where(where) or {}),
+                kind=kind, source_prefix=source_prefix,
+                since=normalise_time(since) if since else None,
+                until=normalise_time(until) if until else None,
+                conditions=parse_filter(parsed_conditions) if parsed_conditions is not None else None,
+            )
+            if evidence_graph or graph_analysis:
+                graph_available = True
+                try:
+                    graph = await asyncio.wait_for(
+                        build_query_evidence_graph(engine.documents, space, q, result, scope=scope), timeout=1.0,
+                    )
+                except Exception:
+                    graph_available = False
+                    graph = QueryEvidenceGraph(notices=["Query evidence graph is unavailable; recall results are still shown."])
+                if evidence_graph:
+                    response["evidence_graph"] = graph.model_dump(mode="json")
+                if graph_analysis:
+                    from ..retrieval.graph_analysis import GraphAnalysisResult, analyze_evidence_graph
+                    try:
+                        analysis = (analyze_evidence_graph(graph) if graph_available else
+                                    GraphAnalysisResult.unavailable("evidence_graph_unavailable"))
+                    except Exception:
+                        analysis = GraphAnalysisResult.unavailable("analysis_unavailable")
+                    response["graph_analysis"] = analysis.model_dump(mode="json")
+            if structural_context:
+                from ..retrieval.structural import StructuralLimits, expand_structural_context
+                try:
+                    structural = await asyncio.wait_for(expand_structural_context(
+                        engine.documents, space, result, scope=scope,
+                        limits=StructuralLimits(max_bytes=expansion_max_bytes)), timeout=1.0)
+                    response["structural_context"] = structural.model_dump(mode="json")
+                except Exception as error:
+                    response["structural_context"] = {"status": "unavailable", "error": type(error).__name__}
+            if multi_hop:
+                from ..retrieval.multihop import MultiHopLimits, expand_multihop
+                try:
+                    expanded = await asyncio.wait_for(expand_multihop(
+                        engine.documents, space, seeds=result, scope=scope, include_history=history,
+                        limits=MultiHopLimits(max_hops=max_hops, max_bytes=expansion_max_bytes)), timeout=1.0)
+                    response["multi_hop"] = expanded.model_dump(mode="json")
+                except Exception as error:
+                    response["multi_hop"] = {"status": "unavailable", "error": type(error).__name__}
+        return response
 
     @app.get("/v1/facts")
     async def get_facts(
@@ -927,7 +1002,7 @@ def parse_where(text: Optional[str]) -> dict[str, str]:
 
 
 def item_json(item: RecallItem) -> dict:
-    return {
+    result = {
         "chunk_id": item.chunk_id,
         "episode_id": item.episode_id,
         "text": item.text,
@@ -939,6 +1014,9 @@ def item_json(item: RecallItem) -> dict:
         "tags": list(item.tags),
         "metadata": dict(item.metadata),
     }
+    if item.rerank_score is not None:
+        result["rerank_score"] = item.rerank_score
+    return result
 
 
 def episode_json(episode) -> dict:

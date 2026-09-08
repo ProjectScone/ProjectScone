@@ -16,9 +16,12 @@ import re
 import time
 from uuid import uuid4
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
+from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
 from ..retrieval import fusion
+from ..retrieval.overview import OverviewResult
+from ..retrieval.reranking import (Reranker, RerankCandidate, candidate_is_retained, rerank_candidates,
+                                   validate_candidate_limit, validate_rerank_options)
 from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
 from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..retrieval.lexical import tokenize
@@ -44,6 +47,7 @@ from ..core.models import (
     LINK_KINDS,
     RecallItem,
     RecallResult,
+    RerankTrace,
     Status,
 )
 from ..capture.redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
@@ -242,6 +246,12 @@ class _DupOf:
     slot: int
 
 
+class _RecallEventItem(TypedDict):
+    """The identity field read from engine-authored recall event items."""
+
+    chunk_id: int
+
+
 class MemoryEngine:
     def __init__(
         self,
@@ -256,9 +266,22 @@ class MemoryEngine:
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
         blobs: Optional[BlobStore] = None,
+        candidate_limit: int | None = None,
+        reranker: Reranker | None = None,
+        rerank_limit: int = 32,
+        rerank_max_bytes: int = 64000,
+        rerank_timeout: float = 1.0,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
+        self.candidate_limit = validate_candidate_limit(candidate_limit)
+        validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
+        if reranker is not None and not callable(getattr(reranker, "rerank", None)):
+            raise InvalidInput("reranker must provide an async rerank method")
+        self.reranker = reranker
+        self.rerank_limit = rerank_limit
+        self.rerank_max_bytes = rerank_max_bytes
+        self.rerank_timeout = rerank_timeout
         self.documents = documents
         self.vectors = vectors
         self.embedder = embedder
@@ -533,7 +556,7 @@ class MemoryEngine:
 
     async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
         when = self.clock()
-        results: list[Optional[Added]] = []
+        results: list[Added | _DupOf | None] = []
         fresh: list[_Pending] = []
         seen: dict[str, int] = {}  # content hash -> index into results
         for record in records:
@@ -594,10 +617,10 @@ class MemoryEngine:
         resolved: list[Added] = []
         for r in results:
             if isinstance(r, _DupOf):
-                target = results[r.slot]
-                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))  # type: ignore[union-attr]
+                target = cast(Added, results[r.slot])
+                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
             else:
-                resolved.append(r)  # type: ignore[arg-type]
+                resolved.append(cast(Added, r))
         return resolved
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
@@ -608,7 +631,7 @@ class MemoryEngine:
         return f"{prefix}\n{chunk_text}" if prefix else chunk_text
 
     async def _write_batch(
-        self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list
+        self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
     ) -> None:
         written: list[int] = []
         try:
@@ -1023,25 +1046,43 @@ class MemoryEngine:
         since: Optional[str] = None,
         until: Optional[str] = None,
         conditions: Mapping[str, object] | None = None,
+        candidate_limit: int | None = None,
+        rerank: bool = True,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
         held before: what changed, when, and why. Off by default; the
         reader gets only what holds at ``as_of`` unless asked for the chain.
 
-        ``kind``, ``source_prefix``, ``since`` and ``until`` narrow the
-        candidates fusion produced by the episode's kind, the start of its
-        source (literal text), and inclusive bounds on when it happened,
-        the same way the Rust engine narrows: a filter that matches nothing
-        in the candidate window yields nothing rather than reaching past
-        it. ``tags`` and ``where`` are different: both lanes apply them
-        before ranking. ``as_of`` stays what it was, fact validity and the
-        upper bound the lanes already apply."""
+        ``kind``, ``source_prefix``, ``since`` and ``until`` narrow by the
+        episode's kind, literal source prefix and inclusive timestamps.
+        Native SQLite and in-memory lexical lanes apply these before their
+        candidate limit, so out-of-scope records cannot crowd out lexical
+        matches. Vector candidates and stores that ignore these fields are
+        still postfiltered within a bounded window; semantic-only matches
+        and such fallback stores have no completeness guarantee. SQLite
+        metadata conditions that require a Python recheck can also underfill
+        the window. ``tags`` and ``where`` are applied in both lanes.
+        ``as_of`` remains fact validity and the lanes' upper time bound.
+
+        ``candidate_limit`` optionally sets each lane's candidate depth
+        independently of returned ``limit``; None uses the configured depth
+        or the legacy limit-based depth. A host-supplied reranker is optional.
+        It sees only verified retained scoped passages within separate count,
+        UTF-8 payload and cooperative async time budgets. Scores remain ranking
+        signals, not confidence. A failed reranker retains baseline ordering;
+        ``rerank=False`` explicitly disables the configured adapter."""
         check_space(space)
         query = query.strip()
         if not query or len(query) > MAX_QUERY:
             raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
         limit = max(1, min(limit, MAX_LIMIT))
+        candidate_limit = validate_candidate_limit(self.candidate_limit if candidate_limit is None else candidate_limit)
+        if type(rerank) is not bool:
+            raise InvalidInput("rerank must be a boolean")
+        active_reranker = self.reranker if rerank else None
+        if active_reranker is not None:
+            validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
         boundary = normalise_time(as_of) if as_of else None
         clean_tags = normalise_tags(tags)
         clean_where = normalise_metadata(where or {})
@@ -1063,7 +1104,7 @@ class MemoryEngine:
         in_store = narrow_by is None or bool(getattr(self.documents, "narrows_metadata", False))
         narrowing = (kind is not None or source_prefix is not None or since_at is not None
                      or until_at is not None or narrow_by is not None)
-        depth = limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
+        depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
         degraded: list[str] = []
         started = time.perf_counter()
         latency: dict[str, float] = {}
@@ -1092,16 +1133,23 @@ class MemoryEngine:
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
 
+        if candidate_limit is not None or active_reranker is not None:
+            vector_lane = vector_lane[:depth]
+
         text_lane: list[tuple[int, float]] = []
         try:
             t0 = time.perf_counter()
             text_lane = await self.documents.search_text(
                 space, query, depth,
-                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by),
+                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
             )
             latency["text"] = _ms(t0)
         except Exception as e:  # noqa: BLE001
             degraded.append(f"text: {type(e).__name__}: {e}")
+
+        if candidate_limit is not None or active_reranker is not None:
+            text_lane = text_lane[:depth]
 
         if len(degraded) == 2:
             latency["total"] = _ms(started)
@@ -1134,7 +1182,11 @@ class MemoryEngine:
             if cid in chunks
         ]
         items = fusion.order(items)
-        items = fusion.cap_per_episode(items, {cid: c.episode_id for cid, c in chunks.items()})
+        episode_of = {cid: c.episode_id for cid, c in chunks.items()}
+        capped_items = fusion.cap_per_episode(items, episode_of)
+        baseline_allowed = {item.chunk_id for item in capped_items}
+        if active_reranker is None:
+            items = capped_items
         episodes: dict[int, Episode] = {}
         if narrowing:
             # Read every candidate's episode and keep the ones that fit,
@@ -1150,14 +1202,76 @@ class MemoryEngine:
                 if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
                 and _fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
             ]
-        items = items[:limit]
+        scope = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
+        if active_reranker is not None:
+            # Stores/indexes may be stale or ignore optional filters. No adapter
+            # sees text until its original source, bytes and scope are verified.
+            retained = []
+            for item in items:
+                chunk = chunks[item.chunk_id]
+                episode = episodes.get(chunk.episode_id)
+                if episode is None:
+                    episode = await self.documents.get_episode(space, chunk.episode_id)
+                    if episode is not None:
+                        episodes[chunk.episode_id] = episode
+                if episode is not None and candidate_is_retained(chunk, episode, space, scope):
+                    retained.append(item)
+            items = retained
+        candidate_items = items
+        items = [item for item in items if item.chunk_id in baseline_allowed][:limit]
         if self.demote_restated:
             items = fusion.demote_restated(
                 items,
                 {cid: c.text for cid, c in chunks.items()},
                 {cid: c.created_at for cid, c in chunks.items()},
             )
+        normalization_base = items[0].score if items else 0.0
         items = fusion.normalise(items)
+        rerank_scores: dict[int, float] = {}
+        rerank_trace: RerankTrace | None = None
+        if active_reranker is not None:
+            # Preserve the legacy denominator, including restatement demotion,
+            # for both returned baseline items and additional candidates.
+            normalized = {
+                item.chunk_id: fusion.Fused(item.chunk_id,
+                    item.score / normalization_base if normalization_base > 0 else item.score,
+                    item.similarity)
+                for item in candidate_items
+            }
+            baseline_ids = [item.chunk_id for item in items]
+            candidate_order = baseline_ids + [item.chunk_id for item in candidate_items if item.chunk_id not in baseline_ids]
+            candidates = tuple(RerankCandidate(
+                chunk_id=cid, episode_id=chunks[cid].episode_id, text=chunks[cid].text,
+                source=episodes[chunks[cid].episode_id].source, created_at=chunks[cid].created_at,
+                baseline_score=normalized[cid].score, similarity=normalized[cid].similarity,
+                lanes=tuple((lane, rank[cid]) for lane, rank in ranks.items() if cid in rank),
+            ) for cid in candidate_order)
+            outcome = await rerank_candidates(active_reranker, query, candidates,
+                limit=self.rerank_limit, max_bytes=self.rerank_max_bytes, timeout=self.rerank_timeout)
+            rerank_trace = outcome.trace
+            latency["rerank"] = outcome.trace.duration_ms
+            if outcome.failure is not None:
+                degraded.append(f"rerank: {outcome.failure}")
+            if outcome.trace.status == "applied":
+                rerank_scores = outcome.scores
+                ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]
+                items = fusion.cap_per_episode([normalized[cid] for cid in ranked], episode_of)[:limit]
+            # A cooperative adapter can yield while a source is forgotten or
+            # replaced. Never emit a stale passage after that asynchronous step.
+            fresh = {chunk.chunk_id: chunk for chunk in await self.documents.get_chunks(space, [item.chunk_id for item in items])} if items else {}
+            surviving = []
+            for item in items:
+                fresh_chunk = fresh.get(item.chunk_id)
+                if fresh_chunk is None or fresh_chunk != chunks[item.chunk_id]:
+                    continue
+                episode = await self.documents.get_episode(space, fresh_chunk.episode_id)
+                if episode is not None and candidate_is_retained(fresh_chunk, episode, space, scope):
+                    episodes[fresh_chunk.episode_id] = episode
+                    surviving.append(item)
+            if len(surviving) < len(items):
+                degraded.append("rerank: retained_sources_changed")
+            items = surviving
 
         for item in items:
             eid = chunks[item.chunk_id].episode_id
@@ -1176,6 +1290,7 @@ class MemoryEngine:
                     episode_id=chunk.episode_id,
                     text=chunk.text,
                     score=round(item.score, 6),
+                    rerank_score=rerank_scores.get(item.chunk_id),
                     similarity=None if item.similarity is None else round(item.similarity, 6),
                     lanes={lane: r[chunk.chunk_id] for lane, r in ranks.items() if chunk.chunk_id in r},
                     created_at=chunk.created_at,
@@ -1184,11 +1299,13 @@ class MemoryEngine:
                     metadata=dict(episode.metadata) if episode else {},
                 )
             )
-        facts = await self._facts_for_query(space, query, boundary or now)
-        previous = await self._history_for(space, facts, boundary or now) if history else []
+        fact_scope = scope if narrowing or clean_tags or clean_where else None
+        facts = await self._facts_for_query(space, query, boundary or now, scope=fact_scope)
+        previous = await self._history_for(space, facts, boundary or now, scope=fact_scope) if history else []
         counts = await self.documents.counts(space)
         result = RecallResult(
             items=result_items,
+            rerank=rerank_trace,
             facts=facts,
             history=previous,
             degraded=degraded,
@@ -1198,6 +1315,10 @@ class MemoryEngine:
             space_bytes=counts.bytes,
         )
         latency["total"] = _ms(started)
+        if candidate_limit is not None:
+            evidence["candidate_limit"] = candidate_limit
+        if rerank_trace is not None:
+            evidence["rerank"] = rerank_trace.model_dump(mode="json")
         event = await self._emit(space, "recall", {
             **evidence,
             "latency_ms": latency,
@@ -1206,7 +1327,8 @@ class MemoryEngine:
             # saw but fusion dropped are not, so coverage is "returned".
             "items": [
                 {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
-                 "similarity": i.similarity, "lanes": i.lanes}
+                 "similarity": i.similarity, "lanes": i.lanes,
+                 **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
                 for i in result_items
             ],
             "items_coverage": "returned",
@@ -1275,7 +1397,8 @@ class MemoryEngine:
             if len(text.encode()) > MAX_AGENT_TEXT:
                 raise InvalidInput(f"text exceeds {MAX_AGENT_TEXT} bytes")
             p["text"] = redact_secrets(text)
-        if p.get("episode_id") is not None and not isinstance(p["episode_id"], int):
+        episode_id = p.get("episode_id")
+        if episode_id is not None and not isinstance(episode_id, int):
             raise InvalidInput("episode_id must be an integer")
         if p.get("ok") is not None and not isinstance(p["ok"], bool):
             raise InvalidInput("ok must be a boolean")
@@ -1289,15 +1412,15 @@ class MemoryEngine:
         unknown = set(p) - allowed
         if unknown:
             raise InvalidInput(f"unknown agent fields: {sorted(unknown)}")
-        if p.get("episode_id") is not None and await self.documents.get_episode(space, int(p["episode_id"])) is None:
+        if episode_id is not None and await self.documents.get_episode(space, int(episode_id)) is None:
             # A link is connector-reported provenance; it must at least point inside this space.
             raise InvalidInput(f"episode {p['episode_id']} is not in {space!r}")
         # Idempotent receipt is the sink's job: the key is unique per space,
         # a retry with the same payload returns the stored event, and the
         # same key with a different payload is a conflict, never a silent drop.
-        key = f"agent:{p['agent']}:{sid}:{source_event_id}" if source_event_id is not None else None
+        dedup_key = f"agent:{p['agent']}:{sid}:{source_event_id}" if source_event_id is not None else None
         try:
-            return await self._emit(space, "agent", p, dedup_key=key)  # type: ignore[return-value]
+            return await self._emit(space, "agent", p, dedup_key=dedup_key)  # type: ignore[return-value]
         except DuplicateEvent as e:
             raise InvalidInput(f"source_event_id {source_event_id!r} was already recorded with a different payload (event {e.existing.event_id})") from e
 
@@ -1343,15 +1466,15 @@ class MemoryEngine:
             episode_ids.add(episode_id)
         for e in agent_events:
             if e.payload.get("episode_id") is not None:
-                episode_ids.add(int(e.payload["episode_id"]))
+                episode_ids.add(int(cast(int, e.payload["episode_id"])))
         chunk_ids: set[int] = set()
         for e in recall_events:
-            for item in e.payload.get("items") or []:
+            for item in cast(Sequence[_RecallEventItem], e.payload.get("items") or []):
                 chunk_ids.add(int(item["chunk_id"]))
         chunks = await self.documents.get_chunks(space, sorted(chunk_ids)) if chunk_ids else []
         if focused:
             keep = {c.chunk_id for c in chunks if c.episode_id in episode_ids}
-            recall_events = [e for e in recall_events if any(int(i["chunk_id"]) in keep for i in e.payload.get("items") or [])]
+            recall_events = [e for e in recall_events if any(int(i["chunk_id"]) in keep for i in cast(Sequence[_RecallEventItem], e.payload.get("items") or []))]
             chunks = [c for c in chunks if c.chunk_id in keep]
         for c in chunks:
             episode_ids.add(c.episode_id)
@@ -1423,7 +1546,7 @@ class MemoryEngine:
             G.add_agent_event(g, e)
         for e in recall_events:
             G.add_recall_event(g, e)
-            for fid in e.payload.get("fact_ids") or []:
+            for fid in cast(Sequence[int], e.payload.get("fact_ids") or []):
                 g.link(f"recall:{e.event_id}", f"claim:{int(fid)}", "held")
         for e in feedback_events:
             if f"recall:{e.payload.get('recall_event_id')}" in g.nodes:
@@ -1444,7 +1567,7 @@ class MemoryEngine:
         recall = await self.events.get(space, recall_event_id)
         if recall is None or recall.kind != "recall":
             raise NotFound(f"recall event {recall_event_id} not found in {space!r}")
-        returned = {int(i["chunk_id"]) for i in recall.payload.get("items", [])}
+        returned = {int(i["chunk_id"]) for i in cast(Sequence[_RecallEventItem], recall.payload.get("items", []))}
         if chunk_id not in returned:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
@@ -1453,7 +1576,21 @@ class MemoryEngine:
             "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
         })  # type: ignore[return-value]
 
-    async def _facts_for_query(self, space: str, query: str, when: str, limit: int = 10) -> list[Fact]:
+    async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:
+        if scope is None:
+            return True
+        if fact.source_episode_id is None:
+            return False
+        episode = await self.documents.get_episode(space, fact.source_episode_id)
+        if episode is None or episode.space != space:
+            return False
+        return (set(scope.tags).issubset(episode.tags)
+                and all(episode.metadata.get(key) == value for key, value in scope.where.items())
+                and (scope.as_of is None or episode.created_at <= scope.as_of)
+                and _fits(episode, scope.kind, scope.source_prefix, scope.since, scope.until, scope.conditions))
+
+    async def _facts_for_query(self, space: str, query: str, when: str, limit: int = 10,
+                               scope: TextFilter | None = None) -> list[Fact]:
         terms = set(tokenize(query))
         if not terms:
             return []
@@ -1464,12 +1601,13 @@ class MemoryEngine:
             if fact.excluded or not fact.holds_at(when):
                 continue
             overlap = len(terms & set(tokenize(f"{fact.subject} {fact.predicate} {fact.object}")))
-            if overlap:
+            if overlap and await self._fact_fits_scope(space, fact, scope):
                 scored.append((-overlap, -fact.confidence, fact.fact_id, fact))
         scored.sort(key=lambda t: t[:3])
         return [t[3] for t in scored[:limit]]
 
-    async def _history_for(self, space: str, facts: Sequence[Fact], when: str, limit: int = 20) -> list[Fact]:
+    async def _history_for(self, space: str, facts: Sequence[Fact], when: str, limit: int = 20,
+                           scope: TextFilter | None = None) -> list[Fact]:
         """The closed ledger facts sharing a subject and predicate with any of
         ``facts`` and begun by ``when``, oldest first: the chain of what was
         believed before. Nothing that started after the reader's boundary
@@ -1483,6 +1621,7 @@ class MemoryEngine:
             f for f in await self.documents.list_facts(space, include_closed=True)
             if (f.subject, f.predicate) in keys and f.fact_id not in shown
             and f.status == "closed" and not f.excluded and f.valid_from <= when
+            and await self._fact_fits_scope(space, f, scope)
         ]
         chain.sort(key=lambda f: (f.valid_from, f.fact_id))
         return chain[:limit]
@@ -1996,6 +2135,21 @@ class MemoryEngine:
         return {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)
                 if f.source_episode_id is not None}
 
+    async def overview(
+        self, space: str, *, limit: int = 20, before: int | None = None,
+        where: Mapping[str, str] | None = None, kind: str | None = None,
+        source_prefix: str | None = None, since: str | None = None, until: str | None = None,
+        exclude_session_id: str | None = None, max_records: int = 200,
+    ) -> OverviewResult:
+        """Return bounded recent source evidence; coverage and continuation are explicit."""
+        from ..retrieval.overview import overview
+
+        return await overview(
+            self.documents, space, limit=limit, before=before, where=where, kind=kind,
+            source_prefix=source_prefix, since=since, until=until,
+            exclude_session_id=exclude_session_id, max_records=max_records,
+        )
+
     async def source_page(self, space: str, *, before: Optional[int] = None,
                           limit: int = 25, kind: Optional[str] = None,
                           conditions: Mapping[str, object] | None = None) -> SourcePage:
@@ -2228,20 +2382,21 @@ class MemoryEngine:
             summary.facts += 1
         for record in links:
             kind = str(record.get("kind", ""))
-            ends = (fact_map.get(int(record["from_fact"])), fact_map.get(int(record["to_fact"])))
-            if kind not in LINK_KINDS or None in ends or ends[0] == ends[1]:
+            from_fact = fact_map.get(int(record["from_fact"]))
+            to_fact = fact_map.get(int(record["to_fact"]))
+            if kind not in LINK_KINDS or from_fact is None or to_fact is None or from_fact == to_fact:
                 # A link to a fact not in the dump is dropped, not pointed at
                 # an unrelated record; a bad kind is a bad record.
                 summary.links_skipped += 1
                 continue
             source = record.get("source_episode_id")
             new_link = NewFactLink(
-                space=space, from_fact=ends[0], to_fact=ends[1], kind=kind,
+                space=space, from_fact=from_fact, to_fact=to_fact, kind=kind,
                 created_at=normalise_time(str(record["created_at"])) if record.get("created_at") else self.clock(),
                 source_episode_id=id_map.get(int(source)) if source is not None else None,
                 quote=record.get("quote"),
             )
-            already = any((l.to_fact, l.kind) == (ends[1], kind) for l in await self.documents.fact_links(space, ends[0]) if l.from_fact == ends[0])
+            already = any((l.to_fact, l.kind) == (to_fact, kind) for l in await self.documents.fact_links(space, from_fact) if l.from_fact == from_fact)
             if already:
                 summary.links_skipped += 1
                 continue
@@ -2350,9 +2505,9 @@ def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], s
 
     Metadata conditions are checked here as well as pushed into the store,
     and that is not redundant. The push-down keeps the store from spending
-    its window on memories the caller excluded; this is what makes the
-    answer exact whatever store it came from, including one whose filter
-    language cannot express the question."""
+    its window on memories the caller excluded. This final check prevents
+    out-of-scope answers even when a store cannot express the filter; it
+    cannot recover eligible memories omitted from a candidate window."""
     if conditions is not None and not conditions.matches(episode.metadata):
         return False
     if kind is not None and episode.kind != kind:

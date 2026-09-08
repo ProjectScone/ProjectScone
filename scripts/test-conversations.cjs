@@ -554,6 +554,30 @@ for(const mobile of [false,true])test(`live public chunks stay provisional until
   assert.equal(await preview.count(),0);assert.equal(posts(),1);
 });
 
+test('stream completion preserves transcript reading position and keeps the composer fixed until capture arrives',async t=>{
+  const {page,emit,finish,streams,requested,posts}=await fixture(t,{streaming:true});await start(page);
+  const userText='I am reading this retained context. '.repeat(100);
+  await page.getByLabel('Message',{exact:true}).fill(userText);await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const preview=page.getByRole('region',{name:'Live reply preview'});await preview.waitFor();emit('A provisional answer remains visible while capture completes.');
+  await preview.getByLabel('Provisional reply text').waitFor();
+  await page.getByRole('region',{name:'Saved messages'}).getByText(userText,{exact:true}).waitFor();
+  await page.locator('.conversation-messages').evaluate(element=>{element.scrollTop=100;});
+  const measure=()=>page.evaluate(()=>({page:window.scrollY,composer:document.querySelector('.conversation-composer').getBoundingClientRect().bottom,thread:document.querySelector('.conversation-thread').getBoundingClientRect().height,reading:document.querySelector('.conversation-messages').scrollTop}));
+  const before=await measure();let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  await page.route('**/turns/*',async route=>{await gate;await route.continue().catch(()=>{});});
+  const requestId=requested.find(url=>url.includes('/stream?')).split('/turns/')[1].split('/')[0];
+  for(const stream of streams)stream.end(`event: terminal\ndata: ${JSON.stringify({request_id:requestId,status:'completed',read_receipt:true})}\n\n`);
+  await preview.getByText('Live preview ended. Checking the saved reply.',{exact:true}).waitFor();
+  assert.equal(await preview.getByLabel('Provisional reply text').innerText(),'A provisional answer remains visible while capture completes.');
+  assert.equal(await preview.evaluate(element=>!!element.closest('.conversation-messages')),true,'Live and saved replies share one bounded transcript');
+  assert.deepEqual(await measure(),before,'Terminal transport cannot move the page, composer or current reading position');
+  finish();release();
+  await page.getByRole('region',{name:'Saved messages'}).getByText('Saved complete answer.',{exact:true}).waitFor();
+  await preview.waitFor({state:'detached'});
+  assert.deepEqual(await measure(),before,'Persisting the reply cannot move the page, composer or current reading position');
+  assert.equal(posts(),1);
+});
+
 test('an interrupted preview reconnects with its last sequence without resending, and gaps replace the discontinuous prefix',async t=>{
   const {page,emit,streams,posts,requested,finish}=await fixture(t,{streaming:true});await start(page);
   await page.getByLabel('Message',{exact:true}).fill('Stream');await page.getByRole('button',{name:'Send message',exact:true}).click();
@@ -867,6 +891,31 @@ test('an unknown conversation contract does not trigger session reads',async t=>
   assert.equal(await page.getByRole('button',{name:'New conversation',exact:true}).isDisabled(),true);
   assert.equal(requested.some(p=>p.startsWith('/v1/conversations?')),false);
 });
+test('composer Enter sends once, Shift+Enter inserts a newline, and composition never submits',async t=>{
+  const {page,posts}=await fixture(t,{streaming:true});
+  await start(page);
+  const input=page.getByLabel('Message',{exact:true});
+  await input.fill('First line');
+  await input.press('Shift+Enter');
+  await input.press('A');
+  assert.equal(await input.inputValue(),'First line\nA');
+  assert.equal(posts(),0);
+  await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',keyCode:229});
+  await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',repeat:true});
+  assert.equal(posts(),0);
+  const sent=page.waitForRequest(r=>r.method()==='POST'&&new URL(r.url()).pathname==='/v1/conversations/current/turns');
+  await input.press('Enter');
+  const request=await sent;
+  assert.equal(request.postDataJSON().text,'First line\nA');
+  await page.waitForFunction(()=>document.querySelector('#conversation-message').value==='');
+  assert.equal(posts(),1);
+  await input.fill('Keep this draft while reply is pending');
+  await input.press('Enter');
+  assert.equal(posts(),1);
+  assert.equal(await input.inputValue(),'Keep this draft while reply is pending');
+});
+
 test('capture consent, send, prepared sources and stop operate through the API',async t=>{
   const {page,posts}=await fixture(t);await start(page);
   await page.getByLabel('Message',{exact:true}).fill('How is Juniper calibrated?');

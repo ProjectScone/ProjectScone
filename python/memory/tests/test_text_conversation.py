@@ -7,7 +7,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.realtime.events import TextDelta, ReplyCompleted
-from scone_memory.realtime.text import TextConversation
+from scone_memory.realtime.text import DEFAULT_SYSTEM_PROMPT, TextConversation
 
 @pytest.fixture
 async def memory():
@@ -81,7 +81,7 @@ async def test_multi_turn_context_and_memory_preserve_only_public_messages(memor
     assert first["memory_context"]["status"] == "prepared"
     messages = models[1].requests[0]
     assert [(m["role"], m["content"]) for m in messages if "Scone retrieved" not in m["content"]] == [
-        ("system", "You are a helpful assistant."),
+        ("system", DEFAULT_SYSTEM_PROMPT),
         ("user", "How is Juniper calibrated?"), ("assistant", "First reply."),
         ("user", "And its name?"),
     ]
@@ -240,7 +240,7 @@ async def test_model_context_mutation_cannot_rewrite_saved_conversation_history(
     await conversation.reply("original user")
     await conversation.reply("second user")
     assert models[1].requests[0][:2] == [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
         {"role": "user", "content": "original user"},
     ]
     await conversation.close()
