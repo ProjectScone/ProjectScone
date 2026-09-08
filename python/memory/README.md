@@ -687,6 +687,53 @@ candidate is reviewed. Reports preserve its public draft, final answer, review
 receipt, and separate draft/review timing; gold answers never enter review.
 This native feature remains opt-in and is not automatically mounted in HTTP.
 
+#### Optional extractive answers
+
+For memory questions where exact recorded wording matters, a model can select
+evidence instead of composing a free-form answer:
+
+```python
+from scone_memory.providers.evidence_selector import SelfHostedEvidenceSelector
+
+conversation = TextConversation(
+    memory, "authorized-space", "extractive-session",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    evidence_selector=SelfHostedEvidenceSelector(endpoint, model, timeout=20),
+    evidence_answer_timeout=20,
+    turn_timeout=90,
+)
+```
+
+When memory is prepared, Scone builds bounded source cards and makes at most one
+selection call. The model returns up to three known card IDs; Scone renders the
+original quotations and source IDs. No free-form generator runs on this path.
+Complete supplied paths and connected contradictions stay together in a card;
+their constituent passages cannot bypass that grouping. Whole cards are omitted
+when they exceed a budget. A path records ordered statements and stored link
+directions; it does not assert a new transitive relationship or infer an endpoint.
+
+Sources are checked before and after selection against the original scope,
+revision, and records. Preparation, selection, and validation share one deadline.
+Stale sources, invalid selections, or provider failures suppress the answer. A
+valid empty selection returns a fixed no-support message. Only the final rendered
+text enters history, capture, and the text callback.
+
+The `evidence_answer` receipt lists delivered cards and evidence IDs, omissions,
+and source status. `verified_accuracy` remains false: exact quotations prevent
+new model-authored claims, but the model can still select irrelevant or incomplete
+evidence. This is an extractive answer mode, not a guarantee of fluent generation
+accuracy. Turns without prepared memory use the normal model and streaming flow.
+An evidence selector and answer reviewer cannot be enabled together. Custom
+selectors implement the `EvidenceSelector` protocol; their lifecycle belongs to
+the caller. This native option is not automatically enabled on HTTP routes.
+
+Add `--evidence-selector-model YOUR_INSTALLED_MODEL --evidence-answer-timeout 20`
+to the generation evaluator to enable it for the candidate only. Reports separate
+context evidence coverage from `selected_evidence_coverage`, record the actual
+answer mode, and count free-form generation calls. Gold labels are used only for
+scoring after selection. Quoting sources can inflate lexical scores; compare
+selection relevance and evidence coverage separately from generative accuracy.
+
 #### Migration from the experimental framework adapters
 
 The three former `integrations/pipecat*.py` modules and their optional dependency

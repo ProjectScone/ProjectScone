@@ -19,6 +19,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
 from .answer_review import AnswerReviewer, AnswerReviewLimits, review_answer
 from .context import ContextReceipt, MemoryContext
+from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
 from .review_evidence import prepare_review_evidence
@@ -44,6 +45,13 @@ class _AnswerReviewFailure(RuntimeError):
         self.answer_review = receipt
 
 
+class _EvidenceAnswerFailure(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__("evidence answer unavailable")
+        self.evidence_answer: dict[str, object] = {
+            "status": "unavailable", "errors": [reason], "verified_accuracy": False}
+
+
 class TextConversation:
     """One active turn, immutable scope, fresh provider per turn.
 
@@ -53,6 +61,9 @@ class TextConversation:
     Cleanup is cooperative and may exceed the cancellation deadline.
     Optional answer review buffers the draft until source checks and review
     finish; only the accepted final text reaches the observer and capture.
+    Optional evidence selection instead constructs answers from checked source
+    cards without a generation provider. Turns without prepared memory retain
+    normal generation and streaming, with a skipped evidence-answer receipt.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
@@ -63,7 +74,8 @@ class TextConversation:
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
-                 review_policy: Literal["report", "require_supported"] = "report"):
+                 review_policy: Literal["report", "require_supported"] = "report",
+                 evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -84,6 +96,16 @@ class TextConversation:
             raise ValueError("review settings require answer_reviewer")
         if review_limits is not None and not isinstance(review_limits, AnswerReviewLimits):
             raise ValueError("review_limits must be AnswerReviewLimits")
+        if evidence_selector is not None and not callable(getattr(evidence_selector, "select", None)):
+            raise ValueError("evidence_selector must implement select")
+        if evidence_selector is not None and answer_reviewer is not None:
+            raise ValueError("evidence_selector and answer_reviewer cannot be combined")
+        if (isinstance(evidence_answer_timeout, bool) or not isinstance(evidence_answer_timeout, (int, float))
+                or not math.isfinite(evidence_answer_timeout) or not 1 <= evidence_answer_timeout <= 180):
+            raise ValueError("evidence_answer_timeout must be finite in 1..180")
+        if evidence_selector is None and evidence_answer_timeout != 20.0:
+            raise ValueError("evidence answer settings require evidence_selector")
+        self._evidence_selector, self._evidence_answer_timeout = evidence_selector, float(evidence_answer_timeout)
         self._answer_reviewer, self._review_policy = answer_reviewer, review_policy
         self._review_limits = (AnswerReviewLimits.model_validate(dict(vars(review_limits)), strict=True)
                                if review_limits is not None else AnswerReviewLimits())
@@ -106,7 +128,7 @@ class TextConversation:
         return self._closed
 
     async def reply(self, text: str, *, on_text: Callable[[str], Awaitable[None]] | None = None) -> dict:
-        """Observe provisional chunks, or one reviewed text; return confirms capture."""
+        """Observe provisional chunks, or one checked final text; return confirms capture."""
         if self._closed:
             raise RuntimeError("conversation is closed")
         if self._active is not None:
@@ -148,14 +170,15 @@ class TextConversation:
             if cancelled:
                 raise asyncio.CancelledError()
 
-    async def _record(self, turn_id, role, text):
+    async def _record(self, turn_id, role, text, *, extractive=False):
         started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
                         turn_id=turn_id, role=role, representation="aggregated_text",
                         capture_status="submitted" if role == "user" else "aggregated")
         if role == "assistant":
-            metadata.update(completion_evidence="adapter_end_and_stream_closed", provider_completion="unverified")
+            metadata.update(completion_evidence="source_checked_extractive_answer" if extractive else "adapter_end_and_stream_closed",
+                            provider_completion="unverified")
         try:
             [added] = await self._memory.remember_many(self._space, [Record(
                 text, kind="conversation", source=self._session_id, metadata=metadata,
@@ -178,19 +201,22 @@ class TextConversation:
             async with asyncio.timeout(self._timeout):
                 turn_id = uuid4().hex
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
-                text, receipt, answer_review = await self._execute(messages, on_text)
+                text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text)
                 complete = [*messages, {"role": "assistant", "content": text}]
                 if _bytes(complete) > self._max_history:
                     raise RuntimeError("model reply exceeded the conversation history byte limit")
                 if self._closed or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
-                assistant_id = await self._record(turn_id, "assistant", text)
+                assistant_id = await self._record(turn_id, "assistant", text,
+                    extractive=evidence_answer is not None and evidence_answer.get("status") != "skipped")
                 self._history = complete
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
                             memory_context=receipt)
                 if answer_review is not None:
                     result["answer_review"] = answer_review
+                if evidence_answer is not None:
+                    result["evidence_answer"] = evidence_answer
                 return result
         finally:
             _OWNER.reset(token)
@@ -199,10 +225,20 @@ class TextConversation:
         request, receipt = await self._context.prepare(messages)
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
+        if self._evidence_selector is not None and receipt["status"] == "prepared":
+            text, evidence_answer = await self._construct_answer(messages[-1]["content"], request, receipt)
+            await self._emit_final(messages, text, on_text)
+            return text, receipt, None, evidence_answer
         draft = await self._generate(request, on_text if self._answer_reviewer is None else None)
         if self._answer_reviewer is None:
-            return draft, receipt, None
+            skipped = ({"status": "skipped", "reason": "no_memory_evidence", "verified_accuracy": False}
+                       if self._evidence_selector is not None else None)
+            return draft, receipt, None, skipped
         text, answer_review = await self._review_draft(messages[-1]["content"], draft, request, receipt)
+        await self._emit_final(messages, text, on_text)
+        return text, receipt, answer_review, None
+
+    async def _emit_final(self, messages, text, on_text):
         if len(text.encode("utf-8")) > self._max_reply:
             raise RuntimeError("model reply exceeded the byte limit")
         if _bytes([*messages, {"role": "assistant", "content": text}]) > self._max_history:
@@ -220,7 +256,40 @@ class TextConversation:
             except Exception as exc:
                 raise RuntimeError("public text observer failed") from exc
             self._cancel_reusable = not self._closed
-        return text, receipt, answer_review
+
+    async def _construct_answer(self, question: str, request: list[dict[str, object]],
+                                context_receipt: ContextReceipt) -> tuple[str, dict[str, object]]:
+        selector = self._evidence_selector
+        if selector is None:
+            raise _EvidenceAnswerFailure("invalid_selection")
+        deadline = time.monotonic() + self._evidence_answer_timeout
+        self._cancel_reusable = not self._closed
+        try:
+            async with asyncio.timeout_at(deadline):
+                material = await prepare_review_evidence(self._memory, self._space, self._scope,
+                    self._session_id, request, context_receipt)
+            task = asyncio.current_task()
+            if self._closed or (task is not None and task.cancelling()):
+                raise asyncio.CancelledError()
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            reason = "source_validation_timeout" if isinstance(error, TimeoutError) else "source_validation_failed"
+            raise _EvidenceAnswerFailure(reason) from error
+        try:
+            constructed = await construct_evidence_answer(selector, question, material,
+                timeout_s=self._evidence_answer_timeout, max_answer_bytes=min(self._max_reply, 16000), deadline=deadline)
+            if self._closed or (task is not None and task.cancelling()):
+                raise asyncio.CancelledError()
+            if time.monotonic() >= deadline:
+                raise _EvidenceAnswerFailure("selection_timeout")
+        except asyncio.CancelledError:
+            raise
+        except EvidenceAnswerError as error:
+            raise _EvidenceAnswerFailure(error.reason) from error
+        return constructed.answer, constructed.receipt
 
     async def _review_draft(self, question: str, draft: str, request: list[dict[str, object]],
                             context_receipt: ContextReceipt) -> tuple[str, dict[str, object]]:

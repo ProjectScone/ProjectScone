@@ -21,7 +21,8 @@ def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
              "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
-             "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
+             "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
+             "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
@@ -45,6 +46,8 @@ from ..realtime.context import ContextReceipt, MemoryContext, _PREFIX
 from ..realtime.answer_review import AnswerReviewLimits, review_answer
 from ..realtime.review_evidence import prepare_review_evidence
 from ..providers.answer_reviewer import SelfHostedAnswerReviewer
+from ..providers.evidence_selector import SelfHostedEvidenceSelector
+from ..realtime.evidence_answer import EvidenceAnswerError, construct_evidence_answer
 from ..retrieval.recall_scope import RecallScope
 from ..realtime.events import ReplyCompleted, TextDelta, TextModel
 from ..realtime.text import DEFAULT_SYSTEM_PROMPT
@@ -53,6 +56,7 @@ from ..retrieval.multihop import MultiHopLimits
 from .edge_retrieval_benchmark import EdgeFixture, FixtureCase, STAMP, _CachedBGE, _seed
 
 MAX_BYTES = 16_000
+MAX_EVIDENCE_CARDS = 24
 
 
 class GenerationCase(FixtureCase):
@@ -172,7 +176,7 @@ def _records(value: object) -> list[dict[str, object]]:
 
 
 async def _context_coverage(engine: MemoryEngine, case: GenerationCase, request: list[dict[str, str]],
-                            labels: dict[int, str]) -> dict[str, object]:
+                            labels: dict[int, str], *, selected_ids: frozenset[str] | None = None) -> dict[str, object]:
     pieces: list[tuple[int, str]] = []
     for message in request:
         content = message.get("content", "")
@@ -180,8 +184,14 @@ async def _context_coverage(engine: MemoryEngine, case: GenerationCase, request:
         if not separator or not prefix.startswith(_PREFIX.rstrip("\n")):
             continue
         payload = _mapping(json.loads(serialized))
-        for key, id_key, text_key in (("sources", "episode_id", "text"), ("claims", "source_episode_id", "quote")):
+        record_kinds = [("sources", "episode_id", "text", "chunk", "chunk_id"),
+                        ("claims", "source_episode_id", "quote", "fact", "fact_id")]
+        if selected_ids is not None:
+            record_kinds.append(("relations", "source_episode_id", "quote", "link", "link_id"))
+        for key, id_key, text_key, kind, evidence_key in record_kinds:
             for record in _records(payload.get(key)):
+                if selected_ids is not None and f"{kind}:{record.get(evidence_key)}" not in selected_ids:
+                    continue
                 episode_id, text = record.get(id_key), record.get(text_key)
                 if type(episode_id) is int and isinstance(text, str):
                     pieces.append((episode_id, text))
@@ -255,6 +265,40 @@ async def _review_reply(engine: MemoryEngine, case: GenerationCase, request: lis
     row["first_token_ms"] = row["total_ms"] if row["answer_text"] else None
 
 
+async def _extractive_reply(engine: MemoryEngine, case: GenerationCase, request: list[dict[str, object]],
+                            receipt: ContextReceipt, selector: SelfHostedEvidenceSelector,
+                            timeout: float) -> dict[str, object]:
+    started = time.perf_counter()
+    deadline = time.monotonic() + timeout
+    answer = ""
+    error_type: str | None = None
+    status = "completed"
+    answer_receipt: dict[str, object]
+    try:
+        scope = RecallScope.validated(where=case.where, kind=case.kind, source_prefix=case.source_prefix,
+                                      since=case.since, until=case.until)
+        async with asyncio.timeout_at(deadline):
+            material = await prepare_review_evidence(engine, case.space, scope, receipt["session_id"], request, receipt)
+        result = await construct_evidence_answer(selector, case.query, material, timeout_s=timeout,
+            max_cards=MAX_EVIDENCE_CARDS, max_evidence_bytes=MAX_BYTES, max_answer_bytes=MAX_BYTES, deadline=deadline)
+        answer, answer_receipt = result.answer, result.receipt
+        if not answer.strip():
+            status = "empty"
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        reason = error.reason if isinstance(error, EvidenceAnswerError) else (
+            "source_validation_timeout" if isinstance(error, TimeoutError) else "source_validation_failed")
+        status = "timeout" if reason.endswith("timeout") else "evidence_answer_unavailable"
+        error_type = "EvidenceAnswerUnavailable"
+        answer_receipt = {"status": "unavailable", "reason": reason, "mode": "extractive", "verified_accuracy": False,
+                          "source_status": "stale" if reason == "stale_evidence" else "unavailable"}
+    total_ms = round((time.perf_counter() - started) * 1000, 3)
+    return {"status": status, "completed": status == "completed", "answer_text": answer, "output_bytes": len(answer.encode()),
+            "truncated": False, "error_type": error_type, "cleanup_error_type": None,
+            "first_token_ms": total_ms if answer else None, "total_ms": total_ms, "evidence_answer": answer_receipt}
+
+
 def _validate_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -272,7 +316,20 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        adaptive_evidence_policy: EvidencePolicy = "model_selected",
                        review_model: str | None = None, review_timeout: float = 20.0,
                        review_policy: Literal["report", "require_supported"] = "report",
+                       evidence_selector_model: str | None = None, evidence_answer_timeout: float = 20.0,
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if evidence_selector_model is not None and review_model is not None:
+        raise ValueError("evidence_selector_model and review_model are mutually exclusive")
+    if (isinstance(evidence_answer_timeout, bool) or not isinstance(evidence_answer_timeout, (int, float))
+            or not math.isfinite(evidence_answer_timeout) or not 1 <= evidence_answer_timeout <= 180):
+        raise ValueError("evidence_answer_timeout must be finite in 1..180")
+    if evidence_selector_model is not None:
+        try:
+            validate_self_hosted_identifier(evidence_selector_model)
+        except ValueError:
+            raise ValueError("evidence_selector_model must be bounded nonblank text") from None
+        if not endpoint:
+            raise ValueError("evidence_selector_model requires an explicit self-hosted endpoint")
     if type(review_policy) is not str or review_policy not in ("report", "require_supported"):
         raise ValueError("review_policy must be report or require_supported")
     if (isinstance(review_timeout, bool) or not isinstance(review_timeout, (int, float))
@@ -336,11 +393,18 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                 if adaptive_model is not None and endpoint is not None else None)
     reviewer = (SelfHostedAnswerReviewer(endpoint, review_model, timeout=review_timeout,
         max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES) if review_model is not None and endpoint is not None else None)
+    selector = (SelfHostedEvidenceSelector(endpoint, evidence_selector_model, timeout=evidence_answer_timeout)
+                if evidence_selector_model is not None and endpoint is not None else None)
     graph_limits = MultiHopLimits() if expand_relations else None
     results: list[dict[str, object]] = []
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
         "code_provenance": _CODE_PROVENANCE,
         "ordered_quotes": ordered_quotes,
+        "candidate_answer_mode": "extractive" if selector is not None else "model_generation",
+        "evidence_selector_model": evidence_selector_model, "evidence_answer_timeout_seconds": evidence_answer_timeout,
+        "evidence_answer_max_cards": MAX_EVIDENCE_CARDS if selector is not None else None,
+        "evidence_answer_max_evidence_bytes": MAX_BYTES if selector is not None else None,
+        "evidence_answer_max_answer_bytes": MAX_BYTES if selector is not None else None,
         "review_model": review_model, "review_timeout_seconds": review_timeout, "review_policy": review_policy,
         "review_max_rounds": 2 if reviewer is not None else None,
         "review_max_output_tokens": 2048 if reviewer is not None else None,
@@ -357,7 +421,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "model": model or "injected-test-provider", "endpoint": endpoint, "repeats": repeats, "timeout_seconds": timeout,
         "system_prompt_sha256": hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest(), "max_prompt_bytes": MAX_BYTES,
         "max_output_bytes": MAX_BYTES, "max_output_tokens": 512, "results": results,
-        "limitations": ["Only public TextDelta output is recorded; no hidden reasoning is requested or captured.",
+        "limitations": ["Only public generated text or host-rendered source excerpts are recorded; no hidden reasoning is requested or captured.",
+            "Host-quoted excerpts can inflate lexical coverage; extractive scores do not measure generative answer accuracy.",
             "Exact phrase alternatives are mechanical key-fact checks, not semantic entailment or unsupported-claim measurement.",
             "Development and held-out splits are declared in the fixture; scores do not guarantee 98–100% general performance.",
             "Generation failures and partial answers remain visible; evidence coverage is separate from answer checks."]}
@@ -402,6 +467,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                             prompt = json.dumps(messages, ensure_ascii=False).encode()
                             row: dict[str, object] = {"case_id": case.id, "split": case.split, "query": case.query,
                                 "trial": trial, "variant": "candidate" if candidate else "baseline",
+                                "answer_mode": "extractive" if selector is not None and candidate and receipt["status"] == "prepared" else "model_generation",
+                                "generation_provider_calls": 0,
                                 "adaptive_retrieval": adaptive_retriever is not None,
                                 "adaptive_failure_policy": adaptive_failure_policy if adaptive_retriever is not None else None,
                                 "adaptive_empty_selection_policy": adaptive_empty_selection_policy if adaptive_retriever is not None else None,
@@ -415,13 +482,25 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                                 "path_count": receipt.get("path_count", 0), "multihop_status": receipt.get("multihop_status", "absent"),
                                 "context_receipt": receipt}
                             row.update(await _context_coverage(engine, case, messages, labels))
-                            if len(prompt) > MAX_BYTES:
+                            if selector is not None and candidate and receipt["status"] == "prepared":
+                                row.update(await _extractive_reply(engine, case, request, receipt, selector, evidence_answer_timeout))
+                            elif len(prompt) > MAX_BYTES:
                                 row.update(status="prompt_limit", completed=False, answer_text="", output_bytes=0,
                                            error_type="PromptByteLimit", first_token_ms=None, total_ms=0.0)
                             else:
+                                row["generation_provider_calls"] = 1
                                 row.update(await capture_public_reply(model_factory(), messages, timeout=timeout))
+                            if selector is not None and candidate and receipt["status"] != "prepared":
+                                row["evidence_answer"] = {"status": "skipped", "reason": "no_memory_evidence", "verified_accuracy": False}
                             if reviewer is not None and candidate:
                                 await _review_reply(engine, case, request, receipt, row, reviewer, review_timeout, review_policy)
+                            if row["answer_mode"] == "extractive":
+                                raw_ids = _mapping(row.get("evidence_answer")).get("evidence_ids")
+                                selected_ids = frozenset(value for value in raw_ids if isinstance(value, str)) if isinstance(raw_ids, (list, tuple)) else frozenset()
+                                selected_coverage = await _context_coverage(engine, case, messages, labels, selected_ids=selected_ids)
+                                row["selected_evidence_coverage"] = selected_coverage["evidence_coverage"]
+                                row["selected_evidence_scope_leaks"] = selected_coverage["scope_leaks"]
+                                row["selected_evidence_invalid_provenance"] = selected_coverage["invalid_provenance"]
                             row.update(score_answer(cast(str, row["answer_text"]), case.answer_checks))
                             row["successful_key_fact_coverage"] = row["key_fact_coverage"] if row["completed"] else 0.0
                             results.append(row)
@@ -463,6 +542,8 @@ def main() -> None:
     parser.add_argument("--review-model", help="Explicit installed answer reviewer model for the candidate")
     parser.add_argument("--review-timeout", type=float, default=20, help="Whole answer review budget including source checks")
     parser.add_argument("--review-policy", choices=("report", "require_supported"), default="report")
+    parser.add_argument("--evidence-selector-model", help="Select source cards for a host-rendered candidate answer; mutually exclusive with --review-model")
+    parser.add_argument("--evidence-answer-timeout", type=float, default=20, help="Whole extractive answer budget including source checks")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
@@ -471,7 +552,8 @@ def main() -> None:
         adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations,
         adaptive_empty_selection_policy=args.adaptive_empty_selection_policy,
         adaptive_evidence_policy=args.adaptive_evidence_policy,
-        review_model=args.review_model, review_timeout=args.review_timeout, review_policy=args.review_policy))
+        review_model=args.review_model, review_timeout=args.review_timeout, review_policy=args.review_policy,
+        evidence_selector_model=args.evidence_selector_model, evidence_answer_timeout=args.evidence_answer_timeout))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 

@@ -73,13 +73,16 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
                 "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
-                "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "testing/generation_ablation.py"}
+                "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
+                "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
     assert [row["structured_paths"] for row in report["results"]] == [False, True, True, False]
     assert [row["variant"] for row in report["results"]] == ["baseline", "candidate", "candidate", "baseline"]
     assert all(row["adaptive_retrieval"] is False for row in report["results"])
+    assert report["candidate_answer_mode"] == "model_generation"
+    assert all(row["answer_mode"] == "model_generation" for row in report["results"])
     assert report["adaptive_empty_selection_policy"] is None
     assert report["adaptive_evidence_policy"] is None
     assert all(row["adaptive_evidence_policy"] is None for row in report["results"])
@@ -574,3 +577,190 @@ async def test_skipped_review_reports_buffered_delivery_time():
     assert row["answer_review"]["status"] == "skipped"
     assert row["first_token_ms"] == 500.0
     assert row["draft_first_token_ms"] == 5.0
+
+
+@pytest.mark.parametrize("options,match", [
+    ({"evidence_selector_model": " "}, "evidence_selector_model"),
+    ({"evidence_selector_model": True}, "evidence_selector_model"),
+    ({"evidence_selector_model": "selector"}, "endpoint"),
+    ({"evidence_selector_model": "selector", "review_model": "reviewer"}, "mutually exclusive"),
+    ({"evidence_answer_timeout": True}, "evidence_answer_timeout"),
+    ({"evidence_answer_timeout": "20"}, "evidence_answer_timeout"),
+    ({"evidence_answer_timeout": float("nan")}, "evidence_answer_timeout"),
+    ({"evidence_answer_timeout": 0}, "evidence_answer_timeout"),
+    ({"evidence_answer_timeout": 181}, "evidence_answer_timeout"),
+])
+async def test_evidence_answer_options_validate_before_output(tmp_path, options, match):
+    from scone_memory.testing.generation_ablation import run_ablation
+    output = tmp_path / "new-directory" / "extractive.json"
+    with pytest.raises(ValueError, match=match):
+        await run_ablation(fixture_file(tmp_path), output=output, **options)
+    assert not output.parent.exists()
+
+
+@pytest.mark.parametrize("change_source,card_kind", [(False, "path"), (True, "path"), (False, "passage")])
+async def test_extractive_candidate_selects_verified_complete_path_without_generator(tmp_path, monkeypatch, change_source, card_kind):
+    from scone_memory.realtime.evidence_answer import EvidenceSelection
+    from scone_memory.retrieval.adaptive import EvidenceDecision
+    from scone_memory.testing import generation_ablation
+    fixture = json.loads((Path(__file__).parent / "fixtures/generation/v1.json").read_text())
+    fixture["cases"] = [case for case in fixture["cases"] if case["id"] == "multihop-journal"]
+    source = tmp_path / "extractive-path.json"
+    source.write_text(json.dumps(fixture))
+    generation_inputs, selections = [], []
+    captured = {}
+    original_prepare = generation_ablation.prepare_review_evidence
+
+    async def capture_material(memory, space, scope, session_id, request, receipt):
+        captured.update(memory=memory, space=space)
+        return await original_prepare(memory, space, scope, session_id, request, receipt)
+
+    class Assessor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def assess(self, question, candidates):
+            return EvidenceDecision(status="sufficient", selected_ids=tuple(item.id for item in candidates))
+
+    class Selector:
+        def __init__(self, endpoint, model, *, timeout):
+            assert (endpoint, model, timeout) == ("http://localhost:1234/v1", "selector", 20)
+
+        async def select(self, question, cards):
+            selections.append((question, cards))
+            path = max((card for card in cards if card.kind == card_kind), key=lambda card: len(card.evidence_ids))
+            captured["selected_text"] = path.text
+            if change_source:
+                fact_id = next(int(value.split(":")[1]) for value in path.evidence_ids if value.startswith("fact:"))
+                fact = await captured["memory"].documents.get_fact(captured["space"], fact_id)
+                await captured["memory"].forget(captured["space"], fact.source_episode_id)
+            return EvidenceSelection(card_ids=(path.id,))
+
+    class Streaming:
+        async def respond(self, messages):
+            generation_inputs.append(messages)
+            yield TextDelta("GENERATOR_ONLY_INVENTED_TEXT")
+            yield ReplyCompleted()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(generation_ablation, "prepare_review_evidence", capture_material)
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", Assessor)
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceSelector", Selector)
+    report = await generation_ablation.run_ablation(source, output=tmp_path / "extractive-report.json",
+        endpoint="http://localhost:1234/v1", model_factory=Streaming, adaptive_model="assessor",
+        expand_relations=True, group_relations=True, evidence_selector_model="selector")
+    baseline, candidate = report["results"]
+    assert len(generation_inputs) == len(selections) == 1
+    assert baseline["answer_text"] == "GENERATOR_ONLY_INVENTED_TEXT"
+    assert baseline["answer_mode"] == "model_generation"
+    assert baseline["generation_provider_calls"] == 1
+    assert "evidence_answer" not in baseline
+    assert candidate["answer_mode"] == report["candidate_answer_mode"] == "extractive"
+    assert candidate["generation_provider_calls"] == 0
+    assert report["evidence_selector_model"] == "selector"
+    assert report["evidence_answer_timeout_seconds"] == 20
+    assert report["evidence_answer_max_cards"] == 24
+    assert report["evidence_answer_max_evidence_bytes"] == report["evidence_answer_max_answer_bytes"] == 16000
+    assert "GENERATOR_ONLY_INVENTED_TEXT" not in candidate["answer_text"]
+    assert selections[0][0] == fixture["cases"][0]["query"]
+    assert candidate["output_bytes"] == len(candidate["answer_text"].encode())
+    assert candidate["evidence_answer"]["verified_accuracy"] is False
+    if change_source:
+        assert candidate["answer_text"] == ""
+        assert candidate["completed"] is False
+        assert candidate["first_token_ms"] is None
+        assert candidate["evidence_answer"]["source_status"] in ("stale", "unavailable")
+        assert candidate["selected_evidence_coverage"] == 0
+    else:
+        assert candidate["completed"] is True
+        assert candidate["evidence_answer"]["status"] == "selected"
+        assert candidate["evidence_answer"]["source_status"] == "retained"
+        assert candidate["first_token_ms"] == candidate["total_ms"]
+        selected_quotes = [required["quote"] for required in fixture["cases"][0]["required"]
+                           if required["quote"] in captured["selected_text"]]
+        assert candidate["evidence_coverage"] == 1
+        assert candidate["selected_evidence_coverage"] == len(selected_quotes) / 3
+        assert candidate["selected_evidence_scope_leaks"] == candidate["selected_evidence_invalid_provenance"] == 0
+        assert all(quote in candidate["answer_text"] for quote in selected_quotes)
+        assert len(selected_quotes) == (3 if card_kind == "path" else 0)
+    assert any("inflate lexical coverage" in note for note in report["limitations"])
+
+
+@pytest.mark.parametrize("failure", ["unprepared", "helper_timeout", "selector_error"])
+async def test_extractive_skips_without_context_and_suppresses_prepared_failures(tmp_path, monkeypatch, failure):
+    from scone_memory.testing import generation_ablation
+    calls = []
+
+    class Selector:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def select(self, question, cards):
+            calls.append("selector")
+            assert "EVALUATION_ONLY_CANARY" not in question + "".join(card.text for card in cards)
+            raise RuntimeError("PRIVATE_SELECTOR_ERROR")
+
+    class Streaming:
+        async def respond(self, messages):
+            calls.append("generator")
+            yield TextDelta("Generated fallback.")
+            yield ReplyCompleted()
+
+        async def aclose(self):
+            pass
+
+    if failure == "unprepared":
+        original = generation_ablation.MemoryContext.prepare
+
+        async def unprepared(context, messages):
+            _, receipt = await original(context, messages)
+            return messages, {**receipt, "status": "empty", "context_sha256": None, "context_bytes": 0}
+
+        monkeypatch.setattr(generation_ablation.MemoryContext, "prepare", unprepared)
+    elif failure == "helper_timeout":
+        async def stalled(*args, **kwargs):
+            await asyncio.sleep(5)
+            raise AssertionError("absolute deadline must interrupt preparation")
+
+        monkeypatch.setattr(generation_ablation, "prepare_review_evidence", stalled)
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceSelector", Selector)
+    report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "failure.json",
+        model_factory=Streaming, endpoint="http://localhost:1234/v1", evidence_selector_model="selector", evidence_answer_timeout=1)
+    baseline, candidate = report["results"]
+    assert baseline["answer_text"] == "Generated fallback."
+    if failure == "unprepared":
+        assert calls == ["generator", "generator"]
+        assert candidate["answer_mode"] == "model_generation"
+        assert candidate["evidence_answer"]["status"] == "skipped"
+        assert candidate["completed"] is True
+    else:
+        assert calls == (["generator", "selector"] if failure == "selector_error" else ["generator"])
+        assert candidate["answer_text"] == ""
+        assert candidate["completed"] is False
+        assert candidate["first_token_ms"] is None
+        assert candidate["generation_provider_calls"] == 0
+        assert candidate["selected_evidence_coverage"] == 0
+        assert candidate["evidence_answer"]["status"] == "unavailable"
+        if failure == "helper_timeout":
+            assert candidate["status"] == "timeout"
+            assert candidate["total_ms"] < 2000
+    assert "PRIVATE_SELECTOR_ERROR" not in json.dumps(report)
+
+
+def test_cli_forwards_extractive_options(tmp_path, monkeypatch):
+    from scone_memory.testing import generation_ablation
+    captured = {}
+
+    async def fake_run(fixture, **kwargs):
+        captured.update(kwargs)
+        return {"state": "completed"}
+
+    monkeypatch.setattr(generation_ablation, "run_ablation", fake_run)
+    monkeypatch.setattr("sys.argv", ["generation_ablation", "--fixture", str(tmp_path / "fixture.json"),
+        "--output", str(tmp_path / "report.json"), "--model", "generator", "--endpoint", "http://localhost:1234/v1",
+        "--evidence-selector-model", "selector", "--evidence-answer-timeout", "12"])
+    generation_ablation.main()
+    assert captured["evidence_selector_model"] == "selector"
+    assert captured["evidence_answer_timeout"] == 12
