@@ -45,7 +45,7 @@ _CURRENT_CHAT_RECAP = re.compile(
     r"(?:summari[sz]e|recap) (?:this|our) (?:chat|conversation))(?: so far)?"
 )
 _ADAPTIVE_DIAGNOSTICS = frozenset({
-    "stale_evidence", "degraded_recall", "candidate_window", "candidate_limit",
+    "stale_evidence", "degraded_recall", "candidate_window", "candidate_limit", "query_evidence_share",
     "filtered_evidence", "max_evidence_bytes", "duplicate_queries", "max_queries",
     "no_evidence", "no_followup_queries", "no_new_queries", "max_rounds", "timeout",
     "invalid_or_failed_assessment", "retrieval_failed",

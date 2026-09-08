@@ -59,9 +59,9 @@ async def test_frontier_ties_are_stable_and_competing_edges_stay_visible():
                ROUTE[1], fact(5, 'alternate', 'managed by', 'branch'))
     report = await StructuredEvidenceAssessor('question', (requirement(max_hops=3),),
         followup_strategy='bridge').assess_with_coverage('question', records)
-    assert report.coverage[0].bridge_ids == ('fact:1', 'fact:2')
-    assert report.decision.selected_ids == ('fact:1', 'fact:4', 'fact:2')
-    assert report.decision.followup_queries == ('office located in',)
+    assert report.coverage[0].bridge_ids == ('fact:1', 'fact:2', 'fact:4', 'fact:5')
+    assert report.decision.selected_ids == ('fact:1', 'fact:4', 'fact:2', 'fact:5')
+    assert report.decision.followup_queries == ('office located in', 'branch located in')
 
 
 async def test_overlong_entity_name_is_not_truncated_into_a_different_anchor():

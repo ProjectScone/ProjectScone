@@ -7,7 +7,7 @@ and retention. Only exact recorded triples can witness these requirements.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -67,6 +67,7 @@ class RequirementCoverage(BaseModel):
     bridge_ids: tuple[EvidenceId, ...] = Field(default=(), max_length=100)
     selected_ids: tuple[EvidenceId, ...] = Field(max_length=100)
     followup_query: FollowupQuery | None
+    alternative_queries: tuple[FollowupQuery, ...] = Field(default=(), max_length=2)
     work_used: int = Field(ge=0, le=2048)
     work_exhausted: bool
 
@@ -82,6 +83,10 @@ class RequirementCoverage(BaseModel):
                 or (self.witnessed and self.bridge_ids)
                 or (not self.witnessed and self.selected_ids and not self.bridge_ids)):
             raise ValueError('coverage verdict does not match its witnesses')
+        if (self.alternative_queries and (self.followup_query is None or not self.bridge_ids)
+                or len(set(self.alternative_queries)) != len(self.alternative_queries)
+                or self.followup_query in self.alternative_queries):
+            raise ValueError('alternative queries require distinct partial bridges')
         return self
 
 
@@ -113,18 +118,29 @@ def _facts(candidates: tuple[EvidenceCandidate, ...]) -> dict[tuple[str, str], l
 
 @dataclass
 class _Bridge:
-    path: tuple[EvidenceCandidate, ...] = ()
+    paths: dict[str, tuple[EvidenceCandidate, ...]] = field(default_factory=dict)
 
     def consider(self, path: tuple[EvidenceCandidate, ...], max_hops: int) -> None:
         target = path[-1].object
         # Leave a hop for the missing relation; never truncate an entity name.
-        if (len(self.path) < len(path) < max_hops and target is not None
+        if (len(path) < max_hops and target is not None
                 and target.strip() and len(target) <= 128):
-            self.path = path
+            previous = self.paths.get(target)
+            if previous is None or len(path) < len(previous):
+                self.paths[target] = path
 
-    def query(self, requirement: EvidenceRequirement) -> str:
-        anchor = self.path[-1].object
-        if requirement.kind == 'reachable_fact' and len(self.path) + 1 == requirement.max_hops:
+    def frontiers(self) -> tuple[tuple[EvidenceCandidate, ...], ...]:
+        paths = tuple((path, tuple(row.id for row in path)) for path in self.paths.values())
+        # A known continuation replaces its prefix as a search frontier. Keep
+        # alternatives: a deeper dead end must not erase a shorter branch.
+        leaves = (path for path, ids in paths if not any(
+            len(other_ids) > len(ids) and other_ids[:len(ids)] == ids for _, other_ids in paths))
+        return tuple(sorted(leaves, key=len, reverse=True)[:3])
+
+    @staticmethod
+    def query(requirement: EvidenceRequirement, path: tuple[EvidenceCandidate, ...]) -> str:
+        anchor = path[-1].object
+        if requirement.kind == 'reachable_fact' and len(path) + 1 == requirement.max_hops:
             return EvidenceRequirement(kind='fact', subject=anchor, predicate=requirement.predicate,
                                        object=requirement.object).search_query()
         return EvidenceRequirement.model_validate({**requirement.model_dump(), 'subject':anchor}).search_query()
@@ -205,9 +221,10 @@ class StructuredEvidenceAssessor:
     Every requirement must be witnessed for ``sufficient``. This means the plan
     has recorded witnesses, not that the records or caller's intent are true.
 
-    The optional bridge follow-up strategy carries one deepest partial route
-    and searches from its reached entity. Partial routes are never witnesses.
-    Depth ties follow input/traversal order; other branches are not enumerated.
+    The optional bridge follow-up strategy carries up to three partial frontier
+    routes and searches from their reached entities. These are never witnesses.
+    Deeper frontiers come first; ties follow input/traversal order. This bounded
+    selection does not enumerate all branches or prove global completeness.
 
     At most 8 requirements, 100 candidates, 128000 candidate UTF-8 bytes and
     2048 path-edge examinations per call. Candidate indexing/direct lookup are
@@ -251,6 +268,7 @@ class StructuredEvidenceAssessor:
         selected: dict[str, None] = {}
         groups: list[tuple[str, ...]] = []
         missing: list[str] = []
+        alternatives: list[str] = []
         uncertain = False
         coverage: list[RequirementCoverage] = []
         remaining = self._max_work
@@ -269,24 +287,32 @@ class StructuredEvidenceAssessor:
             else:
                 witnesses, remaining, exhausted = _reachable_fact(requirement, index, remaining, bridge)
                 uncertain = uncertain or exhausted
-            retained_bridge = bridge.path if not witnesses and self._followup_strategy == 'bridge' else ()
+            bridges = bridge.frontiers() if not witnesses and self._followup_strategy == 'bridge' else ()
+            bridge_ids = tuple(dict.fromkeys(row.id for route in bridges for row in route))
             query = None
+            extra_queries: tuple[str, ...] = ()
             if not witnesses:
-                query = bridge.query(requirement) if retained_bridge else requirement.search_query()
+                queries = tuple(dict.fromkeys(bridge.query(requirement, route) for route in bridges))
+                query = queries[0] if queries else requirement.search_query()
+                extra_queries = queries[1:]
                 missing.append(query)
+                alternatives.extend(extra_queries)
             # Keep competing values for every witnessed subject/predicate, not
             # just the value along the selected route. No winner is inferred.
-            ids = tuple(dict.fromkeys(row.id for witness in (*witnesses, *retained_bridge)
-                for row in index[(witness.subject or "", witness.predicate or "")]))
-            selected.update((identifier, None) for identifier in ids)
+            row_selected: dict[str, None] = {}
+            for route in (witnesses,) if witnesses else bridges:
+                ids = tuple(dict.fromkeys(row.id for witness in route
+                    for row in index[(witness.subject or "", witness.predicate or "")]))
+                row_selected.update((identifier, None) for identifier in ids)
+                if len(ids) > 1:
+                    groups.append(ids)
+            selected.update(row_selected)
             coverage.append(RequirementCoverage(requirement=requirement, witnessed=bool(witnesses),
-                witness_ids=tuple(row.id for row in witnesses), bridge_ids=tuple(row.id for row in retained_bridge),
-                selected_ids=ids, followup_query=query,
+                witness_ids=tuple(row.id for row in witnesses), bridge_ids=bridge_ids,
+                selected_ids=tuple(row_selected), followup_query=query, alternative_queries=extra_queries,
                 work_used=before - remaining, work_exhausted=exhausted))
-            if len(ids) > 1:
-                groups.append(ids)
         decision = EvidenceDecision(status="uncertain" if uncertain else "insufficient" if missing else "sufficient",
             selected_ids=tuple(selected), selected_groups=merge_groups(tuple(groups)),
-            followup_queries=tuple(dict.fromkeys(missing))[:3])
+            followup_queries=tuple(dict.fromkeys((*missing, *alternatives)))[:3])
         return StructuredEvidenceAssessment(decision=decision, coverage=tuple(coverage),
             work_limit=self._max_work, work_used=self._max_work - remaining)

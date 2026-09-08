@@ -1023,13 +1023,23 @@ it into the next round and revalidates its sources. It is reported separately in
 `bridge_ids`, with no positive witness and an `insufficient` (or budget-exhausted
 `uncertain`) verdict. Only the complete original requirement can be sufficient.
 
-This deterministic strategy chooses one deepest reached entity per missing
-requirement, breaking depth ties in candidate/traversal order. It reserves a hop
-for the missing relation and retains competing values around the chosen path.
-It does not exhaustively search every branch or backtrack after an unsuccessful
-query. Names longer than the requirement identity limit are never truncated;
+This deterministic strategy keeps up to three reached frontier entities per
+missing requirement, prioritizing deeper routes and breaking depth ties in
+candidate/traversal order. A known continuation replaces its prefix as a search
+frontier; another branch stays eligible. It reserves a hop for the missing
+relation and retains competing values around each chosen path. Coverage reports
+the primary `followup_query` and up to two `alternative_queries`. The decision
+still issues at most three queries, prioritizing each requirement's primary gap
+before branch alternatives. It does not exhaustively search every branch.
+Names longer than the requirement identity limit are never truncated;
 without a usable bridge it falls back to the original requirement query.
 The default `"requirement"` strategy keeps the original query/selection behavior.
+
+When a round has multiple follow-up queries, adaptive retrieval divides its
+remaining candidate and byte capacity among the pending queries. Unused capacity
+remains available to later queries. This prevents an early result window from
+filling the entire pool before another query contributes. The total budgets stay
+unchanged; `query_evidence_share` records omissions caused by that allocation.
 
 For “Who uses Polaris?”, leave the subject unknown instead of reversing the
 stored relation:

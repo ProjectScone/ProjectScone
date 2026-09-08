@@ -21,6 +21,42 @@ STAMP = "2025-01-01T00:00:00Z"
 AssessorFn = Callable[[str, tuple[EvidenceCandidate, ...]], Awaitable[EvidenceDecision]]
 
 
+@pytest.mark.parametrize('constraint', ['candidates', 'bytes'])
+async def test_followup_queries_share_free_candidate_capacity(memory, monkeypatch, constraint):
+    bridge = await fact(memory, 'root', 'uses', 'branch')
+    noise = [await fact(memory, f'noise-{i}', 'uses', f'value-{i}') for i in range(4)]
+    if constraint == 'bytes':
+        quote = 'Noise uses Value. ' * 40
+        episode = await memory.remember('alpha',quote)
+        noise = [await memory.documents.insert_fact(NewFact(space='alpha',subject='Noise',predicate='uses',
+            object='Value',quote=quote,source_episode_id=episode.episode_id,valid_from=STAMP))]
+    answer = await fact(memory, 'branch', 'uses', 'archive')
+    calls = []
+
+    async def recall(space, query, **kwargs):
+        calls.append(query)
+        return RecallResult(facts=[bridge] if query == 'question' else noise if query == 'first branch' else [answer])
+
+    async def assess(question, candidates):
+        ids = tuple(row.id for row in candidates)
+        if len(calls) == 1:
+            return EvidenceDecision(status='insufficient', selected_ids=ids,
+                                    followup_queries=('first branch','second branch'))
+        assert f'fact:{answer.fact_id}' in ids
+        assert len(ids) <= 4
+        if constraint == 'bytes':
+            assert evidence_payload_bytes(candidates) <= 1024
+        return EvidenceDecision(status='sufficient', selected_ids=ids)
+
+    monkeypatch.setattr(memory,'recall',recall)
+    limits = AdaptiveLimits(candidate_limit=4) if constraint == 'candidates' else AdaptiveLimits(max_evidence_bytes=1024)
+    result = await AdaptiveRetriever(memory,Assessor(assess),limits=limits).retrieve(
+        'alpha','question',scope=RecallScope.validated())
+    assert result.status == 'sufficient'
+    assert calls == ['question','first branch','second branch']
+    assert 'query_evidence_share' in result.reasons
+
+
 @pytest.mark.parametrize("status", ["insufficient", "uncertain"])
 @pytest.mark.parametrize("policy", ["retain_verified", "empty"])
 async def test_terminal_empty_selection_preserves_partial_evidence_without_claiming_selection(memory, monkeypatch, status, policy):

@@ -49,6 +49,10 @@ GRAPH_REASONS = frozenset({
 })
 
 
+def _is_plain_string(value: object) -> bool:
+    return type(value) is str
+
+
 class EvidenceAssessmentError(ValueError):
     """Content-free assessment failure shared by model-neutral adapters."""
 
@@ -333,7 +337,8 @@ class _Run:
             self.notice("stale_evidence")
         return checked
 
-    async def gather(self, query: str, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
+    async def gather(self, query: str, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...],
+                     queries_remaining: int = 1
                      ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
         result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
             candidate_limit=self.limits.candidate_limit, rerank=False, **self.scope.kwargs())
@@ -341,6 +346,12 @@ class _Run:
         # A follow-up can yield while carried evidence is deleted or replaced.
         pool = await self.verify(pool)
         pool, groups = self.prune_groups(pool, groups)
+        available = self.limits.candidate_limit - len(pool)
+        share = (available + queries_remaining - 1) // queries_remaining
+        starting_bytes = evidence_payload_bytes(tuple(value.candidate for value in pool.values()))
+        available_bytes = self.limits.max_evidence_bytes - starting_bytes
+        byte_ceiling = starting_bytes + (available_bytes + queries_remaining - 1) // queries_remaining
+        added = 0
         if result.degraded:
             self.notice("degraded_recall")
         if len(result.items) + len(result.facts) >= self.limits.candidate_limit:
@@ -356,15 +367,23 @@ class _Run:
             if len(pool) >= self.limits.candidate_limit:
                 self.notice("candidate_limit", truncated=True)
                 break
+            if added >= share:
+                self.notice("query_evidence_share", truncated=True)
+                break
             evidence = await self.accept(record)
             if evidence is None:
                 self.notice("filtered_evidence")
                 continue
             candidates = tuple(value.candidate for value in pool.values()) + (evidence.candidate,)
-            if evidence_payload_bytes(candidates) > self.limits.max_evidence_bytes:
+            payload_bytes = evidence_payload_bytes(candidates)
+            if payload_bytes > self.limits.max_evidence_bytes:
                 self.notice("max_evidence_bytes", truncated=True)
                 continue
+            if payload_bytes > byte_ceiling:
+                self.notice("query_evidence_share", truncated=True)
+                continue
             pool[key] = evidence
+            added += 1
         return pool, groups
 
     def prune_groups(self, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
@@ -561,7 +580,7 @@ class _Run:
             empty_selection = False
             hashes: list[str] = []
             carried_group_count = len(selected_groups)
-            for query in pending:
+            for query_index, query in enumerate(pending):
                 key = _query_key(query)
                 if key in self.queries:
                     self.notice("duplicate_queries")
@@ -572,7 +591,8 @@ class _Run:
                 self.queries.add(key)
                 hashes.append(hashlib.sha256(key.encode("utf-8")).hexdigest())
                 self.stage = "retrieval"
-                pool, selected_groups = await self.gather(query, pool, selected_groups)
+                pool, selected_groups = await self.gather(query, pool, selected_groups,
+                                                          len(pending) - query_index)
             self.stage = "verification"
             pool = await self.verify(pool)
             pool, selected_groups = self.prune_groups(pool, selected_groups)
@@ -722,11 +742,11 @@ class AdaptiveRetriever:
                  graph_limits: MultiHopLimits | None = None,
                  empty_selection_policy: EmptySelectionPolicy = "retain_verified",
                  evidence_policy: EvidencePolicy = "model_selected") -> None:
-        if type(failure_policy) is not str or failure_policy not in ("empty", "retain_verified"):
+        if not _is_plain_string(failure_policy) or failure_policy not in ("empty", "retain_verified"):
             raise ValueError("failure_policy must be empty or retain_verified")
-        if type(empty_selection_policy) is not str or empty_selection_policy not in ("empty", "retain_verified"):
+        if not _is_plain_string(empty_selection_policy) or empty_selection_policy not in ("empty", "retain_verified"):
             raise ValueError("empty_selection_policy must be empty or retain_verified")
-        if type(evidence_policy) is not str or evidence_policy not in ("model_selected", "original_and_selected"):
+        if not _is_plain_string(evidence_policy) or evidence_policy not in ("model_selected", "original_and_selected"):
             raise ValueError("evidence_policy must be model_selected or original_and_selected")
         self._memory, self.assessor = memory, assessor
         self._limits = AdaptiveLimits.model_validate((limits or AdaptiveLimits()).model_dump(), strict=True)
