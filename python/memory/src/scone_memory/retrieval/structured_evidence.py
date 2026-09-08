@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..memory.engine import MAX_QUERY
-from .adaptive import EvidenceCandidate, EvidenceDecision, evidence_payload_bytes
+from .adaptive import EvidenceCandidate, EvidenceDecision, EvidenceId, FollowupQuery, evidence_payload_bytes
 from .adaptive_graph import merge_groups
 
 
@@ -54,6 +54,47 @@ class EvidenceRequirement(BaseModel):
                 hints.append(predicate)
                 remaining -= len(predicate) + 1
         return " ".join(value for value in (self.subject, *hints, self.predicate, self.object) if value is not None)
+
+
+class RequirementCoverage(BaseModel):
+    """Positive witnesses and retained alternatives for one supplied requirement."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    requirement: EvidenceRequirement
+    witnessed: bool
+    witness_ids: tuple[EvidenceId, ...] = Field(max_length=100)
+    selected_ids: tuple[EvidenceId, ...] = Field(max_length=100)
+    followup_query: FollowupQuery | None
+    work_used: int = Field(ge=0, le=2048)
+    work_exhausted: bool
+
+    @model_validator(mode='after')
+    def consistent_witnesses(self) -> Self:
+        if (len(set(self.witness_ids)) != len(self.witness_ids)
+                or len(set(self.selected_ids)) != len(self.selected_ids)
+                or not set(self.witness_ids).issubset(self.selected_ids)):
+            raise ValueError('coverage IDs must be unique and witnesses retained')
+        if (self.witnessed != bool(self.witness_ids)
+                or self.witnessed != (self.followup_query is None)
+                or (not self.witnessed and self.selected_ids)):
+            raise ValueError('coverage verdict does not match its witnesses')
+        return self
+
+
+class StructuredEvidenceAssessment(BaseModel):
+    """Per-call diagnostics; not source verification or a global completeness claim."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    decision: EvidenceDecision
+    coverage: tuple[RequirementCoverage, ...] = Field(min_length=1, max_length=8)
+    work_limit: int = Field(ge=1, le=2048)
+    work_used: int = Field(ge=0, le=2048)
+
+    @model_validator(mode='after')
+    def consistent_budget(self) -> Self:
+        if self.work_used != sum(row.work_used for row in self.coverage) or self.work_used > self.work_limit:
+            raise ValueError('coverage work exceeds or disagrees with its budget')
+        return self
 
 
 def _facts(candidates: tuple[EvidenceCandidate, ...]) -> dict[tuple[str, str], list[EvidenceCandidate]]:
@@ -159,6 +200,11 @@ class StructuredEvidenceAssessor:
         self._question, self._max_work = question, max_work
 
     async def assess(self, question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        return (await self.assess_with_coverage(question, candidates)).decision
+
+    async def assess_with_coverage(self, question: str,
+                                  candidates: tuple[EvidenceCandidate, ...]) -> StructuredEvidenceAssessment:
+        """Return every requirement's witnesses without retaining per-call state."""
         if type(question) is not str or question != self._question:
             raise ValueError("question does not match the explicit plan")
         if (type(candidates) is not tuple or len(candidates) > 100
@@ -172,14 +218,16 @@ class StructuredEvidenceAssessor:
         groups: list[tuple[str, ...]] = []
         missing: list[str] = []
         uncertain = False
+        coverage: list[RequirementCoverage] = []
         remaining = self._max_work
         for requirement in self._requirements:
+            before, exhausted = remaining, False
             if requirement.kind == "fact":
                 observations = (index.get((requirement.subject, requirement.predicate), [])
                     if requirement.subject is not None else [row for (_, predicate), rows in index.items()
                         if predicate == requirement.predicate for row in rows if row.object == requirement.object])
-                witnesses = tuple(observations) if requirement.object is None or any(
-                    row.object == requirement.object for row in observations) else ()
+                witnesses = tuple(row for row in observations
+                                  if requirement.object is None or row.object == requirement.object)
             elif requirement.kind == "path":
                 witnesses, remaining, exhausted = _path(requirement, index, remaining)
                 uncertain = uncertain or exhausted
@@ -188,14 +236,22 @@ class StructuredEvidenceAssessor:
                 uncertain = uncertain or exhausted
             if not witnesses:
                 missing.append(requirement.search_query())
+                coverage.append(RequirementCoverage(requirement=requirement, witnessed=False,
+                    witness_ids=(), selected_ids=(), followup_query=missing[-1],
+                    work_used=before - remaining, work_exhausted=exhausted))
                 continue
             # Keep competing values for every witnessed subject/predicate, not
             # just the value along the selected route. No winner is inferred.
             ids = tuple(dict.fromkeys(row.id for witness in witnesses
                 for row in index[(witness.subject or "", witness.predicate or "")]))
             selected.update((identifier, None) for identifier in ids)
+            coverage.append(RequirementCoverage(requirement=requirement, witnessed=True,
+                witness_ids=tuple(row.id for row in witnesses), selected_ids=ids, followup_query=None,
+                work_used=before - remaining, work_exhausted=exhausted))
             if len(ids) > 1:
                 groups.append(ids)
-        return EvidenceDecision(status="uncertain" if uncertain else "insufficient" if missing else "sufficient",
+        decision = EvidenceDecision(status="uncertain" if uncertain else "insufficient" if missing else "sufficient",
             selected_ids=tuple(selected), selected_groups=merge_groups(tuple(groups)),
             followup_queries=tuple(dict.fromkeys(missing))[:3])
+        return StructuredEvidenceAssessment(decision=decision, coverage=tuple(coverage),
+            work_limit=self._max_work, work_used=self._max_work - remaining)

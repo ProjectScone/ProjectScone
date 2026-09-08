@@ -994,6 +994,26 @@ application mapping. Terminal, negative, and whole-index completeness claims are
 unsupported. A missing path means no witness within the supplied candidate and
 hop bounds; it does not prove there is no path in the knowledge store.
 
+Applications that already hold authorized `EvidenceCandidate` records can inspect
+each requirement directly, without another model call:
+
+```python
+assessment = await assessor.assess_with_coverage(question, candidates)
+for row in assessment.coverage:
+    print(row.requirement, row.witness_ids, row.followup_query)
+```
+
+`witness_ids` identify the exact matching facts and connecting path;
+`selected_ids` also retain competing values around those witnesses. The report
+includes every requirement and missing query, even though the adaptive decision
+limits follow-up queries to three. `work_used` counts path-edge examinations;
+candidate indexing and direct lookups have separate input bounds. A row can have
+a positive witness and `work_exhausted=True` when traversal found evidence before
+running out of budget. The aggregate decision remains `uncertain` in that case.
+These diagnostics contain requirements and record IDs, without copying candidate
+text. They do not replace scope authorization or source-retention validation.
+The existing `assess()` interface returns the same report's `decision`.
+
 For “Who uses Polaris?”, leave the subject unknown instead of reversing the
 stored relation:
 
