@@ -7,21 +7,23 @@ and retention. Only exact recorded triples can witness these requirements.
 from __future__ import annotations
 
 from collections import deque
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..memory.engine import MAX_QUERY
 from .adaptive import EvidenceCandidate, EvidenceDecision, evidence_payload_bytes
 from .adaptive_graph import merge_groups
 
 
 class EvidenceRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
-    kind: Literal["fact", "path"]
+    kind: Literal["fact", "path", "reachable_fact"]
     subject: str | None = Field(default=None, min_length=1, max_length=128)
     predicate: str = Field(min_length=1, max_length=128)
     object: str | None = Field(default=None, min_length=1, max_length=128)
     max_hops: int = Field(default=6, ge=1, le=6)
+    via: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def valid_requirement(self) -> Self:
@@ -33,10 +35,25 @@ class EvidenceRequirement(BaseModel):
             raise ValueError("a fact requires at least one explicit endpoint")
         if self.kind == "fact" and self.max_hops != 6:
             raise ValueError("max_hops applies only to paths")
+        if self.kind == "reachable_fact":
+            if self.subject is None or not self.via or self.max_hops < 2:
+                raise ValueError("a reachable fact requires an anchor, traversal predicates and at least two hops")
+            if (any(not predicate.strip() for predicate in self.via) or len(set(self.via)) != len(self.via)
+                    or self.predicate in self.via):
+                raise ValueError("traversal predicates must be unique, nonblank and distinct from the answer predicate")
+        elif self.via:
+            raise ValueError("via applies only to reachable facts")
         return self
 
     def search_query(self) -> str:
-        return " ".join(value for value in (self.subject, self.predicate, self.object) if value is not None)
+        base = " ".join(value for value in (self.subject, self.predicate, self.object) if value is not None)
+        remaining = MAX_QUERY - len(base)
+        hints: list[str] = []
+        for predicate in self.via:
+            if len(predicate) + 1 <= remaining:
+                hints.append(predicate)
+                remaining -= len(predicate) + 1
+        return " ".join(value for value in (self.subject, *hints, self.predicate, self.object) if value is not None)
 
 
 def _facts(candidates: tuple[EvidenceCandidate, ...]) -> dict[tuple[str, str], list[EvidenceCandidate]]:
@@ -73,6 +90,40 @@ def _path(requirement: EvidenceRequirement, index: dict[tuple[str, str], list[Ev
     return (), remaining, False
 
 
+def _reachable_fact(requirement: EvidenceRequirement, index: dict[tuple[str, str], list[EvidenceCandidate]],
+                    remaining: int) -> tuple[tuple[EvidenceCandidate, ...], int, bool]:
+    if requirement.subject is None:
+        raise ValueError("a reachable fact requires an explicit subject")
+    pending: deque[tuple[str, tuple[EvidenceCandidate, ...]]] = deque([(requirement.subject, ())])
+    visited = {requirement.subject}
+    witnesses: dict[str, EvidenceCandidate] = {}
+    while pending:
+        subject, path = pending.popleft()
+        if path:
+            for candidate in index.get((subject, requirement.predicate), []):
+                if remaining == 0:
+                    return tuple(witnesses.values()), remaining, True
+                remaining -= 1
+                if requirement.object is None or candidate.object == requirement.object:
+                    witnesses.update((row.id, row) for row in (*path, candidate))
+        # Reserve one hop for the requested final fact. A matching attribute
+        # does not stop traversal: another reachable subject may have a value.
+        if len(path) + 1 >= requirement.max_hops:
+            continue
+        for predicate in requirement.via:
+            for candidate in index.get((subject, predicate), []):
+                if remaining == 0:
+                    return tuple(witnesses.values()), remaining, True
+                remaining -= 1
+                target = candidate.object
+                if target is not None and target not in visited:
+                    # BFS gives each entity one shortest witness. Merged routes
+                    # and cycles cannot multiply downstream expansion work.
+                    visited.add(target)
+                    pending.append((target, (*path, candidate)))
+    return tuple(witnesses.values()), remaining, False
+
+
 class StructuredEvidenceAssessor:
     """An AdaptiveRetriever assessor for a fixed question and explicit plan.
 
@@ -80,13 +131,17 @@ class StructuredEvidenceAssessor:
     or recorded subjects for an exact predicate/object. With both endpoints,
     one particular value must occur. Path requirements ask
     for a simple directed path of one exact predicate to a named endpoint.
+    Reachable facts ask for a final predicate after one or more directed hops
+    using the explicit ``via`` predicates; max_hops includes the final fact.
+    The final subject/value can be unknown. Each reachable subject contributes
+    one shortest witness, with competing values retained. It need not be a leaf.
     Every requirement must be witnessed for ``sufficient``. This means the plan
     has recorded witnesses, not that the records or caller's intent are true.
 
     At most 8 requirements, 100 candidates, 128000 candidate UTF-8 bytes and
     2048 path-edge examinations per call. Candidate indexing/direct lookup are
     separately bounded by those counts. Missing paths are relative to supplied
-    evidence and max_hops; no terminal/negative/completeness claims are supported.
+    evidence and max_hops; no global terminal/negative/completeness claims are supported.
     """
 
     def __init__(self, question: str, requirements: tuple[EvidenceRequirement, ...], *, max_work: int = 256) -> None:
@@ -125,8 +180,11 @@ class StructuredEvidenceAssessor:
                         if predicate == requirement.predicate for row in rows if row.object == requirement.object])
                 witnesses = tuple(observations) if requirement.object is None or any(
                     row.object == requirement.object for row in observations) else ()
-            else:
+            elif requirement.kind == "path":
                 witnesses, remaining, exhausted = _path(requirement, index, remaining)
+                uncertain = uncertain or exhausted
+            else:
+                witnesses, remaining, exhausted = _reachable_fact(requirement, index, remaining)
                 uncertain = uncertain or exhausted
             if not witnesses:
                 missing.append(requirement.search_query())

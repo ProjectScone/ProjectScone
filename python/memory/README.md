@@ -926,8 +926,9 @@ Cancellation propagates instead of producing a success receipt.
 
 For applications with an explicit question plan, the SDK also provides a
 model-free `StructuredEvidenceAssessor`. Each requirement asks for recorded
-values of an exact subject/predicate, subjects of an exact predicate/object, or
-a simple directed path of one exact predicate to a named endpoint. Every requirement needs a complete witness before
+values of an exact subject/predicate, subjects of an exact predicate/object,
+a simple directed path of one exact predicate to a named endpoint, or a recorded
+attribute reached through explicitly allowed predicates. Every requirement needs a complete witness before
 its verdict is `sufficient`; this verdict describes the supplied plan and
 records, not semantic truth or general question-answer accuracy.
 
@@ -968,6 +969,33 @@ Fact requirements must name at least one endpoint; path requirements still need
 both. These lookups inspect the bounded candidate set and retain all matching
 subjects plus competing recorded values around their witnesses. They do not
 claim to enumerate every user across an entire index.
+
+For an attribute whose owning entity is not known in advance, use
+`reachable_fact`:
+
+```python
+office_location = EvidenceRequirement(
+    kind="reachable_fact", subject="invoice", predicate="located in",
+    via=("assigned to", "managed by"), max_hops=3,
+)
+# Requires invoice -> team -> office, then office's recorded location.
+# A team name, an unrelated office, or a missing bridge cannot satisfy it.
+```
+
+`via` contains 1–8 allowed exact predicates, which may occur in any order or
+repeat along a route. The final `predicate` must be distinct from them.
+At least one bridge is required; use `fact` for a direct attribute. `max_hops`
+counts both bridge facts and the final attribute fact (2–6 total). Omit `object`
+to retain recorded values, or supply it to require a particular value while
+keeping competing observations. Breadth-first traversal keeps one shortest
+supporting route per reachable subject and continues looking for other matching
+subjects within the bounds. It does not enumerate every alternative route.
+The full witnesses and competing values form one atomic group per requirement.
+An attribute owner need not be a graph leaf: this contract cannot establish an
+“ultimate” destination unless the application's relation semantics justify it.
+It supplies recorded evidence connections, not a synthesized transitive fact.
+This is available to both the adaptive assessor and the quote selector below;
+it does not automatically change ordinary conversations or model tool choices.
 
 The assessor accepts 1–8 requirements and at most 100 candidates / 128,000 UTF-8
 candidate bytes. Path-edge work defaults to 256 and is configurable up to 2,048;
