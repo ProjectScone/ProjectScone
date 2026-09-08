@@ -76,6 +76,11 @@ class Settings:
     #: Where attachment bytes live. Empty means beside the SQLite file
     #: when there is one, and in memory when there is not.
     blob_dir: str = ""
+    blobs: str = "auto"
+    s3_bucket: str | None = None
+    dynamodb_blob_table: str | None = None
+    aws_region: str | None = None
+    s3_prefix: str = "attachments/"
     #: Confidence below which a fact an agent submits over MCP is parked
     #: for a person instead of entering the ledger. Unset means none is.
     mcp_propose_below: Optional[float] = None
@@ -154,6 +159,22 @@ class Settings:
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.blobs not in ("auto", "memory", "file", "s3"):
+            raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
+        if self.blobs in ("memory", "s3") and self.blob_dir:
+            raise InvalidInput("SCONE_BLOB_DIR cannot be combined with SCONE_BLOBS=memory or s3")
+        if self.blobs == "file" and not self.blob_dir:
+            raise InvalidInput("SCONE_BLOBS=file requires SCONE_BLOB_DIR")
+        for name, value in (("SCONE_S3_BUCKET", self.s3_bucket),
+                            ("SCONE_DYNAMODB_BLOB_TABLE", self.dynamodb_blob_table),
+                            ("SCONE_AWS_REGION", self.aws_region)):
+            if self.blobs == "s3":
+                if type(value) is not str or not value.strip() or "\x00" in value:
+                    raise InvalidInput(f"SCONE_BLOBS=s3 requires {name}")
+            elif value is not None:
+                raise InvalidInput(f"{name} requires SCONE_BLOBS=s3")
+        if self.blobs != "s3" and self.s3_prefix != "attachments/":
+            raise InvalidInput("SCONE_S3_PREFIX requires SCONE_BLOBS=s3")
         try:
             validate_candidate_limit(self.candidate_limit)
             validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
@@ -201,6 +222,11 @@ class Settings:
             embedder=env.get("SCONE_EMBEDDER", "hash"),
             sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
             blob_dir=env.get("SCONE_BLOB_DIR", ""),
+            blobs=env.get("SCONE_BLOBS", "auto"),
+            s3_bucket=env.get("SCONE_S3_BUCKET") or None,
+            dynamodb_blob_table=env.get("SCONE_DYNAMODB_BLOB_TABLE") or None,
+            aws_region=env.get("SCONE_AWS_REGION") or None,
+            s3_prefix=env.get("SCONE_S3_PREFIX", "attachments/"),
             mcp_propose_below=(float(env["SCONE_MCP_PROPOSE_BELOW"])
                                if env.get("SCONE_MCP_PROPOSE_BELOW") else None),
             mongo_url=env.get("SCONE_MONGO_URL"),
@@ -623,12 +649,22 @@ def build_events(settings: Settings, documents=None):
 
 
 def build_blobs(settings: Settings):
-    """Where attachments are kept. SCONE_BLOB_DIR wins; otherwise a
-    directory beside the SQLite file, because a server whose database is
-    on disk should not lose its evidence on a restart. With no database on
-    disk there is nowhere obvious to write, so bytes stay in memory."""
+    """Select explicit attachment storage or preserve the existing default:
+    SCONE_BLOB_DIR, then beside SQLite, otherwise in memory. AWS construction
+    is lazy; no SDK, credential resolution, or service call until first use."""
     from ..backends.blobs import FileBlobStore, InMemoryBlobStore
 
+    if settings.blobs == "s3":
+        from ..backends.aws_blobs import S3BlobStore
+
+        assert settings.s3_bucket is not None and settings.dynamodb_blob_table is not None and settings.aws_region is not None
+        try:
+            return S3BlobStore(settings.s3_bucket, settings.dynamodb_blob_table,
+                               region_name=settings.aws_region, prefix=settings.s3_prefix)
+        except ValueError as error:
+            raise InvalidInput(str(error)) from None
+    if settings.blobs == "memory":
+        return InMemoryBlobStore()
     if settings.blob_dir:
         return FileBlobStore(Path(settings.blob_dir).expanduser())
     if settings.documents == "sqlite" and settings.sqlite_path not in ("", ":memory:"):
@@ -638,6 +674,7 @@ def build_blobs(settings: Settings):
 
 async def build_engine(settings: Settings) -> MemoryEngine:
     reranker = build_reranker(settings)
+    blobs = build_blobs(settings)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -660,7 +697,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_limit=settings.rerank_limit,
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
-        blobs=build_blobs(settings),
+        blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])

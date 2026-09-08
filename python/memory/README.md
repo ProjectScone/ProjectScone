@@ -245,6 +245,62 @@ save and does not retry. Inspect the store before repeating it. There is no
 automatic host image capture, missing-image reconstruction or Rust CLI parity
 claim. Export/import still carries references, not a portable copy of image bytes.
 
+### Optional S3 attachment storage
+
+Install `scone-memory[aws]` and select pre-provisioned resources explicitly:
+
+```sh
+SCONE_BLOBS=s3
+SCONE_S3_BUCKET=your-attachment-bucket
+SCONE_DYNAMODB_BLOB_TABLE=your-blob-metadata-table
+SCONE_AWS_REGION=us-east-1
+SCONE_S3_PREFIX=attachments/
+```
+
+S3 stores attachment bytes; DynamoDB stores their space ownership, episode
+references, and cleanup journals. This is an attachment backend, not a DynamoDB
+replacement for the document ledger, conversation journal, or retrieval index.
+Configure those stores separately. `SCONE_BLOBS=auto` preserves existing defaults;
+`file` requires `SCONE_BLOB_DIR`, and `memory` explicitly selects ephemeral bytes.
+Contradictory storage settings fail at startup.
+
+The adapter uses the AWS SDK credential chain; prefer workload IAM roles.
+Constructing it does not resolve credentials or contact AWS. Supply a private,
+versioned S3 bucket dedicated to attachments with default SSE-KMS encryption and a DynamoDB table with
+string partition key `pk` and string sort key `sk`. Configure table encryption,
+PITR, and least-privilege access to that table, bucket prefix, and KMS key.
+The role also needs `s3:ListBucket` on the dedicated bucket so S3 HEAD can report
+missing objects as 404 during interrupted-upload recovery; 403 is treated as an
+error, never proof that bytes are absent.
+Deployment container instructions are in [`deploy/aws`](../../deploy/aws/README.md).
+Reusable Terraform configuration lives in the repository-root `terraform/`
+directory. Supply deployment values through the environment; private `.env`
+files, populated variable files, plans, and state stay ignored.
+
+Each S3 upload has an immutable generation key. DynamoDB transactions publish
+ownership and persist deletion intents before S3 cleanup. Cleanup targets the
+recorded version, so a delayed delete cannot remove a newly published generation.
+S3 and DynamoDB do not provide a shared atomic transaction: failed operations
+raise and retain recovery state. Operators can call
+`await engine.blobs.recover_uploads(space, after=cursor, limit=100)` on this
+adapter to fence unpublished uploads and retry cleanup. Each call returns a
+`RecoveryPage` with `visited` and `next_cursor`; follow the cursor until it is
+`None` to complete a sweep. Repeat sweeps after paused writers finish; an attempt
+is not proof that no late write can arrive. Pending upload intents are retained
+for that purpose. No automatic background recovery is configured.
+
+This initial adapter has explicit capacity bounds: 25 MiB per attachment, 1,024
+held attachments per space, 1,024 episode references per attachment, and 300 KiB
+per metadata item. Over-budget operations fail; these limits are not a claim of
+unbounded storage capacity. Partition reads are strongly consistent and use
+queries, not table scans. SDK calls run off the event loop with bounded waits;
+cancellation cannot interrupt an already running SDK request.
+
+Run emulator tests with `pip install -e '.[aws-test]'` followed by
+`pytest tests/test_aws_blobs.py tests/test_aws_blob_config.py`. Tests use synthetic
+resources and credentials through Moto; they do not provision AWS resources or
+measure AWS throughput.
+
 ## LlamaIndex and LangChain workflows
 
 The optional `llamaindex` and `langchain` extras can coexist over one Scone
