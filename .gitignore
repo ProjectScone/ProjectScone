@@ -3,10 +3,16 @@ reference/
 /.env
 /.env.*
 !/.env.example
-/terraform/
 **/.terraform/
 *.tfstate
 *.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan
+/terraform/**/*.plan
+/terraform/**/crash.log
+**/.terraform.lock.hcl
+**/.env.local
 # Local upstream application reference; never vendor it into Scone.
 /supermemory/
 /pipecat/
@@ -38,3 +44,5 @@ python/*/.pytest_cache/
 CAPABILITIES.md
 python/*/src/*.egg-info/
 python/memory/examples
+
+**/__pycache__/
