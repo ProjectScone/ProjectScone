@@ -9,6 +9,7 @@ answers, because a thin answer that says it is thin beats a 500.
 from __future__ import annotations
 
 import dataclasses
+from copy import deepcopy
 
 import hashlib
 import math
@@ -19,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
 from ..retrieval import fusion
+from ..retrieval.fact_search import IndexedFactSearch
 from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import (Reranker, RerankCandidate, candidate_is_retained, rerank_candidates,
                                    validate_candidate_limit, validate_rerank_options)
@@ -1292,7 +1294,7 @@ class MemoryEngine:
                 )
             )
         fact_scope = scope if narrowing or clean_tags or clean_where else None
-        facts = await self._facts_for_query(space, query, boundary or now, scope=fact_scope)
+        facts = await self._facts_for_query(space, query, boundary or now, scope=fact_scope, degraded=degraded)
         previous = await self._history_for(space, facts, boundary or now, scope=fact_scope) if history else []
         counts = await self.documents.counts(space)
         result = RecallResult(
@@ -1582,6 +1584,41 @@ class MemoryEngine:
                 and _fits(episode, scope.kind, scope.source_prefix, scope.since, scope.until, scope.conditions))
 
     async def _facts_for_query(self, space: str, query: str, when: str, limit: int = 10,
+                               scope: TextFilter | None = None, degraded: list[str] | None = None) -> list[Fact]:
+        terms = set(tokenize(query))
+        if not terms:
+            return []
+        if isinstance(self.documents, IndexedFactSearch):
+            try:
+                raw: object = await self.documents.search_facts(space, query, when, limit, scope=deepcopy(scope))
+                if not isinstance(raw, list) or len(raw) > limit:
+                    raise ValueError("invalid indexed facts")
+                # Detach snapshots before any awaited point reads; mutable store
+                # objects must not change the evidence being checked in place.
+                facts: list[Fact] = []
+                for candidate in raw:
+                    if not isinstance(candidate, Fact):
+                        raise ValueError("invalid indexed fact")
+                    facts.append(Fact.model_validate(candidate.model_dump(), strict=True))
+                if len({fact.fact_id for fact in facts}) != len(facts):
+                    raise ValueError("duplicate indexed facts")
+                for fact in facts:
+                    if (fact.space != space or fact.excluded or not fact.holds_at(when)
+                            or not terms.intersection(tokenize(f"{fact.subject} {fact.predicate} {fact.object}"))
+                            or not await self._fact_fits_scope(space, fact, scope)):
+                        raise ValueError("ineligible indexed fact")
+                    current = await self.documents.get_fact(space, fact.fact_id)
+                    if current is None or current != fact:
+                        raise ValueError("stale indexed fact")
+                facts.sort(key=lambda fact: (-len(terms.intersection(tokenize(
+                    f"{fact.subject} {fact.predicate} {fact.object}"))), -fact.confidence, fact.fact_id))
+                return facts
+            except Exception:
+                if degraded is not None:
+                    degraded.append("fact_index: unavailable")
+        return await self._scan_facts_for_query(space, query, when, limit, scope)
+
+    async def _scan_facts_for_query(self, space: str, query: str, when: str, limit: int = 10,
                                scope: TextFilter | None = None) -> list[Fact]:
         terms = set(tokenize(query))
         if not terms:

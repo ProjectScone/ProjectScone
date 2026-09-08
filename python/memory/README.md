@@ -163,6 +163,36 @@ index on MongoDB and a clock-driven sweep elsewhere. No store migrates
 another build's data: each stamps a schema version and refuses a
 mismatch, SQLite excepted for the one recorded step.
 
+### Indexed fact recall
+
+SQLite accelerates lexical fact lookup with a derived token index. Query token
+overlap, confidence/ID ordering, historical validity, and source filters retain
+the ledger scan's semantics. Facts outside the requested source scope cannot
+consume the result limit. The engine checks returned facts against current ledger
+records; an unavailable or invalid index falls back to scanning and reports
+`fact_index: unavailable` in recall degradation. Other document stores retain
+their existing scan unless they implement the optional `IndexedFactSearch` port.
+
+SQL triggers record fact edits made by older clients as well as this library.
+The next lookup refreshes pending terms for that space. Existing databases incur
+an initial backfill; missing or incompatible derived objects are rebuilt on open.
+The index does not change the ledger schema version. Historical-chain retrieval
+still scans, and common query terms can still require sorting many matching
+postings. This index does not accelerate vector retrieval or model generation.
+
+Measure exact result parity and warm lookup latency on disposable synthetic
+ledgers, with initial indexing reported separately:
+
+```sh
+python -m scone_memory.testing.fact_search_benchmark \
+  --sizes 1000 10000 50000 --repeats 5 --output /path/to/new-report.json
+```
+
+The diagnostic includes sparse terms, common terms, and a source filter that
+rejects most higher-ranked matches. It reports full ledger rows materialized and
+fact point reads; it does not claim constant-time lookup or generation accuracy.
+No model, network connection, or application database is used.
+
 ## Preserve an original image from the CLI
 
 ```sh

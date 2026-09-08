@@ -23,6 +23,7 @@ from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
+from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -118,6 +119,7 @@ CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 COMMIT;""")
+    initialize_fact_search(conn)
     return conn
 
 
@@ -512,6 +514,11 @@ class SqliteDocumentStore:
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
+
+    async def search_facts(self, space: str, query: str, when: str, limit: int,
+                           scope: TextFilter | None = None) -> list[Fact]:
+        """Indexed exact-token lookup with temporal/scope filtering before limit."""
+        return [_fact(row) for row in search_fact_rows(self.conn,space,query,when,limit,scope)]
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         rows = self.conn.execute(
