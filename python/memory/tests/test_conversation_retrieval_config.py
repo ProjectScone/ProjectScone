@@ -219,7 +219,7 @@ async def test_adaptive_capability_is_separate_from_reply_model_availability(tmp
         await engine.close()
 
 
-@pytest.mark.parametrize("outcome", ["graph_off", "assessment_timeout", "turn_timeout", "cancel"])
+@pytest.mark.parametrize("outcome", ["graph_off", "assessment_timeout", "verification_timeout", "turn_timeout", "cancel"])
 async def test_served_retrieval_respects_graph_optout_timeout_and_cancellation(tmp_path, monkeypatch, outcome):
     from scone_memory.providers import evidence_assessor
     from scone_memory.realtime.events import ReplyCompleted, TextDelta
@@ -227,6 +227,11 @@ async def test_served_retrieval_respects_graph_optout_timeout_and_cancellation(t
 
     entered, stopped = asyncio.Event(), asyncio.Event()
     observed = []
+    clock_value = [0.0]
+    if outcome == "verification_timeout":
+        from types import SimpleNamespace
+        from scone_memory.retrieval import adaptive
+        monkeypatch.setattr(adaptive, "time", SimpleNamespace(monotonic=lambda: clock_value[0]))
 
     class Assessor:
         async def assess(self, question, candidates):
@@ -234,6 +239,13 @@ async def test_served_retrieval_respects_graph_optout_timeout_and_cancellation(t
             if outcome == "graph_off":
                 return EvidenceDecision(status="sufficient", selected_ids=tuple(candidate.id for candidate in candidates))
             try:
+                if outcome == "verification_timeout":
+                    clock_value[0] = 1.01
+                    raise TimeoutError()
+                if outcome == "assessment_timeout":
+                    # Provider timeout with time left to verify the fallback.
+                    # Waiting for the outer timer can exhaust that reserve on CI.
+                    raise TimeoutError()
                 await asyncio.Event().wait()
             finally:
                 stopped.set()
@@ -283,10 +295,18 @@ async def test_served_retrieval_respects_graph_optout_timeout_and_cancellation(t
                     assert receipt["status"] == "completed", receipt
                     context = receipt["result"]["memory_context"]
                     assert "adaptive_graph_expansions" not in context
-                    assert "aster depends on beacon." in json.dumps(observed)
-                    if outcome == "assessment_timeout":
+                    if outcome == "verification_timeout":
+                        assert "aster depends on beacon." not in json.dumps(observed)
+                        assert context["status"] == "empty"
+                        assert context["references"] == []
+                        assert context["adaptive_fallback_status"] == "verification_timeout"
+                        assert context["adaptive_evidence_basis"] == "none"
+                    else:
+                        assert "aster depends on beacon." in json.dumps(observed)
+                    if outcome in ("assessment_timeout", "verification_timeout"):
                         assert stopped.is_set()
-                        assert context["adaptive_fallback_status"] == "retained"
+                        if outcome == "assessment_timeout":
+                            assert context["adaptive_fallback_status"] == "retained"
                         assert "timeout" in context["adaptive_errors"]
                         assert context["adaptive_status"] == "uncertain"
     finally:
