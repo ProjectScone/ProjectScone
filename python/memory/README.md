@@ -891,6 +891,37 @@ example, `supported` alongside a proposed correction. Host validation still
 checks quotations, evidence IDs and response bounds; schema validity does not
 establish that the review judgment is correct.
 
+Evaluate the reviewer separately from answer generation with labeled drafts:
+
+```sh
+python -m scone_memory.testing.answer_review_evaluation \
+  --fixture tests/fixtures/answer_review/v1.json \
+  --output /tmp/scone-review-baseline.json \
+  --endpoint http://127.0.0.1:11434/v1 --model YOUR_INSTALLED_MODEL
+```
+
+The included original synthetic cases are **development** cases covering direct
+facts, invented facts, justified abstention, missed answers, unresolved conflicts
+and incomplete routes. Add separately held-out cases before making quality claims.
+Each call reviews the original draft once; proposed revisions are recorded only
+as a boolean and are not adopted. This isolates reviewer judgment from generation
+and correction quality. Labels, categories and splits never enter model inputs.
+
+Reports separate false approvals, false rejections, abstentions and failures,
+with summaries by split and category. Approval precision uses approved drafts as
+its denominator; false-approval rate uses all labeled unacceptable drafts;
+acceptable-answer recall uses all labeled acceptable drafts. Decision coverage
+counts only `supported`/`needs_revision`, and labeled agreement counts correct
+decisions over **all** observations. An unavailable or uncertain review never
+counts as a correct rejection. Missing denominators are `null`, not perfect scores.
+The report omits source/draft/revision text and provider error messages. It includes
+a SHA-256 of the normalized fixture, labels, timing and enum diagnostics. Output
+must be a new file. Only the explicitly selected model is called; an optional
+credential comes from `SCONE_ANSWER_REVIEW_API_KEY`.
+Timeouts rely on cooperative asynchronous providers; a late result earns no
+credit even if a provider swallows cancellation. The evaluator cannot forcibly
+interrupt blocking synchronous work inside a custom provider.
+
 #### Optional extractive answers
 
 For memory questions where exact recorded wording matters, a model can select

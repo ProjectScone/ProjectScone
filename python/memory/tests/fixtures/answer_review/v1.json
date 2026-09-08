@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "correct_fact",
+      "category": "source_support",
+      "split": "development",
+      "question": "Which dock receives Iris shipments?",
+      "answer": "Iris shipments arrive at dock 7.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Iris shipments arrive at dock 7."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "wrong_fact",
+      "category": "source_support",
+      "split": "development",
+      "question": "Which dock receives Iris shipments?",
+      "answer": "Iris shipments arrive at dock 9.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Iris shipments arrive at dock 7."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "justified_abstention",
+      "category": "source_support",
+      "split": "development",
+      "question": "Who manufactures the Iris sensor?",
+      "answer": "The supplied source does not identify the manufacturer.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The Iris sensor weighs 30 grams."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "invented_fact",
+      "category": "source_support",
+      "split": "development",
+      "question": "Who manufactures the Iris sensor?",
+      "answer": "Orion manufactures the Iris sensor.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The Iris sensor weighs 30 grams."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "missed_answer",
+      "category": "source_support",
+      "split": "development",
+      "question": "How much does the Iris sensor weigh?",
+      "answer": "The supplied source does not identify its weight.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The Iris sensor weighs 30 grams."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "conflict_preserved",
+      "category": "conflict",
+      "split": "development",
+      "question": "What temperature does the oven use?",
+      "answer": "The sources conflict: one says 80 degrees and another says 90 degrees.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Source A says the oven uses 80 degrees. Source B says the oven uses 90 degrees. Neither source supersedes the other."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "conflict_erased",
+      "category": "conflict",
+      "split": "development",
+      "question": "What temperature does the oven use?",
+      "answer": "The oven uses 80 degrees.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Source A says the oven uses 80 degrees. Source B says the oven uses 90 degrees. Neither source supersedes the other."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "partial_route",
+      "category": "partial_route",
+      "split": "development",
+      "question": "Where does the package ultimately arrive?",
+      "answer": "The package reaches Elm, but the supplied source does not identify its final destination.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The package is forwarded from Ash to Elm. No destination beyond Elm is recorded."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "partial_route_overclaim",
+      "category": "partial_route",
+      "split": "development",
+      "question": "Where does the package ultimately arrive?",
+      "answer": "The package ultimately arrives at Elm.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The package is forwarded from Ash to Elm. No destination beyond Elm is recorded."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "terminal_route",
+      "category": "route_reasoning",
+      "split": "development",
+      "question": "Where does the package ultimately arrive?",
+      "answer": "The package ultimately arrives at Pine.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The package is forwarded from Ash to Elm, then from Elm to Pine. Pine is its recorded final destination."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "reversed_route",
+      "category": "route_reasoning",
+      "split": "development",
+      "question": "Can the package be forwarded from Ash through Elm to Pine?",
+      "answer": "Yes, the package can go from Ash through Elm to Pine.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Forwarding is allowed from Ash to Elm and from Pine to Elm. Both routes are one-way. No Elm-to-Pine route is recorded."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "reversed_route_qualified",
+      "category": "route_reasoning",
+      "split": "development",
+      "question": "Can the package be forwarded from Ash through Elm to Pine?",
+      "answer": "The records show Ash to Elm, but the other route runs from Pine to Elm. They do not establish an Elm-to-Pine route.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Forwarding is allowed from Ash to Elm and from Pine to Elm. Both routes are one-way. No Elm-to-Pine route is recorded."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "intermediate_stop",
+      "category": "route_reasoning",
+      "split": "development",
+      "question": "Where does the package ultimately arrive?",
+      "answer": "The package ultimately arrives at Elm.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "The package is forwarded from Ash to Elm, then from Elm to Pine. Pine is its recorded final destination."
+        }
+      ],
+      "expected_acceptable": false
+    }
+  ]
+}
