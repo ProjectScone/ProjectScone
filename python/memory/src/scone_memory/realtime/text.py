@@ -11,14 +11,17 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from contextvars import ContextVar
+from typing import Literal
 from uuid import uuid4
 
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
-from .context import MemoryContext
+from .answer_review import AnswerReviewer, AnswerReviewLimits, review_answer
+from .context import ContextReceipt, MemoryContext
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
+from .review_evidence import prepare_review_evidence
 
 _OWNER = ContextVar("scone_text_owner", default=None)
 
@@ -35,6 +38,12 @@ def _bytes(messages):
     return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
 
 
+class _AnswerReviewFailure(RuntimeError):
+    def __init__(self, message: str, receipt: dict[str, object]) -> None:
+        super().__init__(message)
+        self.answer_review = receipt
+
+
 class TextConversation:
     """One active turn, immutable scope, fresh provider per turn.
 
@@ -42,6 +51,8 @@ class TextConversation:
     and one ReplyCompleted, plus aclose(). No tool/media/reasoning events are
     accepted. The caller owns authentication, capture consent and provider keys.
     Cleanup is cooperative and may exceed the cancellation deadline.
+    Optional answer review buffers the draft until source checks and review
+    finish; only the accepted final text reaches the observer and capture.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
@@ -50,7 +61,9 @@ class TextConversation:
                  where: Mapping[str, str] | None = None, kind=None,
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
                  max_reply_bytes=64000, max_history_bytes=128000,
-                 adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0):
+                 adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
+                 answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
+                 review_policy: Literal["report", "require_supported"] = "report"):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -63,12 +76,24 @@ class TextConversation:
         for value in (max_reply_bytes, max_history_bytes):
             if type(value) is not int or not 512 <= value <= 1_000_000:
                 raise ValueError("byte limits must be integers in 512..1000000")
+        if type(review_policy) is not str or review_policy not in ("report", "require_supported"):
+            raise ValueError("review_policy must be report or require_supported")
+        if answer_reviewer is not None and not callable(getattr(answer_reviewer, "review", None)):
+            raise ValueError("answer_reviewer must implement review")
+        if answer_reviewer is None and (review_limits is not None or review_policy != "report"):
+            raise ValueError("review settings require answer_reviewer")
+        if review_limits is not None and not isinstance(review_limits, AnswerReviewLimits):
+            raise ValueError("review_limits must be AnswerReviewLimits")
+        self._answer_reviewer, self._review_policy = answer_reviewer, review_policy
+        self._review_limits = (AnswerReviewLimits.model_validate(dict(vars(review_limits)), strict=True)
+                               if review_limits is not None else AnswerReviewLimits())
         self._history = [{"role": "system", "content": system_prompt}]
         if _bytes(self._history) > max_history_bytes:
             raise ValueError("system prompt exceeds history byte limit")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._factory = model_factory
         scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
+        self._scope = scope
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
@@ -81,7 +106,7 @@ class TextConversation:
         return self._closed
 
     async def reply(self, text: str, *, on_text: Callable[[str], Awaitable[None]] | None = None) -> dict:
-        """Observe provisional public chunks; returned result confirms capture."""
+        """Observe provisional chunks, or one reviewed text; return confirms capture."""
         if self._closed:
             raise RuntimeError("conversation is closed")
         if self._active is not None:
@@ -153,7 +178,7 @@ class TextConversation:
             async with asyncio.timeout(self._timeout):
                 turn_id = uuid4().hex
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
-                text, receipt = await self._execute(messages, on_text)
+                text, receipt, answer_review = await self._execute(messages, on_text)
                 complete = [*messages, {"role": "assistant", "content": text}]
                 if _bytes(complete) > self._max_history:
                     raise RuntimeError("model reply exceeded the conversation history byte limit")
@@ -161,9 +186,12 @@ class TextConversation:
                     raise asyncio.CancelledError()
                 assistant_id = await self._record(turn_id, "assistant", text)
                 self._history = complete
-                return dict(turn_id=turn_id, text=text, provider_completion="unverified",
+                result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
                             memory_context=receipt)
+                if answer_review is not None:
+                    result["answer_review"] = answer_review
+                return result
         finally:
             _OWNER.reset(token)
 
@@ -171,6 +199,69 @@ class TextConversation:
         request, receipt = await self._context.prepare(messages)
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
+        draft = await self._generate(request, on_text if self._answer_reviewer is None else None)
+        if self._answer_reviewer is None:
+            return draft, receipt, None
+        text, answer_review = await self._review_draft(messages[-1]["content"], draft, request, receipt)
+        if len(text.encode("utf-8")) > self._max_reply:
+            raise RuntimeError("model reply exceeded the byte limit")
+        if _bytes([*messages, {"role": "assistant", "content": text}]) > self._max_history:
+            raise RuntimeError("model reply exceeded the conversation history byte limit")
+        if self._closed or asyncio.current_task().cancelling():
+            raise asyncio.CancelledError()
+        if on_text is not None:
+            self._cancel_reusable = False
+            try:
+                await on_text(text)
+            except asyncio.CancelledError as exc:
+                if asyncio.current_task().cancelling():
+                    raise
+                raise RuntimeError("public text observer failed") from exc
+            except Exception as exc:
+                raise RuntimeError("public text observer failed") from exc
+            self._cancel_reusable = not self._closed
+        return text, receipt, answer_review
+
+    async def _review_draft(self, question: str, draft: str, request: list[dict[str, object]],
+                            context_receipt: ContextReceipt) -> tuple[str, dict[str, object]]:
+        if context_receipt["status"] != "prepared":
+            return draft, {"status": "skipped", "reason": "no_memory_evidence", "verified_accuracy": False}
+        reviewer = self._answer_reviewer
+        if reviewer is None:
+            raise RuntimeError("answer review unavailable")
+        deadline = time.monotonic() + self._review_limits.timeout_s
+        try:
+            # Proof preparation and review share one deadline. The controller
+            # owns its remaining timer so its final source check can complete.
+            async with asyncio.timeout_at(deadline):
+                prepared = await prepare_review_evidence(self._memory, self._space, self._scope,
+                    self._session_id, request, context_receipt)
+            task = asyncio.current_task()
+            if self._closed or (task is not None and task.cancelling()):
+                raise asyncio.CancelledError()
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+            reviewed = await review_answer(reviewer, question, draft, prepared.evidence, prepared.evidence_ids,
+                limits=self._review_limits, validate_evidence=prepared.validate, deadline=deadline)
+            if self._closed or (task is not None and task.cancelling()):
+                raise asyncio.CancelledError()
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            code = "source_validation_timeout" if isinstance(error, TimeoutError) else "source_validation_failed"
+            failure: dict[str, object] = {"status": "unavailable", "rounds": 0, "revised": False,
+                "issue_codes": [], "errors": [code], "source_status": "unavailable", "verified_accuracy": False}
+            raise _AnswerReviewFailure("answer review evidence unavailable", failure) from error
+        receipt: dict[str, object] = reviewed.receipt.model_dump(mode="json")
+        if reviewed.receipt.source_status != "retained":
+            raise _AnswerReviewFailure("answer review evidence is stale or unavailable", receipt)
+        if self._review_policy == "require_supported" and reviewed.receipt.status != "supported":
+            raise _AnswerReviewFailure("answer review did not support the reply", receipt)
+        return reviewed.answer, receipt
+
+    async def _generate(self, request, on_text):
         model = self._factory()
         if not callable(getattr(model, "aclose", None)):
             raise TypeError("model must implement respond and aclose")
@@ -208,7 +299,7 @@ class TextConversation:
             text = "".join(parts)
             if not completed or not text.strip():
                 raise RuntimeError("provider ended without a complete public reply")
-            return text, receipt
+            return text
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -588,6 +588,59 @@ construction fails; no source or group is silently clipped to fit.
 See [the executable native example](examples/realtime_conversation.py). It uses
 real Scone memory and scheduling with a scripted provider, not live inference.
 
+#### Optional answer review
+
+A complete evidence path does not guarantee that a model follows it correctly.
+The native conversation can review its public draft against the delivered memory
+packet and attempt one correction:
+
+```python
+from scone_memory.providers.answer_reviewer import SelfHostedAnswerReviewer
+from scone_memory.realtime.answer_review import AnswerReviewLimits
+
+conversation = TextConversation(
+    memory, "authorized-space", "reviewed-session",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    answer_reviewer=SelfHostedAnswerReviewer(endpoint, model, timeout=20),
+    review_limits=AnswerReviewLimits(timeout_s=20.0, max_rounds=2),
+    review_policy="report",
+    turn_timeout=90,
+)
+```
+
+The first review may identify unsupported claims, contradictions, incomplete
+answers, or broken paths and propose a replacement. Scone adopts that replacement
+only after a second review reports it supported. Evidence IDs must come from the
+delivered packet, and issue quotations must match the draft exactly. Malformed
+reviews never trigger an automatic repair call. The reviewer sees the current
+question, draft, and memory packet; it does not receive system instructions or
+the full conversation history.
+
+When enabled, review buffers the draft. The observer receives the final text
+once; only that text enters conversation history and assistant capture. Without
+a reviewer, existing streaming behavior is unchanged. Greetings and other turns
+without prepared memory skip this memory-specific review.
+
+`report` retains the original draft if review fails or remains uncertain and its
+sources can still be validated. `require_supported` rejects an eligible memory
+reply unless review reports support. Both policies reject stale or unavailable
+sources. The returned `answer_review` receipt records the outcome, correction,
+issue codes, and source status separately; `verified_accuracy` is always false.
+A supported review is a model judgment, not independent proof of correctness.
+
+Review uses one deadline, at most two model calls, and a reserve for final source
+checks. Preparation and review share the same budget; each bounded source-read
+pass also has a one-second cap. Source checks use the original context revision,
+fixed scope, exact records, and immutable snapshots. Even an unrelated native
+write changes the revision and can conservatively invalidate review. The full
+conversation timeout must cover retrieval, generation, review, and capture.
+
+For an isolated comparison, add `--review-model YOUR_INSTALLED_MODEL
+--review-timeout 20 --review-policy report` to the generation evaluator. Only the
+candidate is reviewed. Reports preserve its public draft, final answer, review
+receipt, and separate draft/review timing; gold answers never enter review.
+This native feature remains opt-in and is not automatically mounted in HTTP.
+
 #### Migration from the experimental framework adapters
 
 The three former `integrations/pipecat*.py` modules and their optional dependency

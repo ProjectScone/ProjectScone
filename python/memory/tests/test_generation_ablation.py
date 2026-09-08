@@ -72,7 +72,8 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
-                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py", "testing/generation_ablation.py"}
+                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
+                "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
@@ -337,3 +338,71 @@ async def test_graph_option_delivers_missing_bridge_to_real_generation_context(t
         assert any(len(path["fact_ids"]) == 3 for path in data["paths"])
     else:
         assert not data.get("paths")
+
+
+@pytest.mark.parametrize("policy", ["report", "require_supported"])
+async def test_answer_review_uses_delivered_evidence_and_preserves_public_draft(tmp_path, monkeypatch, policy):
+    from scone_memory.realtime.answer_review import AnswerIssue, AnswerReviewDecision
+    from scone_memory.testing import generation_ablation
+    reviews = []
+
+    class Reviewer:
+        def __init__(self, endpoint, model, **options):
+            assert model == "reviewer"
+
+        async def review(self, question, answer, evidence, evidence_ids):
+            reviews.append((question, answer, evidence, evidence_ids))
+            if answer == "The probe uses 12 volts.":
+                return AnswerReviewDecision(status="needs_revision", issues=(AnswerIssue(code="contradiction",
+                    answer_quote="12 volts", evidence_ids=(evidence_ids[0],)),), revised_answer="The probe uses 18 volts.")
+            return AnswerReviewDecision(status="supported")
+
+    class Streaming:
+        async def respond(self, messages):
+            yield TextDelta("The probe uses 12 volts.")
+            yield ReplyCompleted()
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(generation_ablation, "SelfHostedAnswerReviewer", Reviewer)
+    report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "review.json",
+        endpoint="http://127.0.0.1:1234/v1", model_factory=Streaming, review_model="reviewer", review_policy=policy)
+    baseline, candidate = report["results"]
+    assert baseline["answer_text"] == "The probe uses 12 volts."
+    assert "answer_review" not in baseline
+    assert candidate["draft_answer_text"] == baseline["answer_text"]
+    assert candidate["answer_text"] == "The probe uses 18 volts."
+    assert candidate["answer_review"]["status"] == "supported"
+    assert candidate["answer_review"]["revised"] is True
+    assert candidate["answer_review"]["source_status"] == "retained"
+    assert candidate["completed"] is True
+    assert candidate["output_bytes"] == len(candidate["answer_text"].encode())
+    assert candidate["review_ms"] >= 0
+    assert len(reviews) == 2 and "18 volts" in reviews[0][2]
+    assert all("EVALUATION_ONLY_CANARY" not in question + evidence for question, _, evidence, _ in reviews)
+    assert report["review_model"] == "reviewer" and report["review_policy"] == policy
+
+
+@pytest.mark.parametrize("options,match", [
+    ({"review_model": " "}, "review_model"),
+    ({"review_model": "reviewer"}, "endpoint"),
+    ({"review_timeout": False}, "review_timeout"),
+    ({"review_timeout": 0}, "review_timeout"),
+    ({"review_timeout": float("inf")}, "review_timeout"),
+    ({"review_policy": "anything"}, "review_policy"),
+])
+async def test_review_options_fail_before_output(tmp_path, options, match):
+    from scone_memory.testing.generation_ablation import run_ablation
+    with pytest.raises(ValueError, match=match):
+        await run_ablation(fixture_file(tmp_path), output=tmp_path / "invalid-review.json", **options)
+    assert not (tmp_path / "invalid-review.json").exists()
+
+
+async def test_skipped_review_reports_buffered_delivery_time():
+    from scone_memory.testing.generation_ablation import _review_reply
+    row = {"answer_text": "Hello!", "completed": True, "status": "completed",
+           "first_token_ms": 5.0, "total_ms": 500.0}
+    await _review_reply(None, None, [], {"status": "empty"}, row, None, 20.0, "report")
+    assert row["answer_review"]["status"] == "skipped"
+    assert row["first_token_ms"] == 500.0
+    assert row["draft_first_token_ms"] == 5.0

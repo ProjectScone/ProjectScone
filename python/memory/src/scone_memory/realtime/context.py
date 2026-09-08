@@ -107,6 +107,7 @@ class ContextReceipt(TypedDict):
     next_before: NotRequired[int | None]
     evidence_graph: NotRequired[dict[str, object]]
     evidence_graph_status: NotRequired[str]
+    evidence_revision: NotRequired[int]
     evidence_graph_stale: NotRequired[bool]
     evidence_fingerprints: NotRequired[dict[str, str]]
     claim_fingerprints: NotRequired[dict[str, str]]
@@ -500,6 +501,7 @@ class MemoryContext:
                         {item.chunk_id for item in selected_items})
                     receipt["evidence_graph"] = graph.model_dump(mode="json")
                     receipt["evidence_graph_status"] = "prepared"
+                    receipt["evidence_revision"] = graph_revision
         except asyncio.CancelledError:
             receipt.update({"status": "cancelled", "error_type": "CancelledError"})
             raise

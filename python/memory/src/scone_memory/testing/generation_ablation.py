@@ -20,7 +20,8 @@ from pydantic import Field, model_validator
 def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
-             "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
+             "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
+             "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
@@ -40,7 +41,11 @@ from ..memory.engine import MemoryEngine, normalise_time
 from ..providers.llm import OpenAICompatibleTextModel
 from ..providers.evidence_assessor import SelfHostedEvidenceAssessor
 from ..providers.self_hosted import validate_self_hosted_identifier
-from ..realtime.context import MemoryContext, _PREFIX
+from ..realtime.context import ContextReceipt, MemoryContext, _PREFIX
+from ..realtime.answer_review import AnswerReviewLimits, review_answer
+from ..realtime.review_evidence import prepare_review_evidence
+from ..providers.answer_reviewer import SelfHostedAnswerReviewer
+from ..retrieval.recall_scope import RecallScope
 from ..realtime.events import ReplyCompleted, TextDelta, TextModel
 from ..realtime.text import DEFAULT_SYSTEM_PROMPT
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, FailurePolicy
@@ -208,6 +213,48 @@ async def _context_coverage(engine: MemoryEngine, case: GenerationCase, request:
             "scope_leaks": leaks, "invalid_provenance": invalid}
 
 
+async def _review_reply(engine: MemoryEngine, case: GenerationCase, request: list[dict[str, object]],
+                        receipt: ContextReceipt, row: dict[str, object], reviewer: SelfHostedAnswerReviewer,
+                        timeout: float, policy: str) -> None:
+    row["draft_answer_text"] = row["answer_text"]
+    row["draft_first_token_ms"], row["draft_total_ms"] = row["first_token_ms"], row["total_ms"]
+    row["draft_completed"], row["draft_status"] = row["completed"], row["status"]
+    if not row["completed"] or receipt["status"] != "prepared":
+        row["answer_review"] = {"status": "skipped", "reason": "incomplete_generation" if not row["completed"] else "no_memory_evidence",
+                                "verified_accuracy": False}
+        row["review_ms"] = 0.0
+        row["first_token_ms"] = row["total_ms"] if row["completed"] and row["answer_text"] else None
+        return
+    started = time.perf_counter()
+    review_deadline = time.monotonic() + timeout
+    try:
+        scope = RecallScope.validated(where=case.where, kind=case.kind, source_prefix=case.source_prefix,
+                                      since=case.since, until=case.until)
+        async with asyncio.timeout_at(review_deadline):
+            material = await prepare_review_evidence(engine, case.space, scope, receipt["session_id"], request, receipt)
+        reviewed = await review_answer(reviewer, case.query, cast(str, row["answer_text"]),
+            material.evidence, material.evidence_ids,
+            limits=AnswerReviewLimits(timeout_s=timeout, max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES),
+            validate_evidence=material.validate, deadline=review_deadline)
+        row["answer_review"] = reviewed.receipt.model_dump(mode="json")
+        if (reviewed.receipt.source_status in ("stale", "unavailable")
+                or (policy == "require_supported" and reviewed.receipt.status != "supported")):
+            row.update(status="review_rejected", completed=False, answer_text="", error_type="AnswerReviewRejected")
+        else:
+            row["answer_text"] = reviewed.answer
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        row["answer_review"] = {"status": "unavailable", "source_status": "unavailable", "verified_accuracy": False}
+        row.update(status="review_unavailable", completed=False, answer_text="", error_type="AnswerReviewUnavailable")
+    row["output_bytes"] = len(cast(str, row["answer_text"]).encode())
+    review_ms = (time.perf_counter() - started) * 1000
+    row["review_ms"] = round(review_ms, 3)
+    row["total_ms"] = round(cast(float, row["draft_total_ms"]) + review_ms, 3)
+    # Reviewed mode buffers the draft; the final answer is delivered together.
+    row["first_token_ms"] = row["total_ms"] if row["answer_text"] else None
+
+
 def _validate_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -221,7 +268,21 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        adaptive_model: str | None = None, adaptive_timeout: float = 30.0,
                        adaptive_rounds: int = 3, baseline_paths: bool = False, group_relations: bool = False,
                        adaptive_failure_policy: FailurePolicy = "retain_verified", expand_relations: bool = False,
+                       review_model: str | None = None, review_timeout: float = 20.0,
+                       review_policy: Literal["report", "require_supported"] = "report",
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if type(review_policy) is not str or review_policy not in ("report", "require_supported"):
+        raise ValueError("review_policy must be report or require_supported")
+    if (isinstance(review_timeout, bool) or not isinstance(review_timeout, (int, float))
+            or not math.isfinite(review_timeout) or not 1 <= review_timeout <= 180):
+        raise ValueError("review_timeout must be finite in 1..180")
+    if review_model is not None:
+        try:
+            validate_self_hosted_identifier(review_model)
+        except ValueError:
+            raise ValueError("review_model must be bounded nonblank text") from None
+        if not endpoint:
+            raise ValueError("review_model requires an explicit self-hosted endpoint")
     if type(expand_relations) is not bool:
         raise ValueError("expand_relations must be a boolean")
     if expand_relations and adaptive_model is None:
@@ -267,11 +328,18 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
     assessor = (SelfHostedEvidenceAssessor(endpoint, adaptive_model, timeout=adaptive_timeout,
         group_relations=group_relations, max_evidence_bytes=16_000)
                 if adaptive_model is not None and endpoint is not None else None)
+    reviewer = (SelfHostedAnswerReviewer(endpoint, review_model, timeout=review_timeout,
+        max_answer_bytes=MAX_BYTES, max_evidence_bytes=MAX_BYTES) if review_model is not None and endpoint is not None else None)
     graph_limits = MultiHopLimits() if expand_relations else None
     results: list[dict[str, object]] = []
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
         "code_provenance": _CODE_PROVENANCE,
         "ordered_quotes": ordered_quotes,
+        "review_model": review_model, "review_timeout_seconds": review_timeout, "review_policy": review_policy,
+        "review_max_rounds": 2 if reviewer is not None else None,
+        "review_max_output_tokens": 2048 if reviewer is not None else None,
+        "review_max_answer_bytes": MAX_BYTES if reviewer is not None else None,
+        "review_max_evidence_bytes": MAX_BYTES if reviewer is not None else None,
         "adaptive_model": adaptive_model, "adaptive_timeout_seconds": adaptive_timeout,
         "adaptive_failure_policy": adaptive_failure_policy if assessor is not None else None,
         "assessment_timeout_seconds": adaptive_timeout if assessor is not None else None,
@@ -341,6 +409,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                                            error_type="PromptByteLimit", first_token_ms=None, total_ms=0.0)
                             else:
                                 row.update(await capture_public_reply(model_factory(), messages, timeout=timeout))
+                            if reviewer is not None and candidate:
+                                await _review_reply(engine, case, request, receipt, row, reviewer, review_timeout, review_policy)
                             row.update(score_answer(cast(str, row["answer_text"]), case.answer_checks))
                             row["successful_key_fact_coverage"] = row["key_fact_coverage"] if row["completed"] else 0.0
                             results.append(row)
@@ -375,12 +445,16 @@ def main() -> None:
                         help="On assessor failure, reverify candidates (default) or return empty evidence")
     parser.add_argument("--expand-relations", action="store_true",
                         help="Gather bounded graph evidence before assessment; requires --adaptive-model")
+    parser.add_argument("--review-model", help="Explicit installed answer reviewer model for the candidate")
+    parser.add_argument("--review-timeout", type=float, default=20, help="Whole answer review budget including source checks")
+    parser.add_argument("--review-policy", choices=("report", "require_supported"), default="report")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
         adaptive_model=args.adaptive_model, adaptive_timeout=args.adaptive_timeout,
         adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations,
-        adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations))
+        adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations,
+        review_model=args.review_model, review_timeout=args.review_timeout, review_policy=args.review_policy))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 
