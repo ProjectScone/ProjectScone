@@ -28,9 +28,10 @@ from .recall_scope import RecallScope
 from .reranking import candidate_is_retained
 
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
-EvidenceBasis = Literal["assessed_selection", "verified_candidates", "none"]
+EvidenceBasis = Literal["assessed_selection", "verified_candidates", "unselected_candidates", "none"]
 FallbackStatus = Literal["not_used", "retained", "empty", "verification_failed", "verification_timeout"]
 FailurePolicy = Literal["empty", "retain_verified"]
+EmptySelectionPolicy = Literal["empty", "retain_verified"]
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact):[1-9][0-9]*$", max_length=64)]
 EvidenceGroup = Annotated[tuple[EvidenceId, ...], Field(min_length=2, max_length=100)]
 EvidenceGroups = Annotated[tuple[EvidenceGroup, ...], Field(max_length=100)]
@@ -182,12 +183,14 @@ class _AssessmentFailed(Exception):
 class _Run:
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, limits: AdaptiveLimits,
                  space: str, question: str, scope: RecallScope, excluded: str | None,
-                 failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None) -> None:
+                 failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None,
+                 empty_selection_policy: EmptySelectionPolicy) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
         self.boundary = memory.clock()
         self.filter = TextFilter(as_of=self.boundary if graph_limits is not None else None, **scope.kwargs())
         self.failure_policy = failure_policy
+        self.empty_selection_policy = empty_selection_policy
         self.graph_limits = graph_limits
         self.graph_expansions: list[AdaptiveGraphReceipt] = []
         self.graph_snapshots: dict[str, _Evidence] = {}
@@ -513,7 +516,9 @@ class _Run:
         selected: dict[str, _Evidence] = {}
         selected_groups: tuple[tuple[str, ...], ...] = ()
         status: EvidenceStatus = "uncertain"
+        empty_selection = False
         for round_number in range(1, self.limits.max_rounds + 1):
+            empty_selection = False
             hashes: list[str] = []
             carried_group_count = len(selected_groups)
             for query in pending:
@@ -550,7 +555,8 @@ class _Run:
             self.fallback_groups = selected_groups
             self.stage = "assessment"
             try:
-                raw_decision = await self.assessor.assess(self.question, candidates)
+                raw_decision = await self.assessor.assess(self.question,
+                    tuple(candidate.model_copy(deep=True) for candidate in candidates))
                 self.check_deadline()
                 # Rebuild even model_construct/model_copy values: strict models
                 # can otherwise bypass validation at an untrusted adapter edge.
@@ -583,8 +589,12 @@ class _Run:
                 selected_groups = merge_groups((*selected_groups, *decision.selected_groups))
             else:
                 selected_groups = decision.selected_groups
-            selected, selected_groups = self.prune_groups(selected, selected_groups)
+            if decision.selected_ids:
+                selected, selected_groups = self.prune_groups(selected, selected_groups)
+            else:
+                selected_groups = ()
             status = decision.status
+            empty_selection = not decision.selected_ids
             if len(selected) != len(decision.selected_ids):
                 status = "uncertain"
             self.rounds[-1] = AdaptiveRound(round_number=round_number, query_hashes=tuple(hashes),
@@ -616,12 +626,21 @@ class _Run:
             # Only selected useful evidence is carried; rejected distractors
             # cannot crowd out the next bounded retrieval window.
             pool = selected.copy()
+        basis: EvidenceBasis = "assessed_selection"
+        if empty_selection and self.empty_selection_policy == "retain_verified":
+            # A valid empty selection is not proof that every candidate is useless.
+            # Recover only the last offered snapshot, never an earlier discarded pool.
+            selected = self.fallback_pool
+            selected_groups = self.fallback_groups
+            basis = "unselected_candidates"
         verified = await self.verify(selected)
         verified, selected_groups = self.prune_groups(verified, selected_groups)
         if len(verified) != len(selected):
             status = "uncertain"
         self.check_deadline()
-        return self.result(verified, status, selected_groups)
+        if verified and basis == "unselected_candidates":
+            self.notice("empty_selection_retained")
+        return self.result(verified, status, selected_groups, basis=basis)
 
 
 class AdaptiveRetriever:
@@ -639,15 +658,23 @@ class AdaptiveRetriever:
     explicit ``graph_limits``, host-verified exact components establish atomic
     groups before assessment, including first-round fallback. Traversal uses
     the run's fact-time boundary and excludes later-created source episodes.
+    A valid terminal empty selection retains the final verified candidate pool
+    by default, labeled ``unselected_candidates`` with the original insufficient
+    or uncertain judgment. It does not retain discarded pools across follow-ups.
+    ``empty_selection_policy="empty"`` preserves strict model-only selection.
     """
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, *,
                  limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified",
-                 graph_limits: MultiHopLimits | None = None) -> None:
+                 graph_limits: MultiHopLimits | None = None,
+                 empty_selection_policy: EmptySelectionPolicy = "retain_verified") -> None:
         if type(failure_policy) is not str or failure_policy not in ("empty", "retain_verified"):
             raise ValueError("failure_policy must be empty or retain_verified")
+        if type(empty_selection_policy) is not str or empty_selection_policy not in ("empty", "retain_verified"):
+            raise ValueError("empty_selection_policy must be empty or retain_verified")
         self._memory, self.assessor = memory, assessor
         self._limits = AdaptiveLimits.model_validate((limits or AdaptiveLimits()).model_dump(), strict=True)
         self._failure_policy = failure_policy
+        self._empty_selection_policy = empty_selection_policy
         self._graph_limits = (MultiHopLimits.model_validate(dict(vars(graph_limits)), strict=True)
                               if graph_limits is not None else None)
 
@@ -664,6 +691,10 @@ class AdaptiveRetriever:
         return self._failure_policy
 
     @property
+    def empty_selection_policy(self) -> EmptySelectionPolicy:
+        return self._empty_selection_policy
+
+    @property
     def graph_limits(self) -> MultiHopLimits | None:
         return self._graph_limits
 
@@ -676,7 +707,7 @@ class AdaptiveRetriever:
             raise InvalidInput("exclude_session_id must be a string")
         fixed_scope = RecallScope.validated(**scope.kwargs())
         run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
-                   self.failure_policy, self.graph_limits)
+                   self.failure_policy, self.graph_limits, self.empty_selection_policy)
         try:
             return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:

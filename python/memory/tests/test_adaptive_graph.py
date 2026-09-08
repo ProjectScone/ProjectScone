@@ -22,6 +22,28 @@ async def chain(engine: MemoryEngine, length: int = 3) -> list[Fact]:
     return [await fact(engine, names[index], "depends on", names[index + 1]) for index in range(length)]
 
 
+@pytest.mark.parametrize("delete_bridge", [False, True])
+@pytest.mark.parametrize("mutate_candidate", [False, True])
+async def test_empty_selection_retains_complete_verified_groups_or_drops_stale_group(memory, monkeypatch, delete_bridge, mutate_candidate):
+    records = await chain(memory)
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=records[:1])))
+    async def assess(question, candidates):
+        if mutate_candidate:
+            object.__setattr__(candidates[0], "text", "adapter changed its input")
+        if delete_bridge:
+            await memory.forget("alpha", records[1].source_episode_id)
+        return EvidenceDecision(status="insufficient", selected_ids=())
+    result = await AdaptiveRetriever(memory, Assessor(assess), graph_limits=MultiHopLimits()).retrieve(
+        "alpha", "Aster destination", scope=RecallScope.validated())
+    assert result.recall.facts == ([] if delete_bridge else records)
+    assert result.selected_groups == (() if delete_bridge else (tuple(f"fact:{r.fact_id}" for r in records),))
+    assert result.evidence_basis == ("none" if delete_bridge else "unselected_candidates")
+    assert result.rounds[-1].selected_count == 0
+    if not delete_bridge:
+        assert "atomic_group_omitted" not in result.reasons
+        assert "stale_evidence" not in result.reasons
+
+
 @pytest.mark.parametrize("fails", [False, True])
 async def test_real_recall_expands_missing_chain_before_first_assessment(memory: MemoryEngine, fails: bool) -> None:
     records = await chain(memory)

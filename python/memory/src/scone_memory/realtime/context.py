@@ -51,6 +51,7 @@ _ADAPTIVE_DIAGNOSTICS = frozenset({
     "invalid_or_failed_assessment", "retrieval_failed",
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
     "atomic_group_omitted",
+    "empty_selection_retained",
 }) | GRAPH_REASONS
 
 
@@ -278,6 +279,7 @@ class MemoryContext:
                                                  | {f"fact:{fact.fact_id}" for fact in result.facts})
                         adaptive_groups = adaptive.selected_groups
                         assessment_basis = ("unassessed_fallback" if adaptive.evidence_basis == "verified_candidates"
+                            else "unselected_candidates" if adaptive.evidence_basis == "unselected_candidates"
                             else "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment")
                         adaptive_coverage = {"assessment_status": adaptive.status,
                             "assessment_basis": assessment_basis, "evidence_basis": adaptive.evidence_basis,

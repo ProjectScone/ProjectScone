@@ -611,3 +611,41 @@ async def test_fallback_preserves_known_atomic_group_under_context_byte_limit(me
     assert data["coverage"]["adaptive"]["model_selected"] is False
     assert data["coverage"]["adaptive"]["selected_omitted_count"] == 2
     assert receipt["context_bytes"] <= 1900
+
+
+@pytest.mark.parametrize("assessment_status", ["insufficient", "uncertain"])
+async def test_terminal_empty_selection_prepares_scoped_partial_candidates_without_assessment_claim(memory, assessment_status):
+    partial = await memory.remember("alpha", "Juniper calibration depends on Meridian. Its maintainer is not recorded.",
+                                    metadata={"team": "science"})
+    await memory.remember("alpha", "Juniper calibration private unrelated department record.", metadata={"team": "legal"})
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status=assessment_status, selected_ids=()))
+    adaptive = retriever(memory, assessor)
+    messages = [{"role": "user", "content": "Who maintains Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", where={"team": "science"},
+                                           adaptive_retriever=adaptive).prepare(messages)
+    assert receipt["status"] == "prepared" and receipt["adaptive_status"] == assessment_status
+    assert {ref["episode_id"] for ref in receipt["references"]} == {partial.episode_id}
+    assert receipt["adaptive_evidence_basis"] == "unselected_candidates"
+    assert receipt["adaptive_fallback_status"] == "not_used" and receipt["adaptive_errors"] == []
+    assert "empty_selection_retained" in receipt["adaptive_reasons"]
+    data = payload(request)
+    coverage = data["coverage"]["adaptive"]
+    assert coverage["assessment_basis"] == "unselected_candidates" and coverage["evidence_basis"] == "unselected_candidates"
+    assert coverage["assessment_status"] == assessment_status and coverage["model_selected"] is False
+    assert coverage["verified_sufficiency"] is False and coverage["fallback_status"] == "not_used"
+    assert coverage["selection_complete"] is True and data["coverage"]["complete_history"] is False
+    assert "private unrelated" not in json.dumps(data)
+    assert len(assessor.calls) == 1 and request[-1] == messages[-1]
+
+
+async def test_explicit_empty_selection_policy_preserves_empty_native_context(memory):
+    await memory.remember("alpha", "Juniper calibration depends on Meridian.")
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status="insufficient", selected_ids=()))
+    adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0), empty_selection_policy="empty")
+    messages = [{"role": "user", "content": "Juniper calibration?"}]
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare(messages)
+    assert request == messages and receipt["status"] == "empty"
+    assert receipt["adaptive_status"] == "insufficient" and receipt["adaptive_evidence_basis"] == "none"
+    assert receipt["references"] == [] and receipt["adaptive_errors"] == []
+    assert receipt["adaptive_fallback_status"] == "not_used"
+    assert "empty_selection_retained" not in receipt["adaptive_reasons"]

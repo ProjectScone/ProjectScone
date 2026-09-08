@@ -21,6 +21,61 @@ STAMP = "2025-01-01T00:00:00Z"
 AssessorFn = Callable[[str, tuple[EvidenceCandidate, ...]], Awaitable[EvidenceDecision]]
 
 
+@pytest.mark.parametrize("status", ["insufficient", "uncertain"])
+@pytest.mark.parametrize("policy", ["retain_verified", "empty"])
+async def test_terminal_empty_selection_preserves_partial_evidence_without_claiming_selection(memory, monkeypatch, status, policy):
+    route = await fact(memory, "Spruce", "forwards to", "Birch")
+    async def recall(*args, **kwargs):
+        return RecallResult(facts=[route])
+    async def assess(question, candidates):
+        return EvidenceDecision(status=status, selected_ids=())
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess), empty_selection_policy=policy).retrieve(
+        "alpha", "Where do Spruce records ultimately finish?", scope=RecallScope.validated())
+    assert result.status == status and result.rounds[-1].selected_count == 0
+    assert result.fallback_status == "not_used" and result.errors == ()
+    assert result.recall.facts == ([route] if policy == "retain_verified" else [])
+    assert result.evidence_basis == ("unselected_candidates" if policy == "retain_verified" else "none")
+    assert ("empty_selection_retained" in result.reasons) is (policy == "retain_verified")
+
+
+async def test_empty_selection_keeps_only_final_pool_after_followup(memory, monkeypatch):
+    old = await fact(memory, "Old", "routes to", "Distractor")
+    final = await fact(memory, "Spruce", "forwards to", "Birch")
+    queries = []
+    async def recall(space, query, **kwargs):
+        queries.append(query)
+        return RecallResult(facts=[old] if len(queries) == 1 else [final])
+    async def assess(question, candidates):
+        return EvidenceDecision(status="insufficient", selected_ids=(),
+            followup_queries=("Spruce route",) if len(queries) == 1 else ())
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Find destination", scope=RecallScope.validated())
+    assert result.recall.facts == [final] and len(result.rounds) == 2
+    assert result.evidence_basis == "unselected_candidates"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+async def test_empty_selection_never_restores_deleted_or_pruned_selected_records(memory, monkeypatch, selected):
+    route = await fact(memory, "Spruce", "forwards to", "Birch")
+    unrelated = await fact(memory, "Other", "uses", "Disk")
+    async def recall(*args, **kwargs):
+        return RecallResult(facts=[route, unrelated] if selected else [route])
+    async def assess(question, candidates):
+        await memory.forget("alpha", route.source_episode_id)
+        return EvidenceDecision(status="insufficient", selected_ids=(f"fact:{route.fact_id}",) if selected else ())
+    monkeypatch.setattr(memory, "recall", recall)
+    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Where does Spruce finish?", scope=RecallScope.validated())
+    assert result.recall.facts == [] and result.evidence_basis == "none"
+    assert "empty_selection_retained" not in result.reasons
+
+
+@pytest.mark.parametrize("policy", [None, True, "anything", 1])
+def test_empty_selection_policy_validates_before_retrieval(policy):
+    with pytest.raises(ValueError, match="empty_selection_policy"):
+        AdaptiveRetriever(None, None, empty_selection_policy=policy)
+
+
 class Assessor:
     def __init__(self, callback: AssessorFn) -> None:
         self.callback = callback
@@ -96,13 +151,14 @@ async def test_actual_engine_recall_selected_chunks_only(memory: MemoryEngine) -
     assert [item.text for item in result.recall.items] == ["Aster depends on Beacon."]
 
 
-async def test_insufficient_without_followups_abstains(memory: MemoryEngine) -> None:
+async def test_explicit_empty_selection_policy_without_followups_abstains(memory: MemoryEngine) -> None:
     await memory.remember("alpha", "Aster depends on Beacon.", created_at=STAMP)
 
     async def assess(question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
         return EvidenceDecision(status="insufficient", selected_ids=())
 
-    result = await AdaptiveRetriever(memory, Assessor(assess)).retrieve("alpha", "Aster", scope=RecallScope.validated())
+    result = await AdaptiveRetriever(memory, Assessor(assess), empty_selection_policy="empty").retrieve(
+        "alpha", "Aster", scope=RecallScope.validated())
     assert result.status == "insufficient" and not result.recall.items and not result.recall.facts
     assert "no_followup_queries" in result.reasons
 

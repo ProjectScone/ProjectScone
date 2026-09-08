@@ -521,6 +521,21 @@ decisions only; a failed response cannot establish new groups. Native context
 receipts expose the basis, fallback status, and delivery completeness separately. Use
 `failure_policy="empty"` when any assessment failure should discard all evidence.
 
+A valid assessment can also return `insufficient` or `uncertain` with no selected
+records. The separate default `empty_selection_policy="retain_verified"` retains
+the final offered candidate snapshot after source revalidation. Its basis is
+`unselected_candidates`, its round still records zero model-selected records,
+and `fallback_status` remains `not_used`. The insufficiency or uncertainty stays
+visible; keeping a known partial route does not establish its missing endpoint.
+Candidate retention does not establish relevance either: the bounded pool may
+include distractors that the assessor did not select.
+
+This policy applies only when the final valid decision selected nothing. It does
+not resurrect earlier pools discarded during follow-up searches, or replace a
+nonempty selection that later loses its sources. Existing scope, deadline, byte,
+and atomic-group checks still apply. Use `empty_selection_policy="empty"` to
+preserve model-only selection, independently of assessment-failure handling.
+
 For a controlled comparison against existing compact paths, add
 `--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30
 --adaptive-rounds 3` to the generation evaluator. Each row records the selected
@@ -529,6 +544,8 @@ source coverage and manual semantic review. The assessment transport timeout
 uses the requested adaptive budget; the retriever enforces the remaining total
 budget across all calls. Reports record both limits and the failure policy; use
 `--adaptive-failure-policy empty` to compare the explicit empty-on-failure behavior.
+Use `--adaptive-empty-selection-policy empty` for the separate valid-empty-selection
+comparison; the report records both policies.
 Receipts distinguish assessment timeouts, provider failures and invalid model decisions without
 including raw provider errors or source text.
 
