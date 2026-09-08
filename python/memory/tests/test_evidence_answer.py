@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -70,6 +72,47 @@ def test_ordered_path_has_exact_quotes_and_suppresses_constituent_cards() -> Non
     assert "A routes to C" not in card.text
 
 
+def test_shared_paragraph_paths_keep_distinct_selection_witnesses() -> None:
+    quote = "atlas routes to birch. birch routes to cedar. vega routes to larch. larch routes to ember."
+    claims = [claim(n, subject, obj) for n, (subject, obj) in enumerate(
+        [("atlas", "birch"), ("birch", "cedar"), ("vega", "larch"), ("larch", "ember")], 1)]
+    for row in claims:
+        row.update(quote=quote, source_episode_id=7)
+    second = dict(fact_ids=[3, 4], steps=[dict(from_fact=3, to_fact=4, kind="subject_object", direction="forward")])
+    evidence = packet(claims=claims, paths=[path(), second])
+    first, other = build_evidence_cards(evidence).cards
+    assert re.sub(r"fact:\d+", "fact:N", first.text) == re.sub(r"fact:\d+", "fact:N", other.text)
+    assert [(row.subject, row.object) for row in first.claims] == [("atlas", "birch"), ("birch", "cedar")]
+    assert [(row.subject, row.object) for row in other.claims] == [("vega", "larch"), ("larch", "ember")]
+    assert first.path_fact_ids == (1, 2) and first.path_steps[0].kind == "subject_object"
+    assert first.path_steps[0].link_id is None
+    assert all(row.source_episode_id == 7 and row.origin == "stated" for row in first.claims)
+    encoded = json.dumps([first.model_dump(mode="json"), other.model_dump(mode="json")], ensure_ascii=False, separators=(",", ":"))
+    assert len(build_evidence_cards(evidence, max_bytes=len(encoded.encode())).cards) == 2
+    assert len(build_evidence_cards(evidence, max_bytes=len(encoded.encode())-1).cards) == 1
+
+
+@pytest.mark.parametrize("change", ["reverse", "forged_link", "missing_claim", "wrong_join", "outside_card", "duplicate"])
+def test_selection_witnesses_reject_forged_or_reversed_joins(change: str) -> None:
+    from pydantic import ValidationError
+    card = build_evidence_cards(packet(claims=[claim(1, "a", "b"), claim(2, "b", "c")], paths=[path()])).cards[0]
+    raw = card.model_dump(mode="python")
+    if change == "reverse":
+        raw["path_steps"][0]["direction"] = "reverse"
+    elif change == "forged_link":
+        raw["path_steps"][0]["link_id"] = 99
+    elif change == "missing_claim":
+        raw["claims"] = raw["claims"][:1]
+    elif change == "wrong_join":
+        raw["claims"][0]["object"] = "different"
+    elif change == "outside_card":
+        raw["evidence_ids"] = ("fact:1",)
+    else:
+        raw["claims"] = (*raw["claims"], raw["claims"][0])
+    with pytest.raises(ValidationError):
+        EvidenceCard.model_validate(raw, strict=True)
+
+
 def test_reverse_stored_link_preserves_record_direction_and_quote() -> None:
     backward = dict(fact_ids=[2,1], steps=[dict(from_fact=1,to_fact=2,kind="supports",direction="reverse",link_id=1)])
     result = build_evidence_cards(packet(claims=[claim(1,"A","B"),claim(2,"X","Y")],
@@ -79,6 +122,79 @@ def test_reverse_stored_link_preserves_record_direction_and_quote() -> None:
     assert "fact:1 -> fact:2" in text and "reverse" in text
     assert "Recorded relation 1 between statements 1 and 2." in text
     assert set(result.cards[0].evidence_ids) == {"fact:1","fact:2","link:1"}
+    card = result.cards[0]
+    assert card.path_fact_ids == (2, 1)
+    assert card.path_steps[0].from_fact == 1 and card.path_steps[0].direction == "reverse"
+    assert card.relations[0].source_episode_id == 101
+
+
+@pytest.mark.parametrize("change", ["direction", "endpoints", "kind", "missing_relation"])
+def test_stored_link_witness_cannot_reverse_or_forge_record(change: str) -> None:
+    from pydantic import ValidationError
+    backward = dict(fact_ids=[2, 1], steps=[dict(from_fact=1, to_fact=2, kind="supports", direction="reverse", link_id=1)])
+    card = build_evidence_cards(packet(claims=[claim(1, "a", "b"), claim(2, "x", "y")],
+        relations=[relation(1, 1, 2, "supports")], paths=[backward])).cards[0]
+    raw = card.model_dump(mode="python")
+    if change == "direction":
+        raw["path_steps"][0]["direction"] = "forward"
+    elif change == "endpoints":
+        raw["relations"][0].update(from_fact=2, to_fact=1)
+    elif change == "kind":
+        raw["relations"][0]["kind"] = "derived_from"
+    else:
+        raw["relations"] = ()
+    with pytest.raises(ValidationError):
+        EvidenceCard.model_validate(raw, strict=True)
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_native_shared_paragraph_routes_expose_checked_selector_identity(backend: str, tmp_path: Path) -> None:
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.backends.sqlite import SqliteDocumentStore
+    from scone_memory.core.models import RecallResult
+    from scone_memory.realtime.text import TextConversation
+    store = InMemoryDocumentStore() if backend == "memory" else SqliteDocumentStore(tmp_path / "paths.db")
+    memory = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    quote = "atlas routes to birch. birch routes to cedar. vega routes to larch. larch routes to ember."
+    source = await memory.remember("alpha", quote)
+    facts = [await memory.assert_fact("alpha", subject, "routes to", obj, source_episode_id=source.episode_id, quote=quote)
+        for subject, obj in [("atlas", "birch"), ("birch", "cedar"), ("vega", "larch"), ("larch", "ember")]]
+
+    async def recall(*args: object, **kwargs: object) -> RecallResult:
+        return RecallResult(facts=[facts[0], facts[2]])
+
+    memory.recall = recall  # type: ignore[method-assign]
+    selected_text: list[str] = []
+
+    async def select(cards: tuple[EvidenceCard, ...]) -> EvidenceSelection:
+        assert len(cards) == 2 and all(card.kind == "path" for card in cards)
+        match = next(card for card in cards if card.claims[0].subject == "vega")
+        assert [row.object for row in match.claims] == ["larch", "ember"]
+        assert all(row.source_episode_id == source.episode_id for row in match.claims)
+        selected_text.append(match.text)
+        return EvidenceSelection(card_ids=(match.id,))
+
+    def unused_factory() -> None:
+        raise AssertionError("extractive mode must skip generation")
+
+    conversation = TextConversation(memory, "alpha", "witnesses", unused_factory, evidence_selector=Selector(select))
+    observed: list[str] = []
+
+    async def observe(text: str) -> None:
+        observed.append(text)
+
+    try:
+        result = await conversation.reply("Where does the vega route end?", on_text=observe)
+        assert observed == selected_text == [result["text"]]
+        assert result["evidence_answer"]["evidence_ids"] == [f"fact:{facts[2].fact_id}", f"fact:{facts[3].fact_id}"]
+        assert result["evidence_answer"]["source_status"] == "retained"
+        assert result["evidence_answer"]["verified_accuracy"] is False
+        episodes = await memory.episodes("alpha", {"session_id": "witnesses"})
+        assert episodes[-1].content == selected_text[0]
+        assert "path_steps" not in episodes[-1].content
+    finally:
+        await conversation.close()
+        await memory.close()
 
 
 def test_contradiction_closure_is_atomic_and_suppresses_passage_escape() -> None:

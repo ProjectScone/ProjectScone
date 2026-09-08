@@ -852,6 +852,14 @@ An exact same-episode passage duplicate is removed only after its standalone
 claim card fits the budget. Different sources, text, and claims stay separate;
 `deduplicated_card_count` is distinct from budget omissions.
 
+Selection cards also carry typed claim triples, their origins and source IDs,
+and ordered path steps. This preserves route identity when several claims quote
+the same paragraph. A structural object-to-subject match remains distinct from
+a stored relationship and its traversal direction. These fields count toward
+the evidence byte budget; they do not change the public quotation rendering or
+establish that a quotation entails a stored claim. Existing custom selectors
+can still construct cards without this optional metadata.
+
 Sources are checked before and after selection against the original scope,
 revision, and records. Preparation, selection, and validation share one deadline.
 Stale sources, invalid selections, or provider failures suppress the answer. A

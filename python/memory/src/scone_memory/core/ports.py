@@ -83,7 +83,7 @@ class TextFilter:
     """What the lexical lane may return. ``as_of`` excludes anything
     that happened after that instant; ``tags`` must all be present.
 
-    Native SQLite and in-memory stores apply episode kind, literal source
+    Native SQLite, MongoDB, and in-memory stores apply episode kind, literal source
     prefix and inclusive episode timestamps before their candidate limit.
     Other stores may ignore these fields: engine postfiltering then enforces
     scope on a bounded candidate window, with no completeness guarantee.

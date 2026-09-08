@@ -35,17 +35,70 @@ class EvidenceAnswerError(ValueError):
         self.reason = reason if type(reason) is str and reason in _FAILURES else "invalid_selection"
 
 
+class EvidenceClaim(BaseModel):
+    """Recorded claim identity, not a claim that its quote proves entailment."""
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
+    fact_id: RecordId
+    subject: str = Field(max_length=128000)
+    predicate: str = Field(max_length=128000)
+    object: str = Field(max_length=128000)
+    origin: FactOrigin
+    source_episode_id: RecordId
+
+
+class EvidenceRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
+    link_id: RecordId
+    from_fact: RecordId
+    to_fact: RecordId
+    kind: LinkKind
+    source_episode_id: RecordId
+
+
+class EvidenceStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, revalidate_instances="always")
+    from_fact: RecordId
+    to_fact: RecordId
+    kind: Literal["subject_object", "extends", "derived_from", "supports"]
+    direction: Literal["forward", "reverse"]
+    link_id: RecordId | None = None
+
+
 class EvidenceCard(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     id: CardId
     kind: Literal["passage", "claim", "path"]
     text: str = Field(min_length=1, max_length=128000)
     evidence_ids: tuple[EvidenceId, ...] = Field(min_length=1, max_length=MAX_CHUNKS+MAX_FACTS+MAX_LINKS)
+    # Selection-only metadata: text remains the exact public quote rendering.
+    claims: tuple[EvidenceClaim, ...] = Field(default=(), max_length=MAX_FACTS)
+    relations: tuple[EvidenceRelation, ...] = Field(default=(), max_length=MAX_LINKS)
+    path_fact_ids: tuple[RecordId, ...] = Field(default=(), max_length=7)
+    path_steps: tuple[EvidenceStep, ...] = Field(default=(), max_length=6)
 
     @model_validator(mode="after")
     def unique_ids(self) -> EvidenceCard:
         if len(set(self.evidence_ids)) != len(self.evidence_ids):
             raise ValueError("card evidence IDs must be unique")
+        claims = {row.fact_id: row.model_dump() for row in self.claims}
+        relations = {row.link_id: row.model_dump() for row in self.relations}
+        if len(claims) != len(self.claims) or len(relations) != len(self.relations):
+            raise ValueError("duplicate selection records")
+        if any(f"fact:{identifier}" not in self.evidence_ids for identifier in claims) or any(
+                f"link:{identifier}" not in self.evidence_ids for identifier in relations):
+            raise ValueError("selection records require card evidence")
+        if any(row.from_fact not in claims or row.to_fact not in claims for row in self.relations):
+            raise ValueError("selection relations require card claims")
+        if self.kind == "passage" and (claims or relations or self.path_fact_ids or self.path_steps):
+            raise ValueError("passages cannot contain claim witnesses")
+        if self.path_fact_ids or self.path_steps:
+            if self.kind != "path":
+                raise ValueError("path witnesses require path cards")
+            try:
+                _paths([{"fact_ids": list(self.path_fact_ids), "steps": [
+                    row.model_dump(exclude_none=True) for row in self.path_steps]}], claims, relations)
+            except ValueError:
+                raise ValueError("invalid selection path witnesses") from None
         return self
 
 
@@ -205,12 +258,20 @@ def _cards(material: _Material, max_cards: int, max_bytes: int) -> EvidenceCards
     standalone_quotes: dict[str, tuple[int, str]] = {}
     passage_quotes: dict[str, tuple[int, str]] = {}
 
-    def add(kind: Literal["path","claim","passage"], parts: list[str], ids: list[str]) -> None:
+    def add(kind: Literal["path","claim","passage"], parts: list[str], ids: list[str],
+            ordered: tuple[int, ...] = (), steps: tuple[EvidenceStep, ...] = ()) -> None:
         text = "\n\n".join(parts)
         # Oversized whole cards still consume their stable proposal ID, but can
         # never be offered. No quote clipping or constituent escape is allowed.
+        card_ids = tuple(dict.fromkeys(ids))
+        claims = tuple(EvidenceClaim(fact_id=row.fact_id, subject=row.subject, predicate=row.predicate,
+            object=row.object, origin=row.origin, source_episode_id=row.source_episode_id)
+            for row in material.claims.values() if f"fact:{row.fact_id}" in card_ids)
+        relations = tuple(EvidenceRelation(link_id=row.link_id, from_fact=row.from_fact, to_fact=row.to_fact,
+            kind=row.kind, source_episode_id=row.source_episode_id)
+            for row in material.relations.values() if f"link:{row.link_id}" in card_ids)
         proposals.append(EvidenceCard(id=f"card:{len(proposals)+1}",kind=kind,text=text,
-                                      evidence_ids=tuple(dict.fromkeys(ids))))
+            evidence_ids=card_ids, claims=claims, relations=relations, path_fact_ids=ordered, path_steps=steps))
 
     def competing(ids: set[int], links: set[int], ordered: list[int], parts: list[str], evidence_ids: list[str]) -> None:
         extra = [claim for claim in material.claims.values() if claim.fact_id in ids and claim.fact_id not in ordered]
@@ -244,7 +305,7 @@ def _cards(material: _Material, max_cards: int, max_bytes: int) -> EvidenceCards
                 evidence_ids.append(f"link:{link.link_id}")
                 protected_episodes.add(link.source_episode_id)
         competing(ids,links,ordered,parts,evidence_ids)
-        add("path",parts,evidence_ids)
+        add("path",parts,evidence_ids,tuple(ordered),tuple(EvidenceStep.model_validate(step, strict=True) for step in steps))
         covered.update(ids)
         protected_episodes.update(material.claims[identifier].source_episode_id for identifier in ids)
     for claim in material.claims.values():
