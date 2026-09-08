@@ -9,6 +9,7 @@ ranking agrees with the reference implementation in every contract test.
 
 from __future__ import annotations
 
+import re
 from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
@@ -245,17 +246,53 @@ class MongoDocumentStore:
         if filter.as_of:
             match["created_at"] = {"$lte": filter.as_of}
         pipeline: list[dict] = [{"$match": match}, {"$addFields": {"score": {"$meta": "textScore"}}}]
-        if filter.tags or filter.where:
+        if (filter.tags or filter.where or filter.conditions is not None
+                or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
             pipeline.append(
                 {"$lookup": {"from": "episodes", "localField": "episode_id", "foreignField": "_id", "as": "episode"}}
             )
             pipeline.append({"$unwind": "$episode"})
+            scope: dict[str, object] = {"episode.space": space}
+            if filter.kind is not None:
+                scope["episode.kind"] = filter.kind
+            if filter.source_prefix is not None:
+                # Mongo regex is case-sensitive; escape every metacharacter.
+                # Even an empty prefix requires an actual string source.
+                prefix = re.escape(filter.source_prefix).replace("\x00", r"\x00")
+                scope["episode.source"] = {"$type": "string", "$regex": "^" + prefix}
+            times: dict[str, str] = {}
+            if filter.since is not None:
+                times["$gte"] = filter.since
+            if filter.until is not None:
+                times["$lte"] = filter.until
+            if times:
+                scope["episode.created_at"] = times
             if filter.tags:
-                pipeline.append({"$match": {"episode.tags": {"$all": list(filter.tags)}}})
+                scope["episode.tags"] = {"$all": list(filter.tags)}
             for key, value in filter.where.items():
-                pipeline.append({"$match": {f"episode.metadata.{key}": value}})
-        pipeline += [{"$sort": {"score": -1, "_id": 1}}, {"$limit": limit}, {"$project": {"score": 1}}]
-        return [(doc["_id"], float(doc["score"])) async for doc in await self.chunks.aggregate(pipeline)]
+                scope[f"episode.metadata.{key}"] = value
+            pipeline.append({"$match": scope})
+        pipeline.append({"$sort": {"score": -1, "_id": 1}})
+        projection = {"score": 1}
+        if filter.conditions is None:
+            pipeline.append({"$limit": limit})
+        else:
+            # Settle parsed numeric/negation semantics exactly before limiting.
+            # Stream only ranked IDs, scores and metadata, not all chunk text.
+            projection["episode.metadata"] = 1
+        pipeline.append({"$project": projection})
+        cursor = await self.chunks.aggregate(pipeline, batchSize=100)
+        found: list[tuple[int, float]] = []
+        try:
+            async for doc in cursor:
+                if filter.conditions is not None and not filter.conditions.matches(doc["episode"].get("metadata", {})):
+                    continue
+                found.append((doc["_id"], float(doc["score"])))
+                if len(found) >= limit:
+                    break
+        finally:
+            await cursor.close()
+        return found
 
     async def recent_episodes(self, space: str, limit: int) -> list[Episode]:
         cursor = self.episodes.find({"space": space}).sort([("created_at", -1), ("_id", -1)]).limit(limit)
