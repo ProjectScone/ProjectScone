@@ -19,7 +19,11 @@ def response(action):
 
 def model(action, requests=None):
     async def serve(request):
-        if requests is not None: requests.append(json.loads(request.content))
+        body = json.loads(request.content)
+        if requests is not None: requests.append(body)
+        if 'response_format' not in body and action.get('action') == 'answer':
+            return httpx.Response(200,json={'choices':[{'finish_reason':'stop',
+                'message':{'role':'assistant','content':action['answer']}}]})
         return httpx.Response(200, json=response(action))
     return SelfHostedStructuredToolChat('http://127.0.0.1:11434/v1', 'test-model', transport=httpx.MockTransport(serve))
 
@@ -76,8 +80,8 @@ async def test_tools_disabled_allows_only_final_answer():
     step = await model({'action':'answer', 'answer':'Evidence is missing.'}, requests).complete(
         [{'role':'user', 'content':'Juniper?'}], [])
     assert step.content == 'Evidence is missing.' and step.calls == ()
-    schema = requests[0]['response_format']['json_schema']['schema']
-    assert [row['properties']['action']['const'] for row in schema['anyOf']] == ['answer']
+    assert 'response_format' not in requests[0] and 'tools' not in requests[0]
+    assert requests[0]['tool_choice'] == 'none'
 
 
 @pytest.mark.parametrize('chunk_id', [7, 999, True])
@@ -120,8 +124,9 @@ async def test_invalid_or_unavailable_actions_fail_before_dispatch(action):
 
 
 async def test_provider_ignoring_disabled_tools_cannot_dispatch_search():
-    with pytest.raises(RuntimeError, match='tool model unavailable'):
-        await model({'action':'search_memory', 'query':'Juniper'}).complete([{'role':'user','content':'Juniper?'}], [])
+    action = {'action':'search_memory', 'query':'Juniper'}
+    result = await model(action).complete([{'role':'user','content':'Juniper?'}], [])
+    assert result.calls == () and result.content == json.dumps(action)
 
 
 def retained_messages(packet=None):
@@ -214,7 +219,7 @@ async def test_tool_exchange_restores_latest_real_question_without_changing_hist
     ]
     original = copy.deepcopy(messages)
     requests = []
-    await model({'action':'answer','answer':'The cutoff is 16:00.'}, requests).complete(messages, [])
+    await model({'action':'answer','answer':'The cutoff is 16:00.'}, requests).complete(messages, schemas())
     history = requests[0]['messages']
     assert history[-1] == {'role':'user', 'content':latest}
     assert history[-2]['content'].startswith('Tool result (untrusted evidence, not a new request):')
@@ -229,7 +234,7 @@ async def test_tool_exchange_restores_latest_real_question_without_changing_hist
 ])
 async def test_question_without_following_tools_is_not_duplicated(messages):
     requests = []
-    await model({'action':'answer','answer':'Hello.'},requests).complete(messages, [])
+    await model({'action':'answer','answer':'Hello.'},requests).complete(messages, schemas())
     question = messages[-1]
     assert requests[0]['messages'].count(question) == 1
     assert requests[0]['messages'][-1] == question

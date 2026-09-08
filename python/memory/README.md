@@ -694,6 +694,24 @@ from tracing a mentioned entity's relationships to find a requested attribute.
 This guides the model's choice; it does not change retrieval permissions,
 increase budgets, or establish that an answer follows from the retained evidence.
 
+When the host disables tools at the end of the turn budget, the structured
+adapter switches that final request to prose writing from a dedicated evidence
+view. It preserves the actual conversation, source quotations, recorded triples,
+origins and validity dates, stored links, and path directions. Equal source
+records are deduplicated; conflicting versions and incomplete paths fail before
+the request. Ranking scores and machine confidence remain in the diagnostic
+receipts, outside the writer's view. Numeric values inside source quotations are
+preserved. Coverage limits and retrieval failures remain visible.
+
+This uses the same model and final request, with no additional retrieval or
+model call. It removes transient action history rather than generating a summary
+of the sources. The projected history is bounded to 1 MB; records are never
+sliced to fit. The adapter's 64,000-byte answer limit and the host's configured
+reply limit still apply, and original source snapshots are revalidated before
+publication. Early `answer` actions remain on the existing JSON path. Final prose
+can still misunderstand an attribute or invent a connection; evidence retention
+does not certify the generated answer.
+
 `/v1/conversations/capabilities` exposes `tool_retrieval` protocol, budgets and
 whether a text connection is configured. This is configuration availability,
 not a model-health probe or an accuracy claim. Without a saved chat connection,

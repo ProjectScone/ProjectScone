@@ -39,7 +39,7 @@ async def test_explicit_thinking_setting_reaches_provider_without_capturing_reas
 
     async def serve(request):
         requests.append(json.loads(request.content))
-        content = json.dumps({'action':'answer','answer':'Hello.'}) if structured else 'Hello.'
+        content = 'Hello.'  # Both protocols use prose once tools are disabled.
         return httpx.Response(200, json=response({'content':content, 'reasoning_content':'PRIVATE_REASONING'}))
 
     provider = SelfHostedStructuredToolChat if structured else SelfHostedToolChat

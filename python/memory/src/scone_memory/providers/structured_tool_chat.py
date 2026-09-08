@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..agents.evidence_loop import ToolCall, ToolStep
 from ..integrations.read_memory import ReadMemoryArgs
 from .tool_chat import SelfHostedToolChat, _decode, _mapping, _step
+from .tool_synthesis import synthesis_history
 
 _PROTOCOL = (
     'Choose exactly one action using the response JSON schema. Put public prose only in the answer field. '
@@ -209,17 +210,30 @@ def _action(raw: bytes, names: set[str], facts: set[int], chunks: set[int]) -> T
     return ToolStep(calls=(ToolCall(id='action-' + uuid4().hex, name=action, arguments=arguments),))
 
 
+def _prose(raw: bytes) -> ToolStep:
+    result = _step(raw, False)
+    if len(result.content.encode()) > 64000:
+        raise ValueError('invalid action answer')
+    return result
+
+
 class SelfHostedStructuredToolChat(SelfHostedToolChat):
     """ToolModel backed by explicit JSON-schema action decisions.
 
     No native tools are sent to the provider. A validated action is translated
-    to one ToolCall for the host's existing scope/retention/budget checks. This
-    protocol guarantees neither action usefulness nor answer correctness.
+    to one ToolCall for the host's existing scope/retention/budget checks. Once
+    tools are disabled, a separate evidence view supports ordinary prose in the
+    same final request. Early JSON answers still use the action protocol. Neither
+    stage guarantees action usefulness or answer correctness.
     """
 
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
         history, facts, chunks = _history(messages)
         names = _names(tools)
+        if not names:
+            return await self._request({'model':self._model, 'messages':synthesis_history(messages),
+                'stream':False, 'temperature':0, 'max_tokens':self._max_tokens, 'tool_choice':'none'},
+                _prose, protocol='structured_answer')
         body: dict[str, object] = {'model':self._model, 'messages':history, 'stream':False, 'temperature':0,
             'max_tokens':self._max_tokens, 'tool_choice':'none',
             'response_format':{'type':'json_schema', 'json_schema':{'name':'memory_action', 'strict':True,

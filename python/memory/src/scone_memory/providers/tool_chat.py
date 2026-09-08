@@ -122,7 +122,7 @@ class SelfHostedToolChat:
         return await self._request(body, lambda raw: _step(raw, bool(tools)))
 
     async def _request(self, body: dict[str, object], parse: Callable[[bytes], ToolStep], *,
-                       protocol: Literal['native', 'structured_action'] = 'native') -> ToolStep:
+                       protocol: Literal['native', 'structured_action', 'structured_answer'] = 'native') -> ToolStep:
         import httpx
 
         if self._think is not None:

@@ -76,7 +76,8 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
                 "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
                 "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py",
                 "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
-                "providers/structured_tool_chat.py", "integrations/scoped_tools.py", "integrations/read_memory.py"}
+                "providers/structured_tool_chat.py", "providers/tool_synthesis.py",
+                "integrations/scoped_tools.py", "integrations/read_memory.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()

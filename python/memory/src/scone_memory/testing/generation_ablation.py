@@ -24,7 +24,8 @@ def _snapshot_code() -> dict[str, object]:
              "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py",
              "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py",
              "agents/evidence_loop.py", "agents/tool_evidence.py", "providers/tool_chat.py",
-             "providers/structured_tool_chat.py", "integrations/scoped_tools.py", "integrations/read_memory.py")
+             "providers/structured_tool_chat.py", "providers/tool_synthesis.py",
+             "integrations/scoped_tools.py", "integrations/read_memory.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
