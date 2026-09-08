@@ -1419,6 +1419,14 @@ python -m scone_memory.testing.answer_review_evaluation \
 The included original synthetic cases are **development** cases covering direct
 facts, invented facts, justified abstention, missed answers, unresolved conflicts
 and incomplete routes. Add separately held-out cases before making quality claims.
+`tests/fixtures/answer_review/contrastive.json` adds 20 synthetic development
+drafts in ten pairs: each pair shares the same question and sources but contains
+one acceptable and one unacceptable answer. It covers negation, unit conversion,
+ownership changes, cross-source routes, causality, quantifiers, inventory scope,
+tables, conflicting observations and instructions embedded in source text.
+Pass that path to `--fixture` to compare reviewers on these cases. Reporting a
+low false-approval rate alone is insufficient: a reviewer that rejects both
+members of every pair accepts none of the correct answers.
 Each call reviews the original draft once; proposed revisions are recorded only
 as a boolean and are not adopted. This isolates reviewer judgment from generation
 and correction quality. Labels, categories and splits never enter model inputs.
@@ -1434,6 +1442,13 @@ The report omits source/draft/revision text and provider error messages. It incl
 a SHA-256 of the normalized fixture, labels, timing and enum diagnostics. Output
 must be a new file. Only the explicitly selected model is called; an optional
 credential comes from `SCONE_ANSWER_REVIEW_API_KEY`.
+Use `--progress` for one flushed JSON event on stderr after each completed case,
+including failures. Events contain case ID, repeat, completed/total counts,
+status, error code and elapsed milliseconds; they omit evidence, drafts, labels,
+revisions, credentials and provider error messages. The final report is still
+written only when the run completes. SDK callers can pass a synchronous
+`on_observation` callback to `evaluate_reviews`; it runs outside the review timer,
+and callback failures propagate instead of becoming model failures.
 Timeouts rely on cooperative asynchronous providers; a late result earns no
 credit even if a provider swallows cancellation. The evaluator cannot forcibly
 interrupt blocking synchronous work inside a custom provider.

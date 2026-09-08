@@ -59,6 +59,23 @@ async def test_abstaining_on_everything_cannot_score_as_correct_rejection():
     assert report.metrics.rejected_unacceptable == 0
 
 
+async def test_observer_failure_propagates_without_running_remaining_reviews():
+    calls = []
+
+    class Reviewer:
+        async def review(self, *args):
+            calls.append(args)
+            return AnswerReviewDecision(status='supported')
+
+    def observe(row):
+        assert row.case_id == 'case-0' and row.status == 'supported'
+        raise RuntimeError('observer failed')
+
+    with pytest.raises(RuntimeError, match='observer failed'):
+        await evaluate_reviews(Reviewer(), fixture([True, False]), on_observation=observe)
+    assert len(calls) == 1
+
+
 async def test_forged_decision_with_unknown_evidence_is_failure():
     class Reviewer:
         async def review(self, *args):
@@ -184,6 +201,21 @@ def test_original_development_fixture_contains_both_labels_and_known_failure_cat
         assert {case.expected_acceptable for case in cases if case.category == category} == {True, False}
 
 
+def test_contrastive_fixture_pairs_change_answers_without_changing_evidence():
+    cases = load_fixture(Path(__file__).parent / 'fixtures' / 'answer_review' / 'contrastive.json').cases
+    pairs = {}
+    for case in cases:
+        assert case.split == 'development'
+        pairs.setdefault((case.category, case.question), []).append(case)
+    assert {'negation', 'units', 'temporal', 'multi_source', 'causality',
+            'quantifiers', 'scope', 'table', 'conflict', 'source_instructions'} <= {case.category for case in cases}
+    for pair in pairs.values():
+        assert len(pair) == 2
+        assert {case.expected_acceptable for case in pair} == {True, False}
+        assert pair[0].sources == pair[1].sources
+        assert pair[0].answer != pair[1].answer
+
+
 def test_cli_reports_real_adapter_results_without_labels_or_credentials_in_output(tmp_path, monkeypatch, capsys):
     from scone_memory.providers import answer_reviewer
     from scone_memory.testing import answer_review_evaluation
@@ -216,3 +248,40 @@ def test_cli_reports_real_adapter_results_without_labels_or_credentials_in_outpu
     with pytest.raises(ValueError, match="output must be a new file"):
         answer_review_evaluation.main()
     assert len(received) == 1
+
+
+def test_cli_progress_reports_completed_cases_without_private_content(tmp_path, monkeypatch, capsys):
+    from scone_memory.providers import answer_reviewer
+    from scone_memory.testing import answer_review_evaluation
+
+    fixture_path, output = tmp_path / 'fixture.json', tmp_path / 'report.json'
+    fixture_path.write_text(fixture([True, False]).model_dump_json())
+
+    class Reviewer:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        async def review(self, question, answer, evidence, evidence_ids):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError('PRIVATE_PROVIDER_DETAIL')
+            return AnswerReviewDecision(status='supported')
+
+    monkeypatch.setattr(answer_reviewer, 'SelfHostedAnswerReviewer', Reviewer)
+    monkeypatch.setenv('SCONE_ANSWER_REVIEW_API_KEY', 'PRIVATE_KEY')
+    monkeypatch.setattr('sys.argv', ['review-eval', '--fixture', str(fixture_path), '--output', str(output),
+        '--model', 'installed', '--endpoint', 'http://127.0.0.1:11434/v1', '--progress'])
+    answer_review_evaluation.main()
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    assert [event['completed'] for event in events] == [1, 2]
+    assert all(event['total'] == 2 for event in events)
+    assert [event['status'] for event in events] == ['supported', 'unavailable']
+    assert events[1]['error'] == 'review_provider_failed'
+    assert all(set(event) == {'event', 'case_id', 'repeat', 'completed', 'total', 'status', 'error', 'elapsed_ms'}
+               for event in events)
+    assert all(event['event'] == 'answer_review_case_completed' for event in events)
+    assert 'PRIVATE' not in captured.out + captured.err + output.read_text()
+    assert 'Mira works on Platform.' not in captured.err
+    assert 'expected_acceptable' not in captured.err
+    assert json.loads(output.read_text())['metrics']['count'] == 2

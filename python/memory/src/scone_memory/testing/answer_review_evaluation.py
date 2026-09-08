@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Callable
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 from statistics import median
+import sys
 import time
 from typing import Literal, Self
 
@@ -181,15 +183,24 @@ async def _observe(reviewer: AnswerReviewer, case: ReviewCase, repeat: int, time
 
 
 async def evaluate_reviews(reviewer: AnswerReviewer, fixture: ReviewFixture, *, repeats: int = 1,
-                           timeout_s: float = 20.0) -> ReviewReport:
+                           timeout_s: float = 20.0,
+                           on_observation: Callable[[ReviewObservation], None] | None = None) -> ReviewReport:
     if type(repeats) is not int or not 1 <= repeats <= 20:
         raise ValueError("repeats must be an integer in 1..20")
     if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or not 1 <= timeout_s <= 180:
         raise ValueError("timeout must be finite in 1..180 seconds")
+    if on_observation is not None and not callable(on_observation):
+        raise ValueError('on_observation must be callable')
     # Revalidate nested instances that callers could construct without validation.
     snapshot = ReviewFixture.model_validate_json(fixture.model_dump_json())
-    rows = tuple([await _observe(reviewer, case, repeat, timeout_s)
-                  for repeat in range(1, repeats + 1) for case in snapshot.cases])
+    completed: list[ReviewObservation] = []
+    for repeat in range(1, repeats + 1):
+        for case in snapshot.cases:
+            row = await _observe(reviewer, case, repeat, timeout_s)
+            completed.append(row)
+            if on_observation is not None:
+                on_observation(row)
+    rows = tuple(completed)
     return ReviewReport(fixture_sha256=hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest(),
         metrics=summarize(rows), observations=rows,
         by_split={split: summarize(tuple(row for row in rows if row.split == split)) for split in sorted({row.split for row in rows})},
@@ -206,6 +217,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument('--quote-mode', choices=('text', 'spans'), default='text',
                         help='Copy draft quotes or select host-owned draft spans')
+    parser.add_argument('--progress', action='store_true', help='Write per-case JSON progress to stderr without source text')
     args = parser.parse_args()
     fixture = load_fixture(args.fixture)
     if args.output.exists() or args.output.resolve() == args.fixture.resolve():
@@ -214,7 +226,17 @@ def main() -> None:
 
     reviewer = SelfHostedAnswerReviewer(args.endpoint, args.model,
         api_key=os.environ.get("SCONE_ANSWER_REVIEW_API_KEY") or None, timeout=args.timeout, quote_mode=args.quote_mode)
-    report = asyncio.run(evaluate_reviews(reviewer, fixture, repeats=args.repeats, timeout_s=args.timeout))
+    completed = 0
+
+    def progress(row: ReviewObservation) -> None:
+        nonlocal completed
+        completed += 1
+        print(json.dumps({'event':'answer_review_case_completed', 'case_id':row.case_id, 'repeat':row.repeat,
+            'completed':completed, 'total':len(fixture.cases) * args.repeats, 'status':row.status,
+            'error':row.error, 'elapsed_ms':row.elapsed_ms}), file=sys.stderr, flush=True)
+
+    report = asyncio.run(evaluate_reviews(reviewer, fixture, repeats=args.repeats, timeout_s=args.timeout,
+                                         on_observation=progress if args.progress else None))
     payload = report.model_dump(mode="json") | {"model": args.model, "timeout_s": args.timeout,
                                               "repeats": args.repeats, "quote_mode": args.quote_mode}
     args.output.parent.mkdir(parents=True, exist_ok=True)
