@@ -154,11 +154,19 @@ class Settings:
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
     conversations_registry: Optional[str] = None
+    answer_review_policy: str = "off"
+    answer_review_url: str | None = None
+    answer_review_model: str | None = None
+    answer_review_api_key: str | None = field(default=None, repr=False)
+    answer_review_timeout: float = 20.0
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        from .conversation_review import validate_review_settings
+
+        validate_review_settings(self)
         if self.blobs not in ("auto", "memory", "file", "s3"):
             raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
         if self.blobs in ("memory", "s3") and self.blob_dir:
@@ -293,6 +301,11 @@ class Settings:
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
             conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
+            answer_review_policy=env.get("SCONE_ANSWER_REVIEW_POLICY", "off"),
+            answer_review_url=env.get("SCONE_ANSWER_REVIEW_URL") or None,
+            answer_review_model=env.get("SCONE_ANSWER_REVIEW_MODEL") or None,
+            answer_review_api_key=env.get("SCONE_ANSWER_REVIEW_API_KEY") or None,
+            answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             log_path=env.get("SCONE_LOG_PATH") or None,
         )

@@ -857,7 +857,33 @@ For an isolated comparison, add `--review-model YOUR_INSTALLED_MODEL
 --review-timeout 20 --review-policy report` to the generation evaluator. Only the
 candidate is reviewed. Reports preserve its public draft, final answer, review
 receipt, and separate draft/review timing; gold answers never enter review.
-This native feature remains opt-in and is not automatically mounted in HTTP.
+For the standard HTTP server, configure the reviewer explicitly alongside
+`SCONE_CONVERSATIONS_JOURNAL` and a text model or persona catalog:
+
+```dotenv
+SCONE_ANSWER_REVIEW_POLICY=require_supported
+SCONE_ANSWER_REVIEW_URL=http://127.0.0.1:11434/v1
+SCONE_ANSWER_REVIEW_MODEL=YOUR_INSTALLED_MODEL
+SCONE_ANSWER_REVIEW_TIMEOUT=20
+# SCONE_ANSWER_REVIEW_API_KEY=  # Only when your reviewer requires authentication.
+```
+
+`off` is the default; `report` and `require_supported` follow the policies above.
+The reviewer has its own endpoint, model and optional credential; it never
+borrows the chat/extraction key. Configuration does not install a model. The
+standard `serve` launcher applies review to custom-model, saved-connection and
+persona **text** sessions. Voice sessions are unchanged. The authenticated
+conversation capabilities endpoint reports `answer_review.configured` and
+`answer_review.policy`, independently of text-model availability.
+
+Reviewed text arrives as one final public delta. Failed required reviews save
+no assistant reply and expose a content-free `answer_review` diagnostic in the
+current process's turn receipt. Lifecycle failure messages survive restart;
+full per-turn review/context receipts are not reconstructed after restart.
+When embedding `create_conversation_app` directly, pass a `ConversationReview`
+from `scone_memory.runtime.conversation_review`; custom runtime factories must
+accept and honor its `answer_reviewer`, `review_policy` and `review_limits`
+keywords. The standard server supplies compatible native factories.
 
 #### Optional extractive answers
 

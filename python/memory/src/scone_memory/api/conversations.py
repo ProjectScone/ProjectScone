@@ -29,6 +29,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
+from ..runtime.conversation_review import ConversationReview
+
 from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..core.models import RecallItem, RecallResult
@@ -95,7 +97,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
                             worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None,
                             local_console_key=None, runtime_available=None, model_connections_available=False,
-                            vision_available=None):
+                            vision_available=None, answer_review=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -116,6 +118,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     creation and then run that persona's native text runtime. A host with a
     catalog and no bare runtime requires the choice; nothing is chosen for it.
     A voice session names a persona and is spoken to over its audio socket.
+    answer_review configures native text sessions only. When supplied, custom
+    runtime factories must accept answer_reviewer, review_policy and review_limits
+    keywords and honor the native TextConversation review contract.
     """
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -133,6 +138,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("scoped_runtime_factory must be callable or None")
     if catalog is not None and not hasattr(catalog, "public"):
         raise ValueError("catalog must be a bound PersonaCatalog or None")
+    if answer_review is not None and not isinstance(answer_review, ConversationReview):
+        raise ValueError("answer_review must be a ConversationReview or None")
     # A catalog's sessions run the native text runtime, which streams.
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
     def bare_runtime_available():
@@ -329,6 +336,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1,
                 "text_configured": bare_runtime_available() or bool(catalog and catalog.personas),
+                "answer_review": {"configured": answer_review is not None,
+                                  "policy": answer_review.policy if answer_review is not None else "off"},
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
@@ -412,11 +421,12 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return inspect(space, sid)
         try:
             fixed = RecallScope.from_mapping(current["recall_scope"])
+            review_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
             if chosen is not None:
-                runtime = chosen.text(engine, space, sid, **fixed.kwargs())
+                runtime = chosen.text(engine, space, sid, **fixed.kwargs(), **review_options)
             else:
-                runtime = (scoped_runtime_factory(space, sid, fixed)
-                           if scoped_runtime_factory is not None else runtime_factory(space, sid))
+                runtime = (scoped_runtime_factory(space, sid, fixed, **review_options)
+                           if scoped_runtime_factory is not None else runtime_factory(space, sid, **review_options))
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
@@ -654,6 +664,20 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             message = ("Conversation timed out before the reply completed. Check Sources to confirm what was saved, "
                        "then check the model connection and timeout before starting a new conversation."
                        if isinstance(error, TimeoutError) else "conversation turn failed; do not automatically retry")
+            from ..realtime.text import _AnswerReviewFailure
+            if isinstance(error, _AnswerReviewFailure):
+                from ..realtime.answer_review import AnswerReviewReceipt
+
+                # Only enum/count/status diagnostics may cross the API boundary.
+                # Never publish the draft, source text or provider exception.
+                try:
+                    review = AnswerReviewReceipt.model_validate_json(json.dumps(error.answer_review))
+                except (TypeError, ValueError):
+                    review = AnswerReviewReceipt(errors=("invalid_review",), source_status="unavailable")
+                receipt["answer_review"] = review.model_dump(mode="json")
+                message = ("Answer review could not verify its retained sources. No assistant reply was saved."
+                           if review.source_status != "retained" else
+                           "Answer review did not support this reply. No assistant reply was saved.")
             receipt.update(status="failed", error=message)
             settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)
