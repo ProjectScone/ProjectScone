@@ -92,7 +92,7 @@ async def test_an_answer_that_was_cut_off_is_never_stored(engine):
     await pipeline.start()
     await pipeline.push(Transcript(text="tell me a long story", final=True))
     await pipeline.push(TextDelta(text="Once upon a time"))
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.push(TextDelta(text=" there was a dragon"))
     await pipeline.push(ReplyCompleted())
     await pipeline.drain()
@@ -122,7 +122,7 @@ async def test_words_from_a_cut_off_turn_do_not_leak_into_the_next_answer(engine
     await pipeline.push(Transcript(text="tell me a long story", final=True))
     await pipeline.push(TextDelta(text="Once upon a time there was a dragon"))
     await pipeline.drain()  # the model really did say it, and the stage heard it
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.push(Transcript(text="what colour is the van?", final=True))
     await pipeline.push(TextDelta(text="It is green."))
     await pipeline.push(ReplyCompleted())

@@ -4,13 +4,14 @@ import type {ApiClient} from '../api';
 import {WorkspaceState} from '../components/WorkspaceState';
 import {IntegrityPanel} from './IntegrityPanel';
 import {ConsolidationPanel} from './ConsolidationPanel';
+import {JobsPanel} from './JobsPanel';
 import {parseProcessingStatus,type ProcessingStatus} from './processing';
 import './processing.css';
 
 const count=(value:number|undefined)=>value===undefined?'Not reported':value.toLocaleString();
 const extractionLabels:Record<string,string>={manual:'Not configured',active:'Enabled',stopped:'Stopped',paused:'Paused'};
 
-export function StatusView({api,integrity,review,documents,maintenance=false,inference=false}:{api:ApiClient;integrity:boolean;review:boolean;documents:boolean;maintenance?:boolean;inference?:boolean}){
+export function StatusView({api,integrity,review,documents,maintenance=false,inference=false,jobs=false}:{api:ApiClient;integrity:boolean;review:boolean;documents:boolean;maintenance?:boolean;inference?:boolean;jobs?:boolean}){
   const [attempt,setAttempt]=useState(0);
   const [processingBusy,setProcessingBusy]=useState(false);
   const [result,setResult]=useState<{api:ApiClient;data?:ProcessingStatus;error?:string;checked?:string}|null>(null);
@@ -40,6 +41,7 @@ export function StatusView({api,integrity,review,documents,maintenance=false,inf
         <p className="processing-note">Reading or refreshing status never runs processing or approval. Explicit processing actions, when supported, require confirmation below. Missing counters remain unknown, not zero.</p>
       </section>
       {(maintenance||inference)&&<ConsolidationPanel api={api} space={s.space} maintenance={maintenance} inference={inference} onBusy={setProcessingBusy}/>}
+      {jobs&&<JobsPanel api={api} space={s.space}/>}
       <section className="processing-storage" aria-labelledby="storage-heading"><h2 id="storage-heading">Storage & search configuration</h2><dl>{([['Stored bytes',count(s.bytes)],['Revision',count(s.revision)],['Extraction model',s.model===null?'Not configured':s.model??'Not reported'],['Embedder',s.embedder??'Not reported'],['Vector index',s.vector_index??'Not reported'],['Document store',s.document_store??'Not reported']] as const).map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section>
       {integrity&&<IntegrityPanel api={api} space={s.space}/>}
     </>}

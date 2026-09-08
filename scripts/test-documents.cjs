@@ -10,18 +10,18 @@ let browser;
 before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
 after(async()=>{await browser?.close();});
 const row=(id,kind='file')=>({episode_id:id,kind,source:kind==='file'?`guide-${id}.md`:null,created_at:'2026-09-06',byte_count:1600,preview:`Source ${id} <script>not markup</script>`,preview_truncated:true});
-async function fixture(t,{supported=true,mobile=false,crowded=false}={}){
+async function fixture(t,{supported=true,mobile=false,crowded=false,sourceRead=true}={}){
   const html=fs.readFileSync(process.env.SCONE_DOCUMENTS_HTML,'utf8').replaceAll('__SCONE_TOKEN__','documents-fixture');
-  const requests=[];const state={fail:false,malformed:false,delay:null,detailDelay:null,empty:false};
+  const requests=[];const state={fail:false,malformed:false,delay:null,detailDelay:null,empty:false,space:'library',sourceStatus:200,wrongId:false};
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://fixture');
-    if(url.pathname==='/memory'){res.setHeader('content-type','text/html');return res.end(html);}
+    if(url.pathname==='/memory'||/^\/memory\/sources\/[^/]+$/.test(url.pathname)){res.setHeader('content-type','text/html');return res.end(html);}
     if(url.pathname==='/favicon.ico'){res.statusCode=204;return res.end();}
     requests.push({url,method:req.method});res.setHeader('content-type','application/json');
     assert.equal(req.headers.authorization,'Bearer documents-fixture');
-    if(url.pathname==='/v1/status')return res.end(JSON.stringify({space:'library',episodes:45}));
+    if(url.pathname==='/v1/status')return res.end(JSON.stringify({space:state.space,episodes:45}));
     if(url.pathname==='/v1/capabilities'){
-      const features={...contract.rust.features};if(!supported)delete features['episodes.list'];
+      const features={...contract.rust.features,'episodes.read':sourceRead};if(!supported)delete features['episodes.list'];
       return res.end(JSON.stringify({...contract.rust,features}));
     }
     if(url.pathname==='/v1/sources'){
@@ -35,7 +35,8 @@ async function fixture(t,{supported=true,mobile=false,crowded=false}={}){
     }
     if(/^\/v1\/episodes\/\d+$/.test(url.pathname)){
       const id=Number(url.pathname.split('/').at(-1));if(id===30&&state.detailDelay)await state.detailDelay;
-      return res.end(JSON.stringify({...row(id),content:state.empty?'':`Full retained text ${id}\n<script>not executable</script>\nEND`,tags:[],metadata:{collection:'manuals'}}));
+      if(state.sourceStatus!==200){res.statusCode=state.sourceStatus;return res.end('{"error":"source inaccessible"}');}
+      return res.end(JSON.stringify({...row(state.wrongId?id+1:id),content:state.empty?'':`Full retained text ${id}\n<script>not executable</script>\nEND`,tags:[],metadata:{collection:'manuals'}}));
     }
     res.statusCode=404;res.end('{}');
   });
@@ -60,6 +61,82 @@ test('Documents browse and inspect retained sources without search or unsupporte
   assert.equal(await page.getByRole('button',{name:'View source images',exact:true}).count(),0);
   assert.equal(requests.some(r=>r.url.pathname==='/v1/recall'||r.method!=='GET'),false);
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'documents-desktop.png'),fullPage:true});
+});
+for(const mobile of [false,true])test(`a source link survives reload with exact original and space, mobile=${mobile}`,async t=>{
+  const {page,requests}=await fixture(t,{mobile});
+  await page.getByRole('button',{name:'Open guide-30.md',exact:true}).click();
+  const link=page.getByRole('link',{name:'Open source page',exact:true});
+  await link.waitFor();assert.equal(await link.getAttribute('href'),'/memory/sources/30?space=library');
+  await link.click();await page.getByRole('heading',{name:'guide-30.md',exact:true}).waitFor();
+  assert.match(page.url(),/\/memory\/sources\/30\?space=library$/);
+  await page.reload();
+  await page.getByRole('region',{name:'Source original'}).getByText('View original Markdown',{exact:true}).click();
+  assert.equal(await page.getByLabel('Original source text').textContent(),'Full retained text 30\n<script>not executable</script>\nEND');
+  assert.equal(await page.locator('a[href="guide-30.md"]').count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(requests.some(r=>r.method!=='GET'),false);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`source-page-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+});
+test('a source bookmark refuses another space before reading an episode',async t=>{
+  const {page,state,requests}=await fixture(t);state.space='another-space';
+  const before=requests.length;await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'This source belongs to a different space',exact:true}).waitFor();
+  assert.equal(requests.slice(before).some(r=>r.url.pathname.startsWith('/v1/episodes/')),false);
+});
+test('reading a known source is independent of listing the library',async t=>{
+  const {page}=await fixture(t,{supported:false});
+  await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'guide-30.md',exact:true}).waitFor();
+});
+test('a host without source-read support is not probed for a source',async t=>{
+  const {page,requests}=await fixture(t,{sourceRead:false});
+  await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'Source pages are unavailable on this server',exact:true}).waitFor();
+  assert.equal(requests.some(r=>r.url.pathname==='/v1/episodes/30'),false);
+});
+test('invalid source addresses cannot silently open a different source',async t=>{
+  const {page,requests}=await fixture(t);
+  for(const route of ['/memory/sources/0?space=library','/memory/sources/30','/memory/sources/30?space=library&space=other','/memory/sources/9007199254740993?space=library']){
+    const before=requests.length;await page.goto(new URL(route,page.url()).href);
+    await page.getByRole('heading',{name:'Invalid source link',exact:true}).waitFor();
+    assert.equal(requests.slice(before).some(r=>r.url.pathname.startsWith('/v1/episodes/')),false);
+  }
+});
+test('source pages distinguish forgotten records and retry failed or mismatched reads',async t=>{
+  const {page,state}=await fixture(t);
+  state.sourceStatus=410;await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'This source was forgotten',exact:true}).waitFor();
+  state.sourceStatus=200;state.wrongId=true;
+  await page.getByRole('button',{name:'Retry source',exact:true}).click();
+  await page.getByRole('heading',{name:'Source could not be verified',exact:true}).waitFor();
+  assert.equal(await page.getByText(/Full retained text 30/).count(),0);
+  state.wrongId=false;await page.getByRole('button',{name:'Retry source',exact:true}).click();
+  await page.getByRole('region',{name:'Source original'}).locator('.source-markdown').getByText(/Full retained text 30/).waitFor();
+});
+test('source link copy reports denial and offers the exact credential-free address',async t=>{
+  const {page}=await fixture(t);
+  await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'guide-30.md',exact:true}).waitFor();
+  await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{value:{writeText:async()=>{throw new DOMException('Denied','NotAllowedError');}}}));
+  await page.getByRole('button',{name:'Copy source link',exact:true}).click();
+  const fallback=page.getByLabel('Source permalink',{exact:true});await fallback.waitFor();
+  assert.equal(await fallback.inputValue(),page.url());
+  assert.equal((await fallback.inputValue()).includes('documents-fixture'),false);
+});
+test('back and forward between source pages cannot revive a pending older original',async t=>{
+  const {page,state}=await fixture(t);
+  await page.goto(new URL('/memory/sources/30?space=library',page.url()).href);
+  await page.getByRole('heading',{name:'guide-30.md',exact:true}).waitFor();
+  // A same-document history entry exercises the router without remounting the app.
+  await page.evaluate(()=>{history.pushState({},'', '/memory/sources/29?space=library');dispatchEvent(new PopStateEvent('popstate'));});
+  await page.getByRole('heading',{name:'guide-29.md',exact:true}).waitFor();
+  let release;state.detailDelay=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const pending=page.waitForRequest(r=>new URL(r.url()).pathname==='/v1/episodes/30');
+  await page.goBack();await pending;
+  const aborted=page.waitForEvent('requestfailed',{predicate:r=>new URL(r.url()).pathname==='/v1/episodes/30'});
+  await page.goForward();await aborted;
+  await page.getByRole('heading',{name:'guide-29.md',exact:true}).waitFor();release();
+  assert.equal(await page.getByText('Full retained text 30',{exact:true}).count(),0);
 });
 test('an empty retained source never replaces the original with an empty-state message',async t=>{
   const {page,state}=await fixture(t);state.empty=true;

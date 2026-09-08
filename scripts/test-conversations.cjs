@@ -116,7 +116,7 @@ for(const voiceState of ['created','running','ended'])test(`saved voice session 
     assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
   }
 });
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
   const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
   if(voiceState){sessions[0].mode='voice';sessions[0].state=voiceState;}
@@ -171,7 +171,10 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
       return res.end(response);
     }
     if(req.url==='/v1/episodes/7')return res.end(JSON.stringify({episode_id:7,content:'Juniper is calibrated with Polaris. <script>not executable</script>',metadata:{},attachments:[]}));
-    if(req.url==='/v1/episodes/2')return res.end(JSON.stringify({episode_id:2,content:'Earlier conversation.',metadata:{role:'user'},attachments:[]}));
+    if(req.url==='/v1/episodes/2'){
+      if(sourceResponse)return sourceResponse(req,res);
+      return res.end(JSON.stringify({episode_id:2,content:'Earlier conversation.',metadata:{role:'user'},attachments:[]}));
+    }
     const match=req.url.match(/^\/v1\/conversations\/([^/]+)(.*)$/);
     if(match){
       const value=sessions.find(s=>s.session_id===match[1]);if(!value){res.statusCode=404;return res.end('{}');}
@@ -206,6 +209,88 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
   return {page,requested,posts:()=>posts,emit,finish,streams,releaseCapabilities,releaseList,recoverService:()=>{capStatus=200;},recoverList:()=>{listFailure=false;},recoverPersonas:()=>{personaStatus=200;},endExternally:()=>{const value=sessions.find(s=>s.session_id==='current');value.state='ended';value.revision++;}};
 }
+
+test('source inspector rejects text returned for a different episode',async t=>{
+  const {page}=await fixture(t,{sourceResponse:(_req,res)=>res.end(JSON.stringify({episode_id:3,content:'Wrong source text',metadata:{},attachments:[]}))});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.getByRole('alert').waitFor({timeout:2000});
+  assert.equal(await evidence.getByText('Wrong source text',{exact:true}).count(),0);
+  assert.equal(await evidence.getByRole('button',{name:'View source images',exact:true}).count(),0);
+});
+
+test('source inspector rejects attachment metadata for a different episode before downloading',async t=>{
+  let reads=0;
+  const {page,requested}=await fixture(t,{sourceResponse:(_req,res)=>res.end(JSON.stringify({episode_id:++reads===1?2:3,content:'Selected source',metadata:{},attachments:[{attachment_id:'a'.repeat(64),media_type:'image/png',bytes:10,filename:'wrong-source.png'}]}))});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  await page.getByRole('button',{name:'View source images',exact:true}).click();
+  const media=page.getByRole('region',{name:'Source images'});
+  await media.getByRole('button',{name:'Retry source images',exact:true}).waitFor({timeout:2000});
+  assert.equal(await media.getByText('wrong-source.png',{exact:true}).count(),0);
+  assert.equal(requested.some(p=>p.startsWith('/v1/attachments/')),false);
+});
+
+for(const status of [404,410,503])test(`source inspector retries a cached ${status} without changing the selection`,async t=>{
+  let reads=0;
+  const {page}=await fixture(t,{sourceResponse:(_req,res)=>{
+    res.setHeader('Cache-Control','private, max-age=3600');
+    if(++reads===1){res.statusCode=status;return res.end('{"error":"private diagnostic"}');}
+    return res.end(JSON.stringify({episode_id:2,content:'Recovered original',metadata:{},attachments:[]}));
+  }});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.getByRole('alert').waitFor();
+  const message=await evidence.getByRole('alert').innerText();
+  assert.match(message,status===410?/forgotten/i:status===404?/unavailable/i:/could not be loaded/i);
+  assert.doesNotMatch(message,/private diagnostic/);
+  await evidence.getByRole('button',{name:'Retry source',exact:true}).click({timeout:2000});
+  await evidence.locator('.source-markdown').getByText('Recovered original',{exact:true}).waitFor({timeout:2000});
+  assert.equal(reads,2);
+});
+
+test('source inspector clears the previous original while another source loads',async t=>{
+  const {page}=await fixture(t);
+  await page.route('**/previous/transcript*',route=>route.fulfill({json:{episodes:[{episode_id:2,content:'First message',metadata:{}},{episode_id:7,content:'Second message',metadata:{}}],has_more:false}}));
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.locator('.source-markdown').getByText('Earlier conversation.',{exact:true}).waitFor();
+  let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  let entered,settled;
+  const intercepted=new Promise(resolve=>{entered=resolve;}),finished=new Promise(resolve=>{settled=resolve;});
+  await page.route('**/v1/episodes/7',async route=>{entered();await gate;try{await route.continue();}catch{}finally{settled();}});
+  await page.getByRole('button',{name:'Inspect message episode 7',exact:true}).click();
+  await intercepted;
+  await evidence.getByRole('status').waitFor();
+  assert.equal(await evidence.locator('.source-markdown').count(),0);
+  assert.equal(await evidence.getByRole('button',{name:'View source images',exact:true}).count(),0);
+  const cancelled=page.waitForEvent('requestfailed',request=>request.url().endsWith('/v1/episodes/7'));
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  await evidence.locator('.source-markdown').getByText('Earlier conversation.',{exact:true}).waitFor();
+  release();await finished;await cancelled;
+  assert.equal(await evidence.locator('.source-markdown').textContent(),'Earlier conversation.');
+});
+
+for(const mobile of [false,true])test(`source inspector retains exact Markdown alongside its formatted original, mobile=${mobile}`,async t=>{
+  const content='**Calibration** uses `Polaris`.\n\n- Keep the source.\n\n![remote](https://example.invalid/image.png)';
+  const {page}=await fixture(t,{mobile,sourceResponse:(_req,res)=>res.end(JSON.stringify({episode_id:2,content,metadata:{},attachments:[]}))});
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  const evidence=page.getByRole('complementary',{name:'Conversation evidence'});
+  await evidence.locator('strong').getByText('Calibration',{exact:true}).waitFor();
+  assert.equal(await evidence.locator('code').textContent(),'Polaris');
+  assert.equal(await evidence.locator('img').count(),0);
+  await evidence.getByText('View original Markdown',{exact:true}).click();
+  assert.equal(await evidence.getByLabel('Original source text').textContent(),content);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR){
+    await page.evaluate(()=>scrollTo(0,0));
+    await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`bound-source-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  }
+});
 
 const personas=[
   {id:'guide',name:'Research guide',reply:{provider:'local',model:'atlas'},transcription:{provider:'deepgram',model:'nova'},speech:{provider:'cartesia',model:'sonic',voice:'calm'},activity:{provider:'silero',model:'vad'},text_ready:true,voice_ready:false},

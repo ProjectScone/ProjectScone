@@ -3,6 +3,7 @@ import type { ApiClient } from '../api';
 import { SourceImages } from '../components/SourceImages';
 import { SourceContent } from '../components/SourceContent';
 import { owners } from './graph-layout';
+import {SourcePageLink} from '../memory/SourcePageLink';
 
 export function SourceInspector({ node, graph, api, select, close }: { node?: EvidenceNode; graph: EvidenceGraph; api: ApiClient; select: (id: string) => void; close?: () => void }) {
   const data = node?.data || {};
@@ -23,6 +24,8 @@ export function SourceInspector({ node, graph, api, select, close }: { node?: Ev
       {content != null ? <div className="source-content">{typeof content === 'string' ? <SourceContent text={content}/> : <pre>{JSON.stringify(content, null, 2)}</pre>}</div> : <p className="intro">This record has no captured text.</p>}
       {data.text_truncated === true && <p className="note">The connector truncated this text. The full original is not present in this event.</p>}
       {episodeId && <SourceImages key={node.id} episodeId={episodeId} api={api} />}
+      {episodeId&&<SourcePageLink api={api} episodeId={episodeId}/>}
+      {sourceId!==null&&<SourcePageLink api={api} episodeId={sourceId}/>}
       <div className="field"><span>Record ID</span><div className="mono">{node.id}</div></div>
       {node.ts && <div className="field"><span>Recorded time</span>{node.ts}</div>}
       {['origin', 'status', 'source', 'provenance', 'valid_from', 'valid_until'].filter(k => data[k] != null).map(k => <div className="field" key={k}><span>{k.replaceAll('_', ' ')}</span>{typeof data[k] === 'object' ? JSON.stringify(data[k]) : String(data[k])}</div>)}

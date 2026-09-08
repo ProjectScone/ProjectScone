@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ApiError } from '../api';
 import { Modal } from '../components/Modal';
 import { WorkspaceState } from '../components/WorkspaceState';
@@ -59,7 +60,7 @@ function confirmedOutcome(id: number, response: Fact, action: 'approve' | 'decli
   throw new Error('Server returned an unrecognized decision receipt');
 }
 
-export function ReviewView({ api, onChanged, relationships=false }: { api: ApiClient; onChanged: () => void; relationships?:boolean }) {
+export function ReviewView({ api, onChanged, relationships=false, statusAvailable=false, claimsAvailable=false }: { api: ApiClient; onChanged: () => void; relationships?:boolean; statusAvailable?:boolean; claimsAvailable?:boolean }) {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [loaded, setLoaded] = useState(false), [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -214,7 +215,13 @@ export function ReviewView({ api, onChanged, relationships=false }: { api: ApiCl
           <details><summary>Decision receipts</summary><ul>{batch.outcomes.map(o => <li key={o.id}>{o.text}</li>)}</ul></details></div>}
         {failure && <p className="review-error" role="alert">{failure}</p>}
         {needsRefresh && <p className="review-reconcile">Decisions are paused until you refresh. A timed-out request may still have reached the server.</p>}
-        {loaded && !matching.length && <WorkspaceState className="review-empty" icon="review" title={facts.length ? 'No matching proposals' : 'Nothing awaits review.'} description={<p>{facts.length ? 'Try another subject or clear your filters.' : 'New claims will appear here for your review. Nothing is approved automatically.'}</p>} actions={facts.length > 0 && <button className="btn small quiet" onClick={clearFilters}>Clear filters</button>}/>}
+        {loaded && !matching.length && <WorkspaceState className="review-empty" icon="review" title={facts.length ? 'No matching proposals' : 'Nothing awaits review.'} description={facts.length ? <p>Try another subject or clear your filters.</p> : <>
+          <p>Review only shows proposed claims. Active and closed claims are listed separately in Memory claims.</p>
+          <p>An empty queue does not mean extraction is complete. When extraction is configured, new proposals appear only when candidates pass its checks.</p>
+        </>} actions={facts.length > 0 ? <button className="btn small quiet" onClick={clearFilters}>Clear filters</button> : <>
+          {statusAvailable && <Link className="btn small quiet" to="#status">Check processing status</Link>}
+          {claimsAvailable && <Link className="btn small quiet" to="#beliefs">View memory claims</Link>}
+        </>}/>}
         {[...groups].map(([name, rows]) => <section className="review-group" key={name}>
           <button className="review-group-heading" aria-expanded={!collapsed.has(name)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(name)) next.delete(name); else next.add(name); return next; })}><span aria-hidden="true">{collapsed.has(name) ? '›' : '⌄'}</span><h2><MarkdownText text={name} inline/></h2><span>{rows.length} on this page</span></button>
           {!collapsed.has(name) && rows.map(f => <article className="proposal" data-fact-id={f.fact_id} key={f.fact_id} aria-busy={saving === f.fact_id}>

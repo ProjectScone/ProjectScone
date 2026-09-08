@@ -31,18 +31,20 @@ async function fixture(t,{mobile=false,clipboardFails=false}={}) {
 for(const mobile of [false,true])test(`concepts can be read and navigated without credentials, mobile=${mobile}`,async t=>{
   const {page,requests,base}=await fixture(t,{mobile});
   await page.goto(base+'/learn');
-  await page.getByRole('heading',{name:'Knowledge that carries forward.',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'What is Scone?',exact:true}).waitFor();
   assert.equal(await page.getByRole('dialog').count(),0,'reading concepts must not open a key dialog');
   const nav=page.getByRole('navigation',{name:'Scone concepts'});
+  if(mobile)await page.getByRole('button',{name:'Browse documentation',exact:true}).click();
   await nav.getByRole('link',{name:'How it works',exact:true}).click();
-  await page.getByRole('heading',{name:'From a source to useful context.',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'How Scone works',exact:true}).waitFor();
   await page.reload();
-  await page.getByRole('heading',{name:'From a source to useful context.',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'How Scone works',exact:true}).waitFor();
+  if(mobile)await page.getByRole('button',{name:'Browse documentation',exact:true}).click();
   await nav.getByRole('link',{name:'Graph memory',exact:true}).click();
-  await page.getByRole('heading',{name:'Connected, not unquestionable.',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'Graph memory',exact:true}).waitFor();
   await page.getByRole('button',{name:'Copy page',exact:true}).click();
   const copied=await page.evaluate(()=>window.copiedText);
-  assert.match(copied,/^# Connected, not unquestionable\./);
+  assert.match(copied,/^# Graph memory/);
   assert.match(copied,/Updates/);
   assert.doesNotMatch(copied,/__SCONE_TOKEN__|Bearer [A-Za-z0-9]{10}/);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
@@ -52,6 +54,53 @@ for(const mobile of [false,true])test(`concepts can be read and navigated withou
   assert.equal(new URL(page.url()).pathname,'/memory');
   assert.equal(new URL(page.url()).hash,'#review');
   await page.getByRole('heading',{name:'Connect to Scone',exact:true}).waitFor();
+});
+
+for(const mobile of [false,true])test(`documentation covers the complete product without a second app sidebar, mobile=${mobile}`,async t=>{
+  const {page,base,requests}=await fixture(t,{mobile});await page.goto(base+'/learn');
+  await page.getByRole('banner',{name:'Scone documentation'}).waitFor();
+  assert.equal(await page.locator('.server-strip,.app-shell .topbar').count(),0);
+  if(mobile)await page.getByRole('button',{name:'Browse documentation',exact:true}).click();
+  const nav=page.getByRole('navigation',{name:'Scone concepts'});
+  for(const name of ['Quickstart','Add sources','Search & retrieval','Review & control','Profiles','Conversations & voice','Spaces & keys','API reference'])assert.equal(await nav.getByRole('link',{name,exact:true}).count(),1);
+  await nav.getByRole('link',{name:'Quickstart',exact:true}).click();
+  await page.getByRole('heading',{name:'Your first memory',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Copy example',exact:true}).click();
+  assert.match(await page.evaluate(()=>window.copiedText),/Bearer \$SCONE_KEY/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.deepEqual(requests.filter(r=>r.url.startsWith('/v1/')),[]);
+  if(process.env.SCONE_SCREENSHOT_DIR){await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`docs-quickstart-${mobile?'mobile':'desktop'}.png`),fullPage:true});}
+});
+for(const mobile of [false,true])test(`documentation reading tools stay in their intended columns, mobile=${mobile}`,async t=>{
+  const {page,base}=await fixture(t,{mobile});await page.goto(base+'/learn');
+  await page.getByRole('heading',{name:'What is Scone?',exact:true}).waitFor();
+  if(mobile){
+    assert.equal(await page.getByRole('navigation',{name:'Scone concepts'}).isVisible(),false,'Closed browse menu does not consume article space');
+    const header=await page.getByRole('banner',{name:'Scone documentation'}).boundingBox();
+    const heading=await page.getByRole('heading',{name:'What is Scone?',exact:true}).boundingBox();
+    assert.ok(heading.y<header.y+header.height+180,'Reading starts near the header, not after a hidden sidebar');
+    await page.getByRole('button',{name:'Browse documentation',exact:true}).click();
+    await page.getByRole('navigation',{name:'Scone concepts'}).getByRole('link',{name:'API reference',exact:true}).click();
+    await page.getByRole('table').first().waitFor();
+    assert.equal(await page.getByRole('navigation',{name:'Scone concepts'}).isVisible(),false);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }else{
+    const main=await page.locator('#main').boundingBox();
+    const outline=await page.getByRole('navigation',{name:'On this page'}).boundingBox();
+    assert.ok(outline.x>=main.x+main.width,'Section navigation belongs beside the article');
+    assert.ok(outline.y<main.y+60,'Section navigation must not fall beneath the full article');
+  }
+});
+test('documentation search finds a workflow and opens its direct route',async t=>{
+  const {page,base,requests}=await fixture(t);await page.goto(base+'/learn');
+  await page.getByRole('searchbox',{name:'Search documentation',exact:true}).fill('transcription');
+  await page.getByRole('navigation',{name:'Documentation search results'}).getByRole('link',{name:/Conversations & voice/}).click();
+  assert.equal(new URL(page.url()).pathname,'/learn/conversations');
+  await page.getByRole('heading',{name:'Conversations that remember',exact:true}).waitFor();
+  await page.reload();await page.getByRole('heading',{name:'Conversations that remember',exact:true}).waitFor();
+  await page.getByRole('searchbox',{name:'Search documentation',exact:true}).fill('unfindablefixtureterm');
+  await page.getByText('No matching documentation. Try a feature or API name.',{exact:true}).waitFor();
+  assert.deepEqual(requests.filter(r=>r.url.startsWith('/v1/')),[]);
 });
 
 test('quickstart copy preserves shell placeholders without executing the example',async t=>{
@@ -96,7 +145,7 @@ test('keyboard navigation and section links keep the selected concept and readin
   await page.goto(base+'/learn');
   const link=page.getByRole('navigation',{name:'Scone concepts'}).getByRole('link',{name:'Graph memory',exact:true});
   await link.focus();await page.keyboard.press('Enter');
-  const title=page.getByRole('heading',{name:'Connected, not unquestionable.',exact:true});
+  const title=page.getByRole('heading',{name:'Graph memory',exact:true});
   await title.waitFor();
   assert.equal(await title.evaluate(element=>element===document.activeElement),true);
   await page.getByRole('navigation',{name:'On this page'}).getByRole('link',{name:'Derivations: an inference names its premises',exact:true}).click();
@@ -104,7 +153,7 @@ test('keyboard navigation and section links keep the selected concept and readin
   const section=page.locator('#derivations');
   const belowHeader=()=>page.evaluate(()=>{
     const section=document.getElementById('derivations')?.getBoundingClientRect();
-    const header=document.querySelector('.server-strip')?.getBoundingClientRect();
+    const header=document.querySelector('.docs-header')?.getBoundingClientRect();
     return Boolean(section&&header&&section.top>=header.bottom&&section.top<header.bottom+48);
   });
   assert.equal(await belowHeader(),true,'Section anchors sit just below the sticky navigation, not behind it.');
@@ -112,7 +161,7 @@ test('keyboard navigation and section links keep the selected concept and readin
   await section.waitFor();
   await page.waitForFunction(()=>{
     const section=document.getElementById('derivations')?.getBoundingClientRect();
-    const header=document.querySelector('.server-strip')?.getBoundingClientRect();
+    const header=document.querySelector('.docs-header')?.getBoundingClientRect();
     return section&&header&&section.top>=header.bottom&&section.top<header.bottom+48;
   });
   assert.equal(new URL(page.url()).pathname,'/learn/graph-memory');

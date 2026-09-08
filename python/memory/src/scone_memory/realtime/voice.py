@@ -20,8 +20,9 @@ from ..retrieval.recall_scope import RecallScope
 from .context import MemoryContext
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .audio import (
-    AudioChunk, AudioTransport, SpeechRecognizer, VoiceModel, SpeechSynthesizer,
-    SpeechStarted, Transcript, TextDelta, ReplyCompleted, SpeechActivityDetector,
+    AudioTransport, SpeechRecognizer, VoiceModel, SpeechSynthesizer,
+    SpeechStarted, TextDelta, SpeechActivityDetector,
+    Reply, check_audio, is_question, sentences,
 )
 
 _OWNER: ContextVar[object | None] = ContextVar("scone_voice_owner", default=None)
@@ -189,10 +190,6 @@ class VoiceSession:
             finally:
                 _OWNER.reset(token)
 
-    def _check_audio(self, chunk):
-        if not isinstance(chunk, AudioChunk) or len(chunk.pcm) > self._max_audio:
-            raise ValueError("invalid or oversized audio chunk")
-
     async def _conversation(self, transport, stt, model, tts, activity=None):
         queue = asyncio.Queue(self._queue_size)
         control = asyncio.Lock()
@@ -202,7 +199,7 @@ class VoiceSession:
             speaking = False
             async with aclosing(transport.receive()) as incoming:
                 async for chunk in incoming:
-                    self._check_audio(chunk)
+                    check_audio(chunk, self._max_audio)
                     if activity is not None:
                         detected = await activity.detect(chunk)
                         if type(detected) is not bool:
@@ -232,15 +229,7 @@ class VoiceSession:
                     async with control:
                         if isinstance(event, SpeechStarted):
                             await self._interrupt(transport)
-                        elif isinstance(event, Transcript):
-                            if type(event.final) is not bool or not isinstance(event.text, str):
-                                raise ValueError("invalid transcript event")
-                            if len(event.text.encode("utf-8")) > 32000:
-                                raise ValueError("transcript exceeds byte limit")
-                            if not event.final or not event.text.strip():
-                                continue
-                            if not isinstance(event.speaker, str) or not 1 <= len(event.speaker) <= 128:
-                                raise ValueError("invalid transcript speaker")
+                        elif is_question(event):
                             await self._interrupt(transport)
                             messages = [*self._history, {"role": "user", "content": event.text}]
                             if _bytes(messages) > self._max_history:
@@ -250,8 +239,6 @@ class VoiceSession:
                             self._history = messages
                             self._output_turn = turn_id
                             self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation))
-                        else:
-                            raise ValueError("unsupported speech event")
 
         feeder, listener = asyncio.create_task(feed()), asyncio.create_task(listen())
         try:
@@ -328,7 +315,7 @@ class VoiceSession:
             async with aclosing(tts.synthesize(text)) as output:
                 async for chunk in output:
                     current()
-                    self._check_audio(chunk)
+                    check_audio(chunk, self._max_audio)
                     await transport.send(chunk, turn_id)
                     emitted = True
                     current()
@@ -338,32 +325,19 @@ class VoiceSession:
         async with asyncio.timeout(self._turn_timeout):
             messages = await self._context()
             current()
-            parts, pending, completed, size = [], "", False, 0
+            reply = Reply(self._max_reply)
+            parts, pending = [], ""
             async with aclosing(model.respond(messages)) as response:
                 async for event in response:
                     current()
-                    if completed:
-                        raise RuntimeError("model emitted data after completion")
+                    reply.accept(event)
                     if isinstance(event, TextDelta):
-                        if not isinstance(event.text, str) or not event.text:
-                            raise ValueError("invalid public text delta")
-                        size += len(event.text.encode("utf-8"))
-                        if size > self._max_reply:
-                            raise RuntimeError("voice reply byte limit reached")
                         parts.append(event.text)
                         pending += event.text
-                        while pending:
-                            sentence = re.search(r"[.!?](?:\s|$)", pending)
-                            end = sentence.end() if sentence else 240 if len(pending) >= 240 else 0
-                            if not end:
-                                break
-                            await speak(pending[:end])
-                            pending = pending[end:]
-                    elif isinstance(event, ReplyCompleted):
-                        completed = True
-                    else:
-                        raise ValueError("unsupported model event; only public text and completion are allowed")
-            if not completed or not "".join(parts).strip():
+                        finished, pending = sentences(pending)
+                        for sentence in finished:
+                            await speak(sentence)
+            if not reply.done or not "".join(parts).strip():
                 raise RuntimeError("model ended without explicit nonempty reply completion")
             if pending.strip():
                 await speak(pending)

@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from scone_memory.pipeline import DROPPED, HANDLED, Delivery, Failed, Pipeline, Stage, Started, Stopped
+from scone_memory.pipeline import (DROPPED, HANDLED, Delivery, Failed, Interrupted, Pipeline,
+                                   Stage, Started, Stopped)
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ async def test_an_interruption_drops_the_cut_off_turn_and_the_next_one_runs():
     await pipeline.push(Word("first"))
     await pipeline.push(Word("second"))
     await asyncio.sleep(0.01)
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.push(Word("third"))
     await pipeline.drain()
     assert slow.started == ["first", "third"], "the queued frame of the cut-off turn is never started"
@@ -249,7 +250,7 @@ async def test_the_observer_can_tell_finished_work_from_work_that_was_cut_off():
     await pipeline.push(Word("kept"))
     await pipeline.push(Word("cut"))
     await asyncio.sleep(0.005)
-    pipeline.interrupt()
+    await pipeline.interrupt()
     await pipeline.drain()
     await pipeline.stop()
 
@@ -276,3 +277,238 @@ async def test_two_stages_that_both_raise_on_bad_news_do_not_ping_pong():
     await pipeline.drain()
     assert pipeline.failures == 6, "the word costs one raise each, and there it ends"
     await pipeline.stop()
+
+
+async def test_a_full_buffered_stage_makes_the_sender_wait_rather_than_grow():
+    """A stage that says how much backlog it will hold pushes back on
+    whoever feeds it. Without that, a fast source outruns a slow stage
+    and the queue is the only thing that grows."""
+    release = asyncio.Event()
+    taken: list[str] = []
+
+    class Slow:
+        buffered = True
+        capacity = 1
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            taken.append(frame.text)
+            await release.wait()
+
+    pipeline = Pipeline([Slow()])
+    await pipeline.start()
+    await pipeline.push(Word("a"))
+    for _ in range(100):
+        if taken:
+            break
+        await asyncio.sleep(0)
+    assert taken == ["a"], "the stage is busy with the first frame"
+    await pipeline.push(Word("b"))
+    third = asyncio.create_task(pipeline.push(Word("c")))
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not third.done(), "one frame is waiting, so the next sender waits too"
+    release.set()
+    await asyncio.wait_for(third, 1)
+    await pipeline.drain()
+    assert taken == ["a", "b", "c"], "everything arrives, in order, once there is room"
+    await pipeline.stop()
+
+
+async def test_a_backlog_size_that_is_not_a_count_of_frames_is_refused():
+    """A capacity that cannot mean a number of frames is a mistake worth
+    saying out loud, not a queue silently left unbounded."""
+
+    class Odd:
+        buffered = True
+        capacity = -1
+
+    with pytest.raises(ValueError, match="whole number of frames"):
+        await Pipeline([Odd()]).start()
+
+
+async def test_a_stage_the_run_cannot_do_without_ends_it_when_it_raises():
+    """Most faults are worth reporting and carrying on from. A stage the
+    run is built around is not: when the ear in a call stops working the
+    call is over, and whoever started it has to hear why."""
+    tail = Collect()
+
+    class Ear:
+        essential = True
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            if frame.text == "bad":
+                raise RuntimeError("the recognizer went away")
+            await emit(frame)
+
+    pipeline = Pipeline([Ear(), tail])
+    await pipeline.start()
+    await pipeline.push(Word("good"))
+    await pipeline.push(Word("bad"))
+    with pytest.raises(RuntimeError, match="recognizer went away"):
+        await asyncio.wait_for(pipeline.wait(), 1)
+    assert any(isinstance(f, Failed) for f in tail.seen), "the stages after it still hear what happened"
+    await pipeline.push(Word("later"))
+    assert [f.text for f in tail.seen if isinstance(f, Word)] == ["good"], "nothing more flows once the run is over"
+    await pipeline.stop()
+
+
+async def test_a_run_that_ends_on_its_own_terms_has_nothing_to_raise():
+    """Waiting on a run that finished cleanly returns rather than
+    inventing a failure, so one place can wait for either ending."""
+    pipeline = Pipeline([Collect()])
+    await pipeline.start()
+    await pipeline.stop()
+    await asyncio.wait_for(pipeline.wait(), 1)
+    assert pipeline.error is None
+
+
+async def test_a_stage_with_its_own_frames_sends_them_on_the_turn_of_the_moment():
+    """A stage reading a socket or a microphone has frames to send when
+    nothing has been handed to it. It gets a way in at its own position,
+    and what it sends belongs to the turn current at the moment it sends,
+    not to whatever turn was running when the run began."""
+    tail = Collect()
+
+    class Ear:
+        def __init__(self):
+            self.feed = None
+
+        async def attach(self, feed):
+            self.feed = feed
+
+        async def handle(self, frame, emit):
+            pass
+
+    ear = Ear()
+    pipeline = Pipeline([ear, tail])
+    await pipeline.start()
+    await ear.feed(Word("one"))
+    await pipeline.interrupt()
+    await ear.feed(Word("two"))
+    assert [f.text for f in tail.seen if isinstance(f, Word)] == ["one", "two"]
+    assert pipeline.dropped == 0, "nothing was late; the second frame belongs to the second turn"
+    await pipeline.stop()
+
+
+async def test_an_interruption_tells_every_stage_which_turn_was_lost():
+    """A stage holding work for the turn that was cut off, audio queued
+    to play or a request in flight, has to be told, and told which turn,
+    so it throws that away and not the work that replaced it."""
+    first, tail = Collect(), Collect()
+    pipeline = Pipeline([first, tail])
+    await pipeline.start()
+    await pipeline.push(Word("first"))
+    assert await pipeline.interrupt() == 2, "the turn to come is the one returned"
+    for stage in (first, tail):
+        assert [f.turn for f in stage.seen if isinstance(f, Interrupted)] == [1], \
+            "every stage is told once, and the turn named is the one cut off"
+    await pipeline.stop()
+
+
+async def test_a_stage_can_cut_off_the_turn_it_is_in_the_middle_of():
+    """The stage nearest the person is the one that knows the person has
+    started speaking again, so it has to be able to say the turn is over
+    without asking whoever started the run."""
+    tail = Collect()
+
+    class Barge:
+        async def handle(self, frame, emit):
+            if isinstance(frame, Word) and frame.text == "stop":
+                await emit.interrupt()
+                await emit(Word("late"))
+
+    pipeline = Pipeline([Barge(), tail])
+    await pipeline.start()
+    await pipeline.push(Word("stop"))
+    assert not [f for f in tail.seen if isinstance(f, Word)], \
+        "what it sends for the turn it has just cut off does not arrive"
+    assert any(isinstance(f, Interrupted) for f in tail.seen)
+    await pipeline.stop()
+
+
+async def test_a_stage_whose_own_work_fails_says_so_like_any_other_fault():
+    """A stage with a task of its own can die between deliveries, where
+    raising reaches nobody. It says so on the handle it sends on, and the
+    run treats that exactly as if it had raised on a frame."""
+    tail = Collect()
+
+    class Reader:
+        essential = True
+
+        def __init__(self):
+            self.feed = None
+
+        async def attach(self, feed):
+            self.feed = feed
+
+        async def handle(self, frame, emit):
+            pass
+
+    reader = Reader()
+    pipeline = Pipeline([reader, tail])
+    await pipeline.start()
+    await reader.feed.fail(OSError("the socket went away"))
+    assert pipeline.failures == 1
+    assert any(isinstance(f, Failed) and "socket went away" in f.error for f in tail.seen), \
+        "the other stages hear it, as they would any fault"
+    with pytest.raises(OSError, match="socket went away"):
+        await asyncio.wait_for(pipeline.wait(), 1)
+    await pipeline.stop()
+
+
+async def test_a_stage_can_tell_that_the_turn_it_is_working_on_is_over():
+    """Work already doomed should stop rather than finish into a drop. A
+    long answer holds a buffered stage's only task, and the turn that
+    replaced it waits behind work nobody will ever hear."""
+    spoken: list[str] = []
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    class Long:
+        buffered = True
+
+        async def handle(self, frame, emit):
+            if not isinstance(frame, Word):
+                return
+            for part in frame.text:
+                if emit.cut_off:
+                    return
+                spoken.append(part)
+                started.set()
+                await gate.wait()
+
+    pipeline = Pipeline([Long()])
+    await pipeline.start()
+    await pipeline.push(Word("abc"))
+    await asyncio.wait_for(started.wait(), 1)
+    await pipeline.interrupt()
+    gate.set()
+    await pipeline.drain()
+    assert spoken == ["a"], "it stopped when the turn ended instead of finishing into a drop"
+    await pipeline.stop()
+
+
+async def test_stopping_does_not_wait_forever_on_a_stage_that_will_not_finish():
+    """A provider wedged in its own cleanup must not be able to hold the
+    run open. Stopping gives every stage a moment to finish what it has,
+    and then takes the task back, so whoever is shutting down is not
+    stuck behind the one thing that has gone wrong."""
+    reached = asyncio.Event()
+
+    class Wedged:
+        buffered = True
+
+        async def handle(self, frame, emit):
+            if isinstance(frame, Word):
+                reached.set()
+                await asyncio.Event().wait()
+
+    pipeline = Pipeline([Wedged()])
+    await pipeline.start()
+    await pipeline.push(Word("hello"))
+    await asyncio.wait_for(reached.wait(), 1)
+    await asyncio.wait_for(pipeline.stop(grace=0.05), 1)
+    assert pipeline.ended.is_set(), "the run is over even though the stage never let go"

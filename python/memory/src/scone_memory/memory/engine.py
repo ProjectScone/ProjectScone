@@ -14,6 +14,7 @@ import hashlib
 import math
 import re
 import time
+from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -35,6 +36,8 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
+    JobItem,
+    IngestJob,
     SpaceReceipt,
     Tombstone,
     DEPENDENCY_KINDS,
@@ -55,6 +58,7 @@ from ..core.ports import (
     NewEvent,
     NewFact,
     NewFactLink,
+    NewJob,
     NewTombstone,
     SourcePage,
     TextFilter,
@@ -73,6 +77,15 @@ MAX_LIMIT = 50
 MAX_SOURCE = 1_000
 #: How many candidates each lane contributes before fusion.
 LANE_DEPTH = 4
+#: How much wider each lane looks when the store cannot take the filter
+#: itself. Bounded: post-filtering cannot be made exact by widening, so
+#: this buys a reasonable corpus rather than pretending to buy every one.
+UNFILTERED_DEPTH = 25
+#: Rows read at a time when walking the inventory for matches, and how
+#: many such reads one page may cost. A filter matching nothing would
+#: otherwise read a whole space to prove a negative.
+SOURCE_WALK_PAGE = 200
+SOURCE_WALK_READS = 25
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
 
@@ -790,6 +803,133 @@ class MemoryEngine:
         })
         return receipt
 
+    # -- ingest jobs ---------------------------------------------------------
+
+    def _able(self, *methods: str) -> bool:
+        return all(callable(getattr(self.documents, name, None)) for name in methods)
+
+    #: What a store must implement to record a batch, and to read one back.
+    #: They are separate because a store may do one and not the other, and
+    #: advertising the wrong one turns a refusal into a server error.
+    RECORDS_JOBS = ("create_job", "update_job")
+    READS_JOBS = ("get_job", "list_jobs")
+
+    def _keeps_jobs(self) -> None:
+        """Recording jobs is a store's choice: one that cannot keep them
+        says so rather than pretending a batch was never tracked."""
+        if not self._able(*self.RECORDS_JOBS):
+            raise InvalidInput("this document store does not record ingest jobs")
+
+    def _reads_jobs(self) -> None:
+        """Reading a job back is a separate choice from recording one."""
+        if not self._able(*self.READS_JOBS):
+            raise InvalidInput("this document store does not read ingest jobs")
+
+    async def ingest_batch(self, space: str, records: Iterable[Record], *,
+                           request_id: Optional[str] = None) -> "IngestJob":
+        """Ingest a batch and keep the receipt of what it became.
+
+        Two receipts per record, never one: ``searchable_at`` is set here,
+        because chunks and vectors land with the batch, and
+        ``consolidated_at`` only when a model has read claims out of the
+        record, which happens later and may never happen. A request id
+        makes a retry the same job rather than a second one."""
+        check_space(space)
+        await self._living(space)
+        self._keeps_jobs()
+        if request_id:
+            already = await self.documents.job_by_request(space, request_id)
+            if already is not None:
+                return already
+        added = await self.remember_many(space, list(records))
+        return await self.record_job(space, added, request_id=request_id)
+
+    async def record_job(self, space: str, added: Sequence[Added], *,
+                         request_id: Optional[str] = None) -> "IngestJob":
+        """Keep the receipt for records that have just landed. Separate
+        from ingesting them, because a caller may have written the batch
+        its own way and still owes the person a receipt."""
+        check_space(space)
+        self._keeps_jobs()
+        when = self.clock()
+        items = tuple(
+            JobItem(index=index, episode_id=one.episode_id, outcome=one.outcome,
+                    state="searchable", searchable_at=when)
+            for index, one in enumerate(added)
+        )
+        job = await self.documents.create_job(NewJob(
+            job_id=uuid4().hex, space=space, created_at=when, request_id=request_id, items=items))
+        await self._emit(space, "ingest_job", {
+            "job_id": job.job_id, "records": len(items), "request_id": request_id,
+        })
+        return job
+
+    async def job_for_request(self, space: str, request_id: str) -> Optional["IngestJob"]:
+        """The job this request already made, if it made one."""
+        check_space(space)
+        if not self._able("job_by_request"):
+            return None
+        return await self.documents.job_by_request(space, request_id)
+
+    async def job(self, space: str, job_id: str) -> "IngestJob":
+        """One batch's receipt."""
+        check_space(space)
+        self._reads_jobs()
+        found = await self.documents.get_job(space, job_id)
+        if found is None:
+            raise NotFound(f"job {job_id!r} in {space!r}")
+        return found
+
+    #: The most batches one page may carry.
+    MAX_JOBS_PAGE = 100
+
+    async def jobs(self, space: str, limit: int = 20, before: Optional[str] = None) -> list["IngestJob"]:
+        """Recent batches, newest first. ``before`` continues from the last
+        job of a previous page; a cursor naming no job is refused rather
+        than quietly returning the newest page again."""
+        check_space(space)
+        self._reads_jobs()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.MAX_JOBS_PAGE:
+            raise InvalidInput(f"limit must be an integer from 1 through {self.MAX_JOBS_PAGE}")
+        if before is not None and await self.documents.get_job(space, before) is None:
+            raise NotFound(f"job {before!r} in {space!r}")
+        return await self.documents.list_jobs(space, limit, before)
+
+    async def cancel_job(self, space: str, job_id: str) -> "IngestJob":
+        """Stop expecting more of this batch. What has already been read
+        stays read and what was searchable stays searchable: cancelling a
+        job abandons the work still to come, it does not delete memory."""
+        job = await self.job(space, job_id)
+        if job.cancelled_at:
+            raise InvalidInput(f"job {job_id!r} was already cancelled at {job.cancelled_at}")
+        when = self.clock()
+        stopped = job.model_copy(update={
+            "cancelled_at": when,
+            "items": [item if item.consolidated_at else item.model_copy(update={"state": "cancelled"})
+                      for item in job.items],
+        })
+        await self.documents.update_job(stopped)
+        await self._emit(space, "ingest_job", {"job_id": job_id, "cancelled": len(stopped.items)})
+        return stopped
+
+    async def note_failed(self, space: str, episode_id: int, error: str) -> int:
+        """Record that reading this record failed, against the record it
+        failed on rather than against the batch. The attempt is counted,
+        so a retry that works still shows it took two goes."""
+        check_space(space)
+        if not callable(getattr(self.documents, "mark_failed", None)):
+            return 0
+        return await self.documents.mark_failed(space, episode_id, error[:500], self.clock())
+
+    async def note_consolidated(self, space: str, episode_ids: Sequence[int]) -> int:
+        """Record that these episodes have been read into claims. Marking
+        the same episode twice moves nothing, so a re-run of the extractor
+        does not rewrite a receipt that already stands."""
+        check_space(space)
+        if not callable(getattr(self.documents, "mark_consolidated", None)):
+            return 0
+        return await self.documents.mark_consolidated(space, list(episode_ids), self.clock())
+
     # -- a whole space ------------------------------------------------------
 
     async def _living(self, space: str) -> None:
@@ -874,6 +1014,7 @@ class MemoryEngine:
         source_prefix: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
+        conditions: Mapping[str, object] | None = None,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -902,8 +1043,19 @@ class MemoryEngine:
             raise InvalidInput(f"source_prefix must be at most {MAX_SOURCE} chars")
         since_at = normalise_time(since) if since else None
         until_at = normalise_time(until) if until else None
-        narrowing = kind is not None or source_prefix is not None or since_at is not None or until_at is not None
-        depth = limit * LANE_DEPTH
+        # Refused before any lane runs: a filter that cannot mean anything
+        # must not come back as an answer drawn from everything. Imported
+        # here because filters read this module's rule for a metadata key.
+        from ..retrieval.filters import parse_filter
+
+        narrow_by = parse_filter(conditions) if conditions is not None else None
+        # A store that cannot take the filter returns its best few, all of
+        # which the filter may then reject, and the search comes back
+        # empty while the memory that answers it sits outside the window.
+        in_store = narrow_by is None or bool(getattr(self.documents, "narrows_metadata", False))
+        narrowing = (kind is not None or source_prefix is not None or since_at is not None
+                     or until_at is not None or narrow_by is not None)
+        depth = limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
         degraded: list[str] = []
         started = time.perf_counter()
         latency: dict[str, float] = {}
@@ -916,7 +1068,9 @@ class MemoryEngine:
             "embedder": self.embedder.id,
             "contextual_embeddings": self.contextual_embeddings,
             "similarity_floor": self.similarity_floor,
-            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at},
+            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
+                       "conditions": dict(conditions) if conditions is not None else None,
+                       "conditions_in_store": None if narrow_by is None else in_store},
         }
 
         vector_lane: list[tuple[int, float]] = []
@@ -934,7 +1088,8 @@ class MemoryEngine:
         try:
             t0 = time.perf_counter()
             text_lane = await self.documents.search_text(
-                space, query, depth, TextFilter(as_of=boundary, tags=clean_tags, where=clean_where)
+                space, query, depth,
+                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by),
             )
             latency["text"] = _ms(t0)
         except Exception as e:  # noqa: BLE001
@@ -985,7 +1140,7 @@ class MemoryEngine:
             items = [
                 item for item in items
                 if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
-                and _fits(episode, kind, source_prefix, since_at, until_at)
+                and _fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
             ]
         items = items[:limit]
         if self.demote_restated:
@@ -1222,7 +1377,13 @@ class MemoryEngine:
             if f.source_episode_id is not None and f"episode:{f.source_episode_id}" not in g.nodes))
         for eid in sorted(elsewhere)[:limit]:
             ep = await self.documents.get_episode(space, eid)
-            if ep is not None:
+            if ep is None:
+                # The claim names a source that is gone. That is not a
+                # budget: it is evidence that was forgotten, and saying so
+                # separately is the difference between "out of view" and
+                # "no longer exists".
+                g.provenance_missing += 1
+            else:
                 draw_episode(ep)
         g.provenance_omitted = max(0, len(elsewhere) - limit)
         for f in wanted:
@@ -1239,6 +1400,17 @@ class MemoryEngine:
                 if link.link_id not in drawn and ends[0] in g.nodes and ends[1] in g.nodes:
                     drawn.add(link.link_id)
                     g.link(ends[0], ends[1], link.kind, source_episode_id=link.source_episode_id)
+        if not focused:
+            captured = {f"episode:{e.payload.get('episode_id')}" for e in agent_events}
+            missing_capture = {n.id for n in g.nodes.values() if n.kind == "episode"} - captured
+            if missing_capture:
+                # Hydrating an old source without its capture event leaves a
+                # real session path broken. Match stored IDs only, within the
+                # same space/time scope, and keep this second read bounded.
+                captures = await self.events.query(space, kind="agent", since=since, limit=2000)
+                matching = [e for e in captures if f"episode:{e.payload.get('episode_id')}" in missing_capture]
+                agent_events.extend(matching[:limit])
+                g.truncated = g.truncated or len(captures) >= 2000 or len(matching) > limit
         for e in agent_events:
             G.add_agent_event(g, e)
         for e in recall_events:
@@ -1817,11 +1989,20 @@ class MemoryEngine:
                 if f.source_episode_id is not None}
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
-                          limit: int = 25, kind: Optional[str] = None) -> SourcePage:
+                          limit: int = 25, kind: Optional[str] = None,
+                          conditions: Mapping[str, object] | None = None) -> SourcePage:
         """Browse retained sources by descending ID, not relevance or source date.
 
         Newer inserts are found by restarting the walk. Deleting the boundary
         record does not invalidate the next page. This is not a frozen snapshot.
+
+        With ``conditions``, the walk keeps reading until the page is full,
+        rather than filtering one page and handing back what survives. The
+        latter turns a page of twenty-five into a page of one and makes the
+        page size mean nothing. The walk is bounded, because a filter that
+        matches nothing would otherwise read a whole space to prove it, and
+        reaching that bound is reported as more to come rather than as the
+        end.
         """
         check_space(space)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -1833,9 +2014,37 @@ class MemoryEngine:
         page = getattr(self.documents, "page_episodes", None)
         if not callable(page):
             raise InvalidInput("this document store does not implement source inventory")
-        rows = await page(space, before, limit + 1, kind)
-        more = len(rows) > limit
-        return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        if conditions is None:
+            rows = await page(space, before, limit + 1, kind)
+            more = len(rows) > limit
+            return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+
+        from ..retrieval.filters import parse_filter
+
+        narrow = parse_filter(conditions)
+        kept: list[Episode] = []
+        cursor, reads, ended = before, 0, False
+        while len(kept) < limit and reads < SOURCE_WALK_READS:
+            batch = await page(space, cursor, SOURCE_WALK_PAGE, kind)
+            reads += 1
+            filled = False
+            for episode in batch:
+                cursor = episode.episode_id
+                if narrow.matches(episode.metadata):
+                    kept.append(episode)
+                    if len(kept) == limit:
+                        filled = True
+                        break
+            if filled:
+                # Stopped on a full page, not on the end of the store: the
+                # rest of this batch has not been looked at yet.
+                break
+            if len(batch) < SOURCE_WALK_PAGE:
+                # The store had nothing more to give, so this is the end of
+                # the space rather than the end of what was read.
+                ended = True
+                break
+        return SourcePage(kept, not ended, None if ended else cursor)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest
@@ -2125,10 +2334,19 @@ def normalise_time(value: str) -> str:
         raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
 
 
-def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str], until: Optional[str]) -> bool:
+def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str],
+          until: Optional[str], conditions=None) -> bool:
     """The narrowing rule, shared with the Rust engine: kind equal, source
     starting with the prefix as literal text (an episode without a source
-    matches no prefix), created_at inside the inclusive bounds."""
+    matches no prefix), created_at inside the inclusive bounds.
+
+    Metadata conditions are checked here as well as pushed into the store,
+    and that is not redundant. The push-down keeps the store from spending
+    its window on memories the caller excluded; this is what makes the
+    answer exact whatever store it came from, including one whose filter
+    language cannot express the question."""
+    if conditions is not None and not conditions.matches(episode.metadata):
+        return False
     if kind is not None and episode.kind != kind:
         return False
     if source_prefix is not None and (episode.source is None or not episode.source.startswith(source_prefix)):

@@ -14,6 +14,7 @@
       "scopes.read": false,
       "status.read": true,
       "episodes.list": true,
+      "episodes.read": true,
       "profile.read": true
     }
   },
@@ -22,6 +23,7 @@
     "implementation": "python",
     "features": {
       "recall": true,
+      "recall.conditions": true,
       "facts.read": true,
       "facts.review": true,
       "facts.close": true,
@@ -33,7 +35,9 @@
       "status.read": true,
       "episodes.attachments": true,
       "episodes.list": true,
+      "episodes.read": true,
       "facts.links": true,
+      "jobs.read": true,
       "integrity.read": true,
       "profile.read": true
     }

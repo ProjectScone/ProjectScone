@@ -1,7 +1,7 @@
 export const FEATURE_KEYS = ['recall', 'facts.read', 'facts.review', 'facts.close',
   'facts.exclude', 'facts.include', 'events.read', 'metrics.read', 'scopes.read', 'status.read'] as const;
 export type Feature = typeof FEATURE_KEYS[number];
-type OptionalFeature = 'episodes.attachments' | 'episodes.list' | 'facts.links' | 'integrity.read' | 'profile.read' | 'processing.distill' | 'processing.derive';
+type OptionalFeature = 'episodes.attachments' | 'episodes.list' | 'episodes.read' | 'facts.links' | 'integrity.read' | 'profile.read' | 'processing.distill' | 'processing.derive' | 'jobs.read' | 'recall.conditions';
 export interface Capabilities {
   schema_version: 1;
   implementation: string;
@@ -20,8 +20,11 @@ export function parseCapabilities(value: unknown): Capabilities {
   if (FEATURE_KEYS.some(key => typeof features[key] !== 'boolean')) throw Error('Incomplete or invalid capability flags');
   if (features['episodes.attachments'] !== undefined && typeof features['episodes.attachments'] !== 'boolean') throw Error('Invalid upload capability flag');
   if (features['episodes.list'] !== undefined && typeof features['episodes.list'] !== 'boolean') throw Error('Invalid inventory capability flag');
+  if (features['episodes.read'] !== undefined && typeof features['episodes.read'] !== 'boolean') throw Error('Invalid source-read capability flag');
   if (features['facts.links'] !== undefined && typeof features['facts.links'] !== 'boolean') throw Error('Invalid relationship capability flag');
   if (features['integrity.read'] !== undefined && typeof features['integrity.read'] !== 'boolean') throw Error('Invalid integrity capability flag');
   if (features['profile.read'] !== undefined && typeof features['profile.read'] !== 'boolean') throw Error('Invalid profile capability flag');
-  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true, 'episodes.list':features['episodes.list'] === true, 'facts.links':features['facts.links'] === true, 'integrity.read':features['integrity.read'] === true, 'profile.read':features['profile.read'] === true, 'processing.distill':features['processing.distill']===true, 'processing.derive':features['processing.derive']===true} as Capabilities['features']};
+  if(features['jobs.read']!==undefined&&typeof features['jobs.read']!=='boolean')throw Error('Invalid job history capability');
+  if(features['recall.conditions']!==undefined&&typeof features['recall.conditions']!=='boolean')throw Error('Invalid recall conditions capability');
+  return {schema_version:1, implementation:data.implementation, features:{...Object.fromEntries(FEATURE_KEYS.map(key => [key, features[key]])), 'episodes.attachments':features['episodes.attachments'] === true, 'episodes.list':features['episodes.list'] === true, 'episodes.read':features['episodes.read'] === true, 'facts.links':features['facts.links'] === true, 'integrity.read':features['integrity.read'] === true, 'profile.read':features['profile.read'] === true, 'processing.distill':features['processing.distill']===true, 'processing.derive':features['processing.derive']===true, 'jobs.read':features['jobs.read']===true, 'recall.conditions':features['recall.conditions']===true} as Capabilities['features']};
 }

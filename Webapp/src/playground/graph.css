@@ -101,17 +101,25 @@
 .depth-map:active { cursor: grabbing; }
 .depth-map .depth-volume polygon { fill: none; stroke: var(--line-strong); stroke-width: .7; opacity: .35; stroke-dasharray: 3 7; }
 .depth-map .depth-node { --node-color: var(--graph-anchor); cursor: pointer; outline: none; }
+.depth-map .depth-node:focus-visible { outline: none; }
+.depth-focus-ring { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0; pointer-events: none; }
+.depth-node:focus-visible .depth-focus-ring { opacity: 1; }
 .depth-map .category-1 { --node-color: var(--graph-interaction); }
 .depth-map .category-2 { --node-color: var(--graph-memory); }
 .depth-map .category-3 { --node-color: var(--graph-claim); }
-.depth-sphere { fill: var(--node-color); stroke: var(--surface); stroke-width: .8; }
+.depth-sphere { fill: var(--node-color); stroke: var(--surface); stroke-width: .45; }
 .depth-hit { fill: transparent; }
 .provenance-gap { padding: 12px; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.6; }
 .provenance-count { display: block; font-size: 10px; }
 .relation small { display: block; margin-top: 5px; font-size: 10px; overflow-wrap: anywhere; }
 .depth-halo { fill: var(--node-color); opacity: .14; stroke: var(--node-color); }
 .depth-node.is-active .depth-halo { opacity: .45; }
-.depth-node.is-dimmed { opacity: .35; }
+.depth-node.is-dimmed { opacity: .25; }
+.depth-labels { pointer-events: none; }
+.depth-labels line { stroke: var(--muted); stroke-width: .7; opacity: .5; }
+.depth-labels rect { fill: var(--surface); fill-opacity: .96; stroke: var(--line); stroke-width: 1; }
+.depth-labels .is-active rect { stroke: var(--accent); }
+.depth-labels .depth-label { stroke: none; font-size: 11px; }
 .depth-label { fill: var(--text); font-size: 11px; font-weight: 550; paint-order: stroke; stroke: var(--canvas); stroke-width: 4; stroke-linejoin: round; pointer-events: none; }
 .depth-edge-caption { fill: var(--text); font: 10px ui-monospace,monospace; paint-order: stroke; stroke: var(--canvas); stroke-width: 4; pointer-events: none; }
 .depth-map [data-edge] { stroke-width: .7; opacity: .22; }

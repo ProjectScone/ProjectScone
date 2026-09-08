@@ -293,6 +293,7 @@ class Distiller:
             attempts = self._failures.get((space, episode.episode_id))
             if attempts is not None and attempts.count >= self.max_attempts:
                 outcomes.append(DistillOutcome(episode.episode_id, error=f"parked: {attempts.last_error}"))
+                await self.engine.note_failed(space, episode.episode_id, f"parked: {attempts.last_error}")
                 continue
             if processed >= limit:
                 break
@@ -329,6 +330,7 @@ class Distiller:
             attempts = self._failures.setdefault(key, _Attempts())
             attempts.count += 1
             attempts.last_error = f"{type(e).__name__}: {e}"
+            await self.engine.note_failed(episode.space, episode.episode_id, attempts.last_error)
             return DistillOutcome(episode.episode_id, error=attempts.last_error)
         self._failures.pop(key, None)
         self._done.add(key)
@@ -384,6 +386,10 @@ class Distiller:
                 continue
             seen.add(fact.fact_id)
             outcome.added.append(fact)
+        # The record has been read, whether or not it yielded a claim: an
+        # episode nothing can be extracted from is finished, not pending.
+        if episode_id is not None:
+            await self.engine.note_consolidated(space, [episode_id])
         return outcome
 
     async def _active_ids(self, space: str, subject: str, predicate: str) -> set[int]:

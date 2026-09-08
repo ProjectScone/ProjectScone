@@ -1,11 +1,22 @@
 import {useEffect,useRef,useState} from 'react';
 import type {ApiClient} from '../api';
 import type {ConversationSession} from './contracts';
-import {startVoiceDevice,type VoiceDeviceState} from './voice/device';
+import {startVoiceDevice,type VoiceDeviceState,type VoiceDeviceFailure} from './voice/device';
+
+const recovery:Record<VoiceDeviceFailure,{label:string;help:string}>={
+  'permission-denied':{label:'Microphone permission denied',help:'Allow microphone access in your browser’s site permissions, then enable the microphone again when you are ready.'},
+  'microphone-unavailable':{label:'Microphone unavailable',help:'Check that a microphone is plugged in and selected in your browser. Close another app if it is using the device, then try again.'},
+  'microphone-disconnected':{label:'Microphone disconnected',help:'Your microphone stopped providing audio. Reconnect it before starting a new voice conversation.'},
+  'output-unavailable':{label:'Audio output unavailable',help:'Check your audio output and browser playback settings. Audio has been stopped to avoid recording a conversation you cannot hear.'},
+  'capture-failed':{label:'Microphone capture stopped',help:'The browser could not keep capturing audio. Close resource-heavy tabs or update your browser before trying again.'},
+  'connection-failed':{label:'Voice connection unavailable',help:'The voice connection failed or was refused. Check the conversation service and the selected persona’s provider configuration.'},
+  'unsupported-browser':{label:'Browser audio unsupported',help:'Use a browser with microphone and audio-worklet support over HTTPS or localhost. You can still inspect saved messages.'},
+};
 
 /** A saved session is an inspection view until the person explicitly enables audio. */
 export function VoiceControls({api,session,verified,supported,stopRequested}:{api:ApiClient;session:ConversationSession;verified:boolean;supported:boolean;stopRequested:boolean}){
   const [state,setState]=useState<VoiceDeviceState|'idle'>('idle'),[consent,setConsent]=useState(false);
+  const [failure,setFailure]=useState<VoiceDeviceFailure>();
   const device=useRef<ReturnType<typeof startVoiceDevice>|null>(null),controller=useRef<AbortController|null>(null);
   const mounted=useRef(false),attached=useRef(false);
   const terminal=['ended','failed','interrupted'].includes(session.state);
@@ -26,11 +37,13 @@ export function VoiceControls({api,session,verified,supported,stopRequested}:{ap
     device.current=startVoiceDevice((format,events,signal)=>{
       attached.current=true; // A sent hello is never automatically retried or reattached.
       return api.voiceConnection(session.session_id,format,events,signal);
-    },next=>{if(mounted.current)setState(next);},abort.signal);
+    },(next,problem)=>{if(mounted.current){setState(next);setFailure(problem);}},abort.signal);
   }
-  const label=state==='permission'?'Waiting for microphone permission':state==='connecting'?'Connecting audio':state==='listening'?'Microphone on':state==='muted'?'Microphone muted':state==='failed'?'Audio connection unavailable':'Microphone off in this tab';
-  const description=terminal?'This voice session is closed. Its retained transcript and sources remain available.':active?
+  const problem=state==='failed'&&failure?recovery[failure]:undefined;
+  const label=problem?.label??(state==='permission'?'Waiting for microphone permission':state==='connecting'?'Connecting audio':state==='listening'?'Microphone on':state==='muted'?'Microphone muted':state==='failed'?'Audio connection unavailable':'Microphone off in this tab');
+  const description=terminal?`${problem?problem.help+' ':''}This voice session is closed. Its retained transcript and sources remain available.`:active?
     state==='muted'?'Your microphone is muted. You can still hear the reply.':state==='listening'?'Live audio is connected to your selected persona. Speak naturally; interrupt to change direction.':'You can cancel at any time. Audio starts only after the server accepts this session.':
+    problem?`${problem.help} ${attached.current?'A connection was attempted. It will not be reattached automatically; inspect this session or start a new one.':'No voice connection was attempted. Retry requires your explicit action.'}`:
     attached.current?'Audio has stopped in this tab. Checking the recorded session outcome; this connection will not be resumed automatically.':
     state==='failed'?'Check your browser’s microphone permission and audio device, then enable it again. No audio connection was opened.':
     session.state==='running'?'The server reports this voice session as running. This tab is inspecting it, not connected to its audio.':

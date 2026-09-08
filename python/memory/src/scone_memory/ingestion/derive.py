@@ -19,7 +19,7 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.models import Fact
 from ..memory.engine import MemoryEngine, derivation_groups
-from ..providers.llm import ChatModel
+from ..providers.llm import ChatError, ChatModel
 from .distill import DistillError, _find_array
 
 DERIVE_PROMPT = (
@@ -31,8 +31,13 @@ DERIVE_PROMPT = (
     "Return [] when nothing follows."
 )
 
-#: Why an entry of the model's reply did not become a proposal.
-REJECTIONS = ("malformed", "unknown_premise", "too_few_premises", "restates_premise")
+#: Why an entry of the model's reply did not become a proposal, and why a
+#: whole group produced none. The last two are about the call rather than
+#: about an entry: a model that answered unusably, and one that did not
+#: answer. A real corpus contains something a model will not discuss, and
+#: one group it will not touch must cost that group and nothing else.
+REJECTIONS = ("malformed", "unknown_premise", "too_few_premises", "restates_premise",
+              "unreadable_reply", "unreachable")
 
 
 @dataclass(frozen=True)
@@ -148,9 +153,23 @@ class Deriver:
             sent = sorted(group, key=lambda f: (-f.confidence, f.fact_id))[: self.max_group]
             by_id = {f.fact_id: f for f in sent}
             text = "\n".join(f"{f.fact_id}: {f.subject} {f.predicate} {f.object}" for f in sent)
-            reply = await self.chat.complete(self.prompt, text)
             outcome.sent += 1
-            derived, rejected = parse_derivations(reply, by_id)
+            try:
+                reply = await self.chat.complete(self.prompt, text)
+            except ChatError as exc:
+                # No answer arrived, so nothing about this group is settled.
+                # It is left unseen and asked again next pass.
+                outcome.rejected.append(RejectedDerivation("unreachable", str(exc)[:200]))
+                continue
+            try:
+                derived, rejected = parse_derivations(reply, by_id)
+            except DistillError as exc:
+                # The model answered and the answer was unusable, a refusal
+                # most often. That is settled: asking again gets the same
+                # answer, so the group is marked seen and the pass goes on.
+                outcome.rejected.append(RejectedDerivation("unreadable_reply", str(exc)[:200]))
+                engine._derive_seen.add(key)
+                continue
             outcome.rejected.extend(rejected)
             for d in derived:
                 if await self._already_held(space, d):
@@ -164,6 +183,13 @@ class Deriver:
             engine._derive_seen.add(key)
         outcome.latency_ms = (time.perf_counter() - started) * 1000
         await engine._emit(space, "derive", outcome.as_payload())
+        unanswered = sum(1 for r in outcome.rejected if r.reason in ("unreadable_reply", "unreachable"))
+        if outcome.sent and unanswered == outcome.sent:
+            # Nothing follows and nothing could be read are different
+            # results, and reporting the second as the first is how a pass
+            # that achieved nothing is filed as one that found nothing.
+            raise DistillError(
+                f"no group could be read in {space}: {outcome.sent} sent, none answered usably")
         return outcome
 
     async def _already_held(self, space: str, d: Derived) -> bool:

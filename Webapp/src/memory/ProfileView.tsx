@@ -5,6 +5,7 @@ import {MarkdownText,SourceContent} from '../components/SourceContent';
 import {parseRetainedSource} from './source-inventory';
 import {parseProfile,type ProfileSnapshot,type ProfileClaim} from './profile';
 import './profile.css';
+import {SourcePageLink} from './SourcePageLink';
 
 function RetainedEvidence({id,api}:{id:number;api:ApiClient}){
   const [attempt,setAttempt]=useState(0),[result,setResult]=useState<{api:ApiClient;text?:string;error?:string}|null>(null);
@@ -21,7 +22,7 @@ function RetainedEvidence({id,api}:{id:number;api:ApiClient}){
 function SourceDisclosure({id,api}:{id:number;api:ApiClient}){
   const [open,setOpen]=useState(false);
   return <div className="profile-source"><button className="btn quiet small" aria-expanded={open} onClick={()=>setOpen(v=>!v)}>{open?'Hide source':`Read source episode #${id}`}</button>
-    {open&&<RetainedEvidence key={id} id={id} api={api}/>}</div>;
+    <SourcePageLink api={api} episodeId={id}/>{open&&<RetainedEvidence key={id} id={id} api={api}/>}</div>;
 }
 function ClaimSources({claim,api}:{claim:ProfileClaim;api:ApiClient}){
   const sources=[...new Set([...(claim.sources??[]),...(claim.source_episode_id!=null?[claim.source_episode_id]:[])])];

@@ -443,28 +443,153 @@ impl Engine {
                 edges.push(json!({"source":nid,"target":chunk,"kind":"chunked_into"}));
             }
         }
+        let mut sources = Vec::<i64>::new();
+        //: Sources a claim names whose episode row no longer exists.
+        let mut gone_sources = std::collections::BTreeSet::<i64>::new();
         for f in self.facts_list(space, true)?.into_iter().take(limit) {
             let id = format!("claim:{}", f.fact_id);
             nodes.insert(id.clone(),json!({"id":id,"kind":"claim","label":format!("{} {} {}",f.subject,f.predicate,f.object),"ts":f.valid_from,"data":{"status":f.status,"valid_from":f.valid_from,"valid_until":f.valid_until,"confidence":f.confidence,"origin":null,"coverage":"origin unavailable on Rust fact record"}}));
-            let mut stmt=self.conn.prepare("SELECT fp.episode_id FROM fact_provenance fp JOIN episodes e ON e.id=fp.episode_id WHERE fp.fact_id=?1 AND e.space_id=?2")?;
-            for eid in stmt.query_map(params![f.fact_id, space.id()], |r| r.get::<_, i64>(0))? {
-                edges.push(
-                    json!({"source":format!("episode:{}",eid?),"target":id,"kind":"source_of"}),
-                );
+            // The episode is looked up rather than joined: a join hides a
+            // provenance row whose episode is gone, and hiding it is what
+            // turned missing evidence into no evidence at all. A source in
+            // another space is not ours to draw and is left alone.
+            let mut stmt = self.conn.prepare(
+                "SELECT fp.episode_id, (SELECT e.space_id FROM episodes e WHERE e.id = fp.episode_id)
+                 FROM fact_provenance fp WHERE fp.fact_id = ?1",
+            )?;
+            for row in stmt.query_map(params![f.fact_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+            })? {
+                let (eid, owner) = row?;
+                match owner {
+                    Some(owner) if owner == space.id() => {
+                        edges.push(
+                            json!({"source":format!("episode:{eid}"),"target":id,"kind":"source_of"}),
+                        );
+                        sources.push(eid);
+                    }
+                    Some(_) => {}
+                    None => {
+                        gone_sources.insert(eid);
+                    }
+                }
             }
         }
-        // Bound the rendered projection; missing endpoints are explicit coverage,
-        // never synthesized. Underlying events/episodes remain independently readable.
+        // The sample above is the newest episodes, which is about recent
+        // activity. A claim's source may be older than that and must still
+        // be drawn, or the claim reads as unsupported rather than as having
+        // a source outside the view. An episode that is gone stays gone.
+        // Counted in source episodes, exactly as the Python engine counts
+        // them: a source that is gone and a source that did not fit are
+        // different facts about the evidence, and neither is an edge count.
+        let mut provenance_missing = gone_sources.len();
+        let mut held = std::collections::BTreeSet::<i64>::new();
+        for eid in sources {
+            let nid = format!("episode:{eid}");
+            if nodes.contains_key(&nid) {
+                held.insert(eid);
+                continue;
+            }
+            match self.evidence_episode(space, eid) {
+                Ok(ep) => {
+                    let label = ep["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    nodes.insert(
+                        nid.clone(),
+                        json!({"id":nid,"kind":"episode","label":label,"ts":ep["created_at"],"data":ep}),
+                    );
+                    held.insert(eid);
+                }
+                // The claim names a source that is gone: forgotten evidence,
+                // not a budget, and said so separately.
+                Err(_) => provenance_missing += 1,
+            }
+        }
+        // Bound the rendered projection; missing endpoints are explicit
+        // coverage, never synthesized. Taking whatever sorted first by key
+        // meant dropping by node id, which is not a decision anyone made:
+        // every kind now gets a share, so a snapshot cannot lose all its
+        // episodes and keep only passages.
+        const KINDS: [&str; 7] = [
+            "episode",
+            "claim",
+            "recall",
+            "session",
+            "turn",
+            "tool_call",
+            "chunk",
+        ];
         if nodes.len() > limit {
             truncated = true;
-            nodes = nodes.into_iter().take(limit).collect();
+            // Two tiers decide what survives. An end of any edge beats a
+            // node nothing points at, because dropping it turns a drawn
+            // relationship into a missing one. And an end of a source_of
+            // edge beats every other end, because that is the provenance
+            // of a claim: a claim drawn without its source reads as
+            // unsupported, which is exactly the failure being fixed.
+            let ends = |kind: Option<&str>| -> std::collections::HashSet<String> {
+                edges
+                    .iter()
+                    .filter(|e| kind.is_none_or(|k| e["kind"] == k))
+                    .flat_map(|e| {
+                        [e["source"].as_str(), e["target"].as_str()]
+                            .into_iter()
+                            .flatten()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            let anchored = ends(None);
+            let provenance = ends(Some("source_of"));
+            let mut buckets: Vec<Vec<(String, Value)>> = KINDS
+                .iter()
+                .map(|kind| {
+                    let mut of_kind: Vec<(String, Value)> = nodes
+                        .iter()
+                        .filter(|(_, node)| node["kind"] == *kind)
+                        .map(|(id, node)| (id.clone(), node.clone()))
+                        .collect();
+                    of_kind.sort_by_key(|(id, _)| (provenance.contains(id), anchored.contains(id)));
+                    of_kind
+                })
+                .collect();
+            let mut kept = BTreeMap::<String, Value>::new();
+            'fill: loop {
+                let mut progressed = false;
+                for bucket in buckets.iter_mut() {
+                    if let Some((id, node)) = bucket.pop() {
+                        kept.insert(id, node);
+                        progressed = true;
+                        if kept.len() >= limit {
+                            break 'fill;
+                        }
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            nodes = kept;
         }
         edges.retain(|e| {
             nodes.contains_key(e["source"].as_str().unwrap_or(""))
                 && nodes.contains_key(e["target"].as_str().unwrap_or(""))
         });
+        // What the bound cost, in the same unit the other engine uses:
+        // source episodes a drawn claim names that this snapshot does not
+        // show, so a reader knows how much is out of view rather than
+        // reading absence as evidence of absence.
+        let provenance_omitted = held
+            .iter()
+            .filter(|eid| !nodes.contains_key(&format!("episode:{eid}")))
+            .count();
         Ok(
-            json!({"nodes":nodes.into_values().collect::<Vec<_>>(),"edges":edges,"truncated":truncated,"evidence":"sqlite","coverage":"bounded retained snapshot; HTTP recall recorded; no inferred edges"}),
+            json!({"nodes":nodes.into_values().collect::<Vec<_>>(),"edges":edges,"truncated":truncated,"provenance_omitted":provenance_omitted,"provenance_missing":provenance_missing,"evidence":"sqlite","coverage":"bounded retained snapshot; HTTP recall recorded; no inferred edges"}),
         )
     }
 }

@@ -11,9 +11,9 @@ protocol and passes the contract tests; nothing in the engine changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Chunk, Episode, Fact, FactLink, Tombstone
+from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,12 @@ class TextFilter:
     tags: tuple[str, ...] = ()
     #: Every key must match the episode's metadata exactly.
     where: Mapping[str, str] = field(default_factory=dict)
+    #: A parsed metadata filter, or None. Duck-typed rather than imported
+    #: so this layer keeps depending on nothing above it: it answers
+    #: ``matches(metadata)`` and renders itself with ``to_sql(column)``.
+    #: A store that ignores it still answers correctly, because the
+    #: engine checks every candidate again; it just looks at more of them.
+    conditions: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,17 @@ class DeletedSpace:
     facts: int
     links: int
     tombstones: int
+
+
+@dataclass(frozen=True)
+class NewJob:
+    """A batch to record, with the receipts its records already have."""
+
+    job_id: str
+    space: str
+    created_at: str
+    request_id: Optional[str]
+    items: tuple[JobItem, ...]
 
 
 @runtime_checkable
@@ -213,6 +230,27 @@ class DocumentStore(Protocol):
         ...
     async def space_deleted(self, space: str) -> Optional[str]:
         """When the space was deleted, or None while it lives."""
+        ...
+    async def create_job(self, new: NewJob) -> IngestJob:
+        """Record a batch. Optional: a store that cannot keep jobs simply
+        does not implement this, and the engine says so plainly."""
+        ...
+    async def get_job(self, space: str, job_id: str) -> Optional[IngestJob]: ...
+    async def job_by_request(self, space: str, request_id: str) -> Optional[IngestJob]:
+        """The job this request already made, so a retry is not a second one."""
+        ...
+    async def list_jobs(self, space: str, limit: int, before: Optional[str] = None) -> list[IngestJob]:
+        """Newest first. ``before`` names the last job of the previous page,
+        so a caller can walk back through older batches."""
+        ...
+    async def update_job(self, job: IngestJob) -> None: ...
+    async def mark_failed(self, space: str, episode_id: int, error: str, when: str) -> int:
+        """Record that reading this record failed, counting the attempt.
+        A record already read is left alone."""
+        ...
+    async def mark_consolidated(self, space: str, episode_ids: Sequence[int], when: str) -> int:
+        """Record that these episodes have been read; returns how many
+        items moved, so marking the same episode twice is not two moves."""
         ...
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import signal
 import socket
 import subprocess
@@ -58,6 +59,12 @@ HELPER = {"schema_version": 1, "id": "helper", "name": "Helper", "instructions":
           "reply": {"provider": "stub", "model": "echo"}, "transcription": {"provider": "stub", "model": "ears"},
           "speech": {"provider": "stub", "model": "mouth", "voice": "alto"}}
 KEY = "launcher-key"
+#: This package as it sits in the checkout being tested, which is not
+#: necessarily the one pip installed.
+SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
+#: A one-minute load average above this means the machine, not the server,
+#: is what the clock is measuring. A quiet host and CI never reach it.
+BUSY = 12.0
 PCM = b"\x01\x00" * 160
 
 
@@ -72,14 +79,23 @@ def composed(tmp_path):
     env.update(SCONE_SQLITE_PATH=str(tmp_path / "memory.db"), SCONE_EMBEDDER="hash", SCONE_API_KEY=KEY,
                SCONE_HOST="127.0.0.1", SCONE_PORT=str(port), SCONE_CONVERSATIONS_JOURNAL=str(tmp_path / "sessions.db"),
                SCONE_CONVERSATIONS_PERSONAS=str(tmp_path / "personas.json"),
-               SCONE_CONVERSATIONS_REGISTRY="launch_registry:registry", PYTHONPATH=str(tmp_path))
+               SCONE_CONVERSATIONS_REGISTRY="launch_registry:registry",
+               # The tree under test, ahead of the registry fixture. Setting
+               # PYTHONPATH to the fixture alone left the child importing
+               # whatever was installed, so this launched the working copy
+               # rather than the checkout pytest was reading, and the test
+               # reported on code it had never seen.
+               PYTHONPATH=os.pathsep.join([str(SOURCE), str(tmp_path)]))
     process = subprocess.Popen([sys.executable, "-m", "scone_memory.runtime.cli", "serve"], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"Authorization": f"Bearer {KEY}"}, timeout=2)
-    # A loaded machine (another gate, a cargo build) has taken more than 20 s
-    # to import and bind; the bound is generous so the test measures the
-    # server, not the neighbours, and says what stderr held if it still fails.
-    deadline = time.monotonic() + 90
+    # A loaded machine (another gate, a cargo build, a benchmark pinning
+    # every core) has taken more than 20 s to import and bind, and at 90 s
+    # this failed twice during a bench run while passing alone in three
+    # seconds. The bound is generous so the test measures the server
+    # rather than its neighbours, still fails rather than hanging, and
+    # says what stderr held when it does.
+    deadline = time.monotonic() + 240
     while True:
         if process.poll() is not None:
             raise AssertionError("serve exited: " + process.communicate()[1])
@@ -89,9 +105,20 @@ def composed(tmp_path):
         except httpx.HTTPError:
             pass
         if time.monotonic() > deadline:
+            alive = process.poll() is None
+            load = os.getloadavg()[0]
             process.kill()
             _, stderr = process.communicate()
-            raise AssertionError("serve did not become ready within 90 s; stderr: " + stderr[-2000:])
+            # A server that never binds is a failure. A server the machine
+            # never scheduled is a fact about the machine, and calling it a
+            # failure would train everyone to ignore this test. The two are
+            # told apart by whether the process is still alive and what the
+            # machine was doing, and the skip says so out loud.
+            if alive and load > BUSY:
+                pytest.skip(f"the machine was too loaded to time a server start (load {load:.0f}); "
+                            "run this again when it is quiet")
+            raise AssertionError(f"serve did not become ready within 240 s (load {load:.0f}); "
+                                 "stderr: " + stderr[-2000:])
         time.sleep(0.025)
     yield client, port, process, tmp_path / "sessions.db"
     client.close()

@@ -19,7 +19,7 @@ before(async()=>{
     if(req.url==='/voice-test'){
       res.setHeader('content-type','text/html');res.end(`<!doctype html><button id="start">Connect microphone</button><script type="module">
 import {startVoiceDevice,createApiClient} from '/voice-device.js';
-window.states=[];window.frames=[];window.tracks=[];window.contexts=[];window.stops=0;
+window.states=[];window.failures=[];window.frames=[];window.tracks=[];window.contexts=[];window.stops=0;
 const gum=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 navigator.mediaDevices.getUserMedia=async options=>{window.constraints=options;const stream=await gum(options);window.tracks.push(...stream.getTracks());if(window.deferPermission)await new Promise(resolve=>window.resolvePermission=resolve);return stream;};
 const NativeAudioContext=window.AudioContext;
@@ -32,7 +32,7 @@ document.querySelector('#start').onclick=()=>{
    if(window.nativeSession)return createApiClient(window.nativeKey||'voice-alpha',()=>{},window.nativeBase).voiceConnection(window.nativeSession,format,events,window.abort.signal);
    if(!window.deferReady)queueMicrotask(()=>events.state('ready'));
    return {send:samples=>window.frames.push([...samples]),stop:()=>window.stops++};
- },state=>window.states.push(state),window.abort.signal);
+ },(state,failure)=>{window.states.push(state);if(failure)window.failures.push(failure);},window.abort.signal);
  window.device.ready.catch(()=>{});
 };
 window.loaded=true;
@@ -67,7 +67,42 @@ test('permission denial fails without opening a voice connection',async t=>{
   const page=await pageFor(t);await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('denied','NotAllowedError');};});
   await page.click('#start');await page.waitForFunction(()=>window.states.includes('failed'));
   assert.equal(await page.evaluate(()=>window.format),undefined);
+  assert.deepEqual(await page.evaluate(()=>window.failures),['permission-denied']);
   await page.waitForFunction(()=>window.contexts.every(c=>c.state==='closed'));
+});
+for(const name of ['NotFoundError','NotReadableError','OverconstrainedError'])test(`microphone ${name} has hardware recovery rather than permission advice`,async t=>{
+  const page=await pageFor(t);
+  await page.evaluate(name=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('private hardware details',name);};},name);
+  await page.click('#start');await page.waitForFunction(()=>window.states.includes('failed'));
+  assert.deepEqual(await page.evaluate(()=>window.failures),['microphone-unavailable']);
+  assert.equal(await page.evaluate(()=>window.format),undefined);
+  await page.waitForFunction(()=>window.contexts.every(c=>c.state==='closed'));
+});
+test('audio output startup failure releases a late microphone grant and explains output recovery',async t=>{
+  const page=await pageFor(t);
+  await page.evaluate(()=>{window.deferPermission=true;AudioContext.prototype.resume=async()=>{throw Error('private device details');};});
+  await page.click('#start');await page.waitForFunction(()=>window.resolvePermission);
+  await page.waitForFunction(()=>window.states.includes('failed'));
+  assert.deepEqual(await page.evaluate(()=>window.failures),['output-unavailable']);
+  await page.evaluate(()=>window.resolvePermission());
+  await page.waitForFunction(()=>window.tracks.every(t=>t.readyState==='ended'));
+  assert.equal(await page.evaluate(()=>window.format),undefined);
+});
+test('unsupported browser does not request a microphone',async t=>{
+  const page=await pageFor(t);
+  await page.evaluate(()=>{window.AudioContext=undefined;});
+  await page.click('#start');await page.waitForFunction(()=>window.states.includes('failed'));
+  assert.deepEqual(await page.evaluate(()=>window.failures),['unsupported-browser']);
+  assert.equal(await page.evaluate(()=>window.tracks.length),0);
+  assert.equal(await page.evaluate(()=>window.format),undefined);
+});
+test('capture setup failure releases acquired audio without attempting a connection',async t=>{
+  const page=await pageFor(t);
+  await page.evaluate(()=>{AudioContext.prototype.createMediaStreamSource=()=>{throw Error('private capture details');};});
+  await page.click('#start');await page.waitForFunction(()=>window.states.includes('failed'));
+  assert.deepEqual(await page.evaluate(()=>window.failures),['capture-failed']);
+  await page.waitForFunction(()=>window.tracks.every(t=>t.readyState==='ended')&&window.contexts.every(c=>c.state==='closed'));
+  assert.equal(await page.evaluate(()=>window.format),undefined);
 });
 test('cancellation during permission releases a late microphone grant without connecting',async t=>{
   const page=await pageFor(t);await page.evaluate(()=>window.deferPermission=true);await page.click('#start');
@@ -82,6 +117,7 @@ test('output suspended while connecting cannot be admitted as a listening sessio
   await page.waitForTimeout(50); // Let the suspension event settle before the server acknowledges.
   await page.evaluate(()=>window.events.state('ready'));
   assert.notEqual(await page.evaluate(()=>window.states.at(-1)),'listening');
+  assert.deepEqual(await page.evaluate(()=>window.failures),['output-unavailable']);
   await page.waitForFunction(()=>window.contexts.every(c=>c.state==='closed'));
   assert.deepEqual(await page.evaluate(()=>window.tracks.map(t=>t.readyState)),['ended']);
 });
@@ -95,6 +131,7 @@ for(const reason of ['abort','server failure','pagehide','device ended'])test(`v
   },reason);
   await page.waitForFunction(()=>window.tracks.every(t=>t.readyState==='ended')&&window.contexts.every(c=>c.state==='closed'));
   assert.equal(await page.evaluate(()=>window.stops),1);
+  assert.deepEqual(await page.evaluate(()=>window.failures),reason==='server failure'?['connection-failed']:reason==='device ended'?['microphone-disconnected']:[]);
   const count=await page.evaluate(()=>window.frames.length);await page.waitForTimeout(100);assert.equal(await page.evaluate(()=>window.frames.length),count);
 });
 
@@ -218,7 +255,8 @@ test('workspace permission denial is recoverable without an automatic audio conn
   const {native,page}=await waitingWorkspace(t);let sockets=0;page.on('websocket',()=>sockets++);
   await page.evaluate(()=>window.denyAudio=true);
   await page.getByRole('button',{name:'Enable microphone',exact:true}).click();
-  await page.getByText('Audio connection unavailable',{exact:true}).waitFor();
+  await page.getByRole('status').filter({hasText:'Microphone permission denied'}).waitFor();
+  assert.match(await page.getByRole('region',{name:'Voice session',exact:true}).innerText(),/browser.*permission/i);
   assert.equal(sockets,0);assert.equal((await native.read('')).state,'created');
   await page.waitForFunction(()=>window.voiceContexts.every(c=>c.state==='closed'));
   await page.evaluate(()=>window.denyAudio=false);
@@ -226,6 +264,43 @@ test('workspace permission denial is recoverable without an automatic audio conn
   await page.getByRole('button',{name:'Mute microphone',exact:true}).waitFor();
   await page.getByRole('button',{name:'Stop audio',exact:true}).click();
   await page.waitForFunction(()=>window.voiceTracks.every(t=>t.readyState==='ended'));
+});
+
+test('workspace hardware failure gives actionable safe instructions without starting a session',{skip:!process.env.SCONE_CONVERSATIONS_HTML},async t=>{
+  const {native,page}=await waitingWorkspace(t);let sockets=0;page.on('websocket',()=>sockets++);
+  await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('private device identifier','NotReadableError');};});
+  await page.getByRole('button',{name:'Enable microphone',exact:true}).click();
+  const voice=page.getByRole('region',{name:'Voice session',exact:true});
+  await voice.getByText('Microphone unavailable',{exact:true}).waitFor();
+  const text=await voice.innerText();
+  assert.match(text,/plugged in/i);assert.match(text,/another app/i);assert.doesNotMatch(text,/private device identifier/);
+  assert.equal(sockets,0);assert.equal((await native.read('')).state,'created');
+  assert.equal(await page.getByRole('button',{name:'Enable microphone',exact:true}).isEnabled(),true);
+});
+
+for(const failure of ['microphone','output'])test(`workspace preserves ${failure} recovery after the native session closes`,{skip:!process.env.SCONE_CONVERSATIONS_HTML},async t=>{
+  const {native,page}=await waitingWorkspace(t);let sockets=0;page.on('websocket',()=>sockets++);
+  await page.getByRole('button',{name:'Enable microphone',exact:true}).click();
+  await page.getByRole('button',{name:'Mute microphone',exact:true}).waitFor();
+  await page.evaluate(failure=>{
+    if(failure==='microphone')window.voiceTracks[0].dispatchEvent(new Event('ended'));
+    else void window.voiceContexts[0].suspend();
+  },failure);
+  await page.getByRole('heading',{name:'Conversation ended',exact:true}).waitFor();
+  const voice=page.getByRole('region',{name:'Voice session',exact:true});
+  const text=await voice.innerText();
+  assert.match(text,failure==='microphone'?/Reconnect it before starting a new voice conversation/:/Check your audio output/);
+  assert.match(text,/session is closed/i);
+  assert.equal(sockets,1);assert.equal((await native.read('')).state,'ended');
+  assert.equal(await page.getByRole('button',{name:'Enable microphone',exact:true}).count(),0);
+  if(process.env.SCONE_VOICE_SCREENSHOTS){
+    for(const [label,width,height] of [['desktop',1440,1000],['mobile',390,844]]){
+      await page.setViewportSize({width,height});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.evaluate(()=>window.scrollTo(0,0));
+      await page.screenshot({path:path.join(process.env.SCONE_VOICE_SCREENSHOTS,`voice-${failure}-recovery-${label}.png`),fullPage:true});
+    }
+  }
 });
 test('workspace verification failure releases audio and never reconnects automatically',{skip:!process.env.SCONE_CONVERSATIONS_HTML},async t=>{
   const {native,page}=await waitingWorkspace(t);let sockets=0;page.on('websocket',()=>sockets++);

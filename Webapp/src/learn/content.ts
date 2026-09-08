@@ -15,15 +15,16 @@ curl --fail-with-body --silent --show-error --get \\
   --data-urlencode 'q=Polaris calibration' \\
   --data-urlencode 'tags=quickstart'`;
 
-export type ConceptId = 'overview' | 'how-it-works' | 'graph-memory';
+import {workflowPages} from './topics.ts';
+export type ConceptId = 'overview' | 'how-it-works' | 'graph-memory' | 'quickstart' | 'sources' | 'search' | 'review' | 'profiles' | 'conversations' | 'spaces' | 'api';
 export type ConceptSection = {id: string; title: string; body: string};
 export type ConceptPage = {
   id: ConceptId; path: string; label: string; title: string; intro: string;
   sections: ConceptSection[]; actions: {label: string; to: string}[];
 };
 export const conceptPages: ConceptPage[] = [
-  {id:'overview',path:'/learn',label:'Overview',title:'Knowledge that carries forward.',
-    intro:'Scone connects what was said, what was learned, and what comes next. Persistent memory and agent conversations, with the evidence still in reach.',
+  {id:'overview',path:'/learn',label:'Overview',title:'What is Scone?',
+    intro:'Persistent knowledge and real-time conversations for agents. Bring context in, connect what it means, and carry it into the next interaction.',
     sections:[
       {id:'one-system',title:'One system. Different kinds of context.',body:`An **episode** is an original source: a note, a retained message, or imported text. **Chunks** are pieces of that source used for retrieval. **Claims** record statements about subjects, with status, origin and validity dates. A **profile** assembles a compact view of memory for context.
 
@@ -38,7 +39,7 @@ No hidden reasoning is captured. A completed reply is not a token stream. Public
 
 Rust and Python are independent native implementations, with libraries and CLIs as well as HTTP hosts. Their supported operations can differ. The workspace checks the connected host’s capabilities before offering an operation.`},
     ],actions:[{label:'Open Documents',to:'/memory#documents'},{label:'Explore the Playground',to:'/playground'}]},
-  {id:'how-it-works',path:'/learn/how-it-works',label:'How it works',title:'From a source to useful context.',
+  {id:'how-it-works',path:'/learn/how-it-works',label:'How it works',title:'How Scone works',
     intro:'Keep the original. Prepare it for retrieval. Extract claims separately. Inspect what actually returned.',
     sections:[
       {id:'source',title:'01 / Retain the source',body:`Add text through Documents or POST /v1/episodes. The source receives an episode ID. That ID is how you reopen the original behind a result; a source label or filename is not a replacement for it.
@@ -52,12 +53,12 @@ Search ranking is not factual confidence. An embedding backend or fallback can a
 A proposed claim must be reviewed before it becomes eligible as an accepted claim. Checking that a quote occurs in a source only establishes textual grounding—not that the statement is correct.`},
       {id:'receipts',title:'Know which stage you have reached',body:`**Source saved** means the ingest call returned a receipt. **Passage retrieved** means recall returned source material. **Claim proposed** means extraction produced something to review. **Claim accepted** records a decision about that claim.
 
-Durable per-source jobs, restartable stage progress, grouped conversation consolidation and an explicit immediate-consolidation mode are still required work. Do not infer those capabilities from a successful source receipt.`},
+Python hosts advertising **jobs.read** expose batch receipts in Memory → Status. Searchable and consolidated counts are separate. A batch receipt is not proof of a restartable, stage-by-stage pipeline; full stage recovery and cancellation remain under development.`},
       {id:'identity',title:'Imports, retries and failures',body:`Repeated content may be deduplicated. A filename is not a versioned document identity, and this HTTP example does not offer replace-by-key semantics. Native dedup keys are not an update API: reusing a known key can return the earlier episode instead of storing changed content.
 
 On an uncertain write, inspect what was retained before retrying. Authentication errors need the correct space key; validation errors need corrected input. Do not blindly retry all failures. Format support and limits depend on the host; universal file extraction, resumable batch imports and deletion cascades are not yet complete.`},
     ],actions:[{label:'Open Documents',to:'/memory#documents'},{label:'Try Search',to:'/memory#search'}]},
-  {id:'graph-memory',path:'/learn/graph-memory',label:'Graph memory',title:'Connected, not unquestionable.',
+  {id:'graph-memory',path:'/learn/graph-memory',label:'Graph memory',title:'Graph memory',
     intro:'A useful graph explains where a statement came from, when it applies, and how it relates to other statements. It also makes uncertainty visible.',
     sections:[
       {id:'nodes',title:'What is a node? What is a link?',body:`A record node represents an identified source, chunk, claim, session, interaction or recall record supplied by the host. A group node summarizes records for navigation; it is not an additional stored fact.
@@ -81,12 +82,20 @@ Automatic extraction of these relationships, full cross-host support and depende
 An approval records a decision, not a mathematical guarantee. Keep original evidence available so people can revisit that decision.`},
       {id:'forgetting',title:'Time, forgetting and deletion are different',body:`Closing a claim’s validity says it no longer applies after a point in time. Excluding a claim controls retrieval where supported. Forgetting a source removes retained material through that host’s operation; it is not automatically a complete erasure of every claim, link, event or attachment derived from it.
 
-End-to-end retention, automatic expiry and deletion-impact receipts remain required work. Missing evidence must be shown as missing, not silently replaced with a new explanation.`},
+Use the host’s impact-preview and deletion receipts where available. Complete cross-runtime retention and erasure guarantees remain under development. Missing evidence is shown as missing rather than replaced with an invented explanation.`},
     ],actions:[{label:'Open Review',to:'/memory#review'},{label:'Inspect Memory claims',to:'/memory#beliefs'},{label:'Explore the Playground',to:'/playground'}]},
 ];
+conceptPages.splice(1,0,workflowPages[0]);
+conceptPages.push(...workflowPages.slice(1));
+
+export const documentationGroups=[
+  {label:'Start here',ids:['overview','quickstart','how-it-works']},
+  {label:'Knowledge & memory',ids:['sources','graph-memory','search','review','profiles']},
+  {label:'Build with Scone',ids:['conversations','spaces','api']},
+] satisfies {label:string;ids:ConceptId[]}[];
 
 export function conceptMarkdown(page: ConceptPage): string {
   return `# ${page.title}\n\n${page.intro}\n\n` + page.sections.map(section =>
-    `## ${section.title}\n\n${section.body}` + (page.id==='how-it-works'&&section.id==='source'?`\n\n\`\`\`sh\n${sourceExample}\n\`\`\``:'')
+    `## ${section.title}\n\n${section.body}` + ((page.id==='how-it-works'||page.id==='quickstart')&&section.id==='source'?`\n\n\`\`\`sh\n${sourceExample}\n\`\`\``:'')
   ).join('\n\n') + '\n\n## In the workspace\n\n' + page.actions.map(action=>`- [${action.label}](${action.to})`).join('\n')+'\n';
 }

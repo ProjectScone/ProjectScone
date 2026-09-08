@@ -231,6 +231,20 @@ def test_memory_is_the_canonical_console_address_and_root_still_works():
         assert "__SCONE_MARK__" not in a.text, "the mark placeholder is always substituted"
 
 
+def test_source_pages_reload_without_turning_api_misses_into_html():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
+        page = c.get("/memory/sources/42?space=default")
+        assert page.status_code == 200
+        assert page.text == c.get("/memory").text
+        assert c.head("/memory/sources/42").status_code == 200
+        assert c.get("/memory/sources/42/not-a-page").status_code == 404
+        miss = c.get("/v1/episodes/42", headers={"Authorization": "Bearer solo"})
+        assert miss.status_code == 404 and miss.headers["content-type"].startswith("application/json")
+    with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
+        assert c.get("/memory/sources/42").status_code == 404
+
+
 def test_memory_only_server_serves_workspace_deep_links_without_advertising_conversations():
     """A refresh on /conversations must not 404 on a memory-only host: the
     packaged workspace owns that address and shows its own readiness state.
@@ -239,7 +253,9 @@ def test_memory_only_server_serves_workspace_deep_links_without_advertising_conv
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with TestClient(create_app(engine, {"solo": "default"}, console_key="solo")) as c:
         canonical = c.get("/memory")
-        for path in ("/learn", "/learn/how-it-works", "/learn/graph-memory"):
+        for path in ("/learn", "/learn/how-it-works", "/learn/graph-memory", "/learn/quickstart",
+                     "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
+                     "/learn/conversations", "/learn/spaces", "/learn/api"):
             page = c.get(path)
             assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
             assert "solo" not in page.text and 'id="root"' in page.text, "a public page carries no configured key"

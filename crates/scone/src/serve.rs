@@ -171,7 +171,19 @@ pub fn console_router(engine: Engine, config: ServeConfig, key: &str) -> Router 
 }
 
 /// The public concept pages the packaged workspace renders.
-pub const LEARN_PAGES: [&str; 3] = ["/learn", "/learn/how-it-works", "/learn/graph-memory"];
+pub const LEARN_PAGES: [&str; 11] = [
+    "/learn",
+    "/learn/quickstart",
+    "/learn/how-it-works",
+    "/learn/graph-memory",
+    "/learn/sources",
+    "/learn/search",
+    "/learn/review",
+    "/learn/profiles",
+    "/learn/conversations",
+    "/learn/spaces",
+    "/learn/api",
+];
 
 pub fn router(engine: Engine, config: ServeConfig) -> Router {
     router_with_playground(engine, config, PLAYGROUND_HTML.to_owned())
@@ -187,8 +199,13 @@ fn router_with_playground(engine: Engine, config: ServeConfig, playground: Strin
         async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
     });
     Router::new()
+        // Every named page is the same bundle: the console decides what to
+        // show from the address. Both sides of this merge added routes, so
+        // this is the union. The source page is ours; the two conversation
+        // addresses came from the workspace merge.
         .route("/playground", workspace_page.clone())
         .route("/memory", workspace_page.clone())
+        .route("/memory/sources/{id}", workspace_page.clone())
         .route("/conversations", workspace_page.clone())
         .route("/conversations/{session_id}", workspace_page)
         .route("/v1/graph", get(get_graph))
@@ -244,7 +261,7 @@ async fn get_capabilities(
             "recall": true, "facts.read": true, "facts.review": true,
             "facts.close": true, "facts.exclude": false, "facts.include": false,
             "events.read": true, "metrics.read": false, "scopes.read": false,
-            "status.read": true, "episodes.list": true, "profile.read": true
+            "status.read": true, "episodes.list": true, "episodes.read": true, "profile.read": true
         }
     }))
     .into_response()

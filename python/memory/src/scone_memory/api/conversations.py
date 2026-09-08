@@ -865,7 +865,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
 
-        for path in ("/", "/memory", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
+        for path in ("/", "/memory", "/memory/sources/{episode_id}", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
             app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
     # The mounted app answers /v1/status, so it must know the worker; its own

@@ -4,23 +4,30 @@ import { LayoutPicker, type GraphLayout } from './LayoutPicker';
 import { layoutDepth, nodeCategory, projectPoint, rotatePoint, type Orbit } from './depth-layout';
 import { owners } from './graph-layout';
 import { depthPage, DEPTH_PAGE_SIZE } from './depth-page';
+import { placeDepthLabels } from './depth-labels';
 
 const initialOrbit:Orbit={yaw:-.35,pitch:.22};
 type Props={nodes:EvidenceNode[];edges:EvidenceEdge[];selected:string|null;select:(id:string)=>void;layout:GraphLayout;setLayout:(layout:GraphLayout)=>void};
 
 export function DepthCanvas({nodes,edges,selected,select,layout,setLayout}:Props){
   const [page,setPage]=useState(0);
-  const view=useMemo(()=>depthPage(nodes,edges,page),[nodes,edges,page]);
+  const [tracing,setTracing]=useState(false);
+  const [tracePage,setTracePage]=useState({id:selected,page:0});
+  const focus=tracing?selected:null;
+  const requested=focus?(tracePage.id===focus?tracePage.page:0):page;
+  const view=useMemo(()=>depthPage(nodes,edges,requested,focus),[nodes,edges,requested,focus]);
   const ownership=useMemo(()=>owners(nodes,edges),[nodes,edges]);
+  const selectedIndex=useMemo(()=>[...nodes].sort((a,b)=>a.id.localeCompare(b.id)).findIndex(n=>n.id===selected),[nodes,selected]);
+  const selectedPage=selectedIndex<0?null:Math.floor(selectedIndex/DEPTH_PAGE_SIZE);
   useEffect(()=>{
-    if(!selected)return;
-    const index=[...nodes].sort((a,b)=>a.id.localeCompare(b.id)).findIndex(n=>n.id===selected);
-    if(index>=0)setPage(Math.floor(index/DEPTH_PAGE_SIZE));
-  },[selected]);
-  return <DepthScene nodes={view.nodes} edges={view.edges} selected={selected} select={select} layout={layout} setLayout={setLayout} view={view} setPage={setPage} ownership={ownership}/>;
+    if(selectedPage!==null)setPage(selectedPage);
+  },[selected,selectedPage]);
+  const navigate=(next:number)=>focus?setTracePage({id:focus,page:next}):setPage(next);
+  const toggleTrace=()=>{setTracing(!view.focus);setTracePage({id:selected,page:0});};
+  return <DepthScene nodes={view.nodes} edges={view.edges} selected={selected} select={select} layout={layout} setLayout={setLayout} view={view} setPage={navigate} ownership={ownership} canTrace={selectedIndex>=0} toggleTrace={toggleTrace}/>;
 }
 
-function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,ownership}:Props&{view:ReturnType<typeof depthPage>;setPage:(page:number)=>void;ownership:Map<string,string>}){
+function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,ownership,canTrace,toggleTrace}:Props&{view:ReturnType<typeof depthPage>;setPage:(page:number)=>void;ownership:Map<string,string>;canTrace:boolean;toggleTrace:()=>void}){
   const svg=useRef<SVGSVGElement>(null);
   const drag=useRef<{x:number;y:number;pan:boolean}|null>(null);
   const motion=useRef({yaw:0,pitch:0,x:0,y:0});
@@ -69,16 +76,24 @@ function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,o
     return p?[[id,{...p,x:center.x+p.x*scale,y:center.y+p.y*scale}] as const]:[];
   })),[world,orbit,scale,center.x,center.y]);
   const sorted=useMemo(()=>[...nodes].filter(n=>projected.has(n.id)).sort((a,b)=>projected.get(a.id)!.z-projected.get(b.id)!.z||a.id.localeCompare(b.id)),[nodes,projected]);
-  const radiusFor=(node:EvidenceNode,depthScale:number)=>(node.kind==='session'?12:nodes.length>100?3.8:7)*depthScale*Math.sqrt(zoom);
+  const radiusFor=(node:EvidenceNode,depthScale:number)=>(node.kind==='session'?7:nodes.length>400?1.8:nodes.length>100?2.4:4)*depthScale*Math.sqrt(zoom);
   const nodeById=useMemo(()=>new Map(nodes.map(n=>[n.id,n])),[nodes]);
   const adjacent=new Set<string>();
   for(const edge of edges){if(edge.source===active)adjacent.add(edge.target);if(edge.target===active)adjacent.add(edge.source);}
   const axisOrigin={x:size.width-58,y:size.height-120};
+  const labelNodes=sorted.filter(n=>n.id===active||n.kind==='session'||nodes.length<=24)
+    .sort((a,b)=>Number(b.id===active)-Number(a.id===active)||Number(b.kind==='session')-Number(a.kind==='session')||a.id.localeCompare(b.id));
+  const labels=placeDepthLabels(labelNodes.map(node=>{
+    const p=projected.get(node.id)!;
+    const text=node.kind==='session'?String(node.data?.agent==='claude-code'?'Claude Code':node.data?.agent==='codex'?'Codex':node.label):node.label;
+    return {id:node.id,text,x:p.x,y:p.y,radius:radiusFor(node,p.scale)};
+  }),{left:16,top:110,right:size.width-16,bottom:size.height-145});
 
   return <>
     <div className="graph-navigation depth-navigation" aria-label="Graph scope">
       <LayoutPicker value={layout} onChange={setLayout}/>
-      <span>{view.pages>1?`${view.page*DEPTH_PAGE_SIZE+1}–${view.page*DEPTH_PAGE_SIZE+nodes.length} of ${view.total} records`:`${nodes.length} individual records`} · {edges.length} stored links</span>
+      {canTrace&&<button onClick={toggleTrace}>{view.focus?'All records':'Trace connections'}</button>}
+      <span>{view.focus?`${nodes.length-1} of ${view.total-1} loaded neighbors · selected record pinned`:view.pages>1?`${view.page*DEPTH_PAGE_SIZE+1}–${view.page*DEPTH_PAGE_SIZE+nodes.length} of ${view.total} records`:`${nodes.length} individual records`} · {edges.length} stored links</span>
       {view.pages>1&&<div className="graph-pagination"><button aria-label="Previous 3D page" disabled={!view.page} onClick={()=>setPage(view.page-1)}>←</button><span>{view.page+1} / {view.pages}</span><button aria-label="Next 3D page" disabled={view.page+1===view.pages} onClick={()=>setPage(view.page+1)}>→</button></div>}
     </div>
     <svg ref={svg} id="graph" className="depth-map" data-layout={layout} data-dimensions="3" aria-label="Memory evidence graph" tabIndex={0}
@@ -108,7 +123,7 @@ function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,o
         drag.current={...previous,x:event.clientX,y:event.clientY};
       }}
       onPointerUp={()=>{drag.current=null;}} onPointerCancel={()=>{drag.current=null;}} onLostPointerCapture={()=>{drag.current=null;}}>
-      <defs><marker id="depth-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker><radialGradient id="depth-node-light" cx="30%" cy="25%"><stop offset="0" stopColor="white" stopOpacity=".65"/><stop offset=".45" stopColor="white" stopOpacity=".05"/><stop offset="1" stopColor="black" stopOpacity=".22"/></radialGradient></defs>
+      <defs><marker id="depth-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs>
       <g className="depth-volume" aria-hidden="true">{[-260,0,260].map(z=>{
         const corners=[[-300,-300],[300,-300],[300,300],[-300,300]].map(([x,y])=>projectPoint(rotatePoint({x,y,z},orbit),1100)!);
         return <polygon key={z} points={corners.map(p=>`${center.x+p.x*scale},${center.y+p.y*scale}`).join(' ')}/>;
@@ -126,12 +141,6 @@ function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,o
       <g id="nodes">{sorted.map(node=>{
         const p=projected.get(node.id)!,session=node.kind==='session',lit=node.id===active;
         const radius=radiusFor(node,p.scale);
-        const label=session?String(node.data?.agent==='claude-code'?'Claude Code':node.data?.agent==='codex'?'Codex':node.label):node.label;
-        const labelLeft=p.x>size.width*.55;
-        const room=(labelLeft?p.x:size.width-p.x)-radius-20;
-        const labelLimit=Math.max(5,Math.min(34,Math.floor(room/7)));
-        const displayLabel=label.length>labelLimit?label.slice(0,labelLimit-1)+'…':label;
-        const labeled=session||lit||nodes.length<=24;
         return <g key={node.id} data-node={node.id} data-z={world.get(node.id)!.z} data-camera-z={p.z} className={`depth-node category-${nodeCategory[node.kind]} ${lit?'is-active':''} ${active&&!lit&&!adjacent.has(node.id)?'is-dimmed':''}`}
           transform={`translate(${p.x} ${p.y})`} role="button" tabIndex={0} aria-label={`Inspect ${node.label}`} aria-pressed={selected===node.id}
           onMouseEnter={()=>setHover(node.id)} onMouseLeave={()=>setHover(null)} onFocus={()=>setFocused(node.id)} onBlur={()=>setFocused(null)} onClick={()=>select(node.id)}
@@ -143,12 +152,17 @@ function DepthScene({nodes,edges,selected,select,layout,setLayout,view,setPage,o
             }
           }}>
           <title>{`${node.label} · ${node.id}${!ownership.has(node.id)?' · No session path in this snapshot':''}`}</title>
-          {labeled?<rect className="depth-hit" x={labelLeft?-radius-7-displayLabel.length*7:-radius-5} y={-radius-5} width={radius*2+12+displayLabel.length*7} height={radius*2+10}/>:<circle className="depth-hit" r={Math.max(7,radius+3)}/>}
+          <circle className="depth-hit" r={Math.max(5,radius+2)}/>
+          <circle className="depth-focus-ring" r={Math.max(8,radius+5)}/>
           {(session||lit)&&<circle className="depth-halo" r={radius+5}/>}
-          <circle className="depth-sphere" r={radius}/><circle r={radius} fill="url(#depth-node-light)" pointerEvents="none"/>
-          {labeled&&<text className="depth-label" textAnchor={labelLeft?'end':'start'} x={labelLeft?-radius-7:radius+7} y={4}>{displayLabel}</text>}
+          <circle className="depth-sphere" r={radius}/>
         </g>;
       })}</g>
+      <g className="depth-labels" aria-hidden="true">{labels.map(label=><g key={label.id} data-depth-label={label.id} className={label.id===active?'is-active':''}>
+        <line x1={label.anchorX} y1={label.anchorY} x2={Math.max(label.x,Math.min(label.x+label.width,label.anchorX))} y2={Math.max(label.y,Math.min(label.y+label.height,label.anchorY))}/>
+        <rect x={label.x} y={label.y} width={label.width} height={label.height} rx="7"/>
+        <text className="depth-label" x={label.x+10} y={label.y+17}>{label.text}</text>
+      </g>)}</g>
       <g className="depth-axes" aria-label="Camera orientation, spatial axes">{[{name:'X',point:{x:26,y:0,z:0}},{name:'Y',point:{x:0,y:26,z:0}},{name:'Z',point:{x:0,y:0,z:26}}].map(axis=>{
         const p=rotatePoint(axis.point,orbit);return <g key={axis.name}><line x1={axisOrigin.x} y1={axisOrigin.y} x2={axisOrigin.x+p.x} y2={axisOrigin.y+p.y}/><text x={axisOrigin.x+p.x*1.3} y={axisOrigin.y+p.y*1.3}>{axis.name}</text></g>;
       })}</g>

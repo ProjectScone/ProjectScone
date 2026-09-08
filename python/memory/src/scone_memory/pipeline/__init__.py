@@ -17,8 +17,8 @@ queue and a task of its own, so only the stages that wait on a network
 or a model cost a context switch.
 """
 
-from .core import (DOWN, DROPPED, FAILED, HANDLED, UP, Delivery, Emit, Failed, Interrupted,
+from .core import (DOWN, DROPPED, FAILED, HANDLED, UP, Delivery, Emit, Failed, Feed, Interrupted,
                    Observer, Pipeline, Stage, Started, Stopped)
 
-__all__ = ["DOWN", "DROPPED", "FAILED", "HANDLED", "UP", "Delivery", "Emit", "Failed", "Interrupted",
+__all__ = ["DOWN", "DROPPED", "FAILED", "HANDLED", "UP", "Delivery", "Emit", "Failed", "Feed", "Interrupted",
            "Observer", "Pipeline", "Stage", "Started", "Stopped"]

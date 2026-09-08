@@ -1149,6 +1149,29 @@ test('source inspector spells out incoming and outgoing evidence direction',asyn
   assert.match(await page.locator('#inspector').innerText(),/This record → claim:88/);
 });
 
+for(const mobile of [false,true])test(`depth traces an off-page claim source back to its session${mobile?' on mobile':''}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  const claims=Array.from({length:1250},(_,i)=>({id:`claim:${String(i).padStart(4,'0')}`,kind:'claim',label:`Claim ${i}`}));
+  await page.route('**/v1/graph*',route=>route.fulfill({json:{nodes:[...claims,...nodes.slice(0,3)],edges:[...edges.slice(0,2),{source:'episode:7',target:'claim:0000',kind:'source_of'}],truncated:false}}));
+  await page.reload();await page.getByRole('button',{name:'Depth view'}).click();
+  await page.locator('[data-node="claim:0000"]').focus();await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#graph [data-node="episode:7"]').count(),0);
+  await page.getByRole('button',{name:'Trace connections',exact:true}).click({timeout:2000});
+  assert.equal(await page.locator('#graph [data-node]').count(),2);
+  assert.equal(await page.locator('#graph [data-source="episode:7"][data-target="claim:0000"]').count(),1);
+  await page.locator('#inspector .relation').click();
+  assert.equal(await page.locator('#graph [data-node="turn:1"]').count(),1);
+  await page.locator('#inspector .relation').filter({hasText:'turn:1'}).click();
+  assert.equal(await page.locator('#graph [data-node="session:codex:s1"]').count(),1);
+  assert.equal(await page.locator('#graph [data-source="session:codex:s1"][data-target="turn:1"]').count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`depth-trace-${mobile?'mobile':'desktop'}.png`),fullPage:true});
+  await page.getByRole('button',{name:'All records',exact:true}).click();
+  assert.equal(await page.locator('#graph [data-node]').count(),253);
+  await page.getByRole('button',{name:'Previous 3D page'}).click();
+  assert.equal(await page.locator('#graph [data-node]').count(),1000);
+});
+
 test('depth view preserves exact recorded relationships and inspector access',async t=>{
   const {page}=await fixture(t);
   await page.getByRole('button',{name:'Depth view'}).click({timeout:3000});
@@ -1460,6 +1483,50 @@ test('text imports do not call changed or deduplicated text an exact saved origi
   assert.equal(await page.getByRole('button',{name:'Save source',exact:true}).isDisabled(),true);
   await page.locator('.source-composer form').evaluate(form=>form.requestSubmit());assert.equal(writes,1);
 });
+for(const surface of ['memory','playground'])test(`${surface} recall follows an exact source page without treating an excerpt as the original`,async t=>{
+  const {page,requested}=await fixture(t);
+  await page.route('**/v1/episodes/7',route=>route.fulfill({json:{episode_id:7,kind:'note',source:'launch-original.md',content:'The retained **original** includes context beyond the excerpt.',created_at:'2026-09-06T03:00:00Z',attachments:[]}}));
+  if(surface==='memory'){
+    await page.route('**/v1/recall?**',route=>route.fulfill({json:memoryRecall('Keep launch local')}));
+    await page.goto(new URL('/memory?q=launch#search',page.url()).href);
+  }else{
+    await page.getByRole('textbox',{name:'Test memory recall'}).fill('launch');
+    await page.getByRole('button',{name:'Recall',exact:true}).click();
+  }
+  const result=surface==='memory'?page.locator('.rows .row').first():page.locator('.recall-card').first();
+  const link=result.getByRole('link',{name:'Open source page',exact:true});
+  await link.waitFor({timeout:2500});
+  assert.equal(await link.getAttribute('href'),'/memory/sources/7?space=launch');
+  assert.equal(requested.filter(url=>url==='/v1/episodes/7').length,0,'Link preparation does not read originals');
+  await link.click();
+  await page.getByRole('heading',{name:'launch-original.md',exact:true}).waitFor();
+  await page.getByRole('region',{name:'Source original'}).locator('strong').filter({hasText:'original'}).waitFor();
+  await page.reload();await page.getByRole('heading',{name:'launch-original.md',exact:true}).waitFor();
+});
+
+test('source links share discovery and never link malformed episode identities',async t=>{
+  const {page,requested}=await fixture(t);
+  const recall=memoryRecall('matching excerpt');
+  recall.items=Array.from({length:20},(_,i)=>({...recall.items[0],chunk_id:i+1,episode_id:i===0?0:i+1}));
+  await page.route('**/v1/recall?**',route=>route.fulfill({json:recall}));
+  await page.goto(new URL('/memory?q=matching#search',page.url()).href);
+  await page.locator('.rows .row').nth(19).getByRole('link',{name:'Open source page',exact:true}).waitFor({timeout:2500});
+  assert.equal(await page.locator('.rows .row').first().getByRole('link',{name:'Open source page',exact:true}).count(),0);
+  assert.ok(requested.filter(url=>url==='/v1/status').length<=4,'Connection discovery is not repeated for every search result');
+  assert.ok(requested.filter(url=>url==='/v1/capabilities').length<=4,'Capabilities are shared rather than per-result requests');
+  assert.equal(requested.filter(url=>/^\/v1\/episodes\//.test(url)).length,0);
+});
+
+test('unadvertised source reads never produce a source link in search',async t=>{
+  const {page,requested}=await fixture(t);
+  await page.route('**/v1/capabilities',route=>route.fulfill({json:{...capabilityContract.python,features:{...capabilityContract.python.features,'episodes.read':false}}}));
+  await page.route('**/v1/recall?**',route=>route.fulfill({json:memoryRecall('Known excerpt')}));
+  await page.goto(new URL('/memory?q=known#search',page.url()).href);
+  await page.locator('.rows').getByText('Original pages are not supported by this server.',{exact:true}).waitFor({timeout:2500});
+  assert.equal(await page.locator('.rows').getByRole('link',{name:'Open source page',exact:true}).count(),0);
+  assert.equal(requested.filter(url=>/^\/v1\/episodes\//.test(url)).length,0);
+});
+
 test('Memory Search removes old passages and image URLs while a new query is pending',async t=>{
   const {page}=await fixture(t);
   let held;const waiting=new Promise(resolve=>{held=resolve;});
@@ -1606,4 +1673,24 @@ test('live topology growth refits newly visible session groups into the canvas',
     return [...document.querySelectorAll('[data-node] rect,[data-group] rect')].every(e=>{const b=e.getBoundingClientRect();return b.x>=canvas.x&&b.y>=canvas.y&&b.right<=canvas.right+1&&b.bottom<=canvas.bottom+1;});
   },{},{timeout:4000});
   assert.equal(await page.locator('[data-group]').count(),4);
+});
+
+test('dense Depth keeps visible markers separate and keyboard focus local to the node',async t=>{
+  const {page}=await fixture(t,{crowded:true});
+  await page.getByRole('button',{name:'Depth view'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#graph [data-node]').length===241);
+  const overlap=await page.locator('.depth-sphere').evaluateAll(circles=>{
+    const points=circles.map(el=>{const box=el.getBoundingClientRect();return {x:box.x+box.width/2,y:box.y+box.height/2,r:box.width/2};});
+    return points.filter((p,i)=>points.some((q,j)=>i!==j&&Math.hypot(p.x-q.x,p.y-q.y)<p.r+q.r)).length/points.length;
+  });
+  assert.ok(overlap<.35,`Too many overlapping node markers: ${Math.round(overlap*100)}%`);
+  const node=page.locator('[data-node="tool:0"]');
+  await node.focus();
+  assert.equal(await node.evaluate(el=>getComputedStyle(el).outlineStyle),'none','Use the node focus ring, not a rectangle around its label.');
+  assert.ok((await node.boundingBox()).width<40,'The node hit area must not expand across its text label.');
+  await page.keyboard.press('Enter');
+  await page.locator('.inspector').waitFor();
+  assert.match(await page.locator('.inspector').innerText(),/tool:0/);
+  assert.equal(await page.locator('#graph [data-node]').count(),241);
+  assert.equal(await page.locator('#graph [data-edge]').count(),240);
 });

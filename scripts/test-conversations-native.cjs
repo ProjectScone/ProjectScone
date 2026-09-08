@@ -48,6 +48,88 @@ async function fixture(t,{reopened=false,scoped=false,streaming=false,composed=f
   return {page,base,errors,modelWaiting,release:()=>server.stdin.write('release\n')};
 }
 
+test('metadata editor narrows real native recall with nested rules and preserves source identity',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t,{composed:true});page.setDefaultTimeout(5000);
+  const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
+  const documents=[
+    ['published', {status:'published',priority:'10'}],
+    ['draft', {status:'draft',priority:'10'}],
+    ['missing status', {priority:'10'}],
+    ['nonnumeric priority', {status:'published',priority:'soon'}],
+    ['low priority', {status:'published',priority:'2'}],
+    ['override', {status:'published',priority:'2',team:'incident, response: primary'}],
+  ];
+  const ids=[];
+  for(const [label,metadata] of documents){
+    const response=await fetch(base+'/v1/episodes',{method:'POST',headers,body:JSON.stringify({content:`quarterly planning note ${label}`,metadata})});
+    assert.equal(response.status,200);ids.push((await response.json()).episode_id);
+  }
+  const queries=[],writes=[];
+  page.on('request',request=>{const url=new URL(request.url());if(url.pathname==='/v1/recall')queries.push(url.searchParams);if(request.method()!=='GET')writes.push(url.pathname);});
+  await page.goto(base+'/memory');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('button',{name:'Metadata filters',exact:true}).click();
+  const editor=page.getByRole('region',{name:'Metadata filter editor',exact:true});
+  await editor.getByLabel('Metadata field 1',{exact:true}).fill('status');
+  await editor.getByLabel('Value 1',{exact:true}).fill('draft');
+  await editor.getByLabel('Negate rule 1',{exact:true}).check();
+  await editor.getByRole('button',{name:'Add group to root',exact:true}).click();
+  await editor.getByLabel('Match rules in group 2',{exact:true}).selectOption('any');
+  await editor.getByLabel('Metadata field 2.1',{exact:true}).fill('priority');
+  await editor.getByLabel('Comparison 2.1',{exact:true}).selectOption('at_least');
+  await editor.getByLabel('Value 2.1',{exact:true}).fill('10');
+  await editor.getByRole('button',{name:'Add rule to 2',exact:true}).click();
+  await editor.getByLabel('Metadata field 2.2',{exact:true}).fill('team');
+  await editor.getByLabel('Value 2.2',{exact:true}).fill('incident, response: primary');
+  const narrowed=page.waitForResponse(r=>new URL(r.url()).pathname==='/v1/recall'&&new URL(r.url()).searchParams.has('conditions'));
+  const before=queries.length;
+  await editor.getByRole('button',{name:'Apply metadata filter',exact:true}).click();
+  const response=await narrowed;assert.equal(response.status(),200);
+  const result=await response.json();
+  assert.deepEqual(result.items.map(item=>item.episode_id).sort((a,b)=>a-b),[ids[0],ids[5]].sort((a,b)=>a-b));
+  await page.locator('.rows').getByText('quarterly planning note published',{exact:false}).waitFor();
+  await page.locator('.rows').getByText('quarterly planning note override',{exact:false}).waitFor();
+  assert.equal(queries.length,before+1,'Applying performs only the narrowed request');
+  assert.deepEqual(JSON.parse(queries.at(-1).get('conditions')),{all:[{field:'status',not:true,is:'draft'},{any:[{field:'priority',at_least:10},{field:'team',is:'incident, response: primary'}]}]});
+  for(const label of ['draft','missing status','nonnumeric priority','low priority'])assert.equal(await page.locator('.rows').getByText(`quarterly planning note ${label}`,{exact:false}).count(),0);
+  assert.deepEqual(writes,[]);assert.deepEqual(errors,[]);
+});
+
+test('a real source bookmark survives sign-in and reload but not a different space or forgetting',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t,{composed:true});page.setDefaultTimeout(5000);
+  const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
+  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=','base64');
+  const upload=await fetch(base+'/v1/attachments',{method:'POST',headers:{authorization:headers.authorization,'content-type':'image/png','x-filename':'juniper-original.png'},body:bytes});
+  assert.equal(upload.status,200);const attachment=await upload.json();
+  const saved=await fetch(base+'/v1/episodes',{method:'POST',headers,body:JSON.stringify({content:'**Juniper** retains the source bookmark experiment.',kind:'file',source:'juniper-notes.md',attachment_ids:[attachment.attachment_id]})});
+  assert.equal(saved.status,200);const id=(await saved.json()).episode_id;
+  const route=`${base}/memory/sources/${id}?space=alpha`,reads=[],writes=[];
+  page.on('request',r=>{if(r.method()!=='GET')writes.push(r.url());if(new URL(r.url()).pathname===`/v1/episodes/${id}`)reads.push(r.headers().authorization);});
+  assert.equal((await page.goto(route)).status(),200);assert.equal(page.url(),route);
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('heading',{name:'juniper-notes.md',exact:true}).waitFor();
+  await page.getByRole('region',{name:'Source original'}).locator('strong').getByText('Juniper',{exact:true}).waitFor();
+  await page.reload();
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await page.getByRole('heading',{name:'juniper-notes.md',exact:true}).waitFor();
+  await page.getByRole('button',{name:'View source images',exact:true}).click();
+  await page.waitForFunction(()=>{const image=document.querySelector('.source-image img');return image?.complete&&image.naturalWidth===1;});
+  const preview=await page.getByRole('img',{name:'juniper-original.png',exact:true}).getAttribute('src');
+  await page.getByRole('button',{name:'Memory connection',exact:true}).click();
+  await page.getByLabel('Use a different Scone space key',{exact:true}).fill('conversation-fixture-beta');await page.getByRole('button',{name:'Switch space',exact:true}).click();
+  await page.getByRole('heading',{name:'This source belongs to a different space',exact:true}).waitFor();
+  assert.equal(await page.getByText('juniper-notes.md',{exact:true}).count(),0);assert.ok(reads.every(key=>key==='Bearer conversation-fixture-alpha'));
+  assert.equal(await page.evaluate(async url=>{try{await fetch(url);return false;}catch{return true;}},preview),true,'Space switch revokes the old image preview');
+  await page.getByRole('button',{name:'Memory connection',exact:true}).click();
+  await page.getByLabel('Use a different Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Switch space',exact:true}).click();
+  await page.getByRole('heading',{name:'juniper-notes.md',exact:true}).waitFor();
+  assert.equal((await fetch(base+`/v1/episodes/${id}`,{method:'DELETE',headers})).status,200);
+  await page.getByRole('button',{name:'Refresh source',exact:true}).click();
+  await page.getByRole('heading',{name:/Source unavailable|This source was forgotten/}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Source original'}).count(),0);
+  assert.deepEqual(writes,[]);assert.deepEqual(errors,[]);
+});
+
 test('profile UI reads native context and reflects closure and forgetting within its space',{timeout:60000},async t=>{
   const {page,base,errors}=await fixture(t,{composed:true});page.setDefaultTimeout(5000);
   const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'};
@@ -283,6 +365,33 @@ for(const composed of [false,true])for(const outcome of ['complete','cancel','st
     assert.deepEqual((await read()).episodes.map(e=>e.content),['Stream Juniper']);
   }
   await preview.waitFor({state:'detached'});assert.equal(posts,1);assert.deepEqual(errors,[]);
+});
+
+test('batch history pages real native receipts and follows their original sources',{timeout:60000},async t=>{
+  const {page,base,errors}=await fixture(t,{composed:true});page.setDefaultTimeout(6000);
+  const headers={authorization:'Bearer conversation-fixture-alpha','content-type':'application/json'},jobs=[];
+  for(let i=0;i<21;i++){
+    const response=await fetch(base+'/v1/episodes/batch',{method:'POST',headers,body:JSON.stringify({request_id:`browser-batch-${i}`,records:[{content:`Native batch record ${i}.`,kind:'file'}]})});
+    assert.equal(response.status,200);jobs.push((await response.json()).job);
+  }
+  const writes=[];page.on('request',r=>{if(r.method()!=='GET'&&r.url().includes('/v1/'))writes.push(r.url());});
+  await page.goto(base+'/memory#status');
+  await page.getByLabel('Scone space key',{exact:true}).fill('conversation-fixture-alpha');await page.getByRole('button',{name:'Connect',exact:true}).click();
+  const panel=page.getByRole('region',{name:'Batch history',exact:true});
+  await panel.getByRole('button',{name:`Inspect batch ${jobs[20].job_id}`,exact:true}).click();
+  const detail=panel.getByRole('region',{name:'Batch details',exact:true});
+  assert.match(await detail.innerText(),/1 searchable · 0 consolidated/);
+  await detail.getByRole('button',{name:`Inspect source ${jobs[20].items[0].episode_id}`,exact:true}).click();
+  await detail.locator('.source-markdown').getByText('Native batch record 20.',{exact:true}).waitFor();
+  await panel.getByRole('button',{name:'Older batches',exact:true}).click();
+  await panel.getByRole('button',{name:`Inspect batch ${jobs[0].job_id}`,exact:true}).waitFor();
+  assert.equal(await panel.getByRole('button',{name:'Older batches',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Memory connection',exact:true}).click();
+  await page.getByLabel('Use a different Scone space key',{exact:true}).fill('conversation-fixture-beta');
+  await page.getByRole('button',{name:'Switch space',exact:true}).click();
+  await page.getByText('No batch receipts on this page.',{exact:false}).waitFor();
+  assert.equal(await panel.locator('.job-card').count(),0);assert.equal(await panel.locator('.job-source').count(),0);
+  assert.deepEqual(writes,[]);assert.deepEqual(errors,[]);
 });
 
 test('Documents browse native inventory, import retained text, and inspect saved image evidence',{timeout:60000},async t=>{

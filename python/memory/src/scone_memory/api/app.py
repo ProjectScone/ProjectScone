@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 import asyncio
+import json
 
 import re
 
@@ -28,6 +29,7 @@ from contextlib import asynccontextmanager
 from ..observability import metrics
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
+from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
 
 
@@ -88,6 +90,7 @@ class SourceQuery(BaseModel):
     before: Optional[int] = Field(default=None, ge=1, le=2**63-1)
     limit: int = Field(default=25, ge=1, le=100)
     kind: Optional[str] = None
+    conditions: Optional[str] = None
 
 
 class FactBody(BaseModel):
@@ -155,6 +158,9 @@ class BatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     records: list[EpisodeBody] = Field(min_length=1, max_length=MAX_BATCH_RECORDS)
+    #: The caller's id for this request. Sending it again returns the job
+    #: the first attempt made instead of ingesting the batch a second time.
+    request_id: Optional[str] = Field(default=None, max_length=128)
 
 
 class LinkBody(BaseModel):
@@ -189,7 +195,11 @@ class FeedbackBody(BaseModel):
 
 
 #: The public concept pages the packaged workspace renders without a key.
-LEARN_PAGES = ("/learn", "/learn/how-it-works", "/learn/graph-memory")
+LEARN_PAGES = (
+    "/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
+    "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
+    "/learn/conversations", "/learn/spaces", "/learn/api",
+)
 CONSOLE = Path(__file__).with_name("console.html")
 PLAYGROUND = Path(__file__).with_name("playground.html")
 MARK = Path(__file__).with_name("scone-mark.png")
@@ -332,18 +342,22 @@ def create_app(
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
-            "recall": True, "facts.read": True, "facts.review": True,
+            "recall": True, "recall.conditions": True, "facts.read": True, "facts.review": True,
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
+            "episodes.read": True,
+            "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
             features["conversations"] = True
+        # Manual passes must share a server-side guard with scheduled work
+        # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
 
     if console:
@@ -393,7 +407,7 @@ def create_app(
         # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
         # Each address is named: there is no catch-all that would turn a
         # mistyped /v1 path into HTML.
-        for path in ("/conversations", "/conversations/{sid}"):
+        for path in ("/conversations", "/conversations/{sid}", "/memory/sources/{episode_id}"):
             app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
 
         def render_guide() -> str:
@@ -487,6 +501,16 @@ def create_app(
         a time, because it forgets before it stores."""
         if any(r.replace for r in body.records):
             raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
+        if body.request_id:
+            replayed = await engine.job_for_request(space, body.request_id)
+            if replayed is not None:
+                # The batch already landed under this id. Nothing is ingested
+                # again, and the answer says plainly that this is the receipt
+                # of the first attempt rather than a second one.
+                return {"items": [{"episode_id": i.episode_id, "outcome": i.outcome} for i in replayed.items],
+                        "counts": {outcome: sum(1 for i in replayed.items if i.outcome == outcome)
+                                   for outcome in ("accepted", "duplicate", "updated")},
+                        "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
             for r in body.records
@@ -497,7 +521,28 @@ def create_app(
             for attachment_id in dict.fromkeys(record.attachment_ids):
                 await engine.blobs.link(space, attachment_id, item.episode_id)
         counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
-        return {"items": [a.model_dump() for a in added], "counts": counts}
+        job = await engine.record_job(space, added, request_id=body.request_id)
+        return {"items": [a.model_dump() for a in added], "counts": counts, "job": job_json(job)}
+
+    @app.get("/v1/jobs")
+    async def get_jobs(limit: int = 20, before: Optional[str] = None, space: str = Depends(space_for)) -> dict:
+        """Recent batches, newest first. ``next`` names the cursor for the
+        page after this one, or is null when there is nothing older, so a
+        reader can tell a short page from the end of the list."""
+        found = await engine.jobs(space, limit, before)
+        more = len(found) == limit and bool(await engine.jobs(space, 1, found[-1].job_id)) if found else False
+        return {"jobs": [job_json(job) for job in found], "next": found[-1].job_id if more else None}
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(job_id: str, space: str = Depends(space_for)) -> dict:
+        """One batch: what each record became, and how far it has got."""
+        return job_json(await engine.job(space, job_id))
+
+    @app.post("/v1/jobs/{job_id}/cancel")
+    async def post_job_cancel(job_id: str, space: str = Depends(space_for)) -> dict:
+        """Stop expecting more of this batch. Records already stored stay
+        stored: this abandons work, it does not delete memory."""
+        return job_json(await engine.cancel_job(space, job_id))
 
     @app.get("/v1/episodes")
     async def get_episodes(ids: str, space: str = Depends(space_for)) -> dict:
@@ -518,7 +563,8 @@ def create_app(
     async def get_sources(query: SourceQuery = Query(), space: str = Depends(space_for)):
         if not callable(getattr(engine.documents, "page_episodes", None)):
             return JSONResponse({"error": "this document store does not implement source inventory"}, status_code=501)
-        page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind)
+        page = await engine.source_page(space, before=query.before, limit=query.limit, kind=query.kind,
+                                        conditions=read_conditions(query.conditions))
         # Where consolidation left each source, in the words the API means:
         # cited (a claim rests on it), parked (the distiller gave up on it in
         # this process), pending (no claim cites it yet; a pass, the worker's
@@ -583,12 +629,14 @@ def create_app(
         source_prefix: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
+        conditions: Optional[str] = None,
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
+            conditions=read_conditions(conditions),
         )
         return {
             "event_id": result.event_id,
@@ -924,6 +972,13 @@ def link_json(link) -> dict:
         "link_id": link.link_id, "from_fact": link.from_fact, "to_fact": link.to_fact, "kind": link.kind,
         "created_at": link.created_at, "source_episode_id": link.source_episode_id, "quote": link.quote,
     }
+
+
+def job_json(job) -> dict:
+    """A job as the API reports it: the stored fields, plus the two counts
+    and the state that are read off them."""
+    return {**job.model_dump(), "searchable": job.searchable,
+            "consolidated": job.consolidated, "state": job.state}
 
 
 def fact_json(fact: Fact) -> dict:

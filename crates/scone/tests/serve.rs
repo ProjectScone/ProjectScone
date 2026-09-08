@@ -85,6 +85,57 @@ async fn source_inventory_matches_shared_literal_contract() {
 }
 
 #[tokio::test]
+async fn source_pages_and_canonical_memory_serve_the_workspace_without_an_api_catch_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = app(dir.path());
+    for path in ["/memory", "/memory/sources/42?space=alice"] {
+        for method in ["GET", "HEAD"] {
+            let response = server
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            assert!(
+                response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/html")
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            if method == "GET" {
+                assert!(String::from_utf8_lossy(&body).contains("id=\"root\""));
+            } else {
+                assert!(body.is_empty());
+            }
+        }
+    }
+    let stray = server
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/memory/sources/42/not-a-page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stray.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(&server, "GET", "/v1/episodes/42", Some("sk-alice"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn source_inventory_pages_are_scoped_and_not_ranked() {
     let dir = tempfile::tempdir().unwrap();
     let server = app(dir.path());
@@ -1132,22 +1183,46 @@ async fn a_proposal_can_be_listed_and_settled_over_http() {
 #[test]
 fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     let source = include_str!("../src/serve.rs");
+    // The path may sit on the line after `.route(`: rustfmt breaks the call
+    // once it grows, and a guard a formatter can switch off is not a guard.
+    // One call takes a variable rather than a literal, the loop over
+    // LEARN_PAGES, and those are named and checked by the test above.
     let mut routes: Vec<&str> = source
-        .match_indices(".route(\"")
-        .map(|(at, marker)| {
-            let rest = &source[at + marker.len()..];
-            &rest[..rest.find('"').expect("a closing quote on the route path")]
+        .match_indices(".route(")
+        .filter_map(|(at, marker)| {
+            let rest = source[at + marker.len()..].trim_start().strip_prefix('"')?;
+            Some(&rest[..rest.find('"').expect("a closing quote on the route path")])
         })
         .collect();
     routes.sort_unstable();
     routes.dedup();
 
+    // Named HTML entry points. Every one is the same bundle, addressed
+    // differently so the console can decide what to show, and none of them
+    // adds /v1 surface: the console at the root, the playground, the two
+    // memory pages and the two conversation pages. The concept pages are
+    // the LEARN_PAGES loop above.
+    let html: Vec<_> = routes
+        .iter()
+        .copied()
+        .filter(|path| !path.starts_with("/v1/"))
+        .collect();
+    assert_eq!(
+        html,
+        [
+            "/",
+            "/conversations",
+            "/conversations/{session_id}",
+            "/memory",
+            "/memory/sources/{id}",
+            "/playground",
+        ]
+    );
+    routes.retain(|path| path.starts_with("/v1/"));
+
     let frozen = [
-        // Exact HTML entry points do not add native product API capabilities.
-        "/conversations",
-        "/conversations/{session_id}",
-        "/memory",
-        "/playground",
+        // The HTML entry points were checked above and removed from this
+        // list; what remains is the API surface, which is what is frozen.
         "/v1/capabilities",
         "/v1/episodes",
         "/v1/episodes/{id}",
@@ -1199,6 +1274,7 @@ fn every_capability_claim_matches_a_mounted_route() {
         ("events.read", "/v1/events"),
         ("status.read", "/v1/status"),
         ("episodes.list", "/v1/episodes"),
+        ("episodes.read", "/v1/episodes/{id}"),
     ] {
         assert_eq!(
             claims(feature),

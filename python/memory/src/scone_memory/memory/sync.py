@@ -159,8 +159,10 @@ class SyncMemoryEngine:
         return self._run(self._engine.episodes(space, where, limit))
 
     def source_page(self, space: str, *, before: Optional[int] = None,
-                    limit: int = 25, kind: Optional[str] = None) -> SourcePage:
-        return self._run(self._engine.source_page(space, before=before, limit=limit, kind=kind))
+                    limit: int = 25, kind: Optional[str] = None,
+                    conditions: Optional[Mapping[str, object]] = None) -> SourcePage:
+        return self._run(self._engine.source_page(space, before=before, limit=limit, kind=kind,
+                                                  conditions=conditions))
 
     def forget(self, space: str, episode_id: int) -> None:
         return self._run(self._engine.forget(space, episode_id))
