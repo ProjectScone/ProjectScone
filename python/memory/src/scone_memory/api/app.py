@@ -13,6 +13,7 @@ from dataclasses import asdict
 
 import asyncio
 import json
+from html import escape
 
 import re
 
@@ -31,6 +32,7 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
+from .page_access import permits_local_bootstrap
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -228,9 +230,9 @@ def create_app(
     model_connections_available: bool = False,
     vision_available=None,
 ) -> FastAPI:
-    """``console_key`` is baked into the page served at ``/`` so the key
-    stays out of the URL and out of anything the user might paste; with
-    no baked key the page asks for one and keeps it in the tab.
+    """``console_key`` enables single-key browser bootstrap for loopback
+    clients with a loopback Host header. Other requests get a keyless page.
+    Only enable this on a loopback listener; the launcher enforces that.
     ``worker`` is a ConsolidationWorker started with the app and stopped
     with it; None means no distiller runs on this server. ``reload_pages``
     re-reads the console and playground files on every request, for
@@ -241,6 +243,9 @@ def create_app(
     with Retry-After instead of queued without limit. Reads are not gated.
     ``roles`` maps a key to read | write | review | full (see ``permitted``);
     a key not in it is full."""
+
+    if console_key is not None and (len(keys) != 1 or console_key not in keys):
+        raise ValueError("console_key requires the sole configured space key")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -372,23 +377,25 @@ def create_app(
 
     if console:
         def render_console() -> str:
-            # Two page generations share this route: the packaged React app,
-            # which carries a __SCONE_TOKEN__ placeholder like the playground,
-            # and the earlier inline page, which took the key on its first
-            # <script> as data-token. Both get the key; neither logs it.
-            page = CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
-            if console_key:
-                if "__SCONE_TOKEN__" in page:
-                    page = page.replace("__SCONE_TOKEN__", console_key)
-                else:
-                    page = page.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{console_key}">', 1)
-            return page
+            return CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
 
         def render_playground() -> str:
-            # Shared asset owned in ui/playground.html and copied here by
-            # scripts/sync-playground.cjs; same key placeholder as the console.
-            page = PLAYGROUND.read_text(encoding="utf-8")
-            return page.replace("__SCONE_TOKEN__", console_key) if console_key else page
+            return PLAYGROUND.read_text(encoding="utf-8")
+
+        def bootstrap(body: str, request: Request) -> str:
+            if console_key is None or not permits_local_bootstrap(request):
+                return body
+            # The packaged app carries a JSON string; the older inline page
+            # used an HTML attribute. Encode for the actual carrier context.
+            encoded = json.dumps(console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+            attribute = escape(console_key, quote=True)
+            if 'data-token="__SCONE_TOKEN__"' in body:
+                return body.replace('data-token="__SCONE_TOKEN__"', f'data-token="{attribute}"')
+            if '"__SCONE_TOKEN__"' in body:
+                return body.replace('"__SCONE_TOKEN__"', encoded)
+            if "__SCONE_TOKEN__" in body:
+                return body.replace("__SCONE_TOKEN__", attribute)
+            return body.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{attribute}">', 1)
 
         console_html = None if reload_pages else render_console()
         playground_html = None if (reload_pages or not PLAYGROUND.exists()) else render_playground()
@@ -398,18 +405,18 @@ def create_app(
             st = path.stat()
             return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
 
-        def page_response(body: str, path: Path) -> Response:
-            headers = {"ETag": revision(path)}
-            if reload_pages:
+        def page_response(body: str, path: Path, request: Request | None = None) -> Response:
+            headers = {"ETag": revision(path), "X-Content-Type-Options": "nosniff"}
+            if reload_pages or console_key is not None:
                 headers["Cache-Control"] = "no-store"
-            return HTMLResponse(body, headers=headers)
+            return HTMLResponse(bootstrap(body, request) if request is not None else body, headers=headers)
 
         # /memory is the canonical address of the memory console (the
         # playground lives at /playground); / stays as a compatible alias.
         @app.api_route("/memory", methods=["GET", "HEAD"])
         @app.api_route("/", methods=["GET", "HEAD"])
-        async def console_page() -> Response:
-            return page_response(console_html if console_html is not None else render_console(), CONSOLE)
+        async def console_page(request: Request) -> Response:
+            return page_response(console_html if console_html is not None else render_console(), CONSOLE, request)
 
         # The packaged workspace also owns the conversation addresses, so a
         # refresh or a shared link lands on the page even on a host with no
@@ -439,8 +446,8 @@ def create_app(
             # show its Playground link; in development the page polls HEAD
             # and reloads when the ETag changes.
             @app.api_route("/playground", methods=["GET", "HEAD"])
-            async def playground_page() -> Response:
-                return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND)
+            async def playground_page(request: Request) -> Response:
+                return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND, request)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:

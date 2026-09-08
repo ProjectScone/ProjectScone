@@ -38,6 +38,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, build_query_evidence_graph
 from ..retrieval.evidence_records import canonical_evidence, fingerprint, restrict_graph
 from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
+from .page_access import permits_local_bootstrap
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -986,9 +987,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
         async def workspace_page(request: Request):
             body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
-            loopback = {"127.0.0.1", "localhost", "::1"}
-            if (local_console_key is not None and request.client is not None
-                    and request.client.host in loopback and request.url.hostname in loopback
+            if (local_console_key is not None and permits_local_bootstrap(request)
                     and request.url.path not in LEARN_PAGES):
                 encoded = json.dumps(local_console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
                 body = body.replace('"__SCONE_TOKEN__"', encoded)

@@ -55,11 +55,11 @@ def build_app(settings: Settings, engine):
         install_http_diagnostics(app)
         return app
 
+    # Browser bootstrap is only offered by a single-key loopback listener.
+    # The page route additionally checks the request peer and Host header.
+    local_key = next(iter(settings.keys)) if len(settings.keys) == 1 and settings.host in {"127.0.0.1", "localhost", "::1"} else None
     if not settings.conversations_journal:
-        # One configured key means one space; bake it so the console opens
-        # without a prompt. Several keys: the console asks which.
-        only_key = next(iter(settings.keys)) if len(settings.keys) == 1 else None
-        return finish(create_app(engine, settings.keys, console_key=only_key, worker=worker, reload_pages=settings.reload_pages,
+        return finish(create_app(engine, settings.keys, console_key=local_key, worker=worker, reload_pages=settings.reload_pages,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                           model_connections_available=model_management, vision_available=vision_available))
     from .conversation_server import journal_path, load_model_factory
@@ -96,8 +96,6 @@ def build_app(settings: Settings, engine):
 
         scoped = local_text_runtime(engine, store, think=settings.chat_think)
         runtime_available = lambda: store.get('chat') is not None
-    # Preserve local single-key preview access when conversations are composed.
-    local_key = next(iter(settings.keys)) if len(settings.keys) == 1 and settings.host in {"127.0.0.1", "localhost", "::1"} else None
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    console=True, public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, reload_pages=settings.reload_pages, catalog=catalog,
