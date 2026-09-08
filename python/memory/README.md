@@ -678,6 +678,42 @@ The assessor's `sufficient` verdict is a fallible model judgment, not an answer
 accuracy guarantee. This option remains off by default and does not automatically
 enable itself in the HTTP service when a model is loaded.
 
+The standard `serve` launcher can mount it explicitly for custom-model,
+saved-connection and persona **text** sessions:
+
+```dotenv
+SCONE_ADAPTIVE_RETRIEVAL=1
+SCONE_ADAPTIVE_URL=http://127.0.0.1:11434/v1
+SCONE_ADAPTIVE_MODEL=YOUR_INSTALLED_MODEL
+SCONE_ADAPTIVE_TIMEOUT=15
+SCONE_ADAPTIVE_MAX_ROUNDS=3
+SCONE_ADAPTIVE_MAX_QUERIES=6
+SCONE_ADAPTIVE_CANDIDATE_LIMIT=20
+SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES=16000
+SCONE_ADAPTIVE_GRAPH_HOPS=3
+# SCONE_ADAPTIVE_API_KEY=  # Only for an authenticated assessor endpoint.
+```
+
+This requires `SCONE_CONVERSATIONS_JOURNAL` and a separately configured text
+model or persona to reply. Assessor credentials are independent of generation,
+extraction and answer review. The full conversation-turn timeout still includes
+retrieval, generation and any answer review; allocate enough time for all enabled
+stages. Greetings and overview queries keep their existing routing. Voice is
+unchanged. Graph hops default to zero (disabled); enabling 1..6 hops uses the
+native `MultiHopLimits` defaults for the other per-expansion work bounds.
+
+Served adaptive retrieval uses `retain_verified` for assessment failures and
+empty selections, plus `original_and_selected` to retain the original query's
+verified pool alongside later selection. These policies are described below;
+none establishes answer accuracy. They preserve scope and source checks across
+every round. `adaptive_retrieval` in conversation capabilities reports configuration,
+budgets and graph hops independently of reply-model availability. Turn context
+receipts report rounds, queries, fallback, truncation and graph work. These are
+current-process context receipts, not a durable reconstruction after restart.
+When embedding `create_conversation_app`, its optional `adaptive_retriever` must
+bind the same engine; custom text factories must accept and honor the native
+`adaptive_retriever` and `recall_timeout` keywords.
+
 The default `failure_policy="retain_verified"` recovers from assessor errors,
 invalid decisions, and assessment timeouts by independently rechecking the last
 bounded candidate snapshot. It reserves `min(1 second, timeout_s / 4)` within the
@@ -736,6 +772,7 @@ Assessor errors still use the separate failure policy. Follow-up retrieval and
 selection behavior are unchanged. The default remains `evidence_policy="model_selected"`.
 Compare with `--adaptive-evidence-policy original_and_selected` in the evaluator;
 neither this option nor the adaptive strategy is automatically enabled in HTTP.
+The explicit served configuration above selects `original_and_selected`.
 
 For a controlled comparison against existing compact paths, add
 `--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30

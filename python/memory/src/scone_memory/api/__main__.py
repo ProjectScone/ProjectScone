@@ -65,9 +65,11 @@ def build_app(settings: Settings, engine):
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
+    from ..runtime.conversation_retrieval import build_adaptive_retrieval
 
     journal = journal_path(settings, settings.conversations_journal)
     answer_review = build_conversation_review(settings)
+    adaptive_retriever = build_adaptive_retrieval(settings, engine)
     catalog: PersonaCatalog | DynamicLocalCatalog | None = None
     if settings.conversations_personas:
         if not settings.conversations_registry:
@@ -91,9 +93,9 @@ def build_app(settings: Settings, engine):
         factory = load_model_factory(settings.conversations_model_factory)
         from ..realtime.text import TextConversation
 
-        def scoped(space, sid, scope, **review_options):
+        def scoped(space, sid, scope, **conversation_options):
             return TextConversation(engine, space, sid, factory, turn_timeout=settings.chat_timeout,
-                                    **scope.kwargs(), **review_options)
+                                    **scope.kwargs(), **conversation_options)
     elif store is not None:
         from ..runtime.model_runtime import local_text_runtime
 
@@ -105,7 +107,7 @@ def build_app(settings: Settings, engine):
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    local_console_key=local_key, runtime_available=runtime_available,
                                    model_connections_available=model_management, vision_available=vision_available,
-                                   answer_review=answer_review))
+                                   answer_review=answer_review, adaptive_retriever=adaptive_retriever))
 
 
 def build_server(settings: Settings, app):

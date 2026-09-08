@@ -159,14 +159,26 @@ class Settings:
     answer_review_model: str | None = None
     answer_review_api_key: str | None = field(default=None, repr=False)
     answer_review_timeout: float = 20.0
+    adaptive_retrieval: bool = False
+    adaptive_url: str | None = None
+    adaptive_model: str | None = None
+    adaptive_api_key: str | None = field(default=None, repr=False)
+    adaptive_timeout: float = 15.0
+    adaptive_max_rounds: int = 3
+    adaptive_max_queries: int = 6
+    adaptive_candidate_limit: int = 20
+    adaptive_max_evidence_bytes: int = 16000
+    adaptive_graph_hops: int = 0
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         from .conversation_review import validate_review_settings
+        from .conversation_retrieval import validate_adaptive_settings
 
         validate_review_settings(self)
+        validate_adaptive_settings(self)
         if self.blobs not in ("auto", "memory", "file", "s3"):
             raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
         if self.blobs in ("memory", "s3") and self.blob_dir:
@@ -306,6 +318,16 @@ class Settings:
             answer_review_model=env.get("SCONE_ANSWER_REVIEW_MODEL") or None,
             answer_review_api_key=env.get("SCONE_ANSWER_REVIEW_API_KEY") or None,
             answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
+            adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
+            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or None,
+            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or None,
+            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or None,
+            adaptive_timeout=parse_seconds("SCONE_ADAPTIVE_TIMEOUT", env.get("SCONE_ADAPTIVE_TIMEOUT"), 15.0),
+            adaptive_max_rounds=_environment_integer("SCONE_ADAPTIVE_MAX_ROUNDS", env.get("SCONE_ADAPTIVE_MAX_ROUNDS", "3")),
+            adaptive_max_queries=_environment_integer("SCONE_ADAPTIVE_MAX_QUERIES", env.get("SCONE_ADAPTIVE_MAX_QUERIES", "6")),
+            adaptive_candidate_limit=_environment_integer("SCONE_ADAPTIVE_CANDIDATE_LIMIT", env.get("SCONE_ADAPTIVE_CANDIDATE_LIMIT", "20")),
+            adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
+            adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             log_path=env.get("SCONE_LOG_PATH") or None,
         )

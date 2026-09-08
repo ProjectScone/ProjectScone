@@ -94,13 +94,13 @@ def text_model_factory(connection: ModelConnection, *, think: bool | None = None
 
 
 def self_hosted_text_runtime(engine, store: ModelConnectionStore, *, think: bool | None = None):
-    def create(space, session_id, scope, **review_options):
+    def create(space, session_id, scope, **conversation_options):
         connection = store.get('chat')
         if connection is None:
             raise InvalidInput('No self-hosted chat model is configured')
         # The immutable connection stays with this session, even across edits.
         return TextConversation(engine, space, session_id, text_model_factory(connection, think=think),
-                                turn_timeout=connection.timeout_s, **scope.kwargs(), **review_options)
+                                turn_timeout=connection.timeout_s, **scope.kwargs(), **conversation_options)
     return create
 
 
