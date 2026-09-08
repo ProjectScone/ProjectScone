@@ -9,7 +9,7 @@ import pytest
 
 from scone_memory.backends.mongo import MongoDocumentStore
 from scone_memory.core.errors import SconeError
-from scone_memory.core.ports import NewFactLink, NewTombstone
+from scone_memory.core.ports import NewFact, NewFactLink, NewTombstone
 
 
 async def test_fact_links_remains_an_async_store_operation() -> None:
@@ -82,6 +82,37 @@ async def test_fact_links_read_both_directions_and_erase_only_their_space() -> N
         assert erased.links == 2
         assert await store.fact_links("alpha", 1) == []
         assert await store.fact_links("beta", 1) == [foreign]
+    finally:
+        await store.drop()
+        await store.close()
+
+
+@pytest.mark.mongo
+async def test_bounded_graph_reads_keep_scope_order_and_hard_caps() -> None:
+    url = os.environ.get("SCONE_TEST_MONGO_URL")
+    if not url:
+        pytest.skip("SCONE_TEST_MONGO_URL is not configured")
+    store = await MongoDocumentStore(url, "scone_test_" + uuid4().hex).open()
+    when = "2025-01-01T00:00:00Z"
+    try:
+        facts = [await store.insert_fact(NewFact("alpha", "Beacon", "owns", str(i), valid_from=when))
+                 for i in range(135)]
+        await store.insert_fact(NewFact("beta", "Beacon", "owns", "private", valid_from=when))
+        links = [await store.insert_fact_link(NewFactLink("alpha", 1 if i % 2 else i + 2,
+                 i + 2 if i % 2 else 1, "supports", when)) for i in range(135)]
+        foreign = await store.insert_fact_link(NewFactLink("beta", 1, 2, "supports", when))
+        assert await store.facts_by_subject("alpha", "Beacon", 2) == facts[:2]
+        assert len(await store.facts_by_subject("alpha", "Beacon", 10_000)) == 129
+        assert await store.fact_links_from("alpha", 1, 2) == links[:2]
+        assert len(await store.fact_links_from("alpha", 1, 10_000)) == 129
+        for limit in (0, -1):
+            assert await store.facts_by_subject("alpha", "Beacon", limit) == []
+            assert await store.fact_links_from("alpha", 1, limit) == []
+        assert await store.get_fact_link("alpha", links[0].link_id) == links[0]
+        assert await store.get_fact_link("alpha", foreign.link_id) is None
+        assert await store.facts_by_subject("alpha", "missing", 2) == []
+        indexes = await store.facts.index_information()
+        assert [("space", 1), ("subject", 1), ("_id", 1)] in [v["key"] for v in indexes.values()]
     finally:
         await store.drop()
         await store.close()

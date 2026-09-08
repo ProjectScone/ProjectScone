@@ -111,8 +111,11 @@ class MongoDocumentStore:
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
+        await self.facts.create_index([("space", 1), ("subject", 1), ("_id", 1)])
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
         await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
+        await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("_id", 1)])
+        await self._fact_links.create_index([("space", 1), ("to_fact", 1), ("_id", 1)])
         await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -365,6 +368,13 @@ class MongoDocumentStore:
         cursor = self.facts.find({"space": space, "subject": subject, "predicate": predicate}).sort("_id", 1)
         return [_fact(doc) async for doc in cursor]
 
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []  # MongoDB's limit(0) means unbounded.
+        cursor = self.facts.find({"space": space, "subject": subject}).sort("_id", 1).limit(cap)
+        return [_fact(doc) async for doc in cursor]
+
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         from pymongo.errors import DuplicateKeyError
 
@@ -407,6 +417,19 @@ class MongoDocumentStore:
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         cursor = self._fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
         return [_fact_link(doc) async for doc in cursor]
+
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        """Read both incident directions, retaining stored direction and ID order."""
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []
+        cursor = self._fact_links.find({"space": space,
+            "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1).limit(cap)
+        return [_fact_link(doc) async for doc in cursor]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        doc = await self._fact_links.find_one({"space": space, "_id": link_id})
+        return _fact_link(doc) if doc is not None else None
 
     async def bump_revision(self, space: str) -> int:
         doc = await self.revisions.find_one_and_update(
