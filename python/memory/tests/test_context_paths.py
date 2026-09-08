@@ -79,7 +79,7 @@ async def test_false_flag_preserves_flat_context_and_skips_expansion(memory, mon
     facts, _, _ = await chain(memory)
     monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[facts[0]])))
     monkeypatch.setattr("scone_memory.realtime.context.expand_multihop", AsyncMock(side_effect=AssertionError("disabled")))
-    request, receipt = await MemoryContext(memory, "alpha", "session", structured_paths=False).prepare([
+    request, receipt = await MemoryContext(memory, "alpha", "session", structured_paths=False, path_quotes=True).prepare([
         {"role": "user", "content": "aster dependency operator location"}])
     data = packet(request)
     assert "paths" not in data
@@ -107,19 +107,20 @@ async def test_a_forbidden_or_deleted_bridge_never_enters_a_path(memory, monkeyp
             await memory.forget("alpha", episodes[1].episode_id)
             return result
         monkeypatch.setattr("scone_memory.realtime.context.expand_multihop", deleting)
-    request, receipt = await MemoryContext(memory, "alpha", session, **scope).prepare([
+    request, receipt = await MemoryContext(memory, "alpha", session, path_quotes=True, **scope).prepare([
         {"role": "user", "content": "aster dependency operator location"}])
     data = packet(request)
     assert data.get("paths", []) == []
     assert facts[1].fact_id not in {claim["fact_id"] for claim in data["claims"]}
     assert receipt["path_count"] == 0
+    assert facts[1].quote not in json.dumps(data)
 
 
 @pytest.mark.parametrize("budget", [512, 1000, 1800, 3000, 8000])
 async def test_path_claims_steps_and_verbatim_source_share_one_byte_budget(memory, monkeypatch, budget):
     facts, _, item = await chain(memory)
     monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[facts[0]], items=[item])))
-    request, receipt = await MemoryContext(memory, "alpha", "session", max_context_bytes=budget).prepare([
+    request, receipt = await MemoryContext(memory, "alpha", "session", max_context_bytes=budget, path_quotes=True).prepare([
         {"role": "user", "content": "aster dependency operator location"}])
     assert receipt["context_bytes"] <= budget
     if receipt["status"] != "prepared":
@@ -130,9 +131,36 @@ async def test_path_claims_steps_and_verbatim_source_share_one_byte_budget(memor
     for path in data.get("paths", []):
         assert set(path["fact_ids"]) <= ids
         assert len(path["steps"]) == len(path["fact_ids"]) - 1
+        claims = {claim["fact_id"]: claim for claim in data["claims"]}
+        assert path["ordered_evidence"] == [
+            {key: claims[fact_id][key] for key in ("fact_id", "source_episode_id", "quote")}
+            for fact_id in path["fact_ids"]
+        ]
     if data.get("paths"):
         assert data["sources"][0]["text"] == item.text
     assert receipt["path_count"] == len(data.get("paths", []))
+
+
+async def test_ordered_quotes_fit_atomically_at_exact_packet_byte_boundary(memory, monkeypatch):
+    from scone_memory.retrieval.multihop import expand_multihop
+
+    facts, _, item = await chain(memory)
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[facts[0]], items=[item])))
+    # Hold expansion constant to isolate packet admission from its separate cap.
+    expansion = await expand_multihop(memory.documents, "alpha", seeds=RecallResult(facts=[facts[0]]))
+    monkeypatch.setattr("scone_memory.realtime.context.expand_multihop", AsyncMock(return_value=expansion))
+    original = [{"role": "user", "content": "aster dependency operator location"}]
+    request, receipt = await MemoryContext(memory, "alpha", "session", path_quotes=True).prepare(original)
+    assert packet(request)["paths"][0]["ordered_evidence"]
+    packet_bytes = len(request[0]["content"].encode("utf-8"))
+    assert receipt["context_bytes"] == packet_bytes
+    exact, exact_receipt = await MemoryContext(memory, "alpha", "session", max_context_bytes=packet_bytes, path_quotes=True).prepare(original)
+    assert packet(exact)["paths"] == packet(request)["paths"]
+    assert exact_receipt["context_bytes"] == packet_bytes
+    below, below_receipt = await MemoryContext(memory, "alpha", "session", max_context_bytes=packet_bytes - 1, path_quotes=True).prepare(original)
+    assert packet(below).get("paths", []) == []
+    assert below_receipt["path_count"] == 0 and below_receipt["path_omitted_count"] == 1
+    assert below_receipt["context_bytes"] <= packet_bytes - 1
 
 
 async def test_reverse_stored_direction_is_retained_and_contradiction_is_not_a_path(memory, monkeypatch):
@@ -180,9 +208,21 @@ async def test_cycles_never_repeat_a_fact_in_supplied_paths(memory, monkeypatch)
     assert paths and all(len(path["fact_ids"]) == len(set(path["fact_ids"])) for path in paths)
 
 
-def test_structured_paths_requires_a_boolean(memory):
-    with pytest.raises(ValueError):
-        MemoryContext(memory, "alpha", "session", structured_paths=1)
+@pytest.mark.parametrize("field", ["structured_paths", "path_quotes"])
+@pytest.mark.parametrize("value", [1, 0, "true", None])
+def test_path_options_require_booleans(memory, field, value):
+    with pytest.raises(ValueError, match=field):
+        MemoryContext(memory, "alpha", "session", **{field: value})
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", None])
+def test_public_quote_option_requires_a_boolean(value):
+    from scone_memory.retrieval.evidence_records import EvidenceRecords
+    from scone_memory.retrieval.multihop import MultiHopResult
+    from scone_memory.retrieval.path_evidence import ordered_evidence_paths
+
+    with pytest.raises(ValueError, match="include_quotes"):
+        ordered_evidence_paths(MultiHopResult(), EvidenceRecords([], []), include_quotes=value)
 
 
 @pytest.mark.parametrize("change", ["delete", "update"])
@@ -221,3 +261,40 @@ async def test_parallel_link_kinds_do_not_collapse_to_one_path(memory, monkeypat
     monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[first])))
     request, _ = await MemoryContext(memory, "alpha", "session").prepare([{"role": "user", "content": "one relationships"}])
     assert {step["kind"] for path in packet(request)["paths"] for step in path["steps"]} == {"supports", "extends"}
+
+
+async def test_ordered_quotes_follow_path_instead_of_recalled_claim_order(memory, monkeypatch):
+    facts, _, _ = await chain(memory)
+    monkeypatch.setattr(memory, "recall", AsyncMock(return_value=RecallResult(facts=[facts[1], facts[0], facts[2]])))
+    request, _ = await MemoryContext(memory, "alpha", "session", path_quotes=True).prepare([
+        {"role": "user", "content": "aster dependency operator location"}])
+    data = packet(request)
+    assert [claim["fact_id"] for claim in data["claims"]] == [facts[1].fact_id, facts[0].fact_id, facts[2].fact_id]
+    assert data["paths"][0]["ordered_evidence"] == [
+        {"fact_id": fact.fact_id, "source_episode_id": fact.source_episode_id, "quote": fact.quote} for fact in facts]
+
+
+@pytest.mark.parametrize("field", ["max_hops", "max_paths", "max_work"])
+@pytest.mark.parametrize("value", [True, False, 1.5])
+def test_public_path_limits_reject_boolean_and_fractional_values(field, value):
+    from scone_memory.retrieval.evidence_records import EvidenceRecords
+    from scone_memory.retrieval.multihop import MultiHopResult
+    from scone_memory.retrieval.path_evidence import ordered_evidence_paths
+
+    with pytest.raises(ValueError, match="path limits"):
+        ordered_evidence_paths(MultiHopResult(), EvidenceRecords([], []), **{field: value})
+
+
+@pytest.mark.parametrize("missing", ["quote", "source_episode_id"])
+async def test_helper_omits_claim_without_canonical_quote_or_source_identity(memory, missing):
+    from scone_memory.retrieval.evidence_graph import build_query_evidence_graph
+    from scone_memory.retrieval.evidence_records import canonical_evidence
+    from scone_memory.retrieval.multihop import expand_multihop
+    from scone_memory.retrieval.path_evidence import ordered_evidence_paths
+
+    facts, _, _ = await chain(memory)
+    expansion = await expand_multihop(memory.documents, "alpha", seeds=RecallResult(facts=[facts[0]]))
+    graph = await build_query_evidence_graph(memory.documents, "alpha", "chain", RecallResult(facts=expansion.facts))
+    records = canonical_evidence(graph)
+    records.claims[1].pop(missing)
+    assert ordered_evidence_paths(expansion, records, include_quotes=True).paths == []

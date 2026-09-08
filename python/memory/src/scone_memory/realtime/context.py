@@ -115,12 +115,14 @@ class MemoryContext:
 
     Each call owns its snapshot and receipt; concurrent calls never share a
     mutable last-result slot. Provider delivery and use are not established here.
+    ``path_quotes`` optionally repeats verified quotes in path order. It has no
+    effect when ``structured_paths`` is disabled or no complete path fits.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
                  kind: str | None = None, source_prefix: str | None = None, since: str | None = None, until: str | None = None,
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
-                 structured_paths: bool = True) -> None:
+                 structured_paths: bool = True, path_quotes: bool = False) -> None:
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise ValueError("session_id must contain 1..128 characters")
@@ -132,10 +134,13 @@ class MemoryContext:
             raise ValueError("recall_timeout must be finite and positive")
         if type(structured_paths) is not bool:
             raise ValueError("structured_paths must be a boolean")
+        if type(path_quotes) is not bool:
+            raise ValueError("path_quotes must be a boolean")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._limit, self._max_bytes, self._timeout = limit, max_context_bytes, recall_timeout
         self._structured_paths = structured_paths
+        self._path_quotes = path_quotes
 
     async def _overview(self) -> OverviewResult:
         items: list[RecallItem] = []
@@ -269,7 +274,7 @@ class MemoryContext:
                             scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id)
                     records = canonical_evidence(graph)
                     if expansion is not None:
-                        found_paths = ordered_evidence_paths(expansion, records)
+                        found_paths = ordered_evidence_paths(expansion, records, include_quotes=self._path_quotes)
                         candidates = found_paths.paths
                         receipt["path_search_truncated"] = found_paths.truncated
                         if found_paths.truncated:

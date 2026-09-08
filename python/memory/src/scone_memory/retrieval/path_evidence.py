@@ -1,7 +1,7 @@
 """Compact ordered paths over independently revalidated canonical evidence.
 
-These are evidence connections, never generated conclusions. No source text is
-invented or copied into path steps; claim/relation IDs address quoted records.
+These are evidence connections, never generated conclusions. Optional ordered
+quotes come verbatim from canonical claims; steps retain their claim/relation IDs.
 """
 from __future__ import annotations
 
@@ -67,21 +67,27 @@ def _verified(edge: MultiHopEdge, claims: dict[int, EvidenceRecord], relations: 
 
 
 def ordered_evidence_paths(expansion: MultiHopResult, records: EvidenceRecords, *,
-                           max_hops: int = 3, max_paths: int = 8, max_work: int = 256) -> PathEvidence:
+                           max_hops: int = 3, max_paths: int = 8, max_work: int = 256,
+                           include_quotes: bool = False) -> PathEvidence:
     """Prefer maximal paths, with strict caps even for dense cyclic graphs.
 
     Starts follow recalled seed order. Subject/object joins run forward;
     stored links preserve their original direction and record traversal direction.
     A contradiction is never traversed as a continuation. Adjacent contradiction
     evidence is supplied by ``path_records`` when a caller budgets the packet.
+    ``include_quotes`` opts into duplicate verbatim claims in traversal order.
     """
-    if not 1 <= max_hops <= 6 or not 1 <= max_paths <= 16 or not 1 <= max_work <= 2048:
+    if type(include_quotes) is not bool:
+        raise ValueError("include_quotes must be a boolean")
+    if (any(type(value) is not int for value in (max_hops, max_paths, max_work))
+            or not 1 <= max_hops <= 6 or not 1 <= max_paths <= 16 or not 1 <= max_work <= 2048):
         raise ValueError("path limits are outside supported bounds")
     claims: dict[int, EvidenceRecord] = {}
     relations: dict[int, EvidenceRecord] = {}
     for claim in records.claims:
         fact_id = claim.get("fact_id")
-        if type(fact_id) is int:
+        quote = claim.get("quote")
+        if type(fact_id) is int and type(claim.get("source_episode_id")) is int and isinstance(quote, str) and quote:
             claims[fact_id] = claim
     for relation in records.relations:
         link_id = relation.get("link_id")
@@ -143,5 +149,11 @@ def ordered_evidence_paths(expansion: MultiHopResult, records: EvidenceRecords, 
     packets: list[EvidenceRecord] = []
     for ids, steps in selected:
         step_values: list[JsonValue] = [step for step in steps]
-        packets.append({"fact_ids": [value for value in ids], "steps": step_values})
+        packet: EvidenceRecord = {"fact_ids": [value for value in ids], "steps": step_values}
+        if include_quotes:
+            packet["ordered_evidence"] = [
+                {"fact_id": fact_id, "source_episode_id": claims[fact_id]["source_episode_id"],
+                 "quote": claims[fact_id]["quote"]} for fact_id in ids
+            ]
+        packets.append(packet)
     return PathEvidence(packets, truncated or hop_truncated)

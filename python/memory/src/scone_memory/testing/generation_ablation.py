@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -14,6 +15,21 @@ from typing import AsyncIterator, Callable, Literal, Protocol, Self, cast, runti
 from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
+
+
+def _snapshot_code() -> dict[str, object]:
+    package = Path(__file__).resolve().parent.parent
+    paths = ("realtime/context.py", "retrieval/path_evidence.py", "providers/llm.py", "testing/generation_ablation.py")
+    return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "loaded_code_identity_verified": False,
+            "files": {path: hashlib.sha256((package / path).read_bytes()).hexdigest() for path in paths},
+            "limitation": "SHA-256 of disk bytes at evaluator import, before local imports and evaluation work. "
+                "Files may change afterward or modules may already be cached; this is not proof of loaded-code identity. "
+                "Only the four listed implementation files are fingerprinted, not the full dependency environment."}
+
+
+_CODE_PROVENANCE = _snapshot_code()
 
 from ..backends.sqlite import SqliteDocumentStore, SqliteVectorIndex
 from ..core.models import EpisodeKind
@@ -196,7 +212,10 @@ def _validate_endpoint(endpoint: str) -> str:
 
 async def run_ablation(fixture: Path, *, output: Path, model: str | None = None, endpoint: str | None = None,
                        embedding_cache: Path | None = None, repeats: int = 1, timeout: float = 30.0,
+                       ordered_quotes: bool = False,
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if type(ordered_quotes) is not bool:
+        raise ValueError("ordered_quotes must be a boolean")
     if type(repeats) is not int or not 1 <= repeats <= 10 or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0 or timeout > 180:
         raise ValueError("repeats must be 1..10 and timeout must be finite in (0,180]")
     corpus = load_generation_fixture(fixture)
@@ -213,6 +232,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         _validate_endpoint(endpoint)
     results: list[dict[str, object]] = []
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+        "code_provenance": _CODE_PROVENANCE,
+        "ordered_quotes": ordered_quotes,
         "model": model or "injected-test-provider", "endpoint": endpoint, "repeats": repeats, "timeout_seconds": timeout,
         "system_prompt_sha256": hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest(), "max_prompt_bytes": MAX_BYTES,
         "max_output_bytes": MAX_BYTES, "max_output_tokens": 512, "results": results,
@@ -243,7 +264,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                         for structured in ((False, True) if trial % 2 == 0 else (True, False)):
                             context = MemoryContext(engine, case.space, f"ablation-{case.id}-{trial}", where=case.where,
                                 kind=case.kind, source_prefix=case.source_prefix, since=case.since, until=case.until,
-                                structured_paths=structured)
+                                structured_paths=structured, path_quotes=ordered_quotes and structured)
                             started = time.perf_counter()
                             request, receipt = await context.prepare([{"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
                                                                      {"role": "user", "content": case.query}])
@@ -251,7 +272,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                             messages = cast(list[dict[str, str]], request)
                             prompt = json.dumps(messages, ensure_ascii=False).encode()
                             row: dict[str, object] = {"case_id": case.id, "split": case.split, "query": case.query,
-                                "trial": trial, "structured_paths": structured, "context_ms": round(context_ms, 3),
+                                "trial": trial, "structured_paths": structured, "ordered_quotes": ordered_quotes and structured,
+                                "context_ms": round(context_ms, 3),
                                 "prompt_bytes": len(prompt), "prompt_sha256": hashlib.sha256(prompt).hexdigest(),
                                 "context_bytes": receipt["context_bytes"], "context_status": receipt["status"],
                                 "path_count": receipt.get("path_count", 0), "multihop_status": receipt.get("multihop_status", "absent"),
@@ -286,9 +308,10 @@ def main() -> None:
     parser.add_argument("--embedding-cache", type=Path)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--ordered-quotes", action="store_true", help="Include ordered verbatim quotes only in the structured-path candidate")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
-        embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout))
+        embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 

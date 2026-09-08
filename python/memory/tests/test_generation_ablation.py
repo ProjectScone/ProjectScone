@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -64,6 +65,16 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
             pass
     output = tmp_path / "report.json"
     report = await run_ablation(fixture_file(tmp_path), output=output, repeats=2, model_factory=Streaming)
+    provenance = report["code_provenance"]
+    assert provenance["kind"] == "disk_snapshot"
+    assert provenance["capture_stage"] == "evaluator_import_before_local_imports"
+    assert provenance["loaded_code_identity_verified"] is False
+    assert provenance["captured_at_utc"].endswith("+00:00")
+    package = Path(__file__).parent.parent / "src" / "scone_memory"
+    expected = {"realtime/context.py", "retrieval/path_evidence.py", "providers/llm.py", "testing/generation_ablation.py"}
+    assert set(provenance["files"]) == expected
+    for relative, digest in provenance["files"].items():
+        assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
     assert [row["structured_paths"] for row in report["results"]] == [False, True, True, False]
     assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in calls)
     assert all(row["prompt_bytes"] <= 16000 for row in report["results"])
@@ -153,3 +164,23 @@ async def test_actual_three_fact_path_has_source_coverage_and_partial_answer_has
     assert candidate["key_fact_coverage"] == 1
     assert candidate["successful_key_fact_coverage"] == 0
     assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in calls)
+    assert report["ordered_quotes"] is False
+    assert all(row["ordered_quotes"] is False for row in report["results"])
+    quoted = await run_ablation(fixture, output=tmp_path / "quoted-report.json", model_factory=Partial, ordered_quotes=True)
+    assert quoted["ordered_quotes"] is True
+    assert [row["ordered_quotes"] for row in quoted["results"]] == [False, True]
+    assert quoted["results"][0]["prompt_sha256"] == report["results"][0]["prompt_sha256"]
+    for index, enabled in ((1, False), (3, True)):
+        blocks = [json.loads(message["content"].partition("\n")[2]) for message in calls[index]
+                  if message["content"].startswith("Scone retrieved source material:")]
+        paths = [path for block in blocks for path in block.get("paths", [])]
+        assert paths
+        assert all(("ordered_evidence" in path) is enabled for path in paths)
+    assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in calls)
+
+
+async def test_ordered_quotes_rejects_non_boolean(tmp_path):
+    from scone_memory.testing.generation_ablation import run_ablation
+    with pytest.raises(ValueError, match="ordered_quotes"):
+        await run_ablation(fixture_file(tmp_path), output=tmp_path / "invalid.json", ordered_quotes=1)
+    assert not (tmp_path / "invalid.json").exists()

@@ -397,6 +397,12 @@ not establish buffering guarantees inside a provider's SDK. Empty chunks are
 ignored by the observer. Unsupported events, chunks after completion, observer
 failures, missing completion and cleanup failures prevent completed capture.
 
+`providers.llm.OpenAICompatibleTextModel` accepts an optional
+`max_output_tokens` integer (1–32,768), forwarded as `max_tokens`; omitting it
+preserves the provider's configured limit. A reported token-limit cutoff is a
+failed reply, even when some text arrived. It cannot be saved as a completed
+assistant response.
+
 Each successful result contains `turn_id`, `text`, `user_episode_id`,
 `assistant_episode_id`, `memory_context` and `provider_completion="unverified"`.
 User text is retained before inference. Assistant text is saved only after
@@ -431,7 +437,10 @@ A low-confidence result supplies no source block.
 Ranked queries with recalled claims can expand bounded relationships inside the
 same scope. With `structured_paths=True` (the default), complete ordered paths
 and their quoted claims enter the same context byte budget; related conflicting
-evidence is retained together. Paths preserve stored direction and are evidence
+evidence is retained together. Optional `path_quotes=True` adds `ordered_evidence`
+with verbatim quotes, fact IDs and source episode IDs in traversal order. It is
+off by default because extra repetition has not demonstrated a small-model
+generation improvement. Paths preserve stored direction and are evidence
 connections, not generated conclusions. Missing, deleted or out-of-scope links
 cannot complete a path. `structured_paths=False` keeps the prior flat context
 for controlled comparisons. Receipts report path counts and expansion coverage;
@@ -452,6 +461,8 @@ both successful and failed public replies, and measures evidence coverage
 separately from completion-gated phrase checks. Phrase matches do not measure
 semantic entailment or unsupported claims. Reports refuse to overwrite an
 existing output path. Keep private evaluation reports outside version control.
+Add `--ordered-quotes` to test the optional quote projection in the path variant;
+the flat baseline remains unchanged.
 
 Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
 references, recall event ID when available, context hash/bytes, omissions and
