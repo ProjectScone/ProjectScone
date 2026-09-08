@@ -20,6 +20,11 @@
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
+    SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
+    SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
+                                 alternatively load preprovisioned CPU model files; both required
+    SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS, *_THREADS, *_BATCH_SIZE
+                                 optional offline tuning (defaults 512, 2, 8); no model downloads
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -113,6 +118,11 @@ class Settings:
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
+    reranker_cross_encoder_dir: str | None = None
+    reranker_cross_encoder_model: str | None = None
+    reranker_cross_encoder_max_pair_tokens: int | None = None
+    reranker_cross_encoder_threads: int | None = None
+    reranker_cross_encoder_batch_size: int | None = None
     rerank_limit: int = 32
     rerank_max_bytes: int = 64000
     rerank_timeout: float = 1.0
@@ -156,9 +166,31 @@ class Settings:
             raise InvalidInput(message) from None
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
+        for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):
+            if value is not None and (type(value) is not str or not value.strip() or "\x00" in value):
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be nonblank text")
+        if (self.reranker_cross_encoder_dir is None) != (self.reranker_cross_encoder_model is None):
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER_DIR and SCONE_RERANKER_CROSS_ENCODER_MODEL must be configured together")
+        if self.reranker_cross_encoder_dir is not None and self.reranker_factory is not None:
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER_DIR cannot be combined with SCONE_RERANKER_FACTORY")
+        for name, tuning, minimum, maximum in (
+            ("MAX_PAIR_TOKENS", self.reranker_cross_encoder_max_pair_tokens, 2, 8192),
+            ("THREADS", self.reranker_cross_encoder_threads, 1, 16),
+            ("BATCH_SIZE", self.reranker_cross_encoder_batch_size, 1, 128),
+        ):
+            if tuning is None:
+                continue
+            if type(tuning) is not int or not minimum <= tuning <= maximum:
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be an integer in {minimum}..{maximum}")
+            if self.reranker_cross_encoder_dir is None:
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} requires the cross encoder directory and model")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
+        for suffix in ("DIR", "MODEL", "MAX_PAIR_TOKENS", "THREADS", "BATCH_SIZE"):
+            name = f"SCONE_RERANKER_CROSS_ENCODER_{suffix}"
+            if name in env and type(env[name]) is not str:
+                raise InvalidInput(f"{name} must be an environment string")
         for name in ("SCONE_RECALL_CANDIDATES", "SCONE_RERANKER_FACTORY", "SCONE_RERANK_LIMIT",
                      "SCONE_RERANK_MAX_BYTES", "SCONE_RERANK_TIMEOUT"):
             if env.get(name) is not None and not isinstance(env[name], str):
@@ -208,6 +240,14 @@ class Settings:
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
+            reranker_cross_encoder_dir=env.get("SCONE_RERANKER_CROSS_ENCODER_DIR") or None,
+            reranker_cross_encoder_model=env.get("SCONE_RERANKER_CROSS_ENCODER_MODEL") or None,
+            reranker_cross_encoder_max_pair_tokens=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS",
+                env["SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS"]) if "SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS" in env else None),
+            reranker_cross_encoder_threads=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_THREADS",
+                env["SCONE_RERANKER_CROSS_ENCODER_THREADS"]) if "SCONE_RERANKER_CROSS_ENCODER_THREADS" in env else None),
+            reranker_cross_encoder_batch_size=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE",
+                env["SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE"]) if "SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE" in env else None),
             rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
             rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
             rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
@@ -401,12 +441,25 @@ def _reranker_spec(spec: str) -> tuple[str, str]:
 
 
 def build_reranker(settings: Settings) -> Reranker | None:
-    """Load explicit trusted operator code; no default provider is selected.
+    """Load an explicit offline model or trusted code; no default is selected.
 
     The factory is synchronous and takes no required arguments. It returns an
     object with an async rerank method. The operator owns adapter resources and
     shutdown; the engine does not close an injected reranker.
+    The built-in cross encoder loads preprovisioned CPU files only. Its optional
+    provider module is imported only when the directory/model pair is selected.
     """
+    if settings.reranker_cross_encoder_dir is not None and settings.reranker_cross_encoder_model is not None:
+        try:
+            from ..providers.offline_reranker import OfflineCrossEncoderReranker
+
+            return OfflineCrossEncoderReranker(settings.reranker_cross_encoder_dir,
+                model_name=settings.reranker_cross_encoder_model,
+                max_pair_tokens=settings.reranker_cross_encoder_max_pair_tokens or 512,
+                threads=settings.reranker_cross_encoder_threads or 2,
+                batch_size=settings.reranker_cross_encoder_batch_size or 8)
+        except Exception:
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER requires valid preprovisioned model files and scone-memory[offline-rerank]") from None
     if settings.reranker_factory is None:
         return None
     module, name = _reranker_spec(settings.reranker_factory)

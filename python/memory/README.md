@@ -256,6 +256,57 @@ The root [.env.example](../../.env.example) lists supported settings without
 credentials. Keep private values in ignored `.env.local` with mode `0600`;
 `scripts/serve-self-hosted.sh --check` validates its format before an explicit launch.
 
+### Offline cross-encoder reranking
+
+Install `scone-memory[offline-rerank]` to rank retained passages with a dedicated
+CPU model instead of asking a chat model to assign relevance scores:
+
+```python
+from scone_memory.providers.offline_reranker import OfflineCrossEncoderReranker
+
+reranker = OfflineCrossEncoderReranker(
+    "/srv/models/ms-marco-MiniLM-L-6-v2",
+    model_name="Xenova/ms-marco-MiniLM-L-6-v2",
+)
+memory = await MemoryEngine(
+    documents, vectors, embedder, reranker=reranker,
+    rerank_limit=16, rerank_timeout=2,
+).open()
+result = await memory.recall(
+    "authorized-space", "Who approves external data exports?",
+    limit=3, candidate_limit=32,
+)
+```
+
+The directory must already contain the model's ONNX weights, configuration, and
+tokenizer files. Provision those artifacts separately; the adapter makes no
+download or inference network calls and never loads remote Python model code.
+Supported plain ONNX models are `Xenova/ms-marco-MiniLM-L-6-v2`,
+`Xenova/ms-marco-MiniLM-L-12-v2`, and `BAAI/bge-reranker-base`. Other models can
+use the existing caller-supplied `Reranker` interface.
+`model_identity` records artifact hashes for reproducible runs. Runtime settings
+also accept `SCONE_RERANKER_CROSS_ENCODER_DIR` and
+`SCONE_RERANKER_CROSS_ENCODER_MODEL`; these are mutually exclusive with the
+existing trusted `SCONE_RERANKER_FACTORY` option.
+
+Scores are raw model logits used for ordering, not confidence or a support
+threshold. Negative scores can still identify the best available evidence.
+Candidate depth, scope checks, result size, and reranking budgets remain owned by
+Scone's retrieval pipeline. Every full query/passage pair must fit the configured
+token limit and the model's declared limit. Oversized pairs fail reranking rather
+than silently scoring a truncated prefix; the existing retrieval fallback and
+failure trace remain visible. This does not expand a model's context window.
+
+Inference runs off the event loop, with one active CPU job per adapter. Cancelling
+the awaiting request does not stop an already running ONNX operation; its result
+is discarded and its slot stays occupied until it finishes.
+
+The isolated evaluator accepts `--cross-encoder-dir /srv/models/MODEL` together
+with `--model MODEL_NAME`, `--embedding-cache EXISTING_BGE_CACHE`, and
+`--output NEW_REPORT.json`. It compares ordinary fusion, expanded candidate
+retrieval, and offline reranking on the same synthetic cases. It measures passage
+retrieval, not generated-answer accuracy.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
@@ -711,6 +762,9 @@ Complete supplied paths and connected contradictions stay together in a card;
 their constituent passages cannot bypass that grouping. Whole cards are omitted
 when they exceed a budget. A path records ordered statements and stored link
 directions; it does not assert a new transitive relationship or infer an endpoint.
+An exact same-episode passage duplicate is removed only after its standalone
+claim card fits the budget. Different sources, text, and claims stay separate;
+`deduplicated_card_count` is distinct from budget omissions.
 
 Sources are checked before and after selection against the original scope,
 revision, and records. Preparation, selection, and validation share one deadline.
