@@ -15,6 +15,7 @@ import hashlib
 import math
 import re
 import time
+from collections import OrderedDict
 from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
@@ -92,6 +93,7 @@ UNFILTERED_DEPTH = 25
 #: otherwise read a whole space to prove a negative.
 SOURCE_WALK_PAGE = 200
 SOURCE_WALK_READS = 25
+FACT_SCOPE_CACHE_LIMIT = 256
 #: Chunk texts per embedding call during batch ingest.
 EMBED_BATCH = 64
 
@@ -1624,13 +1626,30 @@ class MemoryEngine:
         if not terms:
             return []
         scored = []
+        # Keep only eligibility booleans, never mutable source records. A source
+        # decision lasts for this scan (until eviction), not for later queries.
+        source_eligibility: OrderedDict[int, bool] = OrderedDict()
         # Closed facts are included on purpose: asked about 2023, the
         # fact that held in 2023 is the answer even if it closed since.
         for fact in await self.documents.list_facts(space, include_closed=True):
             if fact.excluded or not fact.holds_at(when):
                 continue
             overlap = len(terms & set(tokenize(f"{fact.subject} {fact.predicate} {fact.object}")))
-            if overlap and await self._fact_fits_scope(space, fact, scope):
+            if not overlap:
+                continue
+            source_id = fact.source_episode_id
+            if scope is not None and source_id is not None:
+                if source_id in source_eligibility:
+                    eligible = source_eligibility[source_id]
+                    source_eligibility.move_to_end(source_id)
+                else:
+                    eligible = await self._fact_fits_scope(space, fact, scope)
+                    source_eligibility[source_id] = eligible
+                    if len(source_eligibility) > FACT_SCOPE_CACHE_LIMIT:
+                        source_eligibility.popitem(last=False)
+            else:
+                eligible = await self._fact_fits_scope(space, fact, scope)
+            if eligible:
                 scored.append((-overlap, -fact.confidence, fact.fact_id, fact))
         scored.sort(key=lambda t: t[:3])
         return [t[3] for t in scored[:limit]]
