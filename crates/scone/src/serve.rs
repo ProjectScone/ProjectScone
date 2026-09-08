@@ -190,34 +190,24 @@ pub fn router(engine: Engine, config: ServeConfig) -> Router {
 }
 
 fn router_with_playground(engine: Engine, config: ServeConfig, playground: String) -> Router {
-    let memory_page = playground.clone();
-    let source_page = playground.clone();
     let state = AppState {
         engine: Arc::new(Mutex::new(engine)),
         config: Arc::new(config),
     };
+    let workspace_page = get(move || {
+        let page = playground.clone();
+        async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
+    });
     Router::new()
-        .route(
-            "/memory",
-            get(move || {
-                let page = memory_page.clone();
-                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-            }),
-        )
-        .route(
-            "/memory/sources/{id}",
-            get(move || {
-                let page = source_page.clone();
-                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-            }),
-        )
-        .route(
-            "/playground",
-            get(move || {
-                let page = playground.clone();
-                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page) }
-            }),
-        )
+        // Every named page is the same bundle: the console decides what to
+        // show from the address. Both sides of this merge added routes, so
+        // this is the union. The source page is ours; the two conversation
+        // addresses came from the workspace merge.
+        .route("/playground", workspace_page.clone())
+        .route("/memory", workspace_page.clone())
+        .route("/memory/sources/{id}", workspace_page.clone())
+        .route("/conversations", workspace_page.clone())
+        .route("/conversations/{session_id}", workspace_page)
         .route("/v1/graph", get(get_graph))
         .route("/v1/capabilities", get(get_capabilities))
         .route("/v1/events", get(get_events).post(post_event))
