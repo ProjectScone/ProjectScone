@@ -1,8 +1,7 @@
 """One tool contract, rendered for whichever API is calling.
 
 A model can search memory, add to it and read a profile. The definitions
-and the executor live in one place, so every binding (OpenAI-shaped,
-Anthropic-shaped, MCP, an agent framework) offers the same three tools
+and the executor live in one place, so every ToolBox schema rendering offers the same tools
 with the same arguments, and a mistake comes back as a result the model
 can read rather than an exception that ends the turn.
 """
@@ -24,8 +23,8 @@ async def box():
     return ToolBox(engine, "alpha")
 
 
-def test_the_same_three_tools_are_offered_in_every_rendering():
-    assert [t.name for t in MEMORY_TOOLS] == ["search_memory", "add_memory", "read_profile"]
+def test_the_same_tools_are_offered_in_every_rendering():
+    assert [t.name for t in MEMORY_TOOLS] == ["search_memory", "add_memory", "read_profile", "trace_memory"]
     openai = openai_schema()
     anthropic = anthropic_schema()
     assert [t["function"]["name"] for t in openai] == [t["name"] for t in anthropic]

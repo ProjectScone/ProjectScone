@@ -1,11 +1,11 @@
 """One tool contract, rendered for whichever API is calling.
 
-A model that can search memory, add to it and read a profile needs three
-things described once: what the tools are called, what arguments they
+A model that can search, trace relationships, add memory and read a profile
+needs three things described once: what the tools are called, what arguments they
 take, and what running them returns. Keeping that in one place is what
-makes an OpenAI-shaped binding, an Anthropic-shaped one, MCP and an
-agent framework offer the same tools rather than three dialects that
-drift apart.
+makes the OpenAI-shaped and Anthropic-shaped bindings share a contract.
+Hosts choose which tools to offer and execute; this does not register tools
+with separate HTTP, MCP or framework services automatically.
 
 Two rules the executor keeps. A mistake is a result, never an exception:
 a model that called a tool wrongly can read what went wrong and try
@@ -78,6 +78,20 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ITEMS,
                       "description": "How many recent items to include. Defaults to 5."},
         }, []),
+    ),
+    ToolSpec(
+        name="trace_memory",
+        summary=("Inspect a fact ID returned by search_memory or read_profile. Return its quoted claims, "
+                 "stored relationships and ordered evidence paths within this space. Use this to "
+                 "investigate connections before drawing conclusions; coverage can be partial."),
+        parameters=_schema({
+            "seed_fact_id": {"type": "integer", "minimum": 1, "maximum": 2**63 - 1,
+                             "description": "The stored fact ID to start from."},
+            "max_hops": {"type": "integer", "minimum": 1, "maximum": 6,
+                         "description": "Maximum relationship steps, 1 to 6. Defaults to 3."},
+            "tags": {"type": "array", "items": {"type": "string"},
+                     "description": "Every supporting source must carry all these tags."},
+        }, ["seed_fact_id"]),
     ),
 )
 
@@ -175,6 +189,11 @@ class ToolBox:
                 tags=tuple(arguments.get("tags") or ()), source=arguments.get("source"),
             )
             return {"episode_id": added.episode_id, "outcome": added.outcome}
+        if name == "trace_memory":
+            from .relations import trace_memory
+
+            return await trace_memory(self.engine, self.space, arguments["seed_fact_id"],
+                                      max_hops=arguments.get("max_hops", 3), tags=arguments.get("tags", ()))
         profile = await self.engine.profile(self.space, limit=min(int(arguments.get("limit") or 5), MAX_ITEMS))
         return {
             "facts": [self._fact(f) for f in profile.static_facts],

@@ -428,6 +428,41 @@ above.
 
 ## Using it from a framework
 
+For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
+engine to one host-selected space. Its `openai()` and `anthropic()` methods
+render the same four contracts: `search_memory`, `add_memory`, `read_profile`,
+and `trace_memory`. Hosts can allowlist a subset. The host executes returned
+tool calls with `await box.run(name, arguments)`; installing an adapter does
+not automatically enable a tool loop in HTTP Conversations or the MCP server.
+
+```python
+from scone_memory.integrations.tools import ToolBox
+
+box = ToolBox(engine, "default", tools=["search_memory", "trace_memory"])
+found = await box.run("search_memory", {"query": "who maintains Juniper?"})
+if found["ok"] and found["facts"]:
+    evidence = await box.run("trace_memory", {
+        "seed_fact_id": found["facts"][0]["fact_id"], "max_hops": 3,
+    })
+```
+
+Tracing returns complete quoted claims with source episode IDs and recorded
+origins, directed stored relations, and ordered paths. Exact object-to-subject
+matches are labeled `subject_object`; they are not inferred semantic links.
+Contradictions remain separate evidence, never a path continuation or an
+automatically chosen winner. Quote retention is checked; factual accuracy is
+not certified. Source text remains untrusted data for the receiving model.
+
+The trace is read-only and bounded: 16 facts, 32 edges, 256 traversal store
+calls/candidates, eight paths, and a two-second async timeout. Two additional
+revision reads fence native writes. Complete source episodes may be loaded
+during point reads. The evidence packet is capped at 64,000 UTF-8 bytes before
+the ToolBox envelope. Every source must match any supplied tags. Missing or
+ineligible seeds return empty evidence; timeouts, changed revisions, and store
+failures return an unavailable result without partial quotes. Direct adapter
+writes require adapter transaction discipline. Coverage describes this seed's
+bounded neighborhood, never completeness of an answer to an arbitrary query.
+
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,
 `[llamaindex]`, `[openai-agents]`) and says so if it is missing.
