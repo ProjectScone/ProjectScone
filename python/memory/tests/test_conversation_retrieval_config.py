@@ -163,11 +163,16 @@ async def test_served_adaptive_graph_reaches_native_reply_with_scope_and_receipt
             base = "/v1/conversations/" + session["session_id"]
             sent = await client.post(base + "/turns", json={"request_id": "turn", "text": "aster", "expected_revision": session["revision"]})
             assert sent.status_code == 202
-            for _ in range(100):
-                receipt = (await client.get(base + "/turns/turn")).json()
-                if receipt["status"] != "pending":
-                    break
-                await asyncio.sleep(.01)
+            # Observe the full turn, including capture after the five-second
+            # retrieval budget, without imposing a shorter backend deadline.
+            async with asyncio.timeout(15):
+                while True:
+                    response = await client.get(base + "/turns/turn")
+                    assert response.status_code == 200, response.text
+                    receipt = response.json()
+                    if receipt["status"] != "pending":
+                        break
+                    await asyncio.sleep(.01)
             assert receipt["status"] == "completed", receipt
             context = receipt["result"]["memory_context"]
             if reviewed:
