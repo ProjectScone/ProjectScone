@@ -5,28 +5,30 @@ import { SourceImages } from '../components/SourceImages';
 import { MarkdownText, SourceContent } from '../components/SourceContent';
 import { WorkspaceState } from '../components/WorkspaceState';
 import {SourcePageLink} from '../memory/SourcePageLink';
+import {QueryEvidenceGraph} from '../memory/QueryEvidenceGraph';
 
 export function RecallPanel({ api, enabled, onRecalled }: {api:ApiClient;enabled:boolean;onRecalled:()=>void}) {
   const [query,setQuery] = useState('');
   const [submitted,setSubmitted] = useState('');
-  const [result,setResult] = useState<RecallResult | null>(null);
+  const [receipt,setReceipt] = useState<{api:ApiClient;query:string;result:RecallResult} | null>(null);
+  const result=enabled&&receipt?.api===api&&receipt.query===query.trim()&&receipt.query===submitted?receipt.result:null;
   const [message,setMessage] = useState('');
   const [pending,setPending] = useState(false);
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
-    request.current?.abort();setResult(null);setSubmitted('');setMessage('');setPending(false);
+    request.current?.abort();setReceipt(null);setSubmitted('');setMessage('');setPending(false);
     return () => request.current?.abort();
   }, [api,enabled]);
   function change(value:string) {
-    request.current?.abort();setQuery(value);setSubmitted('');setResult(null);setMessage('');setPending(false);
+    request.current?.abort();setQuery(value);setSubmitted('');setReceipt(null);setMessage('');setPending(false);
   }
   async function recall(event:FormEvent) {
     event.preventDefault(); const q = query.trim(); if (!q || !enabled) return;
     request.current?.abort(); const controller = new AbortController();request.current=controller;
-    setSubmitted(q);setPending(true);setResult(null);setMessage('');
+    setSubmitted(q);setPending(true);setReceipt(null);setMessage('');
     try {
-      const data = await api.request<RecallResult>('/v1/recall?q='+encodeURIComponent(q)+'&limit=5', {signal:AbortSignal.any([controller.signal,AbortSignal.timeout(8000)])});
-      if (!controller.signal.aborted) {setResult(data);onRecalled();}
+      const data = await api.request<RecallResult>('/v1/recall?q='+encodeURIComponent(q)+'&limit=5&evidence_graph=true', {signal:AbortSignal.any([controller.signal,AbortSignal.timeout(8000)])});
+      if (!controller.signal.aborted) {setReceipt({api,query:q,result:data});onRecalled();}
     } catch (error) {if(!controller.signal.aborted)setMessage(error instanceof Error ? error.message : 'Recall unavailable. Try again.');}
     finally {if(!controller.signal.aborted)setPending(false);}
   }
@@ -40,6 +42,7 @@ export function RecallPanel({ api, enabled, onRecalled }: {api:ApiClient;enabled
       {message && <p className="recall-state" role="alert">{message}</p>}
       {result && !result.items.length && <p className="recall-state">No evidence returned for this query.</p>}
       {!submitted && <WorkspaceState className="recall-empty" icon="search" title="Follow a question back to its source." description={<p>Submit a query to inspect the passages the engine retrieves.</p>}/>}
+      {result&&<QueryEvidenceGraph value={result.evidence_graph} api={api}/>}
       {result?.items.map((item,i)=><article className="recall-card" key={`${submitted}:${item.episode_id}:${i}`}>
         <div className="recall-card-heading"><span className="recall-rank">{String(i+1).padStart(2,'0')}</span><h3>Episode {item.episode_id}</h3><span>Retrieved passage</span></div>
         {item.text.length > 420 ? <details className="recall-passage"><summary><span><MarkdownText text={item.text.slice(0,420)} inline/>…</span><b>Read full passage</b></summary><div className="recall-full"><SourceContent text={item.text}/></div></details> : <div className="recall-full"><SourceContent text={item.text}/></div>}

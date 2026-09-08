@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
+import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import hmac
@@ -28,8 +31,12 @@ from typing import Literal
 
 from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.models import RecallItem, RecallResult
+from ..core.ports import TextFilter
 from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
+from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, build_query_evidence_graph
+from ..retrieval.evidence_records import canonical_evidence, fingerprint, restrict_graph
 from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
@@ -73,16 +80,29 @@ class OwnedSession:
     cleanup_task: asyncio.Task | None = None
 
 
+def _without_cached_graph(result):
+    """Receipts retain identifiers and fingerprints, never source text copies."""
+    if not isinstance(result, dict) or not isinstance(result.get("memory_context"), dict):
+        return result
+    context = dict(result["memory_context"])
+    if context.pop("evidence_graph", None) is not None or "evidence_graph_status" in context:
+        context["evidence_graph_status"] = "unavailable"
+    return {**result, "memory_context": context}
+
+
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
-                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None):
+                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None,
+                            local_console_key=None, runtime_available=None, model_connections_available=False,
+                            vision_available=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
     advertises unavailable text. Do not use non-cooperative/untrusted runtimes:
     cancellation and cleanup use cooperative asyncio, not process termination.
     console=True serves the packaged React workspace and session deep links.
-    Pages contain no injected keys; the user supplies a space key in the tab.
+    Pages require a space key unless the loopback host opts into local_console_key.
+    That bootstrap is restricted to loopback clients and hosts with one space key.
     scoped_runtime_factory(space, sid, scope) explicitly opts into fixed recall
     constraints. It receives an immutable RecallScope; pass scope.kwargs() to
     the native runtime. When configured it takes precedence for every new session.
@@ -99,6 +119,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
         raise ValueError("configure nonempty bearer keys")
+    if local_console_key is not None and (len(keys) != 1 or local_console_key not in keys):
+        raise ValueError("local console connection requires the host's single configured key")
     for space in keys.values():
         check_space(space)
     for limit in (max_sessions, max_turns):
@@ -112,6 +134,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("catalog must be a bound PersonaCatalog or None")
     # A catalog's sessions run the native text runtime, which streams.
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
+    def bare_runtime_available():
+        return (runtime_factory is not None or scoped_runtime_factory is not None) and (runtime_available is None or runtime_available())
     if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
@@ -303,7 +327,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1,
-                "text_configured": runtime_factory is not None or scoped_runtime_factory is not None or bool(catalog and catalog.personas),
+                "text_configured": bare_runtime_available() or bool(catalog and catalog.personas),
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
@@ -367,7 +391,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                                               f"(current fingerprint {catalog.fingerprint(body.persona)})",
                                      "code": "persona_selection_stale",
                                      "fingerprint": catalog.fingerprint(body.persona)}, status_code=409)
-        elif runtime_factory is None and scoped_runtime_factory is None:
+        elif not bare_runtime_available():
             if catalog is not None and catalog.personas:
                 raise HTTPException(422, "this host requires a persona: " + ", ".join(p.id for p in catalog.personas))
             raise HTTPException(503, "text conversation runtime is not configured")
@@ -432,10 +456,83 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         has_more = len(episodes) > limit
         next_before = None
         if has_more:
-            raw = json.dumps([1, space, sid, page[0].created_at, page[0].episode_id], separators=(",", ":"))
-            next_before = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+            encoded_boundary = json.dumps([1, space, sid, page[0].created_at, page[0].episode_id], separators=(",", ":"))
+            next_before = base64.urlsafe_b64encode(encoded_boundary.encode()).decode().rstrip("=")
         return {"episodes": [episode_json(episode) for episode in page],
                 "has_more": has_more, "next_before": next_before}
+
+    async def refreshed_graph(space, kept, result):
+        result = _without_cached_graph(result)
+        context = result.get("memory_context")
+        if not isinstance(context, dict) or not isinstance(context.get("evidence_fingerprints"), dict):
+            return result
+        context["evidence_graph_status"] = "unavailable"
+        try:
+            async with asyncio.timeout(1.0):
+                user_id = result.get("user_episode_id")
+                if type(user_id) is not int:
+                    return result
+                user = await engine.documents.get_episode(space, user_id)
+                if user is None or user.space != space or user.episode_id != user_id:
+                    return result
+                if journal is None:
+                    return result
+                session = journal.get(space, kept["session_id"])
+                scope = RecallScope.from_mapping(session["recall_scope"])
+                references = context.get("references", [])
+                if not isinstance(references, list):
+                    return result
+                pairs = [(ref["chunk_id"], ref["episode_id"]) for ref in references[:MAX_CHUNKS]
+                         if isinstance(ref, dict) and type(ref.get("chunk_id")) is int
+                         and type(ref.get("episode_id")) is int]
+                chunks = {chunk.chunk_id: chunk for chunk in await engine.documents.get_chunks(
+                    space, [chunk_id for chunk_id, _ in pairs])} if pairs else {}
+                fingerprints = context["evidence_fingerprints"]
+                items = []
+                for chunk_id, episode_id in pairs:
+                    chunk = chunks.get(chunk_id)
+                    if (chunk is None or chunk.space != space or chunk.episode_id != episode_id
+                            or hashlib.sha256(chunk.text.encode()).hexdigest() != fingerprints.get(str(chunk_id))):
+                        continue
+                    items.append(RecallItem(chunk_id=chunk_id, episode_id=episode_id, text=chunk.text,
+                                            created_at=chunk.created_at, score=0))
+                claim_fingerprints = context.get("claim_fingerprints", {})
+                relation_fingerprints = context.get("relation_fingerprints", {})
+                if not isinstance(claim_fingerprints, dict) or not isinstance(relation_fingerprints, dict):
+                    return result
+                facts = []
+                for fact_id in list(claim_fingerprints)[:MAX_FACTS]:
+                    if not isinstance(fact_id, str) or not fact_id.isdecimal():
+                        continue
+                    fact = await engine.documents.get_fact(space, int(fact_id))
+                    if fact is not None and fact.space == space and fact.fact_id == int(fact_id):
+                        facts.append(fact)
+                graph = await build_query_evidence_graph(engine.documents, space, user.content,
+                    RecallResult(items=items, facts=facts, event_id=context.get("recall_event_id")),
+                    scope=TextFilter(**scope.kwargs()), exclude_session_id=kept["session_id"])
+                records = canonical_evidence(graph)
+                fact_ids = {record["fact_id"] for record in records.claims
+                            if isinstance(record["fact_id"], int)
+                            and fingerprint(record) == claim_fingerprints.get(str(record["fact_id"]))}
+                link_ids = {record["link_id"] for record in records.relations
+                            if isinstance(record["link_id"], int)
+                            and record["from_fact"] in fact_ids and record["to_fact"] in fact_ids
+                            and fingerprint(record) == relation_fingerprints.get(str(record["link_id"]))}
+                graph = restrict_graph(graph, fact_ids, link_ids)
+                if len(fact_ids) < len(claim_fingerprints) or len(link_ids) < len(relation_fingerprints):
+                    graph.notices.append("Some originally supplied claims or relations are no longer retained unchanged with valid sources.")
+                for node in graph.nodes:
+                    if node.kind == "chunk":
+                        for key in ("score", "similarity", "lanes"):
+                            node.data.pop(key, None)
+                if len(items) < len(references):
+                    graph.notices.append("Some originally supplied evidence is no longer retained unchanged.")
+                context["evidence_graph"] = graph.model_dump(mode="json")
+                context["evidence_graph_status"] = "prepared"
+        except Exception as error:
+            logging.getLogger(__name__).warning("evidence_graph.refresh_failed", extra={"event": "evidence_graph.refresh_failed",
+                "session_id": kept["session_id"], "exception_type": type(error).__name__})
+        return result
 
     async def resolved(space, kept, entry):
         """One receipt shape, live or rehydrated, with the reply's text
@@ -472,6 +569,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return {**receipt, "result": None, "result_state": "unreadable"}
         result = dict(receipt.get("result") or {})
         result.update(text=episode.content, assistant_episode_id=episode_id)
+        result = await refreshed_graph(space, kept, result)
         return {**receipt, "result": result, "result_state": "available"}
 
     def settle(space, sid, request_id, status, episode_id=None, error=None):
@@ -494,6 +592,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
 
     async def run_turn(space, sid, entry, request_id, text):
+        from ..runtime.diagnostics import context
+        log_token = context.set({"session_id": sid, "request_id": request_id})
+        started = time.perf_counter()
+        logger = logging.getLogger(__name__)
+        logger.info("conversation.started", extra={"event": "conversation.started"})
         receipt = entry.turns[request_id]["receipt"]
         window = text_window(entry, request_id)
 
@@ -513,6 +616,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 receipt["status"] = "interrupted"
                 settle(space, sid, request_id, "interrupted")
             else:
+                result = _without_cached_graph(result)
                 receipt.update(status="completed", result=result)
                 # The episode holding the reply's text, not the text: one
                 # copy, so forgetting the episode removes it everywhere.
@@ -530,7 +634,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if current["state"] == "running":
                 journal.transition(space, sid, "interrupted:" + uuid4().hex, "interrupt", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
-        except Exception:
+        except Exception as error:
             if receipt.get("status") == "cancelled":
                 after_cancel(space, sid, entry, failed=True)
                 return
@@ -538,13 +642,27 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 receipt["status"] = "interrupted"
                 settle(space, sid, request_id, "interrupted")
                 return
-            receipt.update(status="failed", error="conversation turn failed; do not automatically retry")
+            causes = []
+            cause = error
+            while cause is not None and len(causes) < 5:
+                causes.append(type(cause).__name__)
+                cause = cause.__cause__
+            logging.getLogger(__name__).warning("Conversation turn failed: session=%s request=%s causes=%s",
+                                               sid, request_id, "/".join(causes),
+                                               extra={"event": "conversation.failed", "exception_type": "/".join(causes)})
+            message = ("Conversation timed out before the reply completed. Check Sources to confirm what was saved, "
+                       "then check the model connection and timeout before starting a new conversation."
+                       if isinstance(error, TimeoutError) else "conversation turn failed; do not automatically retry")
+            receipt.update(status="failed", error=message)
             settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)
             if current["state"] == "running":
                 journal.transition(space, sid, "failure:" + uuid4().hex, "fail", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
         finally:
+            logger.info("conversation.finished", extra={"event": "conversation.finished", "outcome": receipt["status"],
+                        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
+            context.reset(log_token)
             if window is not None:
                 window.finish()
             entry.active_id = None
@@ -807,8 +925,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if chosen is None:
             await refuse("persona is no longer available")
             return
+        if current.get("persona_fingerprint") != catalog.fingerprint(current["persona"]):
+            await refuse("model settings changed; create a new voice session")
+            return
         try:
-            transport = WebSocketAudioTransport(websocket, sample_rate=hello.get("sample_rate"),
+            sample_rate = hello.get("sample_rate")
+            if not isinstance(sample_rate, int):
+                raise ValueError("sample rate must be an integer")
+            transport = WebSocketAudioTransport(websocket, sample_rate=sample_rate,
                                                 channels=hello.get("channels", 1))
         except (ValueError, TypeError):
             await refuse("unsupported audio format")
@@ -827,7 +951,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         except asyncio.CancelledError:
             # The host closed it (stop or shutdown), which the journal already
             # records; only a cancelled handler task must keep propagating.
-            if asyncio.current_task().cancelling():
+            active_task = asyncio.current_task()
+            if active_task is not None and active_task.cancelling():
                 raise
         except Exception:
             pass  # the journal says failed below; the transport told the client what it could
@@ -855,12 +980,18 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         return True
 
     if console:
-        # A single packaged application owns these routes. Never inject space or
-        # provider credentials into its public shell, even for a single-key host.
+        # Shared/public access stays keyless; the local preview can bootstrap its
+        # existing space key without changing API authentication or browser storage.
         workspace_html = PLAYGROUND.read_text(encoding="utf-8")
 
-        async def workspace_page():
+        async def workspace_page(request: Request):
             body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
+            loopback = {"127.0.0.1", "localhost", "::1"}
+            if (local_console_key is not None and request.client is not None
+                    and request.client.host in loopback and request.url.hostname in loopback
+                    and request.url.path not in LEARN_PAGES):
+                encoded = json.dumps(local_console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+                body = body.replace('"__SCONE_TOKEN__"', encoded)
             return HTMLResponse(body, headers={
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             })
@@ -871,7 +1002,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     # The mounted app answers /v1/status, so it must know the worker; its own
     # lifespan never runs under a mount, so ownership stays with this one.
     memory_app = create_app(engine, keys, console=False, conversations=True, worker=worker,
-                            ingest_concurrency=ingest_concurrency, roles=roles)
+                            ingest_concurrency=ingest_concurrency, roles=roles,
+                            model_connections_available=model_connections_available, vision_available=vision_available)
+    app.state.memory_app = memory_app
     app.state.ingest_lane_width = memory_app.state.ingest_lane_width
     app.mount("/", memory_app)
     return app

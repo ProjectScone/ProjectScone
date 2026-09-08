@@ -2,8 +2,9 @@
 point id, and the scope fields (space, created_at, tags, metadata) in the
 payload so every filter the engine applies runs server-side.
 
-``QdrantVectorIndex(":memory:")`` uses the client's local mode, which
-runs the same code path without a server; the contract tests use it.
+``QdrantVectorIndex(":memory:")`` uses the client's embedded implementation
+for offline contract tests. It does not exercise the Qdrant server's indexing,
+networking or performance characteristics.
 """
 
 from __future__ import annotations

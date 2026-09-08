@@ -7,6 +7,7 @@ export interface ProcessingStatus {
   pending_review?:number;
   pending_distill?:number;
   failed_distill?:number;
+  last_distill?:{error?:string|null}|null;
   model?:string|null;
   pending_derivation?:number;
   semantic_lane?:string;
@@ -21,6 +22,16 @@ export function parseProcessingStatus(value:unknown):ProcessingStatus {
   const data=value as Record<string,unknown>;
   if(typeof data.space!=='string'||!data.space.trim())throw Error('Invalid memory status: missing space');
   const result:ProcessingStatus={space:data.space};
+  if(data.last_distill!==undefined){
+    const last=data.last_distill;
+    if(last===null)result.last_distill=null;
+    else {
+      if(typeof last!=='object'||Array.isArray(last))throw Error('Invalid memory status: last_distill');
+      const error=(last as Record<string,unknown>).error;
+      if(error!==undefined&&error!==null&&typeof error!=='string')throw Error('Invalid memory status: last_distill.error');
+      result.last_distill={error};
+    }
+  }
   for(const key of ['episodes','chunks','bytes','revision','pending_review','pending_distill','failed_distill','pending_derivation'] as const){
     const count=data[key];
     if(count==null)continue;

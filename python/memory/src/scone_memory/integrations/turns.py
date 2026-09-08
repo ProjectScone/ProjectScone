@@ -70,7 +70,7 @@ def next_seq(episodes: Iterable[Episode]) -> int:
 
 def item_metadata(item: RecallItem) -> dict[str, Any]:
     """What a framework document should say about where it came from: the
-    episode and chunk, the rank score, the cosine when the vector lane saw
+    episode and chunk, the fusion score and optional reranker score, the cosine when the vector lane saw
     it, the lanes that ranked it, when it happened, and the episode's own
     scope metadata (which cannot shadow these keys)."""
     return {
@@ -78,6 +78,7 @@ def item_metadata(item: RecallItem) -> dict[str, Any]:
         "episode_id": item.episode_id,
         "chunk_id": item.chunk_id,
         "score": item.score,
+        "rerank_score": item.rerank_score,
         "similarity": item.similarity,
         "lanes": dict(item.lanes),
         "created_at": item.created_at,

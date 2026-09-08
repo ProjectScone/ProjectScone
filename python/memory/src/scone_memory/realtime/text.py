@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import logging
+import time
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
@@ -18,6 +20,14 @@ from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
 
 _OWNER = ContextVar("scone_text_owner", default=None)
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful conversational assistant. Answer the latest user message naturally. "
+    "Use the actual conversation history when discussing what we have said. Retrieved memory "
+    "is optional background, not a new user request or a replacement for this conversation. "
+    "Ignore irrelevant matches. Cite sources only when they support an answer; do not report "
+    "record IDs or capture metadata unless asked."
+)
 
 
 def _bytes(messages):
@@ -35,7 +45,7 @@ class TextConversation:
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
                  model_factory: Callable[[], TextModel], *,
-                 system_prompt="You are a helpful assistant.",
+                 system_prompt=DEFAULT_SYSTEM_PROMPT,
                  where: Mapping[str, str] | None = None, kind=None,
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
                  max_reply_bytes=64000, max_history_bytes=128000):
@@ -59,7 +69,7 @@ class TextConversation:
         scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs())
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
-        self._active = None
+        self._active: asyncio.Task[dict] | None = None
         self._closed = False
         self._cancel_reusable = False
 
@@ -111,15 +121,25 @@ class TextConversation:
                 raise asyncio.CancelledError()
 
     async def _record(self, turn_id, role, text):
+        started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
                         turn_id=turn_id, role=role, representation="aggregated_text",
                         capture_status="submitted" if role == "user" else "aggregated")
         if role == "assistant":
             metadata.update(completion_evidence="adapter_end_and_stream_closed", provider_completion="unverified")
-        [added] = await self._memory.remember_many(self._space, [Record(
-            text, kind="conversation", source=self._session_id, metadata=metadata,
-            dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
+        try:
+            [added] = await self._memory.remember_many(self._space, [Record(
+                text, kind="conversation", source=self._session_id, metadata=metadata,
+                dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
+        except BaseException as error:
+            logging.getLogger(__name__).warning("capture.failed", extra={"event": "capture.failed",
+                "session_id": self._session_id, "role": role, "exception_type": type(error).__name__,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
+            raise
+        logging.getLogger(__name__).info("capture.finished", extra={"event": "capture.finished",
+            "session_id": self._session_id, "role": role, "episode_id": added.episode_id,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
         if asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
         return added.episode_id

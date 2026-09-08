@@ -50,13 +50,16 @@
 from __future__ import annotations
 
 import math
+import importlib
+import inspect
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, cast
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,11 @@ class Settings:
     contextual_embeddings: bool = False
     demote_restated: bool = False
     similarity_floor: Optional[float] = None
+    candidate_limit: int | None = None
+    reranker_factory: str | None = None
+    rerank_limit: int = 32
+    rerank_max_bytes: int = 64000
+    rerank_timeout: float = 1.0
     events: Optional[str] = None
     events_queries: str = "hash"
     events_max_age_days: Optional[float] = None
@@ -131,9 +139,30 @@ class Settings:
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
     conversations_registry: Optional[str] = None
+    # Opt-in private local service settings and operational diagnostics.
+    model_connections: Optional[str] = None
+    log_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        try:
+            validate_candidate_limit(self.candidate_limit)
+            validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
+        except InvalidInput as error:
+            message = str(error)
+            for field_name, env_name in (("candidate_limit", "SCONE_RECALL_CANDIDATES"),
+                ("rerank_limit", "SCONE_RERANK_LIMIT"), ("rerank_max_bytes", "SCONE_RERANK_MAX_BYTES"),
+                ("rerank_timeout", "SCONE_RERANK_TIMEOUT")):
+                message = message.replace(field_name, env_name)
+            raise InvalidInput(message) from None
+        if self.reranker_factory is not None:
+            _reranker_spec(self.reranker_factory)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
+        for name in ("SCONE_RECALL_CANDIDATES", "SCONE_RERANKER_FACTORY", "SCONE_RERANK_LIMIT",
+                     "SCONE_RERANK_MAX_BYTES", "SCONE_RERANK_TIMEOUT"):
+            if env.get(name) is not None and not isinstance(env[name], str):
+                raise InvalidInput(f"{name} must be an environment string")
         return cls(
             documents=env.get("SCONE_DOCUMENTS", "memory"),
             vectors=env.get("SCONE_VECTORS", "memory"),
@@ -176,6 +205,12 @@ class Settings:
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             demote_restated=env.get("SCONE_DEMOTE_RESTATED") == "1",
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
+            candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
+                             if env.get("SCONE_RECALL_CANDIDATES") else None),
+            reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
+            rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
+            rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
+            rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
             events=env.get("SCONE_EVENTS"),
             events_queries=env.get("SCONE_EVENTS_QUERIES", "hash"),
             events_max_age_days=float(env["SCONE_EVENTS_MAX_AGE_DAYS"]) if env.get("SCONE_EVENTS_MAX_AGE_DAYS") else None,
@@ -191,6 +226,8 @@ class Settings:
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
             conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
+            model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
+            log_path=env.get("SCONE_LOG_PATH") or None,
         )
 
 
@@ -341,7 +378,54 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated")
+ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout")
+
+
+def _environment_integer(name: str, value: str) -> int:
+    if not isinstance(value, str):
+        raise InvalidInput(f"{name} must be an integer")
+    try:
+        return int(value)
+    except ValueError:
+        raise InvalidInput(f"{name} must be an integer") from None
+
+
+def _reranker_spec(spec: str) -> tuple[str, str]:
+    if not isinstance(spec, str):
+        raise InvalidInput("SCONE_RERANKER_FACTORY must name a trusted module:factory")
+    module, separator, name = spec.partition(":")
+    if not separator or not all(part.isidentifier() for part in module.split(".")) or not name.isidentifier():
+        raise InvalidInput("SCONE_RERANKER_FACTORY must name a trusted module:factory")
+    return module, name
+
+
+def build_reranker(settings: Settings) -> Reranker | None:
+    """Load explicit trusted operator code; no default provider is selected.
+
+    The factory is synchronous and takes no required arguments. It returns an
+    object with an async rerank method. The operator owns adapter resources and
+    shutdown; the engine does not close an injected reranker.
+    """
+    if settings.reranker_factory is None:
+        return None
+    module, name = _reranker_spec(settings.reranker_factory)
+    try:
+        factory: object = getattr(importlib.import_module(module), name)
+        if not callable(factory) or inspect.iscoroutinefunction(factory) or inspect.isasyncgenfunction(factory):
+            raise TypeError("factory must be synchronous")
+        inspect.signature(factory).bind()
+        adapter: object = factory()
+        if inspect.iscoroutine(adapter):
+            adapter.close()
+            raise TypeError("factory returned a coroutine")
+        method = getattr(adapter, "rerank", None)
+        if not callable(method) or not inspect.iscoroutinefunction(method):
+            raise TypeError("rerank must be async")
+        inspect.signature(method).bind("query", ())
+    except Exception:
+        raise InvalidInput("SCONE_RERANKER_FACTORY must return an adapter with async rerank(query, candidates)") from None
+    return cast(Reranker, adapter)
 
 
 async def build_in_process_engine(settings: Settings, embedder):
@@ -353,11 +437,17 @@ async def build_in_process_engine(settings: Settings, embedder):
     demotion), so both benches build their engines here."""
     from ..backends import InMemoryDocumentStore, InMemoryVectorIndex
 
+    reranker = build_reranker(settings)
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
         similarity_floor=settings.similarity_floor,
         demote_restated=settings.demote_restated,
+        candidate_limit=settings.candidate_limit,
+        reranker=reranker,
+        rerank_limit=settings.rerank_limit,
+        rerank_max_bytes=settings.rerank_max_bytes,
+        rerank_timeout=settings.rerank_timeout,
     ).open()
 
 
@@ -494,6 +584,7 @@ def build_blobs(settings: Settings):
 
 
 async def build_engine(settings: Settings) -> MemoryEngine:
+    reranker = build_reranker(settings)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -511,6 +602,11 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         contextual_embeddings=settings.contextual_embeddings,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
+        candidate_limit=settings.candidate_limit,
+        reranker=reranker,
+        rerank_limit=settings.rerank_limit,
+        rerank_max_bytes=settings.rerank_max_bytes,
+        rerank_timeout=settings.rerank_timeout,
         blobs=build_blobs(settings),
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

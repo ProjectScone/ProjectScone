@@ -109,6 +109,13 @@ test('successful turn receipt requires aggregate text and validates source refer
   assert.throws(()=>turnReceipt({...wire,result:{text:'ok',memory_context:{status:'prepared',references:[{episode_id:'../bad'}]}}}));
 });
 
+test('reply context retains its own evidence graph without reconstructing a search',()=>{
+  const evidence_graph={nodes:[{id:'query:1',kind:'query',label:'Original question',data:{}}],edges:[],notices:['Context was bounded.']};
+  const wire={request_id:'turn-1',status:'completed',result:{text:'Reply',memory_context:{status:'prepared',references:[],evidence_graph}}};
+  assert.deepEqual(turnReceipt(wire).result?.memory_context?.evidence_graph,evidence_graph);
+  assert.equal(turnReceipt({...wire,result:{text:'Legacy reply',memory_context:{status:'empty',references:[]}}}).result?.memory_context?.evidence_graph,undefined);
+});
+
 test('completed receipts can explicitly report forgotten or unavailable text without becoming failed',()=>{
   for(const result_state of ['forgotten','unavailable','unreadable']){
     const value=turnReceipt({request_id:'turn-1',status:'completed',result_state,result:null});

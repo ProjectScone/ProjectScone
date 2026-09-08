@@ -13,7 +13,9 @@ approves, unless the deployer set accept_at.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -21,6 +23,8 @@ from .derive import Deriver
 from .distill import DistillError, Distiller
 from ..memory.engine import MemoryEngine
 from ..core.errors import SconeError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,6 +36,9 @@ class PassReport:
     closed: int = 0
     skipped: int = 0
     parked: int = 0
+    #: Per-source causes survive the pass and server restarts in the event
+    #: log, including sources saved without an ingestion job receipt.
+    episode_errors: dict[str, str] = field(default_factory=dict)
     #: Candidates the extraction gate withheld before they reached the
     #: store, and why, as counts per reason: the model's output that did
     #: not become a proposal is evidence too.
@@ -84,6 +91,38 @@ class ConsolidationWorker:
 
     async def run_once(self, space: str) -> PassReport:
         """One pass over one space; never raises, always records."""
+        started, call_id = time.perf_counter(), uuid.uuid4().hex[:12]
+        report: Optional[PassReport] = None
+        outcome, exception_type = "cancelled", None
+        logger.info("consolidation.started", extra={
+            "event": "consolidation.started", "call_id": call_id, "mode": "consolidation",
+        })
+        try:
+            report = await self._run_once(space)
+            outcome = "failed" if report.error is not None else "completed"
+            # _run_once constructs every error with its exception class first.
+            # Keep only that class; provider/source error text never enters logs.
+            exception_type = report.error.split(":", 1)[0] if report.error is not None else None
+            return report
+        except asyncio.CancelledError:
+            exception_type = "CancelledError"
+            raise
+        except Exception as error:
+            outcome, exception_type = "failed", type(error).__name__
+            raise
+        finally:
+            counts = {name: getattr(report, name, 0) for name in (
+                "episodes", "proposed", "accepted", "parked", "rejected", "expired",
+            )}
+            logger.log(logging.INFO if outcome == "completed" else logging.WARNING,
+                       "consolidation.finished", extra={
+                           "event": "consolidation.finished", "call_id": call_id,
+                           "mode": "consolidation", "outcome": outcome,
+                           "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                           "exception_type": exception_type, **counts,
+                       })
+
+    async def _run_once(self, space: str) -> PassReport:
         started = self.clock()
         report = PassReport(space)
         try:
@@ -98,6 +137,8 @@ class ConsolidationWorker:
             outcomes = []
             report.error = type(e).__name__
         for o in outcomes:
+            if o.error is not None and o.episode_id is not None:
+                report.episode_errors[str(o.episode_id)] = o.error[:500]
             if o.error and o.error.startswith("parked"):
                 report.parked += 1
                 continue

@@ -9,6 +9,7 @@ both). Install with ``pip install 'scone-memory[langchain]'``.
 from __future__ import annotations
 
 from typing import Any, Optional, Sequence
+from pydantic import Field
 
 try:
     from langchain_core.chat_history import BaseChatMessageHistory
@@ -20,6 +21,7 @@ except ImportError as e:  # pragma: no cover - exercised only without the extra
 
 from ..core.models import RecallResult
 from ..memory.sync import SyncMemoryEngine
+from ..retrieval.reranking import MAX_CANDIDATE_LIMIT
 from .turns import Turn, item_metadata, next_seq, read_turn, turn_records
 
 PLAIN = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}
@@ -73,11 +75,14 @@ class SconeRetriever(BaseRetriever):
     where: dict[str, str] = {}
     as_of: Optional[str] = None
     include_facts: bool = False
+    candidate_limit: int | None = Field(default=None, strict=True, ge=1, le=MAX_CANDIDATE_LIMIT)
+    rerank: bool = Field(default=True, strict=True)
 
     model_config = {"arbitrary_types_allowed": True}
 
     def _recall_kwargs(self) -> dict:
-        return {"limit": self.limit, "tags": self.tags, "where": self.where, "as_of": self.as_of}
+        return {"limit": self.limit, "tags": self.tags, "where": self.where, "as_of": self.as_of,
+                "candidate_limit": self.candidate_limit, "rerank": self.rerank}
 
     def _get_relevant_documents(self, query: str, *, run_manager: Any = None) -> list[Document]:
         result = _sync(self.memory).recall(self.space, query, **self._recall_kwargs())
@@ -106,6 +111,10 @@ class SconeChatMessageHistory(BaseChatMessageHistory):
     @property
     def messages(self) -> list[BaseMessage]:
         return [turn_message(read_turn(e)) for e in _sync(self.memory).episodes(self.space, self._where())]
+
+    @messages.setter
+    def messages(self, value: list[BaseMessage]) -> None:
+        raise AttributeError("messages is a stored view; use add_messages() or clear()")
 
     async def aget_messages(self) -> list[BaseMessage]:
         return [turn_message(read_turn(e)) for e in await _async(self.memory).episodes(self.space, self._where())]

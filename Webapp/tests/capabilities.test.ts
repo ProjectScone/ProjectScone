@@ -4,6 +4,19 @@ import { readFileSync } from 'node:fs';
 import { parseCapabilities } from '../src/capabilities.ts';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../tests/fixtures/http-capabilities.json', import.meta.url), 'utf8'));
+test('image inference requires its own explicit capability',()=>{
+  const features={...fixtures.python.features};delete features['images.understand'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['images.understand'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'images.understand':true}}).features['images.understand'],true);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'images.understand':value}}));
+});
+test('model management requires explicit host administration capability',()=>{
+  const features={...fixtures.python.features};delete features['models.manage'];
+  assert.equal(parseCapabilities({...fixtures.python,features}).features['models.manage'],false);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'models.manage':true}}).features['models.manage'],true);
+  assert.equal(parseCapabilities({...fixtures.python,features:{...features,'models.manage':false}}).features['models.manage'],false);
+  for(const value of ['true',1,null])assert.throws(()=>parseCapabilities({...fixtures.python,features:{...features,'models.manage':value}}));
+});
 test('source reads need an independent explicit boolean capability',()=>{
   const features={...fixtures.python.features};delete features['episodes.read'];
   assert.equal(parseCapabilities({...fixtures.python,features}).features['episodes.read'],false);

@@ -111,6 +111,13 @@ def connect(path: str | Path) -> sqlite3.Connection:
     enable_wal(conn)
     conn.executescript(SCHEMA)
     check_schema(conn, path)
+    # Derived retrieval indices follow schema validation/migration: adding them
+    # before check_schema would change the historical backup or failed upgrade.
+    conn.executescript("""BEGIN;
+CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
+CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
+CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
+COMMIT;""")
     return conn
 
 
@@ -350,6 +357,7 @@ class SqliteDocumentStore:
                 'INSERT INTO chunks (episode_id, space, ordinal, start, "end", text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 (n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
             )
+            assert cur.lastrowid is not None
             out.append(Chunk(chunk_id=cur.lastrowid, **n.__dict__))
         self.conn.commit()
         return out
@@ -404,6 +412,20 @@ class SqliteDocumentStore:
             params.append(filter.as_of)
         # Apply every scope condition before LIMIT so unrelated memories
         # cannot crowd all matching candidates out of the lexical lane.
+        if filter.kind is not None:
+            sql += " AND e.kind = ?"
+            params.append(filter.kind)
+        if filter.source_prefix is not None:
+            # instr is literal and case-sensitive, including %, _ and an
+            # empty prefix; a NULL source never matches any prefix.
+            sql += " AND instr(e.source, ?) = 1"
+            params.append(filter.source_prefix)
+        if filter.since is not None:
+            sql += " AND e.created_at >= ?"
+            params.append(filter.since)
+        if filter.until is not None:
+            sql += " AND e.created_at <= ?"
+            params.append(filter.until)
         for tag in filter.tags:
             sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) AS tag WHERE tag.value = ?)"
             params.append(tag)
@@ -419,8 +441,8 @@ class SqliteDocumentStore:
         rows = self.conn.execute(sql, params).fetchall()
         if filter.conditions is not None:
             # The clause narrows generously, because SQLite cannot make
-            # every test exactly; this settles the rest before the rows
-            # are counted against the limit above them.
+            # every test exactly; settle the rest after LIMIT. Approximate
+            # metadata clauses can therefore still underfill the window.
             rows = [r for r in rows if filter.conditions.matches(json.loads(r["metadata"] or "{}"))]
         return [(row["id"], -row["rank"]) for row in rows]
 
@@ -430,8 +452,9 @@ class SqliteDocumentStore:
         ).fetchall()
         return [_episode(r) for r in rows]
 
-    async def page_episodes(self, space, before, limit, kind):
-        sql, params = "SELECT * FROM episodes WHERE space = ?", [space]
+    async def page_episodes(self, space: str, before: int | None, limit: int, kind: str | None) -> list[Episode]:
+        sql = "SELECT * FROM episodes WHERE space = ?"
+        params: list[str | int] = [space]
         if before is not None:
             sql += " AND id < ?"
             params.append(before)
@@ -466,6 +489,7 @@ class SqliteDocumentStore:
             ),
         )
         self.conn.commit()
+        assert cur.lastrowid is not None
         return Fact(fact_id=cur.lastrowid, **new.__dict__)
 
     async def update_fact(self, fact: Fact) -> None:
@@ -496,6 +520,14 @@ class SqliteDocumentStore:
         )
         return [_fact(r) for r in rows]
 
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        """Indexed exact subject candidates; the caller verifies source scope."""
+        rows = self.conn.execute(
+            "SELECT * FROM facts INDEXED BY facts_subject_id WHERE space = ? AND subject = ? ORDER BY id LIMIT ?",
+            (space, subject, max(0, min(limit, 129))),
+        )
+        return [_fact(row) for row in rows]
+
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         self.conn.execute(
             "INSERT OR IGNORE INTO tombstones (space, episode_id, content_hash, forgotten_at, reason) VALUES (?, ?, ?, ?, ?)",
@@ -524,7 +556,7 @@ class SqliteDocumentStore:
             chunk_ids = tuple(r[0] for r in conn.execute("SELECT id FROM chunks WHERE space = ? ORDER BY id", (space,)))
 
             def count(table: str) -> int:
-                return conn.execute(f"SELECT count(*) FROM {table} WHERE space = ?", (space,)).fetchone()[0]
+                return int(conn.execute(f"SELECT count(*) FROM {table} WHERE space = ?", (space,)).fetchone()[0])
 
             gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
                                 links=count("fact_links"), tombstones=count("tombstones"))
@@ -544,7 +576,7 @@ class SqliteDocumentStore:
 
     # -- ingest jobs ------------------------------------------------------
 
-    def _job(self, space: str, row) -> IngestJob:
+    def _job(self, space: str, row: sqlite3.Row) -> IngestJob:
         items = self.conn.execute(
             "SELECT idx, episode_id, outcome, state, searchable_at, consolidated_at, error, attempts"
             " FROM ingest_items WHERE space = ? AND job_id = ? ORDER BY idx", (space, row["job_id"]))
@@ -646,6 +678,33 @@ class SqliteDocumentStore:
         )
         return [_fact_link(r) for r in rows]
 
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        """Merge two indexed, ordered incident streams without scanning other links."""
+        rows = self.conn.execute(
+            "SELECT * FROM fact_links INDEXED BY fact_links_from_id WHERE space = ? AND from_fact = ? "
+            "UNION SELECT * FROM fact_links INDEXED BY fact_links_to_id WHERE space = ? AND to_fact = ? "
+            "ORDER BY id LIMIT ?",
+            (space, fact_id, space, fact_id, max(0, min(limit, 129))),
+        )
+        return [_fact_link(row) for row in rows]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        row = self.conn.execute("SELECT * FROM fact_links WHERE id = ? AND space = ?", (link_id, space)).fetchone()
+        return _fact_link(row) if row is not None else None
+
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts, with no neighbor expansion."""
+        wanted = tuple(dict.fromkeys(fact_ids[:16]))
+        if not wanted:
+            return []
+        marks = ",".join("?" for _ in wanted)
+        rows = self.conn.execute(
+            f"SELECT * FROM fact_links WHERE space = ? AND from_fact IN ({marks})"
+            f" AND to_fact IN ({marks}) ORDER BY id LIMIT ?",
+            (space, *wanted, *wanted, max(0, min(limit, 49))),
+        )
+        return [_fact_link(row) for row in rows]
+
     async def bump_revision(self, space: str) -> int:
         self.conn.execute(
             "INSERT INTO revisions (space, revision) VALUES (?, 1)"
@@ -657,7 +716,7 @@ class SqliteDocumentStore:
 
     async def revision(self, space: str) -> int:
         row = self.conn.execute("SELECT revision FROM revisions WHERE space = ?", (space,)).fetchone()
-        return row["revision"] if row else 0
+        return int(row["revision"]) if row else 0
 
 
 class SqliteVectorIndex:

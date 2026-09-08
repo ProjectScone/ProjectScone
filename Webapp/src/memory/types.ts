@@ -36,6 +36,7 @@ export interface RecallItem {
 }
 
 export interface RecallResponse {
+  evidence_graph?: unknown;
   event_id?: number | null;
   items: RecallItem[];
   facts: Fact[];
@@ -118,7 +119,7 @@ export interface EventsResponse {
 /** What the shell hands the page. Matches the root-owned client. */
 export type { ApiClient } from '../api';
 
-export type View = "search" | "documents" | "profile" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status";
+export type View = "search" | "documents" | "profile" | "beliefs" | "review" | "live" | "analytics" | "scopes" | "status" | "models";
 
 export interface SearchState {
   metadataFilter?:import('./metadata-filter').AppliedFilter;

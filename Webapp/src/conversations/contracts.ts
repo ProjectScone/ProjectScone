@@ -5,7 +5,7 @@ export interface ConversationSession {session_id:string;space:string;state:Sessi
 export interface Capabilities {text_configured:boolean;session_deletion:boolean;turn_cancellation:boolean;transcript_pagination:boolean;recall_scope:boolean;streaming:boolean;voice:boolean;personas:number}
 export interface Episode {episode_id:number;content:string;metadata:Record<string,unknown>;created_at?:string}
 export interface Transcript {episodes:Episode[];has_more:boolean;next_before:string|null}
-export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[]}}
+export interface TurnResult {text:string;user_episode_id?:number;assistant_episode_id?:number;memory_context?:{status:string;references:{episode_id:number;chunk_id?:number}[];evidence_graph?:unknown}}
 export interface TurnReceipt {request_id:string;status:'pending'|'completed'|'failed'|'interrupted'|'cancelled';result_state:'available'|'forgotten'|'unavailable'|'unreadable';result?:TurnResult}
 export const idPattern=/^[A-Za-z0-9._:-]{1,128}$/;
 const states=['created','running','stopping','ended','failed','interrupted'];
@@ -66,6 +66,7 @@ export function turnReceipt(value:unknown):TurnReceipt{
     if(r.memory_context!=null){
       const c=record(r.memory_context);if(!Array.isArray(c.references)||c.references.length>200)throw Error('Invalid context references');
       result.result.memory_context={status:text(c.status),references:c.references.map(ref=>{const e=record(ref);return {episode_id:integer(e.episode_id),chunk_id:e.chunk_id==null?undefined:integer(e.chunk_id)};})};
+      if(c.evidence_graph!==undefined)result.result.memory_context.evidence_graph=c.evidence_graph;
     }
   }
   return result;

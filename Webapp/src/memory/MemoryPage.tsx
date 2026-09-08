@@ -1,6 +1,7 @@
 import {SourceContent} from '../components/SourceContent';
 import {MetadataFilter} from './MetadataFilter';
 import {SourcePageLink} from './SourcePageLink';
+import {QueryEvidenceGraph} from './QueryEvidenceGraph';
 // The memory console as a React page. Same semantics as the packaged
 // console.html it replaces: every figure carries its n, retrieved text is
 // an excerpt, claims say where they came from, and nothing is shown that
@@ -34,6 +35,7 @@ import { SourceImages } from '../components/SourceImages';
 import { useSearchRecall } from './useSearchRecall';
 import { SourceComposer } from './SourceComposer';
 import { DocumentsView } from './DocumentsView';
+import {ModelConnectionsView} from './ModelConnectionsView';
 import { StatusView } from './StatusView';
 import { ProfileView } from './ProfileView';
 import { parseCapabilities, type Capabilities } from '../capabilities';
@@ -42,9 +44,10 @@ import {claimGroups,filterClaimGroups,type ClaimFilter,type DisplayClaimGroup} f
 const GROUPS: Array<{ label: string; views: Array<[View, string]> }> = [
   { label: "Memory", views: [["search", "Search"], ["documents", "Documents"], ["profile", "Profile"], ["beliefs", "Beliefs"], ["review", "Review"]] },
   { label: "Activity", views: [["live", "Live"], ["analytics", "Analytics"]] },
-  { label: "System", views: [["scopes", "Scopes"], ["status", "Status"]] },
+  { label: "System", views: [["scopes", "Scopes"], ["status", "Status"], ["models", "Models"]] },
 ];
 const INTRO: Record<View, [string, string]> = {
+  models: ["Models", "Connect the models you run locally for conversations, memory extraction, images and voice."],
   search: ["Search", "Ask in plain words. Every result is an excerpt of something stored, and says where it came from."],
   documents: ["Documents", "Your memory starts here. Browse retained files, notes and conversations, then open the material behind them."],
   profile: ["Profile", "See the context this space can provide to an agent: selected claims and recent source excerpts."],
@@ -85,7 +88,7 @@ function useAsync<T>(load: () => Promise<T>, deps: unknown[]) {
 
 const VIEW_FEATURES: Record<View, keyof Capabilities['features']> = {
   search: 'recall', documents: 'episodes.list', profile: 'profile.read', beliefs: 'facts.read', review: 'facts.review',
-  live: 'events.read', analytics: 'metrics.read', scopes: 'scopes.read', status: 'status.read',
+  live: 'events.read', analytics: 'metrics.read', scopes: 'scopes.read', status: 'status.read', models: 'models.manage',
 };
 
 function useCapabilities(api: ApiClient) {
@@ -149,7 +152,7 @@ export function MemoryPage({ api }: { api: ApiClient }) {
             <span className="grp">{g.label}</span>
             {g.views.filter(([id]) => caps?.[VIEW_FEATURES[id]]).map(([id, label]) => (
               <button key={id} className="nav" aria-current={view === id} onClick={() => setView(id)}>
-                <WorkspaceIcon name={id}/>{label}
+                <WorkspaceIcon name={id==='models'?'scopes':id}/>{label}
                 {id === "review" && pending ? <span className="count">{pending}</span> : null}
               </button>
             ))}
@@ -169,6 +172,7 @@ export function MemoryPage({ api }: { api: ApiClient }) {
             {view === "live" && <LiveView api={api} />}
             {view === "analytics" && <AnalyticsView api={api} />}
             {view === "scopes" && <ScopesView api={api} onScope={searchInScope} />}
+            {view === "models" && <ModelConnectionsView api={api} />}
             {view === "status" && <StatusView api={api} integrity={caps['integrity.read']} review={caps['facts.review']} documents={caps['episodes.list']} maintenance={caps['processing.distill']} inference={caps['processing.derive']} jobs={caps['jobs.read']} />}
           </>}
       </main>
@@ -217,7 +221,7 @@ function SearchView({ api, state, setState, onScope, canAddSources, canFilterMet
   const active = Boolean(state.q || Object.keys(state.where).length || state.tags.length || state.asOf || state.metadataFilter);
   const unsupportedFilter=Boolean(state.metadataFilter&&!canFilterMetadata);
 
-  const params = new URLSearchParams({ q: state.q || "*", limit: "25" });
+  const params = new URLSearchParams({ q: state.q || "*", limit: "25", evidence_graph: 'true' });
   const where = Object.entries(state.where).map(([k, v]) => `${k}:${v}`).join(",");
   if (where) params.set("where", where);
   if (state.tags.length) params.set("tags", state.tags.join(","));
@@ -322,7 +326,7 @@ function ResultList({ r, api, asOf, onScope, onTag, feedback, sendFeedback }: {
   r: RecallResponse; asOf: string; onScope: (k: string, v: string) => void; onTag: (t: string) => void;
   feedback: Record<string, boolean>; sendFeedback: (e: number, c: number, u: boolean) => void;
 }) {
-  if (!r.items.length && !r.facts.length) return <Empty>Nothing matched. Store something with <code>scone-memory remember</code> and ask again.</Empty>;
+  if (!r.items.length && !r.facts.length) return <><QueryEvidenceGraph value={r.evidence_graph} api={api}/><Empty>Nothing matched. Store something with <code>scone-memory remember</code> and ask again.</Empty></>;
   const reduction = r.context_reduction != null && r.space_bytes ? `, ${Math.round(r.context_reduction * 100)}% of stored bytes left behind` : "";
   return (
     <>
@@ -330,6 +334,7 @@ function ResultList({ r, api, asOf, onScope, onTag, feedback, sendFeedback }: {
         {r.items.length} excerpt{r.items.length === 1 ? "" : "s"}{reduction}
         {r.degraded.length > 0 && <span className="err"> · one lane failed: {r.degraded.join("; ")}</span>}
       </p>
+      <QueryEvidenceGraph value={r.evidence_graph} api={api}/>
       {r.facts.length > 0 && (
         <div className="facts-inline">
           <h3>Recorded claims that held{asOf ? ` on ${asOf}` : ""}</h3>

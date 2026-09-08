@@ -309,8 +309,12 @@ class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int
     text: str
-    #: Within-query rank score; the top item is 1.0 whatever its relevance.
+    #: Fusion rank score divided by the leading baseline item's score,
+    #: after optional restatement demotion. Not confidence; can exceed 1.
+    #: A reranked first item need not be the baseline leader (score 1.0).
     score: float
+    #: Raw optional reranker score. Its scale is adapter-specific rank only.
+    rerank_score: Optional[float] = None
     #: Cosine from the vector lane when that lane saw the chunk, else None.
     similarity: Optional[float] = None
     #: 1-based rank in each lane that returned this chunk ("vector",
@@ -322,11 +326,22 @@ class RecallItem(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class RerankTrace(BaseModel):
+    status: Literal["applied", "empty", "failed", "disabled"]
+    ordering: Literal["rerank", "fusion"]
+    candidates_considered: int
+    candidates_sent: int
+    candidates_omitted: int
+    payload_bytes: int
+    duration_ms: float
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
     event_id: Optional[int] = None
     items: list[RecallItem] = Field(default_factory=list)
+    rerank: Optional[RerankTrace] = None
     facts: list[Fact] = Field(default_factory=list)
     #: With ``history``: the closed facts that preceded the matched ones for
     #: the same subject and predicate, oldest first. Empty otherwise.

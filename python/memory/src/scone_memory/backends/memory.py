@@ -12,10 +12,11 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from itertools import count
+from bisect import insort
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
-from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone
+from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
@@ -29,6 +30,10 @@ class InMemoryDocumentStore:
         self._chunks: dict[int, Chunk] = {}
         self._facts: dict[int, Fact] = {}
         self._links: dict[int, FactLink] = {}
+        self._link_keys: dict[tuple[str, int, int, str], int] = {}
+        self._links_by_fact: dict[tuple[str, int], list[int]] = defaultdict(list)
+        self._facts_by_subject: dict[tuple[str, str], list[int]] = defaultdict(list)
+        self._fact_subject_keys: dict[int, tuple[str, str]] = {}
         self._tombstones: dict[tuple[str, int], Tombstone] = {}
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
@@ -69,14 +74,21 @@ class InMemoryDocumentStore:
         self._bm25.pop(space, None)
         for fact_id in fact_ids:
             del self._facts[fact_id]
+            self._fact_subject_keys.pop(fact_id, None)
+        for subject_key in [key for key in self._facts_by_subject if key[0] == space]:
+            del self._facts_by_subject[subject_key]
+        for endpoint_key in [key for key in self._links_by_fact if key[0] == space]:
+            del self._links_by_fact[endpoint_key]
         for link_id in link_ids:
             del self._links[link_id]
-        for key in stones:
-            del self._tombstones[key]
+        for link_key in [key for key in self._link_keys if key[0] == space]:
+            del self._link_keys[link_key]
+        for stone_key in stones:
+            del self._tombstones[stone_key]
         self._inflight = {mark for mark in self._inflight if mark[0] != space}
-        for key in [k for k in self._jobs if k[0] == space]:
-            del self._jobs[key]
-            self._job_seq.pop(key, None)
+        for job_key in [key for key in self._jobs if key[0] == space]:
+            del self._jobs[job_key]
+            self._job_seq.pop(job_key, None)
         self._revision.pop(space, None)
         self._deleted[space] = deleted_at
         return DeletedSpace(chunk_ids=chunk_ids, episodes=len(episode_ids), facts=len(fact_ids),
@@ -194,7 +206,8 @@ class InMemoryDocumentStore:
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
         allowed = None
-        if filter.as_of or filter.tags or filter.where or filter.conditions:
+        if (filter.as_of or filter.tags or filter.where or filter.conditions
+                or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
             allowed = [
                 c.chunk_id
                 for c in self._chunks.values()
@@ -205,9 +218,18 @@ class InMemoryDocumentStore:
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):
             return False
-        if filter.tags or filter.where or filter.conditions:
+        if (filter.tags or filter.where or filter.conditions
+                or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
             episode = self._episodes.get(chunk.episode_id)
-            if episode is None:
+            if episode is None or episode.space != chunk.space:
+                return False
+            if filter.kind is not None and episode.kind != filter.kind:
+                return False
+            if filter.source_prefix is not None and (episode.source is None or not episode.source.startswith(filter.source_prefix)):
+                return False
+            if filter.since is not None and episode.created_at < filter.since:
+                return False
+            if filter.until is not None and episode.created_at > filter.until:
                 return False
             if filter.tags and not set(filter.tags) <= set(episode.tags):
                 return False
@@ -222,7 +244,7 @@ class InMemoryDocumentStore:
         mine.sort(key=lambda e: (e.created_at, e.episode_id), reverse=True)
         return mine[:limit]
 
-    async def page_episodes(self, space, before, limit, kind):
+    async def page_episodes(self, space: str, before: int | None, limit: int, kind: str | None) -> list[Episode]:
         from heapq import nlargest
         return nlargest(limit, (e for e in self._episodes.values()
             if e.space == space and (before is None or e.episode_id < before)
@@ -243,12 +265,28 @@ class InMemoryDocumentStore:
     async def insert_fact(self, new: NewFact) -> Fact:
         fact = Fact(fact_id=next(self._fact_ids), **new.__dict__)
         self._facts[fact.fact_id] = fact
+        key = (fact.space, fact.subject)
+        self._facts_by_subject[key].append(fact.fact_id)
+        self._fact_subject_keys[fact.fact_id] = key
         return fact
 
     async def update_fact(self, fact: Fact) -> None:
         if fact.fact_id not in self._facts:
             raise KeyError(fact.fact_id)
+        old_key = self._fact_subject_keys[fact.fact_id]
+        new_key = (fact.space, fact.subject)
+        if old_key != new_key:
+            self._facts_by_subject[old_key].remove(fact.fact_id)
+            if not self._facts_by_subject[old_key]:
+                del self._facts_by_subject[old_key]
+            insort(self._facts_by_subject[new_key], fact.fact_id)
+            self._fact_subject_keys[fact.fact_id] = new_key
         self._facts[fact.fact_id] = fact
+
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        """Exact subject candidates, with at most 129 indexed record reads."""
+        ids = self._facts_by_subject.get((space, subject), ())
+        return [self._facts[fact_id] for fact_id in ids[:max(0, min(limit, 129))]]
 
     async def get_fact(self, space: str, fact_id: int) -> Optional[Fact]:
         fact = self._facts.get(fact_id)
@@ -286,15 +324,38 @@ class InMemoryDocumentStore:
         return sorted((c.chunk_id, c.episode_id) for c in self._chunks.values() if c.space == space)
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
-        for link in self._links.values():
-            if (link.space, link.from_fact, link.to_fact, link.kind) == (new.space, new.from_fact, new.to_fact, new.kind):
-                return link
+        key = (new.space, new.from_fact, new.to_fact, new.kind)
+        existing = self._link_keys.get(key)
+        if existing is not None:
+            return self._links[existing]
         link = FactLink(link_id=next(self._link_ids), **new.__dict__)
         self._links[link.link_id] = link
+        self._link_keys[key] = link.link_id
+        for fact_id in {link.from_fact, link.to_fact}:
+            self._links_by_fact[(link.space, fact_id)].append(link.link_id)
         return link
+
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        """Incident links in stored direction; at most 129 indexed reads."""
+        ids = self._links_by_fact.get((space, fact_id), ())
+        return [self._links[link_id] for link_id in ids[:max(0, min(limit, 129))]]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        link = self._links.get(link_id)
+        return link if link is not None and link.space == space else None
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         return [l for l in self._links.values() if l.space == space and fact_id in (l.from_fact, l.to_fact)]
+
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """At most 16 × 16 × four identity lookups, independent of other links."""
+        wanted = set(fact_ids[:16])
+        capped = max(0, min(limit, 49))
+        if not wanted or not capped:
+            return []
+        found = [link_id for left in wanted for right in wanted for kind in LINK_KINDS
+                 if (link_id := self._link_keys.get((space, left, right, kind))) is not None]
+        return [self._links[link_id] for link_id in sorted(found)[:capped]]
 
     async def bump_revision(self, space: str) -> int:
         self._revision[space] += 1

@@ -45,6 +45,7 @@ def test_a_prebuilt_engine_still_works_and_a_closed_wrapper_refuses():
     memory = SyncMemoryEngine(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()))
     memory.remember("default", "kept")
     assert memory.recall("default", "kept").items[0].episode_id == 1
+    assert memory.overview("default").items[0].episode_id == 1
     memory.close()
     with pytest.raises(RuntimeError, match="closed"):
         memory.status("default")

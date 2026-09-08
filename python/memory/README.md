@@ -215,6 +215,36 @@ save and does not retry. Inspect the store before repeating it. There is no
 automatic host image capture, missing-image reconstruction or Rust CLI parity
 claim. Export/import still carries references, not a portable copy of image bytes.
 
+## LlamaIndex and LangChain workflows
+
+The optional `llamaindex` and `langchain` extras can coexist over one Scone
+engine. `scone_memory.integrations.llamaindex.SconeRetriever` returns scored
+nodes; `scone_memory.integrations.langchain.SconeRetriever` returns documents,
+and `SconeChatMessageHistory` provides explicit session history.
+
+The packaged [composition API](src/scone_memory/integrations/composition.py) runs
+LlamaIndex retrieval inside a LangChain Runnable workflow while preserving
+source text, chunk/episode IDs and the application's authorized scope. Its
+`retrieve_without_tracing` helper disables hosted tracing per invocation and
+needs no model service. These retriever adapters are separate from the optional
+vector-store bridge below.
+
+Additional package APIs provide [query evidence](src/scone_memory/retrieval/evidence_graph.py),
+[bounded reranking](src/scone_memory/retrieval/reranking.py),
+[structural context](src/scone_memory/retrieval/structural.py),
+[recorded multi-hop retrieval](src/scone_memory/retrieval/multihop.py), and
+[encrypted workflow checkpoints](src/scone_memory/agents/workflow.py).
+The [retrieval workflow builder](src/scone_memory/agents/retrieval.py) composes
+both frameworks with retained-source checks.
+
+The [self-hosted reranking evaluator](src/scone_memory/testing/self_hosted_reranking.py)
+and [Qdrant comparison](src/scone_memory/testing/qdrant_comparison.py) are runnable
+package modules. They use isolated fixtures and record failures as well as
+successful retrieval; fixture scores do not establish general answer accuracy.
+The root [.env.example](../../.env.example) lists supported settings without
+credentials. Keep private values in ignored `.env.local` with mode `0600`;
+`scripts/serve-self-hosted.sh --check` validates its format before an explicit launch.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python

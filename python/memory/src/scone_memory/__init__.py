@@ -49,6 +49,9 @@ _LAZY = {
     "Fact": ".core.models",
     "RecallItem": ".core.models",
     "RecallResult": ".core.models",
+    "OverviewResult": ".retrieval.overview",
+    "QueryEvidenceGraph": ".retrieval.evidence_graph",
+    "build_query_evidence_graph": ".retrieval.evidence_graph",
     "Status": ".core.models",
     "SourcePage": ".core.ports",
 }
@@ -71,6 +74,9 @@ def __dir__():
 
 __all__ = [
     "MemoryEngine",
+    "OverviewResult",
+    "QueryEvidenceGraph",
+    "build_query_evidence_graph",
     "SourcePage",
     "SyncMemoryEngine",
     "Profile",

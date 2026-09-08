@@ -24,6 +24,62 @@ const edges = [
   {source:'episode:7',target:'chunk:9',kind:'chunked_into'},
   {source:'recall:12',target:'chunk:9',kind:'returned'},
 ];
+
+test('Status exposes failed extraction separately from healthy memory access and clears it after recovery',async t=>{
+  const {page,requested}=await fixture(t,{memory:true});
+  let failure='DistillError: 2 episode(s) failed';
+  await page.route('**/v1/status',route=>route.fulfill({json:{space:'launch',episodes:5,pending_review:0,semantic_lane:'active',last_distill:{error:failure||null}}}));
+  await page.getByRole('button',{name:'Status',exact:true}).click();
+  const alert=page.getByRole('alert').filter({hasText:'The last extraction pass failed'});
+  await alert.waitFor();
+  await alert.getByText('View extraction error',{exact:true}).click();
+  assert.match(await alert.innerText(),/2 episode\(s\) failed/);
+  assert.match(await alert.innerText(),/Retained sources can still be searched/);
+  failure='';
+  await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+  await alert.waitFor({state:'detached'});
+  assert.ok(!requested.some(url=>url.startsWith('/v1/consolidate')),'Checking failure status must not run extraction.');
+});
+
+test('selected session fetches older history beyond the shared snapshot and retains session navigation',async t=>{
+  const {page}=await fixture(t);
+  await page.locator('#sessions .session').nth(1).waitFor();
+  const older={id:'tool:older',kind:'tool_call',label:'Older Claude action'};
+  const sessionId='s1 /&?';
+  const focusedRequests=[];
+  await page.route('**/v1/graph?*',async route=>{
+    const url=new URL(route.request().url());
+    const focus=url.searchParams.get('session_id');
+    if(focus)focusedRequests.push(focus);
+    const graphNodes=[{...nodes[0],data:{...nodes[0].data,session_id:sessionId}},...nodes.slice(1)];
+    await route.fulfill({json:{nodes:focus?[...graphNodes,older]:graphNodes,
+      edges:focus?[...edges,{source:nodes[0].id,target:older.id,kind:'invoked'}]:edges,truncated:true}});
+  });
+  await page.waitForResponse(response=>response.url().includes('/v1/graph?'));
+  await page.locator('#sessions .session').nth(1).click();
+  await page.waitForFunction(()=>document.querySelector('.graph-title')?.textContent==='6 records · 5 links');
+  assert.ok(focusedRequests.includes(sessionId),'The exact session ID is encoded in a focused API request.');
+  assert.equal(await page.locator('#sessions .session').count(),2);
+  assert.match(await page.locator('#coverage').innerText(),/Partial snapshot/);
+  await page.locator('#sessions .session').first().click();
+  await page.waitForFunction(()=>document.querySelector('.graph-title')?.textContent==='5 records · 4 links');
+});
+
+test('selected session read failure does not disguise the shared snapshot as session history',async t=>{
+  const {page}=await fixture(t);
+  await page.locator('#sessions .session').nth(1).waitFor();
+  await page.route('**/v1/graph?*',async route=>{
+    if(new URL(route.request().url()).searchParams.has('session_id')){
+      await route.fulfill({status:503,json:{error:'Session history unavailable'}});return;
+    }
+    await route.continue();
+  });
+  await page.locator('#sessions .session').nth(1).click();
+  await page.waitForFunction(()=>document.querySelector('#connection')?.textContent?.includes('Session history unavailable'));
+  assert.equal(await page.locator('.graph-title').innerText(),'0 records · 0 links');
+  await page.locator('#sessions .session').first().click();
+  await page.waitForFunction(()=>document.querySelector('.graph-title')?.textContent==='5 records · 4 links');
+});
 async function chooseLayout(page,mode) {
   await page.getByRole('button',{name:'Graph layout',exact:true}).click();
   await page.getByRole('menuitemradio',{name:({constellation:'Constellation',radial:'Radial clusters',flow:'Evidence flow',growth:'Growth spiral'})[mode],exact:true}).click();
@@ -239,6 +295,7 @@ for(const mobile of [false,true])test(`processing overview separates stored sour
   assert.match(await panel.getByRole('article',{name:'Inference'}).innerText(),/2[\s\S]*groups[\s\S]*Off/);
   assert.match(await panel.getByRole('article',{name:'Extraction'}).innerText(),/4[\s\S]*episodes[\s\S]*Stopped/);
   assert.match(await panel.getByRole('article',{name:'Review'}).innerText(),/7[\s\S]*proposals/);
+  await panel.getByText('About these counts',{exact:true}).click();
   assert.match(await panel.innerText(),/not a per-document readiness receipt/);
   await panel.getByRole('link',{name:'Open review'}).click();
   await page.getByRole('heading',{name:'Review',exact:true}).waitFor();

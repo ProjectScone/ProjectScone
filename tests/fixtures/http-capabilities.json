@@ -24,6 +24,9 @@
     "features": {
       "recall": true,
       "recall.conditions": true,
+      "recall.evidence_graph": true,
+      "recall.candidate_budget": true,
+      "recall.reranking": false,
       "facts.read": true,
       "facts.review": true,
       "facts.close": true,
@@ -39,7 +42,9 @@
       "facts.links": true,
       "jobs.read": true,
       "integrity.read": true,
-      "profile.read": true
+      "profile.read": true,
+      "recall.structural_context": true,
+      "recall.multi_hop": true
     }
   }
 }

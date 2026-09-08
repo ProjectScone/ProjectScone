@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 from .engine import ImportSummary, MemoryEngine, Profile, Record
 from ..core.models import Added, Episode, Fact, RecallResult, Status
 from ..core.ports import SourcePage
+from ..retrieval.overview import OverviewResult
 
 
 class SyncMemoryEngine:
@@ -152,8 +153,18 @@ class SyncMemoryEngine:
     def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
         return self._run(self._engine.remember_many(space, list(records)))
 
-    def recall(self, space: str, query: str, **kwargs) -> RecallResult:
-        return self._run(self._engine.recall(space, query, **kwargs))
+    def recall(self, space: str, query: str, *, candidate_limit: int | None = None,
+               rerank: bool = True, **kwargs) -> RecallResult:
+        return self._run(self._engine.recall(space, query, candidate_limit=candidate_limit, rerank=rerank, **kwargs))
+
+    def overview(self, space: str, *, limit: int = 20, before: int | None = None,
+                 where: Mapping[str, str] | None = None, kind: str | None = None,
+                 source_prefix: str | None = None, since: str | None = None,
+                 until: str | None = None, exclude_session_id: str | None = None,
+                 max_records: int = 200) -> OverviewResult:
+        return self._run(self._engine.overview(space, limit=limit, before=before, where=where,
+            kind=kind, source_prefix=source_prefix, since=since, until=until,
+            exclude_session_id=exclude_session_id, max_records=max_records))
 
     def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         return self._run(self._engine.episodes(space, where, limit))

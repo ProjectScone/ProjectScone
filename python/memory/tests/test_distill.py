@@ -180,6 +180,23 @@ async def test_a_transport_failure_counts_as_an_attempt_and_the_others_still_run
     assert [f.object for f in await engine.facts(SPACE)] == ["Lisbon"]
 
 
+async def test_parked_passes_do_not_count_as_failed_model_attempts(engine):
+    from scone_memory.memory.engine import Record
+
+    job = await engine.ingest_batch(SPACE, [Record(content="Ana moved to Lisbon.")])
+    distiller = Distiller(engine, FakeChat([ChatError("connection refused")]), max_attempts=1)
+    with pytest.raises(DistillError):
+        await distiller.distill_pending(SPACE)
+
+    for _ in range(2):
+        [outcome] = await distiller.distill_pending(SPACE)
+        assert outcome.error.startswith("parked:")
+
+    receipt = (await engine.job(SPACE, job.job_id)).items[0]
+    assert receipt.attempts == 1
+    assert receipt.error == "ChatError: connection refused"
+
+
 # -- parse_triples ---------------------------------------------------------------
 
 
@@ -380,6 +397,51 @@ async def test_openai_compatible_chat_turns_transport_failures_into_chat_errors(
     chat = OpenAICompatibleChat("http://llm.local/v1", "gpt", transport=httpx.MockTransport(handle))
     with pytest.raises(ChatError, match="unreachable"):
         await chat.complete("sys", "hello")
+
+
+async def test_http_extraction_requests_a_schema_and_still_rejects_ungrounded_candidates(engine):
+    source = "Ana moved to Lisbon."
+    added = await engine.remember(SPACE, source)
+
+    def handle(request):
+        body = json.loads(request.content)
+        assert body["response_format"]["type"] == "json_schema"
+        schema = body["response_format"]["json_schema"]["schema"]
+        assert schema["required"] == ["facts"]
+        candidate = schema["properties"]["facts"]["items"]
+        assert set(candidate["required"]) == {
+            "subject", "predicate", "object", "quote", "statement_type", "confidence",
+        }
+        assert candidate["additionalProperties"] is False
+        assert body["max_tokens"] > 0
+        assert body["messages"][1]["content"] == source
+        content = json.dumps({"facts": [
+            grounded("Ana", "moved_to", "Lisbon", source),
+            grounded("Ana", "works_at", "Acme", "Ana works at Acme."),
+        ]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+
+    chat = OpenAICompatibleChat("http://llm.local/v1", "local", transport=httpx.MockTransport(handle))
+    outcome = await Distiller(engine, chat).distill_episode(SPACE, added.episode_id)
+    assert [(fact.object, fact.status) for fact in outcome.added] == [("Lisbon", "proposed")]
+    assert [rejection.reason for rejection in outcome.rejected] == ["quote_not_in_source"]
+
+
+@pytest.mark.parametrize("content,finish_reason", [
+    ('{"facts": []}', "length"),
+    ('{"other": []}', "stop"),
+    ('{"facts": "none"}', "stop"),
+    ('{"facts": [', "stop"),
+])
+async def test_structured_extraction_rejects_truncation_and_wrong_envelopes(engine, content, finish_reason):
+    added = await engine.remember(SPACE, "Ana moved to Lisbon.")
+    response = httpx.Response(200, json={"choices": [{
+        "message": {"content": content}, "finish_reason": finish_reason,
+    }]})
+    chat = OpenAICompatibleChat("http://llm.local/v1", "local", transport=httpx.MockTransport(lambda _: response))
+    with pytest.raises((ChatError, DistillError)):
+        await Distiller(engine, chat).distill_episode(SPACE, added.episode_id)
+    assert await engine.facts(SPACE, status="proposed") == []
 
 
 

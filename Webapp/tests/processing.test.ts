@@ -2,6 +2,16 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseProcessingStatus} from '../src/memory/processing.ts';
 
+test('processing preserves the last extraction failure without inventing failed episode counts',()=>{
+  const status=parseProcessingStatus({space:'alpha',last_distill:{error:'DistillError: 2 episode(s) failed'}});
+  assert.equal(status.last_distill?.error,'DistillError: 2 episode(s) failed');
+  assert.equal(status.failed_distill,undefined);
+  assert.equal(parseProcessingStatus({space:'alpha',last_distill:null}).last_distill,null);
+  assert.equal(parseProcessingStatus({space:'alpha'}).last_distill,undefined);
+  assert.equal(parseProcessingStatus({space:'alpha',last_distill:{error:null}}).last_distill?.error,null);
+  for(const last_distill of [[],true,{error:4}])assert.throws(()=>parseProcessingStatus({space:'alpha',last_distill}),/Invalid memory status/);
+});
+
 test('processing status preserves reported zero and leaves omitted counters unknown',()=>{
   const minimal=parseProcessingStatus({space:'alpha',episodes:0,pending_derivation:null});
   assert.equal(minimal.episodes,0);assert.equal(minimal.pending_derivation,undefined);

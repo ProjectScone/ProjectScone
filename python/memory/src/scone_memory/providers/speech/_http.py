@@ -24,16 +24,22 @@ class PCMSpeech:
     """
 
     provider: str
+    requires_api_key = True
+    opaque_voice = True
+    sample_rates: tuple[int, ...] | None = (8000, 16000, 22050, 24000, 44100, 48000)
 
-    def __init__(self, *, api_key: str, model: str, voice: str, sample_rate: int = 24000,
+    def __init__(self, *, api_key: str | None = None, model: str, voice: str, sample_rate: int = 24000,
                  timeout: float = 30, chunk_bytes: int = 4096, max_audio_bytes: int = 24_000_000,
                  transport: httpx.AsyncBaseTransport | None = None):
-        if not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or any(not 33 <= ord(c) <= 126 for c in api_key):
+        if (api_key is None and self.requires_api_key) or (api_key is not None and (
+                not isinstance(api_key, str) or not api_key or len(api_key) > 4096
+                or any(not 33 <= ord(c) <= 126 for c in api_key))):
             raise ValueError('api_key must be nonempty printable ASCII without spaces')
         self._choice = VoiceChoice(provider=self.provider, model=model, voice=voice)
-        if not re.fullmatch(r'[A-Za-z0-9_-]+', voice):
+        if self.opaque_voice and not re.fullmatch(r'[A-Za-z0-9_-]+', voice):
             raise ValueError('voice must be an opaque provider ID')
-        if type(sample_rate) is not int or sample_rate not in (8000, 16000, 22050, 24000, 44100, 48000):
+        if (type(sample_rate) is not int or not 8000 <= sample_rate <= 48000
+                or (self.sample_rates is not None and sample_rate not in self.sample_rates)):
             raise ValueError('unsupported PCM sample rate')
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('timeout must be finite and positive')
@@ -41,12 +47,15 @@ class PCMSpeech:
             raise ValueError('chunk_bytes must be an even integer in 512..64000')
         if type(max_audio_bytes) is not int or not 2 <= max_audio_bytes <= 64_000_000:
             raise ValueError('max_audio_bytes must be an integer in 2..64000000')
-        self._api_key, self._sample_rate = api_key, sample_rate
+        self._api_key, self._sample_rate = api_key or '', sample_rate
         self._timeout, self._chunk_bytes, self._max_audio_bytes = timeout, chunk_bytes, max_audio_bytes
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
         self._response: httpx.Response | None = None
         self._closed = self._busy = False
+
+    def _request(self, text: str) -> tuple[str, dict[str, str], dict[str, object]]:
+        raise NotImplementedError
 
     async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
         if self._closed:

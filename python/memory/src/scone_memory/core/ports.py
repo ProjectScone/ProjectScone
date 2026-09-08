@@ -81,7 +81,14 @@ class NewFactLink:
 @dataclass(frozen=True)
 class TextFilter:
     """What the lexical lane may return. ``as_of`` excludes anything
-    that happened after that instant; ``tags`` must all be present."""
+    that happened after that instant; ``tags`` must all be present.
+
+    Native SQLite and in-memory stores apply episode kind, literal source
+    prefix and inclusive episode timestamps before their candidate limit.
+    Other stores may ignore these fields: engine postfiltering then enforces
+    scope on a bounded candidate window, with no completeness guarantee.
+    Timestamps passed by the engine are normalized UTC RFC 3339 strings.
+    """
 
     as_of: Optional[str] = None
     tags: tuple[str, ...] = ()
@@ -91,8 +98,13 @@ class TextFilter:
     #: so this layer keeps depending on nothing above it: it answers
     #: ``matches(metadata)`` and renders itself with ``to_sql(column)``.
     #: A store that ignores it still answers correctly, because the
-    #: engine checks every candidate again; it just looks at more of them.
+    #: engine checks every candidate again. Its bounded candidate window
+    #: may omit eligible memories when the store cannot narrow exactly.
     conditions: Optional[Any] = None
+    kind: Optional[str] = None
+    source_prefix: Optional[str] = None
+    since: Optional[str] = None
+    until: Optional[str] = None
 
 
 @dataclass(frozen=True)
