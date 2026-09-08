@@ -240,16 +240,27 @@ async def test_proof_cannot_swallow_deadline_or_cancellation_and_start_selection
     await conversation.close()
 
 
-async def test_extractive_history_budget_is_checked_before_callback_and_capture(memory):
-    await memory.remember("alpha", "Juniper calibration uses Polaris. " * 25)
-    observed = []
+@pytest.mark.parametrize("demote_restated", [False, True])
+async def test_extractive_history_budget_is_checked_before_callback_and_capture(memory: MemoryEngine, demote_restated: bool) -> None:
+    memory.demote_restated = demote_restated
+    history_limit = 512
+    source_text = "Juniper calibration uses Polaris. " * 18
+    added = await memory.remember("alpha", source_text)
+    # One oversized chunk makes this a history-limit test regardless of rank.
+    # The previous 25 repetitions also made a short tail that could rank first.
+    chunks = await memory.documents.chunks_of("alpha", added.episode_id)
+    assert len(chunks) == 1 and len(chunks[0].text.encode("utf-8")) > history_limit
+    observed: list[str] = []
 
-    async def observe(text):
+    async def observe(text: str) -> None:
         observed.append(text)
 
+    selector = Selector()
     conversation = TextConversation(memory, "alpha", "budget-extractive", unused_factory,
-        evidence_selector=Selector(), system_prompt="Answer.", max_history_bytes=512)
+        evidence_selector=selector, system_prompt="Answer.", max_history_bytes=history_limit)
     with pytest.raises(RuntimeError, match="conversation history byte limit"):
         await conversation.reply("Juniper calibration?", on_text=observe)
-    assert observed == []
+    assert len(selector.calls) == 1
+    assert len(selector.calls[0][1][0].text.encode("utf-8")) > history_limit
+    assert observed == [] and conversation.closed
     assert [episode.metadata["role"] for episode in await memory.episodes("alpha", {"session_id": "budget-extractive"})] == ["user"]
