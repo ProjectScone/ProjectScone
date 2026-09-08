@@ -15,6 +15,7 @@ from typing import Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..integrations.scoped_tools import ScopedMemoryTools
+from ..integrations.read_memory import ReadMemoryArgs
 from .tool_evidence import PreparedToolEvidence
 
 
@@ -53,6 +54,7 @@ class ToolOutcome(BaseModel):
     error: str | None
     output_bytes: int
     origin: Literal['host', 'model'] = 'model'
+    reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,34 @@ def _json(value: object) -> str:
 
 def _denied(reason: str) -> str:
     return _json({'ok': False, 'status': 'unavailable', 'error': reason, 'verified_accuracy': False})
+
+
+def _read_key(call: ToolCall) -> tuple[int, int, int] | None:
+    if call.name != 'read_memory':
+        return None
+    try:
+        args = ReadMemoryArgs.model_validate(call.arguments)
+    except ValueError:
+        return None
+    return args.chunk_id, args.before, args.after
+
+
+def _covers_same_source(evidence: PreparedToolEvidence, key: tuple[int, int, int]) -> bool:
+    packet = json.loads(evidence.payload)
+    coverage = packet.get('coverage', {})
+    items = packet.get('items', [])
+    if (not isinstance(coverage, dict) or coverage.get('mode') != 'chunk_window'
+            or coverage.get('truncated') is not False or coverage.get('has_more_after') is not False
+            or not isinstance(items, list) or not 1 <= len(items) <= 9):
+        return False
+    ordinals = coverage.get('returned_ordinals')
+    if (not isinstance(ordinals, list) or any(type(value) is not int for value in ordinals)
+            or ordinals != list(range(len(items)))):
+        return False
+    for ordinal, item in enumerate(items):
+        if isinstance(item, dict) and type(item.get('chunk_id')) is int and item['chunk_id'] == key[0]:
+            return key[1] >= ordinal and ordinal + key[2] >= len(items) - 1
+    return False
 
 
 class EvidenceToolLoop:
@@ -112,6 +142,7 @@ class EvidenceToolLoop:
         known_facts: set[int] = set()
         known_chunks: set[int] = set()
         prepared: list[PreparedToolEvidence] = []
+        reads: dict[tuple[int, int, int], tuple[PreparedToolEvidence, int]] = {}
         outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
         deadline = time.monotonic() + limits.timeout_s
@@ -125,6 +156,7 @@ class EvidenceToolLoop:
 
         async def record_call(call: ToolCall, origin: Literal['host', 'model']) -> None:
             nonlocal calls, tool_bytes
+            reused = False
             if calls >= limits.max_tool_calls:
                 payload = _denied('tool_budget')
             else:
@@ -136,18 +168,38 @@ class EvidenceToolLoop:
                         or call.arguments['chunk_id'] not in known_chunks):
                     payload = _denied('search_for_chunk_first')
                 else:
-                    evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
-                    check_deadline()
-                    size = len(evidence.payload.encode())
-                    if tool_bytes + size > limits.max_tool_bytes:
-                        payload = _denied('tool_output_budget')
+                    key = _read_key(call)
+                    cached = reads.get(key) if key is not None else None
+                    if cached is None and key is not None:
+                        cached = next((entry for entry in reads.values() if _covers_same_source(entry[0], key)), None)
+                    if cached is not None:
+                        valid = await asyncio.create_task(cached[0].validate())
+                        check_deadline()
+                        if not valid:
+                            raise RuntimeError('tool evidence changed before reuse')
+                        reused = True
+                        payload = _json({'ok':True, 'status':'prepared', 'verified_accuracy':False,
+                            'reuse':{'tool_result_number':cached[1], 'new_evidence_count':0},
+                            'message':'These passages are already in an earlier tool result above. '
+                                      'Use that evidence, choose a different read for missing context, or answer.'})
+                        if tool_bytes + len(payload.encode()) > limits.max_tool_bytes:
+                            payload = _denied('tool_output_budget')
+                            reused = False
                     else:
-                        payload = evidence.payload
-                        prepared.append(evidence)
-                        known_facts.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
-                                           if key.startswith('fact:'))
-                        known_chunks.update(int(key.partition(':')[2]) for key in evidence.evidence_ids
-                                            if key.startswith('chunk:'))
+                        evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
+                        check_deadline()
+                        size = len(evidence.payload.encode())
+                        if tool_bytes + size > limits.max_tool_bytes:
+                            payload = _denied('tool_output_budget')
+                        else:
+                            payload = evidence.payload
+                            prepared.append(evidence)
+                            if key is not None and evidence.evidence_ids:
+                                reads[key] = (evidence, len(outcomes) + 1)
+                            known_facts.update(int(item.partition(':')[2]) for item in evidence.evidence_ids
+                                               if item.startswith('fact:'))
+                            known_chunks.update(int(item.partition(':')[2]) for item in evidence.evidence_ids
+                                                if item.startswith('chunk:'))
             tool_bytes += len(payload.encode())
             if tool_bytes > limits.max_tool_bytes:
                 raise RuntimeError('tool output byte limit')
@@ -163,7 +215,7 @@ class EvidenceToolLoop:
                         call.name if call.name in ('search_memory', 'trace_memory', 'read_memory') else 'unknown_tool')
             outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                 error=error if isinstance(error, str) and error in codes else None,
-                output_bytes=len(payload.encode()), origin=origin))
+                output_bytes=len(payload.encode()), origin=origin, reused=reused))
 
         async with asyncio.timeout(limits.timeout_s):
             if self._initial_search:

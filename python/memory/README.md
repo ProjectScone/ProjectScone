@@ -552,6 +552,17 @@ denials consume the aggregate tool-byte budget. If complete pairing cannot fit,
 the turn fails before another model request. Exhausting calls or rounds permits
 one final request with tools disabled; further tool calls are protocol failures.
 
+Within one run, repeated `read_memory` calls reuse retained evidence after fresh
+source validation. Matching includes normalized default offsets and windows
+with different anchors that cover the same already-read whole source. Whole-source
+matching requires contiguous ordinals from zero and explicit untruncated source
+coverage; narrower windows remain separate reads. Search and trace calls, failed
+or empty reads, and results rejected by the output budget are not cached.
+A reused call returns a compact reference to the earlier tool result, reports
+`reused=true` in its outcome, and still consumes a call and output bytes. It
+does not append duplicate source packets to the receipt or establish completeness.
+Source changes or failed revalidation stop the turn before another model request.
+
 Defaults bound the transcript to 256,000 bytes, all tool output to 128,000 bytes,
 and the final reply to 16,000 bytes. No intermediate text is published. Sources,
 chunks, facts, and links are frozen before model consumption and rechecked before
@@ -707,6 +718,11 @@ The guided question used four calls instead of two, including a duplicate read;
 this change does not establish more efficient tool planning. Eight simpler
 fixed-evidence cases retained both requested answer details with either rendering.
 These are synthetic development observations, not general accuracy guarantees.
+Whole-source reuse subsequently reduced the guided probe's last tool result from
+1,411 to 260 bytes, skipping its duplicate read preparation after revalidation.
+Total tool output fell from 4,392 to 3,241 bytes; four tool attempts remained.
+The answer still included the cutoff and outage hold. This measures reduced
+duplicate work and context, not better model planning or general accuracy.
 Served mode stays opt-in.
 
 Framework adapters live under `scone_memory.integrations`; each needs its
