@@ -1,0 +1,464 @@
+{
+  "schema_version": 1,
+  "description": "Original generation cases. Development and held-out splits declared before model runs. Lexical answer checks are auditable diagnostics, not semantic entailment grading. No live user data.",
+  "documents": [
+    {
+      "id": "table",
+      "content": "# Service tiers\n\n## Regional limits\n\n| Tier | Requests per minute |\n| --- | ---: |\n| café | 17 |\n| team | 42 |\n\n```text\n# Example only\n| café | 999 |\n```\n",
+      "source": "docs/table.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "conflict-a",
+      "content": "Lab A reports the dusk gate mode as open. This is a recorded observation, not a reconciled conclusion.",
+      "source": "docs/conflict-a.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "conflict-b",
+      "content": "Lab B reports the dusk gate mode as closed. This conflicts with Lab A and remains unresolved.",
+      "source": "docs/conflict-b.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-a",
+      "content": "beacon routes requests to cedar.",
+      "source": "docs/route-a.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-b",
+      "content": "cedar persists through ridge.",
+      "source": "docs/route-b.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "route-c",
+      "content": "ridge uses an encrypted local journal.",
+      "source": "docs/route-c.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "atlas-route",
+      "content": "atlas forwards records to birch.",
+      "source": "docs/atlas-route.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "birch-route",
+      "content": "birch persists records through creek.",
+      "source": "docs/birch-route.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "creek-route",
+      "content": "creek stores its records with delta.",
+      "source": "docs/creek-route.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "delta-storage",
+      "content": "delta uses an encrypted append-only log.",
+      "source": "docs/delta-storage.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "amber-route",
+      "content": "amber forwards its retained data to talon.",
+      "source": "docs/amber-route.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "talon-storage",
+      "content": "talon uses a rotating disk archive.",
+      "source": "docs/talon-storage.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "spruce-route",
+      "content": "spruce forwards its records to unresolved-target.",
+      "source": "docs/spruce-route.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "edge"
+      },
+      "created_at": "2026-01-01"
+    },
+    {
+      "id": "other-project-spruce",
+      "content": "spruce uses a public cloud archive.",
+      "source": "docs/other-project-spruce.md",
+      "space": "fixture",
+      "tags": [
+        "approved"
+      ],
+      "where": {
+        "project": "other"
+      },
+      "created_at": "2026-01-01"
+    }
+  ],
+  "facts": [
+    {
+      "id": "route-a",
+      "document_id": "route-a",
+      "subject": "beacon",
+      "predicate": "routes_to",
+      "object": "cedar",
+      "quote": "beacon routes requests to cedar.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "route-b",
+      "document_id": "route-b",
+      "subject": "cedar",
+      "predicate": "persists_through",
+      "object": "ridge",
+      "quote": "cedar persists through ridge.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "route-c",
+      "document_id": "route-c",
+      "subject": "ridge",
+      "predicate": "uses",
+      "object": "encrypted local journal",
+      "quote": "ridge uses an encrypted local journal.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "atlas-route",
+      "document_id": "atlas-route",
+      "subject": "atlas",
+      "predicate": "forwards_to",
+      "object": "birch",
+      "quote": "atlas forwards records to birch.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "birch-route",
+      "document_id": "birch-route",
+      "subject": "birch",
+      "predicate": "persists_through",
+      "object": "creek",
+      "quote": "birch persists records through creek.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "creek-route",
+      "document_id": "creek-route",
+      "subject": "creek",
+      "predicate": "stores_with",
+      "object": "delta",
+      "quote": "creek stores its records with delta.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "delta-storage",
+      "document_id": "delta-storage",
+      "subject": "delta",
+      "predicate": "uses",
+      "object": "encrypted append-only log",
+      "quote": "delta uses an encrypted append-only log.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "amber-route",
+      "document_id": "amber-route",
+      "subject": "amber",
+      "predicate": "forwards_to",
+      "object": "talon",
+      "quote": "amber forwards its retained data to talon.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "talon-storage",
+      "document_id": "talon-storage",
+      "subject": "talon",
+      "predicate": "uses",
+      "object": "rotating disk archive",
+      "quote": "talon uses a rotating disk archive.",
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "spruce-route",
+      "document_id": "spruce-route",
+      "subject": "spruce",
+      "predicate": "forwards_to",
+      "object": "unresolved-target",
+      "quote": "spruce forwards its records to unresolved-target.",
+      "valid_from": "2026-01-01"
+    }
+  ],
+  "cases": [
+    {
+      "id": "table-limits",
+      "query": "How many requests per minute does the café tier allow?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "table",
+          "quote": "| Tier | Requests per minute |"
+        },
+        {
+          "document_id": "table",
+          "quote": "| café | 17 |"
+        }
+      ],
+      "split": "development",
+      "answer_checks": [
+        [
+          "17"
+        ]
+      ]
+    },
+    {
+      "id": "multihop-journal",
+      "query": "What storage journal does the beacon route ultimately use?",
+      "mode": "multihop",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "route-a",
+          "quote": "beacon routes requests to cedar."
+        },
+        {
+          "document_id": "route-b",
+          "quote": "cedar persists through ridge."
+        },
+        {
+          "document_id": "route-c",
+          "quote": "ridge uses an encrypted local journal."
+        }
+      ],
+      "split": "development",
+      "answer_checks": [
+        [
+          "encrypted local journal"
+        ]
+      ]
+    },
+    {
+      "id": "unresolved-conflict",
+      "query": "What conflicting dusk gate modes do Lab A and Lab B report?",
+      "mode": "structural",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "conflict-a",
+          "quote": "Lab A reports the dusk gate mode as open."
+        },
+        {
+          "document_id": "conflict-b",
+          "quote": "Lab B reports the dusk gate mode as closed."
+        }
+      ],
+      "split": "development",
+      "answer_checks": [
+        [
+          "open"
+        ],
+        [
+          "closed"
+        ]
+      ]
+    },
+    {
+      "id": "four-fact-storage",
+      "mode": "multihop",
+      "query": "Which storage system ultimately receives atlas records?",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "atlas-route",
+          "quote": "atlas forwards records to birch."
+        },
+        {
+          "document_id": "birch-route",
+          "quote": "birch persists records through creek."
+        },
+        {
+          "document_id": "creek-route",
+          "quote": "creek stores its records with delta."
+        },
+        {
+          "document_id": "delta-storage",
+          "quote": "delta uses an encrypted append-only log."
+        }
+      ],
+      "split": "held_out",
+      "answer_checks": [
+        [
+          "encrypted append-only log"
+        ]
+      ]
+    },
+    {
+      "id": "paraphrased-storage",
+      "mode": "multihop",
+      "query": "Where does amber keep its data after forwarding it?",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "amber-route",
+          "quote": "amber forwards its retained data to talon."
+        },
+        {
+          "document_id": "talon-storage",
+          "quote": "talon uses a rotating disk archive."
+        }
+      ],
+      "split": "held_out",
+      "answer_checks": [
+        [
+          "rotating disk archive"
+        ]
+      ]
+    },
+    {
+      "id": "missing-destination",
+      "mode": "multihop",
+      "query": "What storage medium ultimately holds spruce records?",
+      "space": "fixture",
+      "where": {
+        "project": "edge"
+      },
+      "source_prefix": null,
+      "seed_fact_ids": [],
+      "required": [
+        {
+          "document_id": "spruce-route",
+          "quote": "spruce forwards its records to unresolved-target."
+        }
+      ],
+      "split": "held_out",
+      "answer_checks": [
+        [
+          "not specified",
+          "not recorded",
+          "cannot determine",
+          "not enough",
+          "no information",
+          "does not specify",
+          "doesn't specify",
+          "not provided",
+          "unknown",
+          "don't have"
+        ]
+      ]
+    }
+  ]
+}

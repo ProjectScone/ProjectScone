@@ -428,6 +428,31 @@ facts. That block never enters shared history or captured transcripts. The
 default 8,000-byte budget omits whole passages rather than silently clipping them.
 A low-confidence result supplies no source block.
 
+Ranked queries with recalled claims can expand bounded relationships inside the
+same scope. With `structured_paths=True` (the default), complete ordered paths
+and their quoted claims enter the same context byte budget; related conflicting
+evidence is retained together. Paths preserve stored direction and are evidence
+connections, not generated conclusions. Missing, deleted or out-of-scope links
+cannot complete a path. `structured_paths=False` keeps the prior flat context
+for controlled comparisons. Receipts report path counts and expansion coverage;
+they do not cache raw paths or source text.
+
+Run the paired natural-language evaluator with your installed self-hosted model:
+
+```sh
+python -m scone_memory.testing.generation_ablation \
+  --fixture tests/fixtures/generation/v1.json \
+  --model YOUR_INSTALLED_MODEL --endpoint http://127.0.0.1:11434/v1 \
+  --embedding-cache /path/to/cached/fastembed \
+  --repeats 2 --timeout 60 --output /path/to/private/new-report.json
+```
+
+It uses the actual conversation context builder and synthetic sources, keeps
+both successful and failed public replies, and measures evidence coverage
+separately from completion-gated phrase checks. Phrase matches do not measure
+semantic entailment or unsupported claims. Reports refuse to overwrite an
+existing output path. Keep private evaluation reports outside version control.
+
 Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
 references, recall event ID when available, context hash/bytes, omissions and
 sanitized degradation/error types. They prove preparation—not delivery or use.
