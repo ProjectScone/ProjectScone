@@ -154,6 +154,10 @@ class Settings:
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
     conversations_registry: Optional[str] = None
+    conversations_tool_mode: str = "off"
+    conversations_tool_max_calls: int = 4
+    conversations_tool_max_rounds: int = 4
+    conversations_tool_timeout: float = 120.0
     answer_review_policy: str = "off"
     answer_review_url: str | None = None
     answer_review_model: str | None = None
@@ -176,9 +180,11 @@ class Settings:
     def __post_init__(self) -> None:
         from .conversation_review import validate_review_settings
         from .conversation_retrieval import validate_adaptive_settings
+        from .conversation_tools import validate_tool_settings
 
         validate_review_settings(self)
         validate_adaptive_settings(self)
+        validate_tool_settings(self)
         if self.blobs not in ("auto", "memory", "file", "s3"):
             raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
         if self.blobs in ("memory", "s3") and self.blob_dir:
@@ -329,6 +335,10 @@ class Settings:
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
+            conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
+            conversations_tool_max_calls=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", "4")),
+            conversations_tool_max_rounds=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", "4")),
+            conversations_tool_timeout=parse_seconds("SCONE_CONVERSATIONS_TOOL_TIMEOUT", env.get("SCONE_CONVERSATIONS_TOOL_TIMEOUT"), 120.0),
             log_path=env.get("SCONE_LOG_PATH") or None,
         )
 

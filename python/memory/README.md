@@ -629,7 +629,38 @@ Custom `create_conversation_app` runtimes can use this mode today;
 cached HTTP receipts discard the packets and rebuild the existing graph from
 matching retained source/fact/link fingerprints. Deleted or changed evidence
 disappears on refresh. Graph inspection remains bounded and may be partial.
-The default server factory/model catalog does not yet select native tool mode.
+The composed server can select tool mode explicitly for its saved self-hosted
+chat connection:
+
+```sh
+SCONE_MODEL_CONNECTIONS=~/.scone-memory/model-connections.json
+SCONE_CONVERSATIONS_JOURNAL=~/.scone-memory/conversations.db
+SCONE_CONVERSATIONS_TOOL_MODE=structured # off (default), native, structured
+# SCONE_CONVERSATIONS_TOOL_MAX_CALLS=4
+# SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS=4
+# SCONE_CONVERSATIONS_TOOL_TIMEOUT=120
+```
+
+Configure the chat connection in the model settings or supply `SCONE_CHAT_URL`
+and `SCONE_CHAT_MODEL` as connection defaults. `native` requires native
+OpenAI-compatible tool calls; `structured` requires JSON-schema responses. There
+is no automatic protocol or provider fallback. The setting applies to ordinary
+text sessions and text sessions using a self-hosted persona; voice keeps its
+existing pipeline. Sessions capture the connection at creation, and every turn
+gets a fresh tool model. `SCONE_CHAT_THINK` is forwarded when explicitly set.
+
+The whole tool turn has the configured timeout, while each provider request is
+bounded by the smaller of that budget and the saved connection timeout. The
+existing whole-conversation turn timeout can end it sooner. Calls and rounds
+accept 1–16; the tool timeout accepts 0.01–600 seconds. Transcript, output and
+reply byte limits retain `ToolLoopLimits` defaults. Startup refuses combinations
+with adaptive retrieval, answer review, trusted custom model factories or custom
+persona catalogs. Those integrations can still bind their own SDK pipelines.
+
+`/v1/conversations/capabilities` exposes `tool_retrieval` protocol, budgets and
+whether a text connection is configured. This is configuration availability,
+not a model-health probe or an accuracy claim. Without a saved chat connection,
+text remains unavailable; enabling the mode does not install a model.
 
 `source_status="retained"` confirms source revalidation, not answer entailment;
 `verified_accuracy` remains false. A model can still skip search, misunderstand
@@ -637,6 +668,10 @@ a relation, or emit a tool request as prose. In a synthetic 3B Ollama developmen
 probe, invalid trace arguments and tool-shaped prose prevented a useful answer.
 That probe is not a successful accuracy benchmark; tool-use reliability remains
 a separate quality requirement before enabling this mode by default.
+An additional two-question served 3B development probe skipped retrieval for a
+natural memory question and repeatedly reread one passage when explicitly asked
+to use tools, missing a neighboring exception. Successful protocol execution and
+retained citations did not make those answers correct; served mode stays opt-in.
 
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,

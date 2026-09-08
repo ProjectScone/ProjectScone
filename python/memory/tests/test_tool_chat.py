@@ -31,6 +31,34 @@ async def test_native_tool_call_then_tool_less_final_request():
     assert 'PRIVATE_REASONING' not in final.model_dump_json()
 
 
+@pytest.mark.parametrize('structured', [False, True])
+@pytest.mark.parametrize('think', [None, False, True])
+async def test_explicit_thinking_setting_reaches_provider_without_capturing_reasoning(structured, think):
+    from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
+    requests = []
+
+    async def serve(request):
+        requests.append(json.loads(request.content))
+        content = json.dumps({'action':'answer','answer':'Hello.'}) if structured else 'Hello.'
+        return httpx.Response(200, json=response({'content':content, 'reasoning_content':'PRIVATE_REASONING'}))
+
+    provider = SelfHostedStructuredToolChat if structured else SelfHostedToolChat
+    model = provider('http://127.0.0.1:11434/v1', 'test-model', think=think, transport=httpx.MockTransport(serve))
+    step = await model.complete([{'role':'user','content':'Hello'}], [])
+    assert step.content == 'Hello.'
+    assert 'PRIVATE_REASONING' not in step.model_dump_json()
+    if think is None:
+        assert 'think' not in requests[0]
+    else:
+        assert requests[0]['think'] is think
+
+
+@pytest.mark.parametrize('think', [0, 1, 'false', []])
+def test_invalid_thinking_setting_fails_before_request(think):
+    with pytest.raises(ValueError, match='thinking'):
+        SelfHostedToolChat('http://127.0.0.1:11434/v1', 'test-model', think=think)
+
+
 @pytest.mark.parametrize('packet', [
     response({'content': 'partial'}, 'length'),
     response({'content': '', 'tool_calls': [tool()]}, 'stop'),

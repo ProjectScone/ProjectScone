@@ -103,7 +103,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
                             worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None,
                             local_console_key=None, runtime_available=None, model_connections_available=False,
-                            vision_available=None, answer_review=None, adaptive_retriever=None):
+                            vision_available=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -129,7 +129,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     keywords and honor the native TextConversation review contract.
     adaptive_retriever must use this engine. Text runtime factories receive
     adaptive_retriever and recall_timeout keywords when it is configured.
+    tool_retrieval describes the explicit ConversationTools binding installed by
+    the host on its text factories. It advertises configuration, not model health.
     """
+    from ..runtime.conversation_tools import ConversationTools
+
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
         raise ValueError("configure nonempty bearer keys")
@@ -151,6 +155,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     if adaptive_retriever is not None and (
             not isinstance(adaptive_retriever, AdaptiveRetriever) or adaptive_retriever.memory is not engine):
         raise ValueError("adaptive_retriever must use this memory engine")
+    if tool_retrieval is not None and (not isinstance(tool_retrieval, ConversationTools)
+            or answer_review is not None or adaptive_retriever is not None):
+        raise ValueError("tool_retrieval requires a compatible ConversationTools binding")
     # A catalog's sessions run the native text runtime, which streams.
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
     def bare_runtime_available():
@@ -347,6 +354,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1,
                 "text_configured": bare_runtime_available() or bool(catalog and catalog.personas),
+                "tool_retrieval": {"configured": tool_retrieval is not None,
+                    "protocol": tool_retrieval.mode if tool_retrieval is not None else "off",
+                    "available": tool_retrieval is not None and (bare_runtime_available() or bool(catalog and catalog.personas)),
+                    "limits": tool_retrieval.limits.model_dump(mode="json") if tool_retrieval is not None else None,
+                    "applies_to": "text", "verified_accuracy": False},
                 "answer_review": {"configured": answer_review is not None,
                                   "policy": answer_review.policy if answer_review is not None else "off"},
                 "adaptive_retrieval": {"configured": adaptive_retriever is not None,

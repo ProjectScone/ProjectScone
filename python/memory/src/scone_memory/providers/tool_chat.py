@@ -93,7 +93,8 @@ class SelfHostedToolChat:
 
     def __init__(self, endpoint: str, model: str, *, api_key: str | None = None,
                  timeout_s: float = 120.0, max_response_bytes: int = 128000,
-                 max_tokens: int = 2048, transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 max_tokens: int = 2048, transport: httpx.AsyncBaseTransport | None = None,
+                 think: bool | None = None) -> None:
         self._endpoint = validate_self_hosted_endpoint(endpoint).rstrip('/') + '/chat/completions'
         self._model = validate_self_hosted_identifier(model)
         if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
@@ -103,11 +104,14 @@ class SelfHostedToolChat:
             raise ValueError('invalid tool response budget')
         if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
             raise ValueError('invalid tool token budget')
+        if think is not None and type(think) is not bool:
+            raise ValueError('invalid tool thinking setting')
         if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()
                 or len(api_key) > 8192 or any(ord(ch) < 32 or ord(ch) == 127 for ch in api_key)):
             raise ValueError('invalid tool model key')
         self._key, self._timeout, self._max_bytes = api_key, float(timeout_s), max_response_bytes
         self._max_tokens, self._transport = max_tokens, transport
+        self._think = think
 
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
         body: dict[str, object] = {'model': self._model, 'messages': messages, 'stream': False,
@@ -121,6 +125,8 @@ class SelfHostedToolChat:
                        protocol: Literal['native', 'structured_action'] = 'native') -> ToolStep:
         import httpx
 
+        if self._think is not None:
+            body = {**body, 'think':self._think}
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1100000:
             raise ValueError('tool model request byte limit')
