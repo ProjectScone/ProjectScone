@@ -72,24 +72,29 @@ async def test_the_engine_puts_the_replacement_first_only_when_asked():
         ])
         return e
 
-    plain = await engine_with()
-    pack = await plain.recall("s", "In which country was pesäpallo created?", limit=5)
+    default = await engine_with()
+    pack = await default.recall("s", "In which country was pesäpallo created?", limit=5)
     texts = [i.text for i in pack.items]
-    assert texts.index(FINLAND) < texts.index(PHILIPPINES), "the superseded statement leads without the setting"
-
-    demoting = await engine_with(demote_restated=True)
-    pack = await demoting.recall("s", "In which country was pesäpallo created?", limit=5)
-    texts = [i.text for i in pack.items]
-    assert texts.index(PHILIPPINES) < texts.index(FINLAND), "the replacement leads with it"
+    assert texts.index(PHILIPPINES) < texts.index(FINLAND), \
+        "out of the box, the replacement leads and the statement it replaced follows"
     assert set(texts) == {FINLAND, PHILIPPINES, GOALTENDER}, "nothing is dropped"
     assert pack.items[0].score == 1.0, "normalisation still runs after the reorder"
+
+    # Someone asking what was believed at the time wants the old order,
+    # so it is still reachable, just no longer what you get by accident.
+    historical = await engine_with(demote_restated=False)
+    pack = await historical.recall("s", "In which country was pesäpallo created?", limit=5)
+    texts = [i.text for i in pack.items]
+    assert texts.index(FINLAND) < texts.index(PHILIPPINES), "turned off, similarity decides again"
 
 
 def test_the_setting_comes_from_the_environment():
     from scone_memory.runtime.config import Settings
 
+    assert Settings.from_env({}).demote_restated is True, "on unless someone says otherwise"
     assert Settings.from_env({"SCONE_DEMOTE_RESTATED": "1"}).demote_restated is True
-    assert Settings.from_env({}).demote_restated is False
+    assert Settings.from_env({"SCONE_DEMOTE_RESTATED": "0"}).demote_restated is False
+    assert Settings.from_env({"SCONE_DEMOTE_RESTATED": "off"}).demote_restated is False
 
 
 def test_both_benches_build_their_engines_with_every_setting():
