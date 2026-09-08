@@ -16,6 +16,8 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..agents.tool_evidence import PreparedToolEvidence, prepare_tool_evidence
+
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
 from ..retrieval.recall_scope import RecallScope
@@ -90,6 +92,30 @@ class ScopedMemoryTools:
     def openai(self) -> list[dict[str, object]]:
         return [{"type": "function", "function": {"name": row["name"], "description": row["description"],
                 "parameters": row["input_schema"]}} for row in self.anthropic()]
+
+    async def prepare(self, name: str, arguments: Mapping[str, object]) -> PreparedToolEvidence:
+        """Read and freeze evidence for later final-answer revalidation."""
+        deadline = time.monotonic() + self._timeout
+
+        async def read() -> PreparedToolEvidence:
+            result = await self.run(name, arguments)
+            return await prepare_tool_evidence(self._memory, self._space, self._scope,
+                self._excluded, result, self._timeout)
+
+        try:
+            async with asyncio.timeout(self._timeout):
+                evidence = await asyncio.create_task(read())
+                active = asyncio.current_task()
+                if active is not None and active.cancelling():
+                    raise asyncio.CancelledError()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
+                return evidence
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return await prepare_tool_evidence(self._memory, self._space, self._scope,
+                self._excluded, _unavailable('evidence_unavailable'), self._timeout)
 
     async def _search(self, args: _Search) -> dict[str, object]:
         result = await AdaptiveRetriever(self._memory, _RetainCandidates(),

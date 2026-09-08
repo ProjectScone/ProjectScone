@@ -499,6 +499,61 @@ permanent evidence: an enclosing answer pipeline must revalidate sources before
 publishing an answer based on them. No HTTP tool loop or automatic tool execution
 is installed by constructing this binding.
 
+For an opt-in model-native tool turn, use the bounded host controller:
+
+```python
+import os
+from scone_memory.agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits
+from scone_memory.providers.tool_chat import SelfHostedToolChat
+
+model = SelfHostedToolChat(
+    os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+    api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+)
+reply = await EvidenceToolLoop(model, box, limits=ToolLoopLimits(
+    max_tool_calls=4, max_tool_rounds=4, timeout_s=120.0,
+)).run([{"role": "user", "content": "What is the recorded Juniper dependency chain?"}])
+print(reply.text)
+print(reply.source_status, reply.evidence_ids)
+# Immutable JSON packets retain the passages, quoted claims, directed paths,
+# source identifiers, and partial-coverage markers supplied to the model.
+packets = reply.evidence_packets
+```
+
+The model chooses search queries. Tracing becomes available after retained facts
+are discovered and accepts only IDs returned during that turn. Host scope still
+applies to every expanded source. Every declared call receives a matching tool
+response, including denials. Attempts consume the call budget; both results and
+denials consume the aggregate tool-byte budget. If complete pairing cannot fit,
+the turn fails before another model request. Exhausting calls or rounds permits
+one final request with tools disabled; further tool calls are protocol failures.
+
+Defaults bound the transcript to 256,000 bytes, all tool output to 128,000 bytes,
+and the final reply to 16,000 bytes. No intermediate text is published. Sources,
+chunks, facts, and links are frozen before model consumption and rechecked before
+the result is returned. Native revision changes or changed/deleted snapshots fail
+the turn. This uses bounded point reads, not a database-wide atomic transaction;
+direct adapter writes still need transaction discipline. `box.prepare()` shares
+one tool deadline across retrieval and snapshotting. Each later validation pass
+is also bounded, within the overall loop deadline.
+
+The self-hosted adapter requires native OpenAI-compatible tool-call support.
+It does not execute tool-shaped prose, capture reasoning fields, follow redirects,
+use environment proxies, discover/download models, or select a fallback provider.
+It rejects incomplete replies, duplicate JSON keys/call IDs, non-finite numbers,
+and oversized responses. Logs contain outcome and elapsed time, not message text.
+HTTP resources are closed before a reply is accepted; cooperative cleanup can
+run beyond the deadline, but late success is rejected.
+
+This is a library controller, not yet mounted in the Conversations HTTP service.
+It does not persist workflow checkpoints or automatically capture chat messages.
+`source_status="retained"` confirms source revalidation, not answer entailment;
+`verified_accuracy` remains false. A model can still skip search, misunderstand
+a relation, or emit a tool request as prose. In a synthetic 3B Ollama development
+probe, invalid trace arguments and tool-shaped prose prevented a useful answer.
+That probe is not a successful accuracy benchmark; tool-use reliability remains
+a separate quality requirement before enabling this mode by default.
+
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,
 `[llamaindex]`, `[openai-agents]`) and says so if it is missing.
