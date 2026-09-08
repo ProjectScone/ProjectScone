@@ -105,12 +105,23 @@ async def test_bounded_graph_reads_keep_scope_order_and_hard_caps() -> None:
         assert len(await store.facts_by_subject("alpha", "Beacon", 10_000)) == 129
         assert await store.fact_links_from("alpha", 1, 2) == links[:2]
         assert len(await store.fact_links_from("alpha", 1, 10_000)) == 129
+        assert await store.fact_links_between("alpha", [1, 2, 3, 3], 49) == links[:2]
+        assert await store.fact_links_between("beta", [1, 2], 49) == [foreign]
+        assert await store.fact_links_between("alpha", [], 49) == []
+        assert await store.fact_links_between("alpha", [1, 2, 3], 1) == links[:1]
         for limit in (0, -1):
             assert await store.facts_by_subject("alpha", "Beacon", limit) == []
             assert await store.fact_links_from("alpha", 1, limit) == []
+            assert await store.fact_links_between("alpha", [1, 2], limit) == []
         assert await store.get_fact_link("alpha", links[0].link_id) == links[0]
         assert await store.get_fact_link("alpha", foreign.link_id) is None
         assert await store.facts_by_subject("alpha", "missing", 2) == []
+        for target in range(2, 17):
+            for kind in ("extends", "derived_from", "contradicts"):
+                await store.insert_fact_link(NewFactLink("alpha", 1, target, kind, when))
+        bounded = await store.fact_links_between("alpha", list(range(1, 140)), 10_000)
+        assert len(bounded) == 49
+        assert all(1 <= row.from_fact <= 16 and 1 <= row.to_fact <= 16 for row in bounded)
         indexes = await store.facts.index_information()
         assert [("space", 1), ("subject", 1), ("_id", 1)] in [v["key"] for v in indexes.values()]
     finally:

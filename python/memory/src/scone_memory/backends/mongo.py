@@ -431,6 +431,16 @@ class MongoDocumentStore:
         doc = await self._fact_links.find_one({"space": space, "_id": link_id})
         return _fact_link(doc) if doc is not None else None
 
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts; never expand to neighbors."""
+        wanted = list(dict.fromkeys(fact_ids[:16]))
+        cap = max(0, min(limit, 49))
+        if not wanted or not cap:
+            return []
+        cursor = self._fact_links.find({"space": space, "from_fact": {"$in": wanted},
+            "to_fact": {"$in": wanted}}).sort("_id", 1).limit(cap)
+        return [_fact_link(doc) async for doc in cursor]
+
     async def bump_revision(self, space: str) -> int:
         doc = await self.revisions.find_one_and_update(
             {"_id": space}, {"$inc": {"revision": 1}}, upsert=True, return_document=True

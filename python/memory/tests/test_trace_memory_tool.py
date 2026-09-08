@@ -207,3 +207,19 @@ async def test_output_budget_never_cuts_a_quote_or_drops_only_one_side_of_confli
 async def test_search_only_toolbox_cannot_trace(box):
     restricted = ToolBox(box.engine, "alpha", tools=["search_memory"])
     assert (await restricted.run("trace_memory", {"seed_fact_id": 1}))["ok"] is False
+
+
+async def test_stored_relations_also_reach_query_graph_inspection(box):
+    from scone_memory.core.models import RecallResult
+    from scone_memory.retrieval.evidence_graph import build_query_evidence_graph
+    from scone_memory.retrieval.evidence_records import canonical_evidence
+
+    first = await claim(box, "Juniper", "is", "green")
+    second = await claim(box, "Beacon", "is", "ready")
+    stored = await relation(box, second, first)
+    graph = await build_query_evidence_graph(box.engine.documents, "alpha", "Juniper",
+                                             RecallResult(facts=[first, second]))
+    records = canonical_evidence(graph)
+    assert records.relations == [{"link_id": stored.link_id, "from_fact": second.fact_id,
+        "to_fact": first.fact_id, "kind": "supports", "source_episode_id": second.source_episode_id,
+        "quote": second.quote}]
