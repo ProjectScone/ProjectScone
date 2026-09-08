@@ -119,7 +119,7 @@ class Settings:
     distill_accept_at: Optional[float] = None
     derive: bool = False
     contextual_embeddings: bool = False
-    demote_restated: bool = False
+    demote_restated: bool = True
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
@@ -261,7 +261,8 @@ class Settings:
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
-            demote_restated=env.get("SCONE_DEMOTE_RESTATED") == "1",
+            demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
+                             if env.get("SCONE_DEMOTE_RESTATED") else True),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),

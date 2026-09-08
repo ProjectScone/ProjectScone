@@ -317,18 +317,47 @@ async fn concept_pages_are_served_by_the_console_host_only_and_never_by_a_catch_
     let engine = Engine::open(dir.path(), Box::new(HashEmbedder::new(64))).unwrap();
     let console = scone::serve::console_router(engine, config(), "fixture-token");
     for path in [
-        "/learn",
-        "/learn/quickstart",
-        "/learn/how-it-works",
-        "/learn/graph-memory",
-        "/learn/sources",
-        "/learn/search",
-        "/learn/review",
-        "/learn/profiles",
-        "/learn/conversations",
-        "/learn/spaces",
-        "/learn/api",
+        "/memory",
+        "/playground",
+        "/conversations",
+        "/conversations/example-session",
     ] {
+        let response = console
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "workspace deep link {path}"
+        );
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("fixture-token"));
+    }
+    for path in [
+        "/v1/not-a-route",
+        "/unrelated-page",
+        "/conversations/id/unknown-child",
+    ] {
+        let response = console
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "unknown path {path}"
+        );
+    }
+    for path in scone::serve::LEARN_PAGES {
         for method in ["GET", "HEAD"] {
             let response = console
                 .clone()
@@ -1168,9 +1197,11 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
     routes.sort_unstable();
     routes.dedup();
 
-    // Named HTML entry points, which use the existing source-read API and add
-    // no /v1 surface: the console at the root, the playground, and the two
-    // memory pages. The concept pages are the LEARN_PAGES loop above.
+    // Named HTML entry points. Every one is the same bundle, addressed
+    // differently so the console can decide what to show, and none of them
+    // adds /v1 surface: the console at the root, the playground, the two
+    // memory pages and the two conversation pages. The concept pages are
+    // the LEARN_PAGES loop above.
     let html: Vec<_> = routes
         .iter()
         .copied()
@@ -1178,11 +1209,20 @@ fn the_rust_http_surface_stays_frozen_at_the_engine_essentials() {
         .collect();
     assert_eq!(
         html,
-        ["/", "/memory", "/memory/sources/{id}", "/playground"]
+        [
+            "/",
+            "/conversations",
+            "/conversations/{session_id}",
+            "/memory",
+            "/memory/sources/{id}",
+            "/playground",
+        ]
     );
     routes.retain(|path| path.starts_with("/v1/"));
 
     let frozen = [
+        // The HTML entry points were checked above and removed from this
+        // list; what remains is the API surface, which is what is frozen.
         "/v1/capabilities",
         "/v1/episodes",
         "/v1/episodes/{id}",

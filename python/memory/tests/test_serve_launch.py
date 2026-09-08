@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import signal
 import socket
 import subprocess
@@ -58,6 +59,9 @@ HELPER = {"schema_version": 1, "id": "helper", "name": "Helper", "instructions":
           "reply": {"provider": "stub", "model": "echo"}, "transcription": {"provider": "stub", "model": "ears"},
           "speech": {"provider": "stub", "model": "mouth", "voice": "alto"}}
 KEY = "launcher-key"
+#: This package as it sits in the checkout being tested, which is not
+#: necessarily the one pip installed.
+SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 #: A one-minute load average above this means the machine, not the server,
 #: is what the clock is measuring. A quiet host and CI never reach it.
 BUSY = 12.0
@@ -75,7 +79,13 @@ def composed(tmp_path):
     env.update(SCONE_SQLITE_PATH=str(tmp_path / "memory.db"), SCONE_EMBEDDER="hash", SCONE_API_KEY=KEY,
                SCONE_HOST="127.0.0.1", SCONE_PORT=str(port), SCONE_CONVERSATIONS_JOURNAL=str(tmp_path / "sessions.db"),
                SCONE_CONVERSATIONS_PERSONAS=str(tmp_path / "personas.json"),
-               SCONE_CONVERSATIONS_REGISTRY="launch_registry:registry", PYTHONPATH=str(tmp_path))
+               SCONE_CONVERSATIONS_REGISTRY="launch_registry:registry",
+               # The tree under test, ahead of the registry fixture. Setting
+               # PYTHONPATH to the fixture alone left the child importing
+               # whatever was installed, so this launched the working copy
+               # rather than the checkout pytest was reading, and the test
+               # reported on code it had never seen.
+               PYTHONPATH=os.pathsep.join([str(SOURCE), str(tmp_path)]))
     process = subprocess.Popen([sys.executable, "-m", "scone_memory.runtime.cli", "serve"], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"Authorization": f"Bearer {KEY}"}, timeout=2)
