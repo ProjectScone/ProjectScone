@@ -689,6 +689,10 @@ evidence in plain chat roles. After a completed tool exchange it repeats the
 latest actual user question so the provider's answer target does not become the
 last source packet. This rendering does not change stored conversation history;
 the expanded history is checked against the adapter's 1 MB limit before sending.
+Its tool-selection instructions distinguish reading neighboring document chunks
+from tracing a mentioned entity's relationships to find a requested attribute.
+This guides the model's choice; it does not change retrieval permissions,
+increase budgets, or establish that an answer follows from the retained evidence.
 
 `/v1/conversations/capabilities` exposes `tool_retrieval` protocol, budgets and
 whether a text connection is configured. This is configuration availability,

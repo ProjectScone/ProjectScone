@@ -25,6 +25,13 @@ _PROTOCOL = (
     'Preserve relationship direction; field joins do not prove causation. Do not invent missing links or facts. '
     'If evidence is missing, answer with that limitation. Scores are ranks, not confidence. '
     'When only answer is available, give the final answer using what was learned, with uncertainty where needed.'
+    ' Choose tools by the missing evidence: read_memory stays inside one document; '
+    'trace_memory follows an entity across recorded relationships and other documents. '
+    'When a fact names another entity but does not give the attribute the user asks for, '
+    'trace that fact before treating the other entity as the answer. '
+    'Match the requested attribute, not just a mentioned entity. '
+    'If a traced path still lacks the requested attribute, state what remains unknown. '
+    'An unrelated entity with that attribute does not fill a missing connection.'
 )
 
 
