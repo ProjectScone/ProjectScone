@@ -204,7 +204,11 @@ class OpenAICompatibleTextModel:
         timeout: float = DEFAULT_TIMEOUT,
         transport: httpx.AsyncBaseTransport | None = None,
         trust_env: bool = True,
+        max_output_tokens: int | None = None,
     ) -> None:
+        if max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768):
+            raise ValueError("max_output_tokens must be an integer from 1 to 32768")
+        self._max_output_tokens = max_output_tokens
         try:
             import httpx
         except ImportError as e:  # pragma: no cover
@@ -255,6 +259,8 @@ class OpenAICompatibleTextModel:
         from ..realtime.events import ReplyCompleted, TextDelta
 
         body = {"model": self._chat.model, "messages": list(messages), "temperature": self._chat.temperature, "stream": True}
+        if self._max_output_tokens is not None:
+            body["max_tokens"] = self._max_output_tokens
         if self._chat.think is not None:
             body["think"] = self._chat.think
         try:
@@ -265,6 +271,9 @@ class OpenAICompatibleTextModel:
                 if not response.headers.get("content-type", "").startswith("text/event-stream"):
                     await response.aread()
                     text = _content_of(response)
+                    finish = response.json()["choices"][0].get("finish_reason")
+                    if finish not in (None, "stop"):
+                        raise ChatError("chat response did not finish normally")
                     if text:
                         yield TextDelta(text)
                     yield ReplyCompleted()
@@ -284,7 +293,10 @@ class OpenAICompatibleTextModel:
                         raise ChatError(f"malformed chat stream chunk: {type(e).__name__}") from e
                     if chunk_text:
                         yield TextDelta(chunk_text)
-                    if choice.get("finish_reason") == "stop":
+                    finish = choice.get("finish_reason")
+                    if finish is not None and finish != "stop":
+                        raise ChatError("chat response did not finish normally")
+                    if finish == "stop":
                         completed = True
                         break
         except self._httpx.HTTPError as e:
