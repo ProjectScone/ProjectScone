@@ -105,6 +105,7 @@ class EvidenceCard(BaseModel):
 class EvidenceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     card_ids: tuple[CardId, ...] = Field(default=(), max_length=3)
+    atomic: bool = False
 
     @model_validator(mode="after")
     def unique_ids(self) -> EvidenceSelection:
@@ -453,7 +454,11 @@ async def construct_evidence_answer(
                 raise EvidenceAnswerError("stale_evidence")
             delivered: list[EvidenceCard] = []
             omitted = cards.omitted_count
-            for identifier in selection.card_ids:
+            selected = selection.card_ids
+            if selection.atomic and len("\n\n".join(by_id[key].text for key in selected).encode("utf-8")) > max_answer_bytes:
+                omitted += len(selected)
+                selected = ()
+            for identifier in selected:
                 card = by_id[identifier]
                 if len("\n\n".join(c.text for c in (*delivered,card)).encode("utf-8")) > max_answer_bytes:
                     omitted += 1
@@ -466,6 +471,7 @@ async def construct_evidence_answer(
                 evidence_ids=list(dict.fromkeys(identifier for card in delivered for identifier in card.evidence_ids)),
                 card_count=len(cards.cards),omitted_card_count=omitted,
                 deduplicated_card_count=cards.deduplicated_card_count,
+                atomic_selection=selection.atomic,
                 verified_accuracy=False,source_status="retained",mode="extractive"))
     except asyncio.CancelledError:
         raise

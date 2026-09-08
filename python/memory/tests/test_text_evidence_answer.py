@@ -43,6 +43,78 @@ def unused_factory():
     raise AssertionError("extractive mode must not create a generation provider")
 
 
+@pytest.mark.parametrize('question', ['Hello!', 'Juniper launch date?'])
+async def test_required_evidence_never_falls_back_to_generation_on_empty_memory(memory, question):
+    conversation = TextConversation(memory, 'alpha', 'required-empty', evidence_selector=Selector(),
+        evidence_answer_policy='required')
+    observed = []
+
+    async def observe(text):
+        observed.append(text)
+
+    result = await conversation.reply(question, on_text=observe)
+    assert observed == [result['text']]
+    assert result['evidence_answer']['status'] == 'no_selection'
+    assert result['evidence_answer']['source_status'] == 'none'
+    assert result['evidence_answer']['evidence_ids'] == []
+    episodes = await memory.episodes('alpha', {'session_id':'required-empty'})
+    assert episodes[-1].metadata['completion_evidence'] == 'evidence_abstention'
+    await conversation.close()
+
+
+@pytest.mark.parametrize('policy', ['always', None, True])
+def test_evidence_answer_policy_rejects_invalid_values(memory, policy):
+    with pytest.raises(ValueError, match='evidence_answer_policy'):
+        TextConversation(memory, 'alpha', 'policy', unused_factory, evidence_selector=Selector(),
+                         evidence_answer_policy=policy)
+
+
+def test_required_evidence_policy_requires_selector(memory):
+    with pytest.raises(ValueError, match='evidence_selector'):
+        TextConversation(memory, 'alpha', 'policy', unused_factory, evidence_answer_policy='required')
+
+
+async def test_required_evidence_reports_retrieval_failure_without_generation(memory, monkeypatch):
+    conversation = TextConversation(memory, 'alpha', 'required-failed', unused_factory,
+        evidence_selector=Selector(), evidence_answer_policy='required')
+
+    async def failed(messages):
+        return messages, {'status':'failed'}
+
+    monkeypatch.setattr(conversation._context, 'prepare', failed)
+    with pytest.raises(RuntimeError, match='evidence answer'):
+        await conversation.reply('Juniper launch date?')
+    assert [row.metadata['role'] for row in await memory.episodes('alpha', {'session_id':'required-failed'})] == ['user']
+
+
+@pytest.mark.parametrize('predicate', ['depends on', 'painted by'])
+async def test_required_structured_answer_runs_through_scoped_retrieval_and_capture(engine, predicate):
+    from scone_memory.core.ports import NewFact
+    from scone_memory.realtime.structured_selector import StructuredEvidenceSelector
+    from scone_memory.retrieval.structured_evidence import EvidenceRequirement
+    quote = f'Juniper {predicate} Polaris.'
+    for team, obj in [('blue', 'Polaris'), ('red', 'PRIVATE_OTHER_TEAM')]:
+        text = f'Juniper {predicate} {obj}.'
+        episode = await engine.remember('alpha', text, metadata={'team':team})
+        await engine.documents.insert_fact(NewFact(space='alpha', subject='Juniper', predicate=predicate,
+            object=obj, source_episode_id=episode.episode_id, quote=text, valid_from='2025-01-01T00:00:00Z'))
+    question = 'What does Juniper depend on?'
+    selector = StructuredEvidenceSelector(question, (
+        EvidenceRequirement(kind='fact', subject='Juniper', predicate='depends on'),))
+    conversation = TextConversation(engine, 'alpha', 'required-scoped', unused_factory,
+        evidence_selector=selector, evidence_answer_policy='required', where={'team':'blue'})
+    result = await conversation.reply(question)
+    assert 'PRIVATE_OTHER_TEAM' not in result['text']
+    assert (result['evidence_answer']['status'] == 'selected') is (predicate == 'depends on')
+    if predicate == 'depends on':
+        assert quote in result['text'] and result['evidence_answer']['atomic_selection'] is True
+    else:
+        assert quote not in result['text']
+    episodes = await engine.episodes('alpha', {'session_id':'required-scoped'})
+    assert episodes[-1].content == result['text']
+    await conversation.close()
+
+
 async def test_extractive_answer_uses_checked_cards_and_only_final_callback_history_capture(memory):
     await memory.remember("alpha", "Juniper calibration uses Polaris.", metadata={"team": "science"})
     await memory.remember("alpha", "Juniper calibration PRIVATE record.", metadata={"team": "legal"})

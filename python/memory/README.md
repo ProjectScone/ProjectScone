@@ -845,6 +845,54 @@ The native retriever still owns candidate discovery, scope, timing, and source
 revalidation. Invalidated selected groups are omitted together. This does not
 turn a passage that looks like a triple into a stored fact.
 
+The same explicit plan can govern quote-based answer selection with
+`StructuredEvidenceSelector`. It requires all fact/path witnesses, including
+competing recorded values, to fit in at most three whole cards. A missing bridge,
+reversed path, or different predicate produces no selection. The answer remains
+the original quoted records and citations; no model writes the public answer.
+
+```python
+from scone_memory.realtime.structured_selector import StructuredEvidenceSelector
+from scone_memory.realtime.text import TextConversation
+
+question = "Which dependency path connects aster to denver?"
+requirements = (
+    EvidenceRequirement(kind="path", subject="aster", predicate="depends on",
+                        object="denver", max_hops=3),
+)
+conversation = TextConversation(memory, "authorized-space", "planned-answer-1",
+    evidence_selector=StructuredEvidenceSelector(question, requirements),
+    evidence_answer_policy="required",
+    where={"collection": "manuals"},
+)
+try:
+    reply = await conversation.reply(question)
+finally:
+    await conversation.close()
+```
+
+This is a fixed, application-authored question plan, not automatic intent
+understanding. For another question, the application must supply its corresponding
+plan. The selector checks only offered cards: missing or budget-omitted evidence
+cannot establish a global negative. Path checks match recorded triples; they do
+not certify extraction correctness, quote entailment, causation, or source truth.
+`verified_accuracy` remains false. The synthetic tool-action development cases
+also exercise this selector with hand-authored plans; passing them is a contract
+check, not a natural-language generation accuracy result.
+
+Selections from this selector are atomic: if the entire selected quote set
+exceeds the answer byte limit, the renderer abstains instead of publishing a
+partial chain. Other selectors may request this behavior through
+`EvidenceSelection(atomic=True, card_ids=...)`. Receipts expose
+`atomic_selection` and count output-budget omissions.
+
+`evidence_answer_policy="required"` needs an evidence selector and never falls
+back to generation. Empty or skipped retrieval returns a recorded abstention
+with `source_status="none"`; failed preparation returns an error. No generation
+provider is needed. The default `"when_available"` policy retains normal
+generation when no memory is prepared. This SDK policy and selector are opt-in;
+the default server configuration does not automatically create question plans.
+
 An optional bounded loop assesses retrieved evidence, keeps selected records,
 and searches for missing information before generation. The host supplies an
 `EvidenceAssessor`; the core fixes the memory space and session filters for every
