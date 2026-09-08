@@ -20,7 +20,7 @@ from pydantic import Field, model_validator
 def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
-             "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
+             "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
              "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -48,7 +48,7 @@ from ..providers.answer_reviewer import SelfHostedAnswerReviewer
 from ..retrieval.recall_scope import RecallScope
 from ..realtime.events import ReplyCompleted, TextDelta, TextModel
 from ..realtime.text import DEFAULT_SYSTEM_PROMPT
-from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EmptySelectionPolicy, FailurePolicy
+from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EmptySelectionPolicy, EvidencePolicy, FailurePolicy
 from ..retrieval.multihop import MultiHopLimits
 from .edge_retrieval_benchmark import EdgeFixture, FixtureCase, STAMP, _CachedBGE, _seed
 
@@ -269,6 +269,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        adaptive_rounds: int = 3, baseline_paths: bool = False, group_relations: bool = False,
                        adaptive_failure_policy: FailurePolicy = "retain_verified", expand_relations: bool = False,
                        adaptive_empty_selection_policy: EmptySelectionPolicy = "retain_verified",
+                       adaptive_evidence_policy: EvidencePolicy = "model_selected",
                        review_model: str | None = None, review_timeout: float = 20.0,
                        review_policy: Literal["report", "require_supported"] = "report",
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
@@ -292,6 +293,8 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         raise ValueError("adaptive_failure_policy must be empty or retain_verified")
     if type(adaptive_empty_selection_policy) is not str or adaptive_empty_selection_policy not in ("retain_verified", "empty"):
         raise ValueError("adaptive_empty_selection_policy must be retain_verified or empty")
+    if type(adaptive_evidence_policy) is not str or adaptive_evidence_policy not in ("model_selected", "original_and_selected"):
+        raise ValueError("adaptive_evidence_policy must be model_selected or original_and_selected")
     if type(ordered_quotes) is not bool:
         raise ValueError("ordered_quotes must be a boolean")
     if type(group_relations) is not bool:
@@ -346,6 +349,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "adaptive_model": adaptive_model, "adaptive_timeout_seconds": adaptive_timeout,
         "adaptive_failure_policy": adaptive_failure_policy if assessor is not None else None,
         "adaptive_empty_selection_policy": adaptive_empty_selection_policy if assessor is not None else None,
+        "adaptive_evidence_policy": adaptive_evidence_policy if assessor is not None else None,
         "assessment_timeout_seconds": adaptive_timeout if assessor is not None else None,
         "adaptive_rounds": adaptive_rounds, "baseline_paths": baseline_paths, "group_relations": group_relations,
         "expand_relations": expand_relations, "graph_limits": graph_limits.model_dump(mode="json") if graph_limits is not None else None,
@@ -378,7 +382,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                 adaptive = (AdaptiveRetriever(engine, assessor,
                     limits=AdaptiveLimits(timeout_s=float(adaptive_timeout), max_rounds=adaptive_rounds),
                     failure_policy=adaptive_failure_policy, graph_limits=graph_limits,
-                    empty_selection_policy=adaptive_empty_selection_policy)
+                    empty_selection_policy=adaptive_empty_selection_policy, evidence_policy=adaptive_evidence_policy)
                     if assessor is not None else None)
                 for case in corpus.cases:
                     for trial in range(repeats):
@@ -401,6 +405,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                                 "adaptive_retrieval": adaptive_retriever is not None,
                                 "adaptive_failure_policy": adaptive_failure_policy if adaptive_retriever is not None else None,
                                 "adaptive_empty_selection_policy": adaptive_empty_selection_policy if adaptive_retriever is not None else None,
+                                "adaptive_evidence_policy": adaptive_evidence_policy if adaptive_retriever is not None else None,
                                 "group_relations": group_relations and adaptive_retriever is not None,
                                 "expand_relations": expand_relations and adaptive_retriever is not None,
                                 "structured_paths": structured, "ordered_quotes": ordered_quotes and candidate,
@@ -451,6 +456,8 @@ def main() -> None:
                         help="On assessor failure, reverify candidates (default) or return empty evidence")
     parser.add_argument("--adaptive-empty-selection-policy", choices=("retain_verified", "empty"), default="retain_verified",
                         help="On a valid empty selection, retain verified candidates (default) or return empty evidence")
+    parser.add_argument("--adaptive-evidence-policy", choices=("model_selected", "original_and_selected"), default="model_selected",
+                        help="Use model-selected evidence (default) or also preserve evidence from the original query")
     parser.add_argument("--expand-relations", action="store_true",
                         help="Gather bounded graph evidence before assessment; requires --adaptive-model")
     parser.add_argument("--review-model", help="Explicit installed answer reviewer model for the candidate")
@@ -463,6 +470,7 @@ def main() -> None:
         adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations,
         adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations,
         adaptive_empty_selection_policy=args.adaptive_empty_selection_policy,
+        adaptive_evidence_policy=args.adaptive_evidence_policy,
         review_model=args.review_model, review_timeout=args.review_timeout, review_policy=args.review_policy))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 

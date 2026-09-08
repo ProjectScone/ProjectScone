@@ -28,10 +28,11 @@ from .recall_scope import RecallScope
 from .reranking import candidate_is_retained
 
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
-EvidenceBasis = Literal["assessed_selection", "verified_candidates", "unselected_candidates", "none"]
+EvidenceBasis = Literal["assessed_selection", "verified_candidates", "unselected_candidates", "original_and_selected", "none"]
 FallbackStatus = Literal["not_used", "retained", "empty", "verification_failed", "verification_timeout"]
 FailurePolicy = Literal["empty", "retain_verified"]
 EmptySelectionPolicy = Literal["empty", "retain_verified"]
+EvidencePolicy = Literal["model_selected", "original_and_selected"]
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact):[1-9][0-9]*$", max_length=64)]
 EvidenceGroup = Annotated[tuple[EvidenceId, ...], Field(min_length=2, max_length=100)]
 EvidenceGroups = Annotated[tuple[EvidenceGroup, ...], Field(max_length=100)]
@@ -133,6 +134,8 @@ class AdaptiveResult(BaseModel):
     selected_groups: EvidenceGroups = ()
     status: EvidenceStatus = "uncertain"
     evidence_basis: EvidenceBasis = "none"
+    original_query_ids: tuple[EvidenceId, ...] = Field(default=(), max_length=100)
+    model_selected_ids: tuple[EvidenceId, ...] = Field(default=(), max_length=100)
     fallback_status: FallbackStatus = "not_used"
     graph_expansions: tuple[AdaptiveGraphReceipt, ...] = ()
     rounds: tuple[AdaptiveRound, ...] = ()
@@ -146,6 +149,9 @@ class AdaptiveResult(BaseModel):
         delivered = {f"chunk:{item.chunk_id}" for item in self.recall.items}
         delivered.update(f"fact:{fact.fact_id}" for fact in self.recall.facts)
         _validate_groups(self.selected_groups, delivered)
+        for ids in (self.original_query_ids, self.model_selected_ids):
+            if len(set(ids)) != len(ids) or not set(ids).issubset(delivered):
+                raise ValueError("evidence origins must be unique delivered IDs")
         return self
 
 
@@ -184,13 +190,17 @@ class _Run:
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, limits: AdaptiveLimits,
                  space: str, question: str, scope: RecallScope, excluded: str | None,
                  failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None,
-                 empty_selection_policy: EmptySelectionPolicy) -> None:
+                 empty_selection_policy: EmptySelectionPolicy, evidence_policy: EvidencePolicy) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
         self.boundary = memory.clock()
         self.filter = TextFilter(as_of=self.boundary if graph_limits is not None else None, **scope.kwargs())
         self.failure_policy = failure_policy
         self.empty_selection_policy = empty_selection_policy
+        self.evidence_policy = evidence_policy
+        self.original_pool: dict[str, _Evidence] = {}
+        self.original_groups: tuple[tuple[str, ...], ...] = ()
+        self.blend_contracts: tuple[tuple[str, ...], ...] = ()
         self.graph_limits = graph_limits
         self.graph_expansions: list[AdaptiveGraphReceipt] = []
         self.graph_snapshots: dict[str, _Evidence] = {}
@@ -473,18 +483,48 @@ class _Run:
 
     def result(self, pool: dict[str, _Evidence], status: EvidenceStatus,
                groups: tuple[tuple[str, ...], ...] = (), *, basis: EvidenceBasis | None = None,
-               fallback_status: FallbackStatus = "not_used") -> AdaptiveResult:
+               fallback_status: FallbackStatus = "not_used", original_ids: tuple[str, ...] = (),
+               model_ids: tuple[str, ...] | None = None) -> AdaptiveResult:
         items = [evidence.item for evidence in pool.values() if evidence.item is not None]
         facts = [evidence.fact for evidence in pool.values() if evidence.fact is not None]
         recall = RecallResult(items=items, facts=facts,
             returned_bytes=sum(len(item.text.encode("utf-8")) for item in items)
                 + sum(len((fact.quote or "").encode("utf-8")) for fact in facts),
             degraded=[f"adaptive: {reason}" for reason in [*self.reasons, *self.errors]])
+        evidence_basis: EvidenceBasis = (basis or "assessed_selection") if pool else "none"
         return AdaptiveResult(recall=recall, selected_groups=groups, status=status, rounds=tuple(self.rounds),
-            evidence_basis=(basis or "assessed_selection") if pool else "none", fallback_status=fallback_status,
+            evidence_basis=evidence_basis, fallback_status=fallback_status, original_query_ids=original_ids,
+            model_selected_ids=(tuple(pool) if evidence_basis == "assessed_selection" else ()) if model_ids is None else model_ids,
             graph_expansions=tuple(self.graph_expansions),
             queries_used=len(self.queries), truncated=self.truncated,
             reasons=tuple(self.reasons), errors=tuple(self.errors))
+
+    async def blend_original(self, selected: dict[str, _Evidence], selected_groups: tuple[tuple[str, ...], ...],
+                             status: EvidenceStatus) -> AdaptiveResult:
+        from .adaptive_graph import merge_groups
+        from .evidence_blend import blend_evidence
+
+        # Original snapshots win ID collisions, so later retrieval cannot replace
+        # a changed source under an identity already observed in the first query.
+        combined = {**selected, **self.original_pool}
+        verified = await self.verify(combined)
+        verified, groups = self.prune_groups(verified,
+            merge_groups((*self.original_groups, *self.blend_contracts, *selected_groups)))
+        original = tuple(verified[key].candidate for key in self.original_pool if key in verified)
+        final = tuple(verified[key].candidate for key in selected if key in verified)
+        blend = blend_evidence(original, final,
+            joint_groups=groups,
+            max_candidates=self.limits.candidate_limit, max_bytes=self.limits.max_evidence_bytes)
+        for reason in blend.reasons:
+            self.notice(reason, truncated=reason in ("candidate_limit", "max_evidence_bytes"))
+        delivered = {key: verified[key] for key in blend.ids}
+        if len(verified) != len(combined) or not set(selected).issubset(delivered):
+            status = "uncertain"
+        self.check_deadline()
+        if delivered:
+            self.notice("original_query_blended")
+        return self.result(delivered, status, blend.groups, basis="original_and_selected",
+                           original_ids=blend.original_ids, model_ids=blend.selected_ids)
 
     async def recover_assessment(self) -> AdaptiveResult:
         """Recheck original candidates once, using only the remaining deadline."""
@@ -538,6 +578,11 @@ class _Run:
             pool, selected_groups = self.prune_groups(pool, selected_groups)
             if self.graph_limits is not None:
                 pool, selected_groups = await self.expand_graph(pool, selected_groups)
+            if round_number == 1 and self.evidence_policy == "original_and_selected":
+                self.original_pool, self.original_groups = deepcopy(pool), selected_groups
+            if self.evidence_policy == "original_and_selected":
+                from .adaptive_graph import merge_groups
+                self.blend_contracts = merge_groups((*self.blend_contracts, *selected_groups))
             if not pool:
                 self.notice("no_evidence")
                 selected = {}
@@ -589,6 +634,9 @@ class _Run:
                 selected_groups = merge_groups((*selected_groups, *decision.selected_groups))
             else:
                 selected_groups = decision.selected_groups
+            if self.evidence_policy == "original_and_selected":
+                from .adaptive_graph import merge_groups
+                self.blend_contracts = merge_groups((*self.blend_contracts, *selected_groups))
             if decision.selected_ids:
                 selected, selected_groups = self.prune_groups(selected, selected_groups)
             else:
@@ -626,6 +674,8 @@ class _Run:
             # Only selected useful evidence is carried; rejected distractors
             # cannot crowd out the next bounded retrieval window.
             pool = selected.copy()
+        if self.evidence_policy == "original_and_selected" and self.original_pool:
+            return await self.blend_original(selected, selected_groups, status)
         basis: EvidenceBasis = "assessed_selection"
         if empty_selection and self.empty_selection_policy == "retain_verified":
             # A valid empty selection is not proof that every candidate is useless.
@@ -662,19 +712,27 @@ class AdaptiveRetriever:
     by default, labeled ``unselected_candidates`` with the original insufficient
     or uncertain judgment. It does not retain discarded pools across follow-ups.
     ``empty_selection_policy="empty"`` preserves strict model-only selection.
+    Opt-in ``evidence_policy="original_and_selected"`` fuses the original query
+    snapshot with the final model selection under the existing output caps.
+    Source checks cover at most two bounded pools within the same deadline.
+    Assessor failure handling remains governed separately by ``failure_policy``.
     """
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, *,
                  limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified",
                  graph_limits: MultiHopLimits | None = None,
-                 empty_selection_policy: EmptySelectionPolicy = "retain_verified") -> None:
+                 empty_selection_policy: EmptySelectionPolicy = "retain_verified",
+                 evidence_policy: EvidencePolicy = "model_selected") -> None:
         if type(failure_policy) is not str or failure_policy not in ("empty", "retain_verified"):
             raise ValueError("failure_policy must be empty or retain_verified")
         if type(empty_selection_policy) is not str or empty_selection_policy not in ("empty", "retain_verified"):
             raise ValueError("empty_selection_policy must be empty or retain_verified")
+        if type(evidence_policy) is not str or evidence_policy not in ("model_selected", "original_and_selected"):
+            raise ValueError("evidence_policy must be model_selected or original_and_selected")
         self._memory, self.assessor = memory, assessor
         self._limits = AdaptiveLimits.model_validate((limits or AdaptiveLimits()).model_dump(), strict=True)
         self._failure_policy = failure_policy
         self._empty_selection_policy = empty_selection_policy
+        self._evidence_policy = evidence_policy
         self._graph_limits = (MultiHopLimits.model_validate(dict(vars(graph_limits)), strict=True)
                               if graph_limits is not None else None)
 
@@ -695,6 +753,10 @@ class AdaptiveRetriever:
         return self._empty_selection_policy
 
     @property
+    def evidence_policy(self) -> EvidencePolicy:
+        return self._evidence_policy
+
+    @property
     def graph_limits(self) -> MultiHopLimits | None:
         return self._graph_limits
 
@@ -707,7 +769,7 @@ class AdaptiveRetriever:
             raise InvalidInput("exclude_session_id must be a string")
         fixed_scope = RecallScope.validated(**scope.kwargs())
         run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
-                   self.failure_policy, self.graph_limits, self.empty_selection_policy)
+                   self.failure_policy, self.graph_limits, self.empty_selection_policy, self.evidence_policy)
         try:
             return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:

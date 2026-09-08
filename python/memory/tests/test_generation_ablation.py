@@ -72,7 +72,7 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
-                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
+                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
                 "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/text.py", "providers/answer_reviewer.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
@@ -81,6 +81,8 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert [row["variant"] for row in report["results"]] == ["baseline", "candidate", "candidate", "baseline"]
     assert all(row["adaptive_retrieval"] is False for row in report["results"])
     assert report["adaptive_empty_selection_policy"] is None
+    assert report["adaptive_evidence_policy"] is None
+    assert all(row["adaptive_evidence_policy"] is None for row in report["results"])
     assert all(row["adaptive_empty_selection_policy"] is None for row in report["results"])
     assert all("EVALUATION_ONLY_CANARY" not in json.dumps(messages) for messages in calls)
     assert all(row["prompt_bytes"] <= 16000 for row in report["results"])
@@ -228,6 +230,7 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     assert report["state"] == "completed"
     assert report["adaptive_failure_policy"] == failure_policy
     assert report["adaptive_empty_selection_policy"] == "retain_verified"
+    assert report["adaptive_evidence_policy"] == "model_selected"
     assert report["expand_relations"] is expand_relations
     assert (report["graph_limits"] is not None) is expand_relations
     assert report["group_relations"] is group_relations
@@ -252,6 +255,7 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
             retained_fallback = assessment_fails and failure_policy == "retain_verified"
             assert row["adaptive_failure_policy"] == failure_policy
             assert row["adaptive_empty_selection_policy"] == "retain_verified"
+            assert row["adaptive_evidence_policy"] == "model_selected"
             assert row["evidence_coverage"] == (0 if assessment_fails and not retained_fallback else 1)
             assert row["context_receipt"]["adaptive_evidence_basis"] == (
                 "verified_candidates" if retained_fallback else "none" if assessment_fails else "assessed_selection")
@@ -260,6 +264,7 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
         else:
             assert row["adaptive_failure_policy"] is None
             assert row["adaptive_empty_selection_policy"] is None
+            assert row["adaptive_evidence_policy"] is None
             assert "adaptive_status" not in row["context_receipt"]
             assert row["evidence_coverage"] == 1
         assert row["scope_leaks"] == row["invalid_provenance"] == 0
@@ -277,6 +282,9 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     ({"adaptive_empty_selection_policy": "anything"}, "adaptive_empty_selection_policy"),
     ({"adaptive_empty_selection_policy": True}, "adaptive_empty_selection_policy"),
     ({"adaptive_empty_selection_policy": None}, "adaptive_empty_selection_policy"),
+    ({"adaptive_evidence_policy": "anything"}, "adaptive_evidence_policy"),
+    ({"adaptive_evidence_policy": True}, "adaptive_evidence_policy"),
+    ({"adaptive_evidence_policy": None}, "adaptive_evidence_policy"),
     ({"baseline_paths": 1}, "baseline_paths"),
     ({"baseline_paths": True}, "adaptive_model"),
     ({"group_relations": True}, "adaptive_model"),
@@ -367,8 +375,78 @@ async def test_empty_selection_policies_compare_actual_partial_route(tmp_path, m
         assert '"required"' not in serialized
 
 
-@pytest.mark.parametrize("policy", ["retain_verified", "empty"])
-def test_cli_forwards_empty_selection_policy(tmp_path, monkeypatch, policy):
+async def test_original_evidence_policy_preserves_partial_route_after_wrong_nonempty_selection(tmp_path, monkeypatch):
+    from scone_memory.retrieval.adaptive import EvidenceDecision
+    from scone_memory.testing import generation_ablation
+    fixture = json.loads((Path(__file__).parent / "fixtures/generation/v1.json").read_text())
+    fixture["cases"] = [case for case in fixture["cases"] if case["id"] == "missing-destination"]
+    case = fixture["cases"][0]
+    source = tmp_path / "wrong-followup.json"
+    source.write_text(json.dumps(fixture))
+    original_quote = "spruce forwards its records to unresolved-target."
+    unrelated_quote = "talon uses a rotating disk archive."
+    assessment_inputs = []
+    generation_inputs = []
+
+    class WrongAssessor:
+        def __init__(self, *args, **kwargs):
+            self.round = 0
+
+        async def assess(self, question, candidates):
+            assessment_inputs.append((question, candidates))
+            self.round += 1
+            if self.round == 1:
+                assert any(item.text == original_quote for item in candidates)
+                return EvidenceDecision(status="insufficient", selected_ids=(),
+                    followup_queries=("What storage does talon use?",))
+            selected = tuple(item.id for item in candidates if item.id.startswith("chunk:") and item.text == unrelated_quote)
+            assert selected
+            return EvidenceDecision(status="sufficient", selected_ids=selected)
+
+    class Streaming:
+        async def respond(self, messages):
+            generation_inputs.append(messages)
+            yield TextDelta("Scripted generation; answer accuracy is not measured by this regression.")
+            yield ReplyCompleted()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", WrongAssessor)
+    reports = {}
+    for policy in ("model_selected", "original_and_selected"):
+        reports[policy] = await generation_ablation.run_ablation(source, output=tmp_path / f"{policy}.json",
+            endpoint="http://127.0.0.1:1234/v1", adaptive_model="wrong-assessor", model_factory=Streaming,
+            baseline_paths=True, group_relations=True, expand_relations=True, adaptive_evidence_policy=policy)
+        baseline, candidate = reports[policy]["results"]
+        receipt = candidate["context_receipt"]
+        assert reports[policy]["adaptive_evidence_policy"] == policy
+        assert baseline["adaptive_evidence_policy"] is None
+        assert candidate["adaptive_evidence_policy"] == policy
+        assert receipt["adaptive_status"] == "sufficient"
+        assert receipt["adaptive_evidence_basis"] == ("original_and_selected" if policy == "original_and_selected" else "assessed_selection")
+        assert receipt["adaptive_round_count"] == 2
+        assert receipt["adaptive_fallback_status"] == "not_used"
+        assert receipt["adaptive_errors"] == []
+        assert candidate["evidence_coverage"] == (1 if policy == "original_and_selected" else 0)
+        assert candidate["scope_leaks"] == candidate["invalid_provenance"] == 0
+    assert reports["model_selected"]["results"][0]["prompt_sha256"] == reports["original_and_selected"]["results"][0]["prompt_sha256"]
+    assert original_quote not in json.dumps(generation_inputs[1])
+    assert original_quote in json.dumps(generation_inputs[3])
+    assert all(unrelated_quote in json.dumps(generation_inputs[index]) for index in (1, 3))
+    assert len(assessment_inputs) == 4
+    assert all(question == case["query"] for question, _ in assessment_inputs)
+    assert all("public cloud archive" not in item.text for _, candidates in assessment_inputs for item in candidates)
+    for messages in generation_inputs:
+        serialized = json.dumps(messages)
+        assert "public cloud archive" not in serialized
+        assert '"answer_checks"' not in serialized
+        assert '"required"' not in serialized
+
+
+@pytest.mark.parametrize("option,policy", [("empty_selection", "retain_verified"), ("empty_selection", "empty"),
+                                         ("evidence", "model_selected"), ("evidence", "original_and_selected")])
+def test_cli_forwards_adaptive_policy(tmp_path, monkeypatch, option, policy):
     from scone_memory.testing import generation_ablation
     captured = {}
 
@@ -379,9 +457,9 @@ def test_cli_forwards_empty_selection_policy(tmp_path, monkeypatch, policy):
     monkeypatch.setattr(generation_ablation, "run_ablation", fake_run)
     monkeypatch.setattr("sys.argv", ["generation_ablation", "--fixture", str(tmp_path / "fixture.json"),
         "--output", str(tmp_path / "report.json"), "--model", "generator", "--endpoint", "http://localhost:1234/v1",
-        "--adaptive-model", "assessor", "--adaptive-empty-selection-policy", policy])
+        "--adaptive-model", "assessor", f"--adaptive-{option.replace('_', '-')}-policy", policy])
     generation_ablation.main()
-    assert captured["adaptive_empty_selection_policy"] == policy
+    assert captured[f"adaptive_{option}_policy"] == policy
 
 
 @pytest.mark.parametrize("expand_relations", [False, True])

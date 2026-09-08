@@ -536,6 +536,35 @@ nonempty selection that later loses its sources. Existing scope, deadline, byte,
 and atomic-group checks still apply. Use `empty_selection_policy="empty"` to
 preserve model-only selection, independently of assessment-failure handling.
 
+To protect against later searches drifting away from the original question,
+opt into `evidence_policy="original_and_selected"`. The retriever saves the first
+verified query pool, including any enabled graph expansion, and combines it with
+the final model selection. Reciprocal rank fusion gives each lane a vote using
+`1 / (60 + rank)`; whole atomic components compete by their strongest member's
+score. Ties use original-query order first. Packing uses the existing candidate
+and UTF-8 byte limits, so either lane can lose records when the combined pool
+does not fit. Scores indicate ranking, not relevance or factual confidence.
+
+The host revalidates the union before packing. Original snapshots take precedence
+for shared IDs; a later search cannot replace a changed original source under
+the same identity. Verification reads at most two bounded pools within the
+existing deadline. Each input lane is capped at 128,000 serialized bytes; the
+combined output still uses the configured, potentially smaller context budget.
+Valid atomic contracts learned in earlier rounds continue to apply across both
+lanes, so restoring original evidence cannot expose a surviving group fragment.
+`original_query_ids` and `model_selected_ids` distinguish the
+origins of returned records and may overlap. Native context filters those origin
+lists again after its own packing. A model's `sufficient` verdict describes its
+selection; it does not certify the blended evidence or generated answer. Losing
+selected evidence to validation or packing downgrades the result to `uncertain`.
+
+This policy keeps the original pool even when a successful workflow ends with an
+empty selection; it takes precedence over terminal empty-selection handling.
+Assessor errors still use the separate failure policy. Follow-up retrieval and
+selection behavior are unchanged. The default remains `evidence_policy="model_selected"`.
+Compare with `--adaptive-evidence-policy original_and_selected` in the evaluator;
+neither this option nor the adaptive strategy is automatically enabled in HTTP.
+
 For a controlled comparison against existing compact paths, add
 `--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30
 --adaptive-rounds 3` to the generation evaluator. Each row records the selected

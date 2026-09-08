@@ -52,6 +52,7 @@ _ADAPTIVE_DIAGNOSTICS = frozenset({
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
     "atomic_group_omitted",
     "empty_selection_retained",
+    "original_query_blended",
 }) | GRAPH_REASONS
 
 
@@ -245,6 +246,7 @@ class MemoryContext:
             recalled_facts: list[Fact] = []
             adaptive_selected_ids: set[str] | None = None
             adaptive_groups: tuple[tuple[str, ...], ...] = ()
+            adaptive_provenance: dict[str, tuple[str, ...]] = {}
             adaptive_coverage: dict[str, object] | None = None
             low_confidence: bool | None
             event_id: int | None
@@ -280,6 +282,7 @@ class MemoryContext:
                         adaptive_groups = adaptive.selected_groups
                         assessment_basis = ("unassessed_fallback" if adaptive.evidence_basis == "verified_candidates"
                             else "unselected_candidates" if adaptive.evidence_basis == "unselected_candidates"
+                            else "model_judgment_over_selection" if adaptive.evidence_basis == "original_and_selected"
                             else "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment")
                         adaptive_coverage = {"assessment_status": adaptive.status,
                             "assessment_basis": assessment_basis, "evidence_basis": adaptive.evidence_basis,
@@ -288,6 +291,12 @@ class MemoryContext:
                             "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
                             "reasons": reasons, "errors": errors, "selection_complete": False,
                             "selected_omitted_count": len(adaptive_selected_ids)}
+                        if adaptive.evidence_basis == "original_and_selected":
+                            adaptive_provenance = {"original_query_ids": adaptive.original_query_ids,
+                                                   "model_selected_ids": adaptive.model_selected_ids}
+                            # Reserve complete provenance before packing; delivery
+                            # filtering below only reduces the serialized size.
+                            adaptive_coverage.update({key: list(ids) for key, ids in adaptive_provenance.items()})
                         if adaptive.graph_expansions:
                             graph_expansions: list[dict[str, object]] = [
                                 {"candidate_count": expansion.candidate_count, "added_count": expansion.added_count,
@@ -476,6 +485,8 @@ class MemoryContext:
                                         | {f"fact:{claim['fact_id']}" for claim in claims})
                         omitted_ids = adaptive_selected_ids - supplied_ids
                         adaptive_coverage.update(selection_complete=not omitted_ids, selected_omitted_count=len(omitted_ids))
+                        adaptive_coverage.update({key: [identity for identity in ids if identity in supplied_ids]
+                                                  for key, ids in adaptive_provenance.items()})
                     block = _source_block(sources, coverage, claims, relations, paths)
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
             lanes = {d.partition(":")[0] for d in degraded}

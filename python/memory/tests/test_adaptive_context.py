@@ -649,3 +649,86 @@ async def test_explicit_empty_selection_policy_preserves_empty_native_context(me
     assert receipt["references"] == [] and receipt["adaptive_errors"] == []
     assert receipt["adaptive_fallback_status"] == "not_used"
     assert "empty_selection_retained" not in receipt["adaptive_reasons"]
+
+
+@pytest.mark.parametrize("evidence_policy", ["model_selected", "original_and_selected"])
+async def test_original_query_blend_preserves_partial_evidence_with_scoped_provenance(memory, evidence_policy):
+    partial = await memory.remember("alpha", "Juniper calibration depends on Meridian; its maintainer is unknown.",
+                                    metadata={"team": "science"})
+    wrong = await memory.remember("alpha", "Juniper calibration cafeteria serves pastries.", metadata={"team": "science"})
+    await memory.remember("alpha", "Juniper calibration PRIVATE source.", metadata={"team": "legal"})
+
+    def decide(_, candidates):
+        assert all("PRIVATE" not in candidate.text for candidate in candidates)
+        return EvidenceDecision(status="sufficient", selected_ids=tuple(
+            candidate.id for candidate in candidates if candidate.episode_id == wrong.episode_id))
+
+    assessor = ScriptedAssessor(decide)
+    adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0), evidence_policy=evidence_policy)
+    request, receipt = await MemoryContext(memory, "alpha", "current", where={"team": "science"},
+                                           adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Who maintains Juniper calibration?"}])
+    assert receipt["status"] == "prepared", receipt
+    data = payload(request)
+    expected_episodes = {wrong.episode_id, partial.episode_id} if evidence_policy == "original_and_selected" else {wrong.episode_id}
+    assert {source["episode_id"] for source in data["sources"]} == expected_episodes
+    coverage = data["coverage"]["adaptive"]
+    assert coverage["verified_sufficiency"] is False and coverage["fallback_status"] == "not_used"
+    assert coverage["assessment_status"] == "sufficient" and receipt["adaptive_errors"] == []
+    assert "PRIVATE" not in json.dumps(data) and len(assessor.calls) == 1
+    if evidence_policy == "original_and_selected":
+        supplied = {f"chunk:{source['chunk_id']}" for source in data["sources"]}
+        selected = {candidate.id for candidate in assessor.calls[0][1] if candidate.episode_id == wrong.episode_id}
+        assert coverage["assessment_basis"] == "model_judgment_over_selection"
+        assert coverage["evidence_basis"] == "original_and_selected" and coverage["model_selected"] is False
+        assert set(coverage["original_query_ids"]) == supplied
+        assert set(coverage["model_selected_ids"]) == selected
+        assert "original_query_blended" in receipt["adaptive_reasons"]
+    else:
+        assert coverage["model_selected"] is True and coverage["assessment_basis"] == "model_judgment"
+
+
+async def test_blended_provenance_excludes_records_omitted_by_context_budget(memory):
+    partial = await memory.remember("alpha", "Juniper calibration depends on Meridian.")
+    wrong = await memory.remember("alpha", "Juniper calibration cafeteria: " + "Pastries served daily. " * 60)
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status="sufficient", selected_ids=tuple(
+        candidate.id for candidate in candidates if candidate.episode_id == wrong.episode_id)))
+    adaptive = AdaptiveRetriever(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0), evidence_policy="original_and_selected")
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive,
+                                           max_context_bytes=1700).prepare([
+        {"role": "user", "content": "Who maintains Juniper calibration?"}])
+    assert receipt["status"] == "prepared", receipt
+    data = payload(request)
+    assert {source["episode_id"] for source in data["sources"]} == {partial.episode_id}
+    coverage = data["coverage"]["adaptive"]
+    supplied = {f"chunk:{source['chunk_id']}" for source in data["sources"]}
+    assert set(coverage["original_query_ids"]) == supplied and coverage["model_selected_ids"] == []
+    assert coverage["selection_complete"] is False and coverage["selected_omitted_count"] > 0
+    assert coverage["model_selected"] is False and coverage["verified_sufficiency"] is False
+    assert receipt["context_bytes"] <= 1700
+
+
+async def test_blended_provenance_excludes_source_deleted_after_adaptive_return(memory):
+    deleted = await memory.remember("alpha", "Juniper calibration obsolete original source.")
+    retained = await memory.remember("alpha", "Juniper calibration cafeteria serves pastries.")
+    assessor = ScriptedAssessor(lambda _, candidates: EvidenceDecision(status="sufficient", selected_ids=tuple(
+        candidate.id for candidate in candidates if candidate.episode_id == retained.episode_id)))
+
+    class DeleteOriginalAfterRetrieval(AdaptiveRetriever):
+        async def retrieve(self, *args, **kwargs):
+            result = await super().retrieve(*args, **kwargs)
+            await memory.forget("alpha", deleted.episode_id)
+            return result
+
+    adaptive = DeleteOriginalAfterRetrieval(memory, assessor, limits=AdaptiveLimits(timeout_s=1.0),
+                                            evidence_policy="original_and_selected")
+    request, receipt = await MemoryContext(memory, "alpha", "current", adaptive_retriever=adaptive).prepare([
+        {"role": "user", "content": "Who maintains Juniper calibration?"}])
+    assert receipt["status"] == "prepared", receipt
+    data = payload(request)
+    assert {source["episode_id"] for source in data["sources"]} == {retained.episode_id}
+    supplied = {f"chunk:{source['chunk_id']}" for source in data["sources"]}
+    coverage = data["coverage"]["adaptive"]
+    assert set(coverage["original_query_ids"]) == set(coverage["model_selected_ids"]) == supplied
+    assert coverage["selection_complete"] is False and coverage["selected_omitted_count"] == 1
+    assert "obsolete original" not in json.dumps(data)
