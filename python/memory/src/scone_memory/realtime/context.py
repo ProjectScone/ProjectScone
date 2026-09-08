@@ -14,7 +14,7 @@ from typing import NotRequired, TypedDict
 
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.recall_scope import RecallScope
-from ..retrieval.adaptive import AdaptiveRetriever
+from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
 from ..retrieval.conversation_plan import overview_evidence, plan_conversation_retrieval
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
@@ -51,7 +51,7 @@ _ADAPTIVE_DIAGNOSTICS = frozenset({
     "invalid_or_failed_assessment", "retrieval_failed",
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
     "atomic_group_omitted",
-})
+}) | GRAPH_REASONS
 
 
 def _conversation_only(query: str, messages: list[dict[str, object]]) -> bool:
@@ -127,6 +127,7 @@ class ContextReceipt(TypedDict):
     adaptive_reasons: NotRequired[list[str]]
     adaptive_errors: NotRequired[list[str]]
     adaptive_atomic_group_omitted_count: NotRequired[int]
+    adaptive_graph_expansions: NotRequired[list[dict[str, object]]]
 
 
 class MemoryContext:
@@ -284,6 +285,16 @@ class MemoryContext:
                             "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
                             "reasons": reasons, "errors": errors, "selection_complete": False,
                             "selected_omitted_count": len(adaptive_selected_ids)}
+                        if adaptive.graph_expansions:
+                            graph_expansions: list[dict[str, object]] = [
+                                {"candidate_count": expansion.candidate_count, "added_count": expansion.added_count,
+                                 "omitted_count": expansion.omitted_count, "store_calls": expansion.store_calls,
+                                 "complete": expansion.complete, "truncated": expansion.truncated,
+                                 "reasons": sorted({reason if reason in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                                    for reason in expansion.reasons})}
+                                for expansion in adaptive.graph_expansions]
+                            receipt["adaptive_graph_expansions"] = graph_expansions
+                            adaptive_coverage["graph_expansions"] = graph_expansions
                         if adaptive_groups:
                             # Reserve the largest count before packing so final
                             # coverage can only shrink the serialized byte cost.

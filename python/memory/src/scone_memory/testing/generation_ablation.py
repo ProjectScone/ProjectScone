@@ -20,7 +20,7 @@ from pydantic import Field, model_validator
 def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
     paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
-             "retrieval/evidence_groups.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
+             "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py")
     return {"kind": "disk_snapshot", "capture_stage": "evaluator_import_before_local_imports",
             "captured_at_utc": datetime.now(timezone.utc).isoformat(),
             "loaded_code_identity_verified": False,
@@ -44,6 +44,7 @@ from ..realtime.context import MemoryContext, _PREFIX
 from ..realtime.events import ReplyCompleted, TextDelta, TextModel
 from ..realtime.text import DEFAULT_SYSTEM_PROMPT
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, FailurePolicy
+from ..retrieval.multihop import MultiHopLimits
 from .edge_retrieval_benchmark import EdgeFixture, FixtureCase, STAMP, _CachedBGE, _seed
 
 MAX_BYTES = 16_000
@@ -219,8 +220,12 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                        ordered_quotes: bool = False,
                        adaptive_model: str | None = None, adaptive_timeout: float = 30.0,
                        adaptive_rounds: int = 3, baseline_paths: bool = False, group_relations: bool = False,
-                       adaptive_failure_policy: FailurePolicy = "retain_verified",
+                       adaptive_failure_policy: FailurePolicy = "retain_verified", expand_relations: bool = False,
                        model_factory: Callable[[], TextModel] | None = None) -> dict[str, object]:
+    if type(expand_relations) is not bool:
+        raise ValueError("expand_relations must be a boolean")
+    if expand_relations and adaptive_model is None:
+        raise ValueError("expand_relations requires adaptive_model")
     if type(adaptive_failure_policy) is not str or adaptive_failure_policy not in ("empty", "retain_verified"):
         raise ValueError("adaptive_failure_policy must be empty or retain_verified")
     if type(ordered_quotes) is not bool:
@@ -262,6 +267,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
     assessor = (SelfHostedEvidenceAssessor(endpoint, adaptive_model, timeout=adaptive_timeout,
         group_relations=group_relations, max_evidence_bytes=16_000)
                 if adaptive_model is not None and endpoint is not None else None)
+    graph_limits = MultiHopLimits() if expand_relations else None
     results: list[dict[str, object]] = []
     report: dict[str, object] = {"schema_version": 1, "state": "running", "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
         "code_provenance": _CODE_PROVENANCE,
@@ -270,6 +276,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
         "adaptive_failure_policy": adaptive_failure_policy if assessor is not None else None,
         "assessment_timeout_seconds": adaptive_timeout if assessor is not None else None,
         "adaptive_rounds": adaptive_rounds, "baseline_paths": baseline_paths, "group_relations": group_relations,
+        "expand_relations": expand_relations, "graph_limits": graph_limits.model_dump(mode="json") if graph_limits is not None else None,
         "assessment_max_evidence_bytes": 16_000 if assessor is not None else None,
         "model": model or "injected-test-provider", "endpoint": endpoint, "repeats": repeats, "timeout_seconds": timeout,
         "system_prompt_sha256": hashlib.sha256(DEFAULT_SYSTEM_PROMPT.encode()).hexdigest(), "max_prompt_bytes": MAX_BYTES,
@@ -298,7 +305,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                 labels = {episode_id: document_id for document_id, episode_id in episodes.items()}
                 adaptive = (AdaptiveRetriever(engine, assessor,
                     limits=AdaptiveLimits(timeout_s=float(adaptive_timeout), max_rounds=adaptive_rounds),
-                    failure_policy=adaptive_failure_policy)
+                    failure_policy=adaptive_failure_policy, graph_limits=graph_limits)
                     if assessor is not None else None)
                 for case in corpus.cases:
                     for trial in range(repeats):
@@ -321,6 +328,7 @@ async def run_ablation(fixture: Path, *, output: Path, model: str | None = None,
                                 "adaptive_retrieval": adaptive_retriever is not None,
                                 "adaptive_failure_policy": adaptive_failure_policy if adaptive_retriever is not None else None,
                                 "group_relations": group_relations and adaptive_retriever is not None,
+                                "expand_relations": expand_relations and adaptive_retriever is not None,
                                 "structured_paths": structured, "ordered_quotes": ordered_quotes and candidate,
                                 "context_ms": round(context_ms, 3),
                                 "prompt_bytes": len(prompt), "prompt_sha256": hashlib.sha256(prompt).hexdigest(),
@@ -365,12 +373,14 @@ def main() -> None:
     parser.add_argument("--group-relations", action="store_true", help="Select exact fact components atomically; requires --adaptive-model")
     parser.add_argument("--adaptive-failure-policy", choices=("empty", "retain_verified"), default="retain_verified",
                         help="On assessor failure, reverify candidates (default) or return empty evidence")
+    parser.add_argument("--expand-relations", action="store_true",
+                        help="Gather bounded graph evidence before assessment; requires --adaptive-model")
     args = parser.parse_args()
     report = asyncio.run(run_ablation(args.fixture, output=args.output, model=args.model, endpoint=args.endpoint,
         embedding_cache=args.embedding_cache, repeats=args.repeats, timeout=args.timeout, ordered_quotes=args.ordered_quotes,
         adaptive_model=args.adaptive_model, adaptive_timeout=args.adaptive_timeout,
         adaptive_rounds=args.adaptive_rounds, baseline_paths=args.baseline_paths, group_relations=args.group_relations,
-        adaptive_failure_policy=args.adaptive_failure_policy))
+        adaptive_failure_policy=args.adaptive_failure_policy, expand_relations=args.expand_relations))
     print(json.dumps({"output": str(args.output), "state": report["state"]}))
 
 

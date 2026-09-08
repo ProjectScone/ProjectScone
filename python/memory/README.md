@@ -516,9 +516,9 @@ and source-verification failures still return no evidence. Cancellation propagat
 Recovered evidence has `status="uncertain"`, `evidence_basis="verified_candidates"`,
 and `fallback_status="retained"`; the original sanitized assessment error remains
 visible. This is an unassessed candidate pool, not a sufficient answer or a model
-selection. Recovery preserves atomic groups from prior valid decisions only; a
-failed response cannot establish new groups. Native context receipts expose the
-basis, fallback status, and delivery completeness separately. Use
+selection. Recovery preserves host-known atomic groups and groups from prior valid
+decisions only; a failed response cannot establish new groups. Native context
+receipts expose the basis, fallback status, and delivery completeness separately. Use
 `failure_policy="empty"` when any assessment failure should discard all evidence.
 
 For a controlled comparison against existing compact paths, add
@@ -529,8 +529,7 @@ source coverage and manual semantic review. The assessment transport timeout
 uses the requested adaptive budget; the retriever enforces the remaining total
 budget across all calls. Reports record both limits and the failure policy; use
 `--adaptive-failure-policy empty` to compare the explicit empty-on-failure behavior.
-Receipts distinguish
-assessment timeouts, provider failures and invalid model decisions without
+Receipts distinguish assessment timeouts, provider failures and invalid model decisions without
 including raw provider errors or source text.
 
 For optional atomic relation selection, construct the assessor with
@@ -540,12 +539,44 @@ by exact object-to-subject matches, preserving branches and cycles. It does not
 invent semantic links or search beyond the supplied candidate pool. Existing
 stored-link kinds are still handled by the separate graph expansion stage.
 
+To gather missing connecting facts **before** assessment, pass
+`graph_limits=MultiHopLimits(...)` to `AdaptiveRetriever` (import it from
+`scone_memory.retrieval.multihop`). The host expands verified recall seeds using
+bounded stored-link reads and exact object-to-subject joins, within the same
+space, source filters, session exclusion, and adaptive deadline. With graph
+expansion enabled, all candidate sources and facts share the engine clock
+boundary; future-created sources are excluded. It verifies expanded source
+records before disclosing them to the assessor.
+
+This option prioritizes connected fact components within the adaptive candidate
+and byte budgets. Exact components become host-owned atomic groups: partial
+model selections or later source loss omit the whole group. These known groups
+also survive an assessor failure, so fallback can retain a route gathered before
+assessment. Use `group_relations=True` on the self-hosted assessor to let the
+model select the components directly. Stored links retain their kinds and
+orientation in the separate evidence graph; an exact component is not a claim
+of causation or an inferred answer.
+
+`graph_limits=None` keeps expansion disabled. Enable it in the generation
+comparison with `--expand-relations`; reports record the graph limits and
+per-expansion coverage and work. Graph limits apply to each expansion; the
+adaptive round cap bounds their number and the total deadline bounds the run.
+`store_calls` counts traversal and its source revalidation; additional adaptive
+checks are bounded by the candidate count and deadline. Reaching a hop,
+candidate, store-call, node, edge, or byte limit leaves explicit incomplete coverage. Even an exhausted
+reachable graph does not establish query completeness. Graph expansion uses
+bounded adjacency reads; it does not search beyond the fixed scope or infer unrecorded links. Initial recall retains its existing backend
+behavior, including the current fact-seed lookup implementation.
+
 A selected group expands to all of its original evidence IDs. The model-neutral
 `EvidenceDecision.selected_groups` contract carries that requirement through
 source revalidation and conversation packing: if any member changes or cannot
 fit, the whole group is omitted. Independent ungrouped evidence can still be
-used. Receipts expose group omissions; a complete group does not prove that the
-answer is sufficient or correct. Grouping stays off by default.
+used. Atomic membership is by evidence ID: separately recalled chunks remain
+independent, even when they quote a grouped fact. This does not guarantee atomic
+delivery of equivalent source content across representations. Receipts expose
+group omissions; a complete group does not prove that the answer is sufficient
+or correct. Grouping stays off by default.
 
 The adapter's `max_evidence_bytes` bounds the serialized evidence array including
 group metadata and joins. It is separate from the core's input-evidence budget

@@ -72,7 +72,7 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
     expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
-                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "testing/generation_ablation.py"}
+                "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py", "testing/generation_ablation.py"}
     assert set(provenance["files"]) == expected
     for relative, digest in provenance["files"].items():
         assert digest == hashlib.sha256((package / relative).read_bytes()).hexdigest()
@@ -189,12 +189,13 @@ async def test_ordered_quotes_rejects_non_boolean(tmp_path):
     assert not (tmp_path / "invalid.json").exists()
 
 
+@pytest.mark.parametrize("expand_relations", [False, True])
 @pytest.mark.parametrize("failure_policy", ["empty", "retain_verified"])
 @pytest.mark.parametrize("group_relations", [False, True])
 @pytest.mark.parametrize("baseline_paths", [False, True])
 @pytest.mark.parametrize("assessment_fails", [False, True])
 async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visible(tmp_path, monkeypatch,
-                                                                                   baseline_paths, assessment_fails, group_relations, failure_policy):
+                                                                                   baseline_paths, assessment_fails, group_relations, failure_policy, expand_relations):
     from scone_memory.retrieval.adaptive import EvidenceDecision
     from scone_memory.testing import generation_ablation
     expected_group_relations = group_relations
@@ -220,9 +221,11 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", Assessor, raising=False)
     report = await generation_ablation.run_ablation(fixture_file(tmp_path), output=tmp_path / "adaptive.json",
         endpoint="http://127.0.0.1:1234/v1", model_factory=Streaming, repeats=2, ordered_quotes=True,
-        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths, group_relations=group_relations, adaptive_failure_policy=failure_policy)
+        adaptive_model="local-assessor", adaptive_timeout=20, adaptive_rounds=2, baseline_paths=baseline_paths, group_relations=group_relations, adaptive_failure_policy=failure_policy, expand_relations=expand_relations)
     assert report["state"] == "completed"
     assert report["adaptive_failure_policy"] == failure_policy
+    assert report["expand_relations"] is expand_relations
+    assert (report["graph_limits"] is not None) is expand_relations
     assert report["group_relations"] is group_relations
     assert report["assessment_max_evidence_bytes"] == 16000
     assert report["adaptive_model"] == "local-assessor"
@@ -234,6 +237,7 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
     assert [row["variant"] for row in rows] == ["baseline", "candidate", "candidate", "baseline"]
     assert [row["group_relations"] for row in rows] == [False, group_relations, group_relations, False]
     assert [row["adaptive_retrieval"] for row in rows] == [False, True, True, False]
+    assert [row["expand_relations"] for row in rows] == [False, expand_relations, expand_relations, False]
     assert [row["structured_paths"] for row in rows] == [baseline_paths, True, True, baseline_paths]
     assert [row["ordered_quotes"] for row in rows] == [False, True, True, False]
     assert len(assessment_inputs) == 2
@@ -260,6 +264,8 @@ async def test_adaptive_pair_uses_real_context_and_keeps_failed_assessments_visi
 
 
 @pytest.mark.parametrize("options,match", [
+    ({"expand_relations": 1}, "expand_relations"),
+    ({"expand_relations": True}, "adaptive_model"),
     ({"adaptive_failure_policy": "anything"}, "adaptive_failure_policy"),
     ({"adaptive_failure_policy": True}, "adaptive_failure_policy"),
     ({"baseline_paths": 1}, "baseline_paths"),
@@ -285,3 +291,49 @@ async def test_adaptive_options_validate_before_output_creation(tmp_path, option
     with pytest.raises(ValueError, match=match):
         await run_ablation(fixture_file(tmp_path), output=output, **options)
     assert not output.parent.exists()
+
+
+@pytest.mark.parametrize("expand_relations", [False, True])
+async def test_graph_option_delivers_missing_bridge_to_real_generation_context(tmp_path, monkeypatch, expand_relations):
+    from scone_memory.retrieval.adaptive import EvidenceAssessmentError
+    from scone_memory.testing import generation_ablation
+    fixture = json.loads((Path(__file__).parent / "fixtures/generation/v1.json").read_text())
+    fixture["cases"] = [case for case in fixture["cases"] if case["id"] == "multihop-journal"]
+    source = tmp_path / "bridge.json"
+    source.write_text(json.dumps(fixture))
+    calls = []
+
+    class FailingAssessor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def assess(self, question, candidates):
+            raise EvidenceAssessmentError("assessment_provider_failed")
+
+    class Streaming:
+        async def respond(self, messages):
+            calls.append(messages)
+            yield TextDelta("The journal is recorded in the supplied source.")
+            yield ReplyCompleted()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(generation_ablation, "SelfHostedEvidenceAssessor", FailingAssessor)
+    report = await generation_ablation.run_ablation(source, output=tmp_path / "report.json",
+        endpoint="http://127.0.0.1:1234/v1", adaptive_model="failing-assessor", model_factory=Streaming,
+        baseline_paths=True, group_relations=True, expand_relations=expand_relations)
+    candidate = report["results"][1]
+    receipt = candidate["context_receipt"]
+    assert receipt["adaptive_status"] == "uncertain"
+    assert receipt["adaptive_fallback_status"] == "retained"
+    assert receipt["adaptive_errors"] == ["assessment_provider_failed"]
+    assert candidate["path_count"] == (1 if expand_relations else 0)
+    data = next(json.loads(message["content"].split("\n", 1)[1]) for message in calls[1]
+                if message["content"].startswith("Scone retrieved source material:"))
+    if expand_relations:
+        assert candidate["evidence_coverage"] == 1
+        assert receipt["adaptive_graph_expansions"][0]["added_count"] >= 1
+        assert any(len(path["fact_ids"]) == 3 for path in data["paths"])
+    else:
+        assert not data.get("paths")

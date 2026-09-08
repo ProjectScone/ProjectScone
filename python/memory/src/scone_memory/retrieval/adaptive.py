@@ -23,7 +23,7 @@ from ..core.errors import InvalidInput
 from ..core.models import Chunk, Episode, Fact, RecallItem, RecallResult
 from ..core.ports import TextFilter
 from ..memory.engine import MAX_QUERY, MemoryEngine, check_space
-from .multihop import _source_matches
+from .multihop import MultiHopLimits, _source_matches, expand_multihop
 from .recall_scope import RecallScope
 from .reranking import candidate_is_retained
 
@@ -37,6 +37,13 @@ EvidenceGroups = Annotated[tuple[EvidenceGroup, ...], Field(max_length=100)]
 FollowupQuery = Annotated[str, Field(min_length=1, max_length=MAX_QUERY)]
 ASSESSMENT_FAILURE_REASONS = frozenset({
     "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
+})
+GRAPH_REASONS = frozenset({
+    "max_store_calls", "max_candidates", "max_nodes", "max_edges", "max_bytes", "max_hops",
+    "candidate_window", "unsupported_bounded_links", "unsupported_bounded_subjects",
+    "unsupported_link_revalidation", "stale_evidence", "degraded_recall", "no_seeds",
+    "candidate_limit", "max_evidence_bytes", "atomic_group_omitted", "graph_grouping_limit",
+    "filtered_evidence", "graph_failed", "timeout",
 })
 
 
@@ -101,6 +108,23 @@ class AdaptiveRound(BaseModel):
     status: EvidenceStatus
 
 
+class AdaptiveGraphReceipt(BaseModel):
+    """Per-expansion coverage, not evidence or answer completeness.
+
+    ``store_calls`` counts traversal and the walker's own revalidation. Extra
+    adaptive checks are candidate-bounded within the deadline. The round cap
+    bounds the number of these separately budgeted expansions.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    candidate_count: int = Field(default=0, ge=0)
+    added_count: int = Field(default=0, ge=0)
+    omitted_count: int = Field(default=0, ge=0)
+    store_calls: int = Field(default=0, ge=0)
+    complete: bool = False
+    truncated: bool = False
+    reasons: tuple[str, ...] = ()
+
+
 class AdaptiveResult(BaseModel):
     """Selected retained evidence and an explicitly fallible model judgment."""
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -109,6 +133,7 @@ class AdaptiveResult(BaseModel):
     status: EvidenceStatus = "uncertain"
     evidence_basis: EvidenceBasis = "none"
     fallback_status: FallbackStatus = "not_used"
+    graph_expansions: tuple[AdaptiveGraphReceipt, ...] = ()
     rounds: tuple[AdaptiveRound, ...] = ()
     queries_used: int = 0
     truncated: bool = False
@@ -157,12 +182,16 @@ class _AssessmentFailed(Exception):
 class _Run:
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, limits: AdaptiveLimits,
                  space: str, question: str, scope: RecallScope, excluded: str | None,
-                 failure_policy: FailurePolicy) -> None:
+                 failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
-        self.filter = TextFilter(**scope.kwargs())
         self.boundary = memory.clock()
+        self.filter = TextFilter(as_of=self.boundary if graph_limits is not None else None, **scope.kwargs())
         self.failure_policy = failure_policy
+        self.graph_limits = graph_limits
+        self.graph_expansions: list[AdaptiveGraphReceipt] = []
+        self.graph_snapshots: dict[str, _Evidence] = {}
+        self.graph_stale_ids: set[str] = set()
         self.hard_deadline = time.monotonic() + limits.timeout_s
         reserve = min(1.0, limits.timeout_s / 4) if failure_policy == "retain_verified" else 0.0
         self.deadline = self.hard_deadline - reserve
@@ -192,6 +221,21 @@ class _Run:
         except ValueError:
             return False
 
+    def retain_snapshot(self, evidence: _Evidence) -> _Evidence | None:
+        if self.graph_limits is None:
+            return evidence
+        key = evidence.candidate.id
+        previous = self.graph_snapshots.get(key)
+        changed = previous is not None and (previous.candidate != evidence.candidate
+            or previous.source != evidence.source or previous.chunk != evidence.chunk or previous.fact != evidence.fact)
+        if key in self.graph_stale_ids or changed:
+            self.graph_stale_ids.add(key)
+            self.notice("stale_evidence")
+            return None
+        if previous is None:
+            self.graph_snapshots[key] = deepcopy(evidence)
+        return evidence
+
     async def accept(self, item: RecallItem | Fact) -> _Evidence | None:
         """Resolve a recalled ID with point reads before trusting any content."""
         documents = self.memory.documents
@@ -220,9 +264,9 @@ class _Run:
                 return None
             if retained.quote is None or retained.quote not in source.content:
                 return None
-            return _Evidence(EvidenceCandidate(id=f"fact:{retained.fact_id}", episode_id=episode_id,
+            return self.retain_snapshot(_Evidence(EvidenceCandidate(id=f"fact:{retained.fact_id}", episode_id=episode_id,
                 text=retained.quote, subject=retained.subject, predicate=retained.predicate,
-                object=retained.object), source.model_copy(deep=True), fact=retained)
+                object=retained.object), source.model_copy(deep=True), fact=retained))
         chunks = await documents.get_chunks(self.space, [item.chunk_id])
         self.check_deadline()
         if len(chunks) != 1:
@@ -245,8 +289,8 @@ class _Run:
             return None
         if item.source != source.source or item.metadata != source.metadata or item.tags != source.tags:
             return None
-        return _Evidence(EvidenceCandidate(id=f"chunk:{chunk.chunk_id}", episode_id=chunk.episode_id,
-            text=chunk.text), source.model_copy(deep=True), item=item.model_copy(deep=True), chunk=chunk)
+        return self.retain_snapshot(_Evidence(EvidenceCandidate(id=f"chunk:{chunk.chunk_id}", episode_id=chunk.episode_id,
+            text=chunk.text), source.model_copy(deep=True), item=item.model_copy(deep=True), chunk=chunk))
 
     async def verify(self, pool: dict[str, _Evidence]) -> dict[str, _Evidence]:
         """Fresh bounded point reads plus a revision guard around the snapshot.
@@ -266,6 +310,8 @@ class _Run:
             current = await self.accept(record)
             if current is not None and current == evidence:
                 checked[key] = current
+            elif self.graph_limits is not None:
+                self.graph_stale_ids.add(key)
         final_revision = await self.memory.documents.revision(self.space)
         self.check_deadline()
         if final_revision != revision:
@@ -317,6 +363,111 @@ class _Run:
         omitted = {member for group in groups if not set(group).issubset(pool) for member in group}
         return {key: evidence for key, evidence in pool.items() if key not in omitted}, retained
 
+    async def expand_graph(self, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
+                           ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
+        from .adaptive_graph import exact_fact_groups, merge_groups
+
+        if self.graph_limits is None:
+            return pool, groups
+        facts = tuple(evidence.fact for evidence in pool.values() if evidence.fact is not None)
+        index = len(self.graph_expansions)
+        self.graph_expansions.append(AdaptiveGraphReceipt())
+        if not facts:
+            self.graph_expansions[index] = AdaptiveGraphReceipt(reasons=("no_seeds",))
+            return pool, groups
+        reasons: set[str] = set()
+        store_calls = 0
+        graph_count = 0
+        try:
+            revision = await self.memory.documents.revision(self.space)
+            self.check_deadline()
+            expansion = await expand_multihop(self.memory.documents, self.space,
+                seeds=RecallResult(facts=list(facts)), limits=self.graph_limits,
+                scope=TextFilter(as_of=self.boundary, **self.scope.kwargs()), exclude_session_id=self.excluded)
+            self.check_deadline()
+            store_calls = expansion.counts.store_calls
+            reasons.update(reason if reason in GRAPH_REASONS else "graph_failed" for reason in expansion.coverage.reasons)
+            graph_count = len(expansion.facts)
+            original_ids = set(pool)
+            original_facts = {fact.fact_id: fact for fact in facts}
+            current = await self.verify(pool)
+            # Membership includes whole discovered components before packing.
+            # Existing IDs retain their original snapshots; even an updated
+            # record with the same ID cannot replace one which failed checks.
+            all_facts = dict(original_facts)
+            for fact in expansion.facts:
+                if fact.fact_id in original_facts:
+                    if fact != original_facts[fact.fact_id]:
+                        current.pop(f"fact:{fact.fact_id}", None)
+                        reasons.add("stale_evidence")
+                    continue
+                all_facts[fact.fact_id] = fact
+                if any(len(text.encode("utf-8")) > self.limits.max_evidence_bytes
+                       for text in (fact.quote or "", fact.subject, fact.predicate, fact.object)):
+                    reasons.add("max_evidence_bytes")
+                evidence = await self.accept(fact)
+                if evidence is None:
+                    reasons.add("filtered_evidence")
+                else:
+                    current[evidence.candidate.id] = evidence
+            current = await self.verify(current)
+            final_revision = await self.memory.documents.revision(self.space)
+            self.check_deadline()
+            if final_revision != revision:
+                reasons.add("stale_evidence")
+                raise ValueError("graph snapshot changed")
+            try:
+                host_groups = merge_groups((*groups, *exact_fact_groups(tuple(all_facts.values()))))
+            except ValueError:
+                # A dense/oversized membership window is a visible budget
+                # omission. Do not expose an arbitrary partial fact component.
+                reasons.add("graph_grouping_limit")
+                fact_ids = {f"fact:{fact_id}" for fact_id in all_facts}
+                current = {key: value for key, value in current.items() if key not in fact_ids}
+                current, host_groups = self.prune_groups(current, groups)
+            members = {member for group in host_groups for member in group}
+            standalone = [(key,) for key in current if key not in members]
+            # Atomic components go first so unrelated recall chunks cannot
+            # consume every slot needed by a newly discovered connecting fact.
+            units = [*host_groups, *standalone]
+            offered: dict[str, _Evidence] = {}
+            for unit in units:
+                if not set(unit).issubset(current):
+                    reasons.add("atomic_group_omitted")
+                    continue
+                if len(offered) + len(unit) > self.limits.candidate_limit:
+                    reasons.add("candidate_limit")
+                    continue
+                prospective = tuple(value.candidate for value in offered.values()) + tuple(current[key].candidate for key in unit)
+                if evidence_payload_bytes(prospective) > self.limits.max_evidence_bytes:
+                    reasons.add("max_evidence_bytes")
+                    continue
+                offered.update((key, current[key]) for key in unit)
+            offered, retained_groups = self.prune_groups(offered, host_groups)
+            if len(retained_groups) != len(host_groups):
+                reasons.add("atomic_group_omitted")
+            considered_ids = original_ids | {f"fact:{fact_id}" for fact_id in all_facts}
+            omitted = len(considered_ids - set(offered))
+            truncated = expansion.coverage.truncated or bool(reasons & {
+                "candidate_limit", "max_evidence_bytes", "graph_grouping_limit"})
+            self.graph_expansions[index] = AdaptiveGraphReceipt(candidate_count=graph_count,
+                added_count=len(set(offered) - original_ids), omitted_count=omitted, store_calls=store_calls,
+                complete=expansion.coverage.complete and not omitted and not reasons,
+                truncated=truncated, reasons=tuple(sorted(reasons)))
+            for reason in reasons:
+                self.notice(reason, truncated=truncated)
+            self.check_deadline()
+            return offered, retained_groups
+        except asyncio.CancelledError:
+            self.graph_expansions[index] = AdaptiveGraphReceipt(candidate_count=graph_count, store_calls=store_calls,
+                truncated=True, reasons=("timeout",))
+            raise
+        except Exception as error:
+            reasons.add("timeout" if isinstance(error, asyncio.TimeoutError) else "graph_failed")
+            self.graph_expansions[index] = AdaptiveGraphReceipt(candidate_count=graph_count, store_calls=store_calls,
+                truncated=isinstance(error, asyncio.TimeoutError), reasons=tuple(sorted(reasons)))
+            raise
+
     def result(self, pool: dict[str, _Evidence], status: EvidenceStatus,
                groups: tuple[tuple[str, ...], ...] = (), *, basis: EvidenceBasis | None = None,
                fallback_status: FallbackStatus = "not_used") -> AdaptiveResult:
@@ -328,6 +479,7 @@ class _Run:
             degraded=[f"adaptive: {reason}" for reason in [*self.reasons, *self.errors]])
         return AdaptiveResult(recall=recall, selected_groups=groups, status=status, rounds=tuple(self.rounds),
             evidence_basis=(basis or "assessed_selection") if pool else "none", fallback_status=fallback_status,
+            graph_expansions=tuple(self.graph_expansions),
             queries_used=len(self.queries), truncated=self.truncated,
             reasons=tuple(self.reasons), errors=tuple(self.errors))
 
@@ -379,6 +531,8 @@ class _Run:
             self.stage = "verification"
             pool = await self.verify(pool)
             pool, selected_groups = self.prune_groups(pool, selected_groups)
+            if self.graph_limits is not None:
+                pool, selected_groups = await self.expand_graph(pool, selected_groups)
             if not pool:
                 self.notice("no_evidence")
                 selected = {}
@@ -424,7 +578,12 @@ class _Run:
             self.stage = "verification"
             pool = await self.verify(pool)
             selected = {key: pool[key] for key in decision.selected_ids if key in pool}
-            selected, selected_groups = self.prune_groups(selected, decision.selected_groups)
+            if self.graph_limits is not None:
+                from .adaptive_graph import merge_groups
+                selected_groups = merge_groups((*selected_groups, *decision.selected_groups))
+            else:
+                selected_groups = decision.selected_groups
+            selected, selected_groups = self.prune_groups(selected, selected_groups)
             status = decision.status
             if len(selected) != len(decision.selected_ids):
                 status = "uncertain"
@@ -476,15 +635,21 @@ class AdaptiveRetriever:
     explicitly unassessed and uncertain. A small verification reserve stays
     within the same deadline. ``failure_policy="empty"`` disables this fallback.
     Recovery preserves only atomic groups from prior valid decisions; a failed
-    provider response establishes no new grouping or selection authority.
+    provider response establishes no new grouping or selection authority. With
+    explicit ``graph_limits``, host-verified exact components establish atomic
+    groups before assessment, including first-round fallback. Traversal uses
+    the run's fact-time boundary and excludes later-created source episodes.
     """
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, *,
-                 limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified") -> None:
+                 limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified",
+                 graph_limits: MultiHopLimits | None = None) -> None:
         if type(failure_policy) is not str or failure_policy not in ("empty", "retain_verified"):
             raise ValueError("failure_policy must be empty or retain_verified")
         self._memory, self.assessor = memory, assessor
         self._limits = AdaptiveLimits.model_validate((limits or AdaptiveLimits()).model_dump(), strict=True)
         self._failure_policy = failure_policy
+        self._graph_limits = (MultiHopLimits.model_validate(dict(vars(graph_limits)), strict=True)
+                              if graph_limits is not None else None)
 
     @property
     def memory(self) -> MemoryEngine:
@@ -498,6 +663,10 @@ class AdaptiveRetriever:
     def failure_policy(self) -> FailurePolicy:
         return self._failure_policy
 
+    @property
+    def graph_limits(self) -> MultiHopLimits | None:
+        return self._graph_limits
+
     async def retrieve(self, space: str, query: str, *, scope: RecallScope,
                        exclude_session_id: str | None = None) -> AdaptiveResult:
         check_space(space)
@@ -507,7 +676,7 @@ class AdaptiveRetriever:
             raise InvalidInput("exclude_session_id must be a string")
         fixed_scope = RecallScope.validated(**scope.kwargs())
         run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
-                   self.failure_policy)
+                   self.failure_policy, self.graph_limits)
         try:
             return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:
