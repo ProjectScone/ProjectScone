@@ -2422,10 +2422,7 @@ class MemoryEngine:
             )
             if new.status not in STATUSES or new.origin not in ORIGINS:
                 raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
-            identity = (
-                new.subject, new.predicate, new.object, new.valid_from, new.valid_until,
-                new.status, new.closed_reason, new.confidence,
-            )
+            identity = _fact_identity(new)
             if identity in existing:
                 summary.facts_skipped += 1
                 if f.get("fact_id") is not None:
@@ -2492,12 +2489,17 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
-def _fact_identity(fact: Fact) -> tuple:
-    """Two facts are the same record only when every stored field agrees;
-    a different reason or confidence is a different record."""
+def _fact_identity(fact: Fact | NewFact) -> tuple:
+    """Import identity includes retained evidence after source-ID remapping.
+
+    Store-local fact/supersession IDs are not preserved. Exclusion is mutable
+    target policy: reimporting the same evidence must not create a fresh,
+    unexcluded copy of a fact the target has suppressed.
+    """
     return (
         fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until,
         fact.status, fact.closed_reason, fact.confidence,
+        fact.source_episode_id, fact.origin, fact.quote,
     )
 
 
