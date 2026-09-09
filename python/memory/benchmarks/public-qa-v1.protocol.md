@@ -76,3 +76,26 @@ run/protocol and must preserve the old observations.
   quality and unanswerable-question handling are not evaluated by this protocol.
 - No tuning during the600-response run. Later diagnosis/tuning is separately
   labeled; its changes must be evaluated on the reserved questions.
+
+## Measurement details fixed before inference
+
+- Recall@k means the fraction of annotated supporting source documents found
+  within the first k ranked native-recall chunks (k=5,10). Deduplicate their
+  document IDs for the numerator; do not refill the list to k unique documents.
+  Document identity is SHA256 of original title, NUL, and original paragraph
+  text. Average per-question fractions; also report all-support-documents found.
+- Generation timers cover inference only, including model loading and prompt
+  processing when incurred. Record MemoryContext preparation separately. Their
+  sum is an estimated sequential request cost, not an observed live HTTP latency.
+- Memory collector: Ollama `/api/ps` before and after each20-question model block.
+  Save every loaded model's `size` and `size_vram` in bytes, its digest and context.
+  These are Ollama-reported loaded-model sizes, not process RSS or peak system
+  RAM. Before a block, unload other models in this benchmark's three-model set
+  using native keep_alive=0. Do not unload unrelated models; record them.
+- The manifest contains all600 planned observations. Interrupted started calls
+  are terminal failures; unattempted calls remain explicitly unattempted until
+  resumed. Do not rank models from different completed prefixes or call an
+  incomplete run complete. Full-run scoring requires every planned observation
+  to be terminal, with failures retained in each model's200-question denominator.
+- The reserved questions are evaluated only after tuned settings are frozen.
+  Once their results influence tuning, they are no longer an untouched holdout.
