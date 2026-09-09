@@ -12,10 +12,12 @@ on an engine instance.
 | `retrieval/recall.py` | Lane execution, fusion, source verification, optional reranking and result assembly |
 | `retrieval/fact_recall.py` | Validated indexed fact lookup, scan fallback and historical facts |
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
+| `retrieval/activity_graph.py` | Read activity and retained sources into a graph of recorded relationships |
+| `retrieval/graph.py` | Graph values and typed edge construction without storage reads |
 | `retrieval/reranking.py` | Bounded adapter calls, output validation and fallback ordering |
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
 | `memory/archive.py` | Export original records and import with identity, source and link remapping |
-| `memory/engine.py` | Coordinate the public API and remaining ingestion, lifecycle and graph operations |
+| `memory/engine.py` | Coordinate the public API and remaining ingestion and lifecycle operations |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
 its current document store, vector index, embedder and ranking configuration.
@@ -56,6 +58,19 @@ the target. Tombstoned content stays omitted unless resurrection is explicit.
 Store-local supersession IDs retain their existing import behavior; this is not
 a complete cross-store snapshot or a transaction across document/vector stores.
 
+Activity graph assembly receives the current document store and optional event
+log. The engine validates the space and clamps the event/provenance window before
+dispatch. The builder hydrates retained sources and recorded capture events,
+preserves session/episode focus, and distinguishes sources omitted for room from
+sources that no longer exist. Retrieval edges retain their lane/rank labels;
+similarity is never promoted to a factual relationship. Graph data structures
+and edge helpers remain separate from storage reads and graph analysis.
+
+These windows bound event reads and additional source hydration, not the number
+of facts scanned or all nodes returned. Fact listing still reads the space's full
+ledger. This extraction does not solve large-ledger graph scaling or introduce
+an atomic snapshot across the document and event stores.
+
 The refactor preserves candidate depth, filter semantics, fusion ordering,
 scope verification, cancellation propagation and degraded-mode reporting.
 Reranker failures retain baseline ordering; ranking scores do not become
@@ -67,7 +82,7 @@ available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
 The engine decomposition is ongoing. Ingestion job coordination, fact lifecycle,
-retention/deletion and activity graphs still need their own
+retention/deletion and inventory operations still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
 
@@ -86,3 +101,8 @@ distinct fact provenance, repeated import, UTF-8 chunk rebuilding and explicit
 resurrection. Contract tests run with in-memory, SQLite, embedded Qdrant and a
 self-managed Qdrant server; real cross-language transfer remains a separate,
 explicitly configured test.
+
+Activity graph tests cover direct port calls, stored capture/source/recall/feedback
+edges, focused sessions, time/space scope, omitted versus missing sources, bounded
+capture hydration and cancellation. The same public graph payload continues to
+feed graph analysis and the HTTP endpoints.
