@@ -144,10 +144,14 @@ class EvidenceToolLoop:
     """
 
     def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
-                 initial_search: bool = False, answer_requirements: AnswerRequirements | None = None) -> None:
+                 initial_search: bool = False, answer_requirements: AnswerRequirements | None = None,
+                 compact_search_results: bool = False) -> None:
         if type(initial_search) is not bool:
             raise ValueError('initial_search must be a boolean')
+        if type(compact_search_results) is not bool:
+            raise ValueError('compact_search_results must be a boolean')
         self._initial_search = initial_search
+        self._compact_search_results = compact_search_results
         self._model, self._tools = model, tools
         self._limits = ToolLoopLimits.model_validate((limits or ToolLoopLimits()).model_dump())
         self._answer_requirements = validated_requirements(answer_requirements)
@@ -179,6 +183,7 @@ class EvidenceToolLoop:
         known_chunks: set[int] = set()
         prepared: list[PreparedToolEvidence] = []
         reads: dict[tuple[int, int, int], tuple[PreparedToolEvidence, int]] = {}
+        searches: dict[str, tuple[PreparedToolEvidence, int]] = {}
         outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
         deadline = time.monotonic() + limits.timeout_s
@@ -226,12 +231,31 @@ class EvidenceToolLoop:
                     else:
                         evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
                         check_deadline()
-                        size = len(evidence.payload.encode())
+                        payload = evidence.payload
+                        repeated = (searches.get(payload) if self._compact_search_results
+                                    and call.name == 'search_memory' and evidence.evidence_ids else None)
+                        if repeated is not None:
+                            valid = await asyncio.create_task(repeated[0].validate())
+                            check_deadline()
+                            if not valid:
+                                raise RuntimeError('tool evidence changed before reuse')
+                            reference = _json({'ok':True, 'status':'prepared', 'verified_accuracy':False,
+                                'reuse':{'tool_result_number':repeated[1], 'new_evidence_count':0, 'searched_again':True},
+                                'message':'Fresh search returned the identical result shown earlier. '
+                                          'Read relevant context, target a missing fact with a different query, '
+                                          'or answer from the available evidence.'})
+                            if len(reference.encode()) < len(payload.encode()):
+                                payload, reused = reference, True
+                        size = len(payload.encode())
                         if tool_bytes + size > limits.max_tool_bytes:
                             payload = _denied('tool_output_budget')
+                            reused = False
                         else:
-                            payload = evidence.payload
+                            # Keep each fresh snapshot even when its presentation
+                            # references an earlier result. Retrieval was executed.
                             prepared.append(evidence)
+                            if self._compact_search_results and call.name == 'search_memory' and evidence.evidence_ids:
+                                searches.setdefault(evidence.payload, (evidence, len(outcomes) + 1))
                             if key is not None and evidence.evidence_ids:
                                 reads[key] = (evidence, len(outcomes) + 1)
                             known_facts.update(int(item.partition(':')[2]) for item in evidence.evidence_ids

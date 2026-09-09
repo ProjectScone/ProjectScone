@@ -668,6 +668,22 @@ A reused call returns a compact reference to the earlier tool result, reports
 does not append duplicate source packets to the receipt or establish completeness.
 Source changes or failed revalidation stop the turn before another model request.
 
+`EvidenceToolLoop(..., compact_search_results=True)` optionally compacts an
+identical nonempty search result into a reference to its first full result in
+the current turn. It is off by default. Every search still executes: this is
+presentation compaction, not a retrieval cache. Matching requires the entire
+result payload to be byte-for-byte identical, including ranking, ordering,
+metadata and coverage. Changed results, empty results and errors are offered
+normally. A reference is used only when it is shorter than the full payload.
+
+The reference identifies `tool_result_number`, `new_evidence_count: 0` and
+`searched_again: true`; its outcome reports `reused=true`. The earlier receipt
+is revalidated before reuse, and every fresh search receipt remains in the
+returned evidence packets and final validation set. Attempts still consume
+the same call budget; the bytes actually offered consume the tool-byte budget.
+This does not establish that the existing evidence is sufficient or correct,
+and it does not force the model to answer or to choose a different query.
+
 Defaults bound the transcript to 256,000 bytes, all tool output to 128,000 bytes,
 and the final reply to 16,000 bytes. No intermediate text is published. Sources,
 chunks, facts, and links are frozen before model consumption and rechecked before
