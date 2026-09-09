@@ -18,6 +18,11 @@ accuracy, so the source-count default remains unchanged.
 The [public answer-review comparison](public-answer-review-v1.results.md) tests
 the existing revision gate on all 200 original drafts. Exact match falls from
 64% to 62.5%; the report preserves all adopted and unaccepted proposals.
+The [format-aware review follow-up](public-format-review-v1.results.md) supplies
+the original answer instructions to that reviewer. Exact match falls to 62%:
+preserving output instructions does not fix comparison and entity-role errors.
+The report retains every changed answer and distinguishes fallback preservation
+from successful repair. Review remains optional.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
