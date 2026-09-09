@@ -12,16 +12,19 @@ from collections.abc import Awaitable, Callable
 import math
 import re
 import time
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .answer_requirements import AnswerRequirements, validated_requirements
 
 EvidenceId = Annotated[str, Field(pattern=r"^(chunk|fact|link):[1-9][0-9]*$", max_length=64)]
 IssueCode = Literal["unsupported_claim", "contradiction", "incomplete_answer", "broken_path"]
 ReviewStatus = Literal["supported", "needs_revision", "uncertain", "unavailable"]
 SourceStatus = Literal["unchecked", "retained", "stale", "unavailable"]
 ErrorCode = Literal["review_timeout", "review_provider_failed", "invalid_review",
-                    "source_validation_failed", "source_validation_timeout", "stale_evidence"]
+                    "source_validation_failed", "source_validation_timeout", "stale_evidence",
+                    "answer_format_rejected"]
 REVIEW_FAILURE_REASONS = frozenset({"review_timeout", "review_provider_failed", "invalid_review"})
 MAX_QUESTION_BYTES = 8000
 MAX_EVIDENCE_IDS = 256
@@ -74,6 +77,16 @@ class AnswerReviewer(Protocol):
                      evidence_ids: tuple[str, ...]) -> AnswerReviewDecision: ...
 
 
+class RequirementsAnswerReviewer(AnswerReviewer, Protocol):
+    async def review_with_requirements(self, question: str, answer: str, evidence: str,
+        evidence_ids: tuple[str, ...], requirements: AnswerRequirements) -> AnswerReviewDecision: ...
+
+
+def require_contextual_reviewer(reviewer: AnswerReviewer, requirements: AnswerRequirements | None) -> None:
+    if requirements is not None and not callable(getattr(reviewer, 'review_with_requirements', None)):
+        raise ValueError('answer requirements need a reviewer implementing review_with_requirements')
+
+
 class AnswerReviewLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     timeout_s: float = Field(default=20.0, ge=1, le=180, allow_inf_nan=False)
@@ -91,6 +104,7 @@ class AnswerReviewReceipt(BaseModel):
     errors: tuple[ErrorCode, ...] = ()
     verified_accuracy: Literal[False] = False
     source_status: SourceStatus = "unchecked"
+    format_status: Literal['unchecked', 'satisfied', 'rejected'] = 'unchecked'
 
 
 class ReviewedAnswer(BaseModel):
@@ -134,9 +148,11 @@ def _decision(value: AnswerReviewDecision, answer: str, ids: tuple[str, ...],
 class _ReviewRun:
     def __init__(self, reviewer: AnswerReviewer, question: str, answer: str, evidence: str,
                  ids: tuple[str, ...], limits: AnswerReviewLimits,
-                 validator: Callable[[], Awaitable[bool]] | None, deadline: float | None) -> None:
+                 validator: Callable[[], Awaitable[bool]] | None, deadline: float | None,
+                 requirements: AnswerRequirements | None) -> None:
         self.reviewer, self.question, self.original = reviewer, question, answer
         self.evidence, self.ids, self.limits, self.validator = evidence, ids, limits, validator
+        self.requirements = requirements
         now = time.monotonic()
         self.hard_deadline = min(now + limits.timeout_s, deadline) if deadline is not None else now + limits.timeout_s
         reserve = min(1.0, max(0.0, self.hard_deadline - now) / 4) if validator is not None else 0.0
@@ -157,9 +173,16 @@ class _ReviewRun:
 
     def result(self, *, status: ReviewStatus = "unavailable", answer: str | None = None) -> ReviewedAnswer:
         selected = self.original if answer is None else answer
+        format_status: Literal['unchecked', 'satisfied', 'rejected'] = 'unchecked'
+        if self.requirements is not None:
+            format_status = 'satisfied' if self.requirements.accepts(selected) else 'rejected'
+            if format_status == 'rejected':
+                self.error('answer_format_rejected')
+                if status == 'supported':
+                    status = 'needs_revision'
         return ReviewedAnswer(answer=selected, receipt=AnswerReviewReceipt(status=status, rounds=self.rounds,
             revised=selected != self.original, issue_codes=tuple(self.issue_codes), errors=tuple(self.errors),
-            source_status=self.source_status))
+            source_status=self.source_status, format_status=format_status))
 
     async def sources(self) -> None:
         self.check_deadline()
@@ -194,7 +217,11 @@ class _ReviewRun:
             self.source_status = "unavailable"
         decision: AnswerReviewDecision | None = None
         try:
-            response = await self.reviewer.review(self.question, answer, self.evidence, self.ids)
+            if self.requirements is None:
+                response = await self.reviewer.review(self.question, answer, self.evidence, self.ids)
+            else:
+                response = await cast(RequirementsAnswerReviewer, self.reviewer).review_with_requirements(
+                    self.question, answer, self.evidence, self.ids, self.requirements)
             self.check_deadline()
         except asyncio.CancelledError:
             raise
@@ -237,6 +264,9 @@ class _ReviewRun:
             if (decision.status != "needs_revision" or decision.revised_answer is None
                     or round_number + 1 == self.limits.max_rounds):
                 return self.result(status=decision.status)
+            if self.requirements is not None and not self.requirements.accepts(decision.revised_answer):
+                self.error('answer_format_rejected')
+                return self.result(status='needs_revision')
             current = decision.revised_answer
         return self.result()
 
@@ -267,7 +297,8 @@ class _ReviewRun:
 async def review_answer(reviewer: AnswerReviewer, question: str, answer: str, evidence: str,
                         evidence_ids: tuple[str, ...], *, limits: AnswerReviewLimits | None = None,
                         validate_evidence: Callable[[], Awaitable[bool]] | None = None,
-                        deadline: float | None = None) -> ReviewedAnswer:
+                        deadline: float | None = None,
+                        requirements: AnswerRequirements | None = None) -> ReviewedAnswer:
     """Review once and optionally confirm one revision under one deadline.
 
     Inputs are strictly validated before any callback or model invocation.
@@ -281,6 +312,10 @@ async def review_answer(reviewer: AnswerReviewer, question: str, answer: str, ev
     An optional absolute monotonic deadline can shorten the configured budget
     to include earlier caller work; it cannot extend that budget.
     Callers must treat stale/unavailable sources independently of review policy.
+    Explicit requirements are shared with a contextual reviewer. Invalid proposed
+    revisions are rejected before confirmation; format_status describes the
+    returned text, including fallback drafts. Callers must withhold rejected
+    formats even under report policy. Instructions themselves are not verified.
     """
     if limits is not None and not isinstance(limits, AnswerReviewLimits):
         raise ValueError("limits must be AnswerReviewLimits")
@@ -296,7 +331,9 @@ async def review_answer(reviewer: AnswerReviewer, question: str, answer: str, ev
         raise ValueError("validate_evidence must be callable")
     if deadline is not None and (isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)):
         raise ValueError("deadline must be a finite monotonic timestamp")
-    run = _ReviewRun(reviewer, question, answer, evidence, evidence_ids, fixed, validate_evidence, deadline)
+    requirements = validated_requirements(requirements)
+    require_contextual_reviewer(reviewer, requirements)
+    run = _ReviewRun(reviewer, question, answer, evidence, evidence_ids, fixed, validate_evidence, deadline, requirements)
     try:
         return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
     except asyncio.CancelledError:

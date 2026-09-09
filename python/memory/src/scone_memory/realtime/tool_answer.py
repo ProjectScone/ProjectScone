@@ -6,17 +6,18 @@ import json
 from uuid import uuid4
 
 from ..agents.evidence_loop import ToolLoopResult
+from .answer_requirements import AnswerRequirements
 from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer
 from .context import ContextReceipt
 
 
 async def review_tool_answer(reviewer: AnswerReviewer, question: str, result: ToolLoopResult,
-                             limits: AnswerReviewLimits) -> ReviewedAnswer:
+                             limits: AnswerReviewLimits, *, requirements: AnswerRequirements | None = None) -> ReviewedAnswer:
     """Review exact retained tool packets within the original tool deadline."""
     evidence = json.dumps({'tool_results':[json.loads(packet) for packet in result.evidence_packets],
         'complete':False}, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     return await review_answer(reviewer, question, result.text, evidence, result.evidence_ids,
-        limits=limits, validate_evidence=result.validate, deadline=result.deadline)
+        limits=limits, validate_evidence=result.validate, deadline=result.deadline, requirements=requirements)
 
 
 def _fingerprint(record: object) -> str:
