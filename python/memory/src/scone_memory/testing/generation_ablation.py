@@ -19,7 +19,7 @@ from pydantic import Field, model_validator
 
 def _snapshot_code() -> dict[str, object]:
     package = Path(__file__).resolve().parent.parent
-    paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py",
+    paths = ("realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "retrieval/search_history.py",
              "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
              "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py", "realtime/tool_answer.py",
              "providers/answer_reviewer.py", "providers/evidence_selector.py", "providers/llm.py", "providers/evidence_assessor.py", "testing/generation_ablation.py",

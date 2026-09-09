@@ -14,8 +14,7 @@ import hashlib
 import json
 from itertools import islice, zip_longest
 import time
-import unicodedata
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -26,6 +25,7 @@ from ..memory.engine import MAX_QUERY, MemoryEngine, check_space
 from .multihop import MultiHopLimits, _source_matches, expand_multihop
 from .recall_scope import RecallScope
 from .reranking import candidate_is_retained
+from .search_history import EvidenceAssessmentContext, EvidenceSearchAttempt, query_key as _query_key
 
 EvidenceStatus = Literal["sufficient", "insufficient", "uncertain"]
 EvidenceBasis = Literal["assessed_selection", "verified_candidates", "unselected_candidates", "original_and_selected", "none"]
@@ -92,6 +92,11 @@ class EvidenceDecision(BaseModel):
 
 class EvidenceAssessor(Protocol):
     async def assess(self, question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision: ...
+
+
+class ContextualEvidenceAssessor(EvidenceAssessor, Protocol):
+    async def assess_with_context(self, question: str, candidates: tuple[EvidenceCandidate, ...],
+                                  context: EvidenceAssessmentContext) -> EvidenceDecision: ...
 
 
 class AdaptiveLimits(BaseModel):
@@ -173,10 +178,6 @@ def evidence_payload_bytes(candidates: tuple[EvidenceCandidate, ...]) -> int:
                           ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-def _query_key(query: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", query).split()).casefold()
-
-
 @dataclass(frozen=True)
 class _Evidence:
     candidate: EvidenceCandidate
@@ -194,7 +195,8 @@ class _Run:
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, limits: AdaptiveLimits,
                  space: str, question: str, scope: RecallScope, excluded: str | None,
                  failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None,
-                 empty_selection_policy: EmptySelectionPolicy, evidence_policy: EvidencePolicy) -> None:
+                 empty_selection_policy: EmptySelectionPolicy, evidence_policy: EvidencePolicy,
+                 include_search_history: bool) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
         self.boundary = memory.clock()
@@ -202,6 +204,8 @@ class _Run:
         self.failure_policy = failure_policy
         self.empty_selection_policy = empty_selection_policy
         self.evidence_policy = evidence_policy
+        self.include_search_history = include_search_history
+        self.searches: list[EvidenceSearchAttempt] = []
         self.original_pool: dict[str, _Evidence] = {}
         self.original_groups: tuple[tuple[str, ...], ...] = ()
         self.blend_contracts: tuple[tuple[str, ...], ...] = ()
@@ -338,7 +342,7 @@ class _Run:
         return checked
 
     async def gather(self, query: str, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...],
-                     queries_remaining: int = 1
+                     queries_remaining: int = 1, *, round_number: int = 1
                      ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
         result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
             candidate_limit=self.limits.candidate_limit, rerank=False, **self.scope.kwargs())
@@ -384,6 +388,9 @@ class _Run:
                 continue
             pool[key] = evidence
             added += 1
+        if self.include_search_history:
+            self.searches.append(EvidenceSearchAttempt(query=query, round_number=round_number,
+                added_candidates=added, degraded=bool(result.degraded)))
         return pool, groups
 
     def prune_groups(self, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...]
@@ -592,7 +599,7 @@ class _Run:
                 hashes.append(hashlib.sha256(key.encode("utf-8")).hexdigest())
                 self.stage = "retrieval"
                 pool, selected_groups = await self.gather(query, pool, selected_groups,
-                                                          len(pending) - query_index)
+                    len(pending) - query_index, round_number=round_number)
             self.stage = "verification"
             pool = await self.verify(pool)
             pool, selected_groups = self.prune_groups(pool, selected_groups)
@@ -620,8 +627,16 @@ class _Run:
             self.fallback_groups = selected_groups
             self.stage = "assessment"
             try:
-                raw_decision = await self.assessor.assess(self.question,
-                    tuple(candidate.model_copy(deep=True) for candidate in candidates))
+                offered = tuple(candidate.model_copy(deep=True) for candidate in candidates)
+                if self.include_search_history:
+                    context = EvidenceAssessmentContext(
+                        searches=tuple(search.model_copy(deep=True) for search in self.searches),
+                        round_number=round_number, rounds_remaining=self.limits.max_rounds - round_number,
+                        queries_remaining=self.limits.max_queries - len(self.queries))
+                    raw_decision = await cast(ContextualEvidenceAssessor, self.assessor).assess_with_context(
+                        self.question, offered, context)
+                else:
+                    raw_decision = await self.assessor.assess(self.question, offered)
                 self.check_deadline()
                 # Rebuild even model_construct/model_copy values: strict models
                 # can otherwise bypass validation at an untrusted adapter edge.
@@ -736,12 +751,19 @@ class AdaptiveRetriever:
     snapshot with the final model selection under the existing output caps.
     Source checks cover at most two bounded pools within the same deadline.
     Assessor failure handling remains governed separately by ``failure_policy``.
+    ``include_search_history=True`` passes private run-local search observations
+    and remaining budgets to ``assess_with_context`` on a compatible assessor.
+    Counts describe additions to bounded pools, not evidence completeness.
     """
     def __init__(self, memory: MemoryEngine, assessor: EvidenceAssessor, *,
                  limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified",
                  graph_limits: MultiHopLimits | None = None,
                  empty_selection_policy: EmptySelectionPolicy = "retain_verified",
-                 evidence_policy: EvidencePolicy = "model_selected") -> None:
+                 evidence_policy: EvidencePolicy = "model_selected", include_search_history: bool = False) -> None:
+        if type(include_search_history) is not bool:
+            raise ValueError('include_search_history must be a boolean')
+        if include_search_history and not callable(getattr(assessor, 'assess_with_context', None)):
+            raise ValueError('search history requires an assessor with assess_with_context')
         if not _is_plain_string(failure_policy) or failure_policy not in ("empty", "retain_verified"):
             raise ValueError("failure_policy must be empty or retain_verified")
         if not _is_plain_string(empty_selection_policy) or empty_selection_policy not in ("empty", "retain_verified"):
@@ -753,6 +775,7 @@ class AdaptiveRetriever:
         self._failure_policy = failure_policy
         self._empty_selection_policy = empty_selection_policy
         self._evidence_policy = evidence_policy
+        self._include_search_history = include_search_history
         self._graph_limits = (MultiHopLimits.model_validate(dict(vars(graph_limits)), strict=True)
                               if graph_limits is not None else None)
 
@@ -777,6 +800,10 @@ class AdaptiveRetriever:
         return self._evidence_policy
 
     @property
+    def include_search_history(self) -> bool:
+        return self._include_search_history
+
+    @property
     def graph_limits(self) -> MultiHopLimits | None:
         return self._graph_limits
 
@@ -789,7 +816,8 @@ class AdaptiveRetriever:
             raise InvalidInput("exclude_session_id must be a string")
         fixed_scope = RecallScope.validated(**scope.kwargs())
         run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
-                   self.failure_policy, self.graph_limits, self.empty_selection_policy, self.evidence_policy)
+            self.failure_policy, self.graph_limits, self.empty_selection_policy, self.evidence_policy,
+            self.include_search_history)
         try:
             return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:

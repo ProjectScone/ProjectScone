@@ -35,6 +35,50 @@ def test_invalid_adaptive_configuration_refuses_startup(tmp_path, changes):
         Settings.from_env(environment(tmp_path) | changes)
 
 
+@pytest.mark.parametrize('changes', [
+    {'SCONE_ADAPTIVE_SEARCH_HISTORY': 'maybe'},
+    {'SCONE_ADAPTIVE_SEARCH_HISTORY': '1', 'SCONE_ADAPTIVE_RETRIEVAL': '0'},
+])
+def test_invalid_search_history_configuration_refuses_startup(tmp_path, changes):
+    with pytest.raises(InvalidInput):
+        Settings.from_env(environment(tmp_path) | changes)
+
+
+def test_search_history_alone_requires_adaptive_retrieval():
+    with pytest.raises(InvalidInput, match='SCONE_ADAPTIVE_RETRIEVAL'):
+        Settings.from_env({'SCONE_ADAPTIVE_SEARCH_HISTORY': '1'})
+
+
+async def test_configured_history_reaches_real_assessor_request(tmp_path, monkeypatch, engine):
+    from scone_memory.providers import evidence_assessor
+    from scone_memory.runtime.conversation_retrieval import build_adaptive_retrieval
+    from scone_memory.retrieval.recall_scope import RecallScope
+
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        data = json.loads(body['messages'][1]['content'])
+        content = json.dumps({'status': 'sufficient', 'selected_ids': [data['candidates'][0]['id']],
+                              'followup_queries': []})
+        return httpx.Response(200, json={'choices': [{'message': {'content': content}, 'finish_reason': 'stop'}]})
+
+    original = evidence_assessor.SelfHostedEvidenceAssessor
+    monkeypatch.setattr(evidence_assessor, 'SelfHostedEvidenceAssessor',
+        lambda *args, **kwargs: original(*args, **kwargs, transport=httpx.MockTransport(respond)))
+    settings = Settings.from_env(environment(tmp_path) | {
+        'SCONE_ADAPTIVE_SEARCH_HISTORY': '1', 'SCONE_ADAPTIVE_GRAPH_HOPS': '0'})
+    await engine.remember('alpha', 'Cedar retains Aster records in a private journal.')
+    strategy = build_adaptive_retrieval(settings, engine)
+    result = await strategy.retrieve('alpha', 'Cedar Aster journal', scope=RecallScope.validated())
+    assert result.status == 'sufficient' and result.recall.items
+    data = json.loads(requests[0]['messages'][1]['content'])
+    assert data['search_history']['searches'][0]['query'] == 'Cedar Aster journal'
+    assert data['search_history']['rounds_remaining'] == 2
+    assert len(requests) == 1
+
+
 def test_assessor_configuration_uses_only_its_own_credentials(tmp_path, monkeypatch):
     from dataclasses import replace
     from scone_memory.providers import evidence_assessor
@@ -206,10 +250,12 @@ async def test_served_adaptive_graph_reaches_native_reply_with_scope_and_receipt
                     assert context["adaptive_status"] == "uncertain"
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_adaptive_capability_is_separate_from_reply_model_availability(tmp_path, enabled):
+@pytest.mark.parametrize('enabled,history', [(True, True), (True, False), (False, False)])
+async def test_adaptive_capability_is_separate_from_reply_model_availability(tmp_path, enabled, history):
     env = environment(tmp_path) if enabled else {"SCONE_API_KEY": "fixture-key",
         "SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db")}
+    if history:
+        env['SCONE_ADAPTIVE_SEARCH_HISTORY'] = '1'
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     try:
         app = build_app(Settings.from_env(env), engine)
@@ -218,8 +264,10 @@ async def test_adaptive_capability_is_separate_from_reply_model_availability(tmp
                 capability = (await client.get("/v1/conversations/capabilities")).json()
                 assert capability["text_configured"] is False
                 assert capability["adaptive_retrieval"]["configured"] is enabled
+                assert capability['adaptive_retrieval']['search_history'] is history
                 if not enabled:
-                    assert capability["adaptive_retrieval"] == {"configured": False, "limits": None, "graph_max_hops": 0}
+                    assert capability["adaptive_retrieval"] == {
+                        "configured": False, "limits": None, "graph_max_hops": 0, 'search_history': False}
     finally:
         await engine.close()
 

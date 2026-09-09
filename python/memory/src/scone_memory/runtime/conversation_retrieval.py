@@ -22,6 +22,8 @@ def retrieval_limits(settings: Settings) -> AdaptiveLimits:
 def validate_adaptive_settings(settings: Settings) -> None:
     if type(settings.adaptive_retrieval) is not bool:
         raise InvalidInput("SCONE_ADAPTIVE_RETRIEVAL must be a boolean")
+    if type(settings.adaptive_search_history) is not bool:
+        raise InvalidInput("SCONE_ADAPTIVE_SEARCH_HISTORY must be a boolean")
     try:
         limits = retrieval_limits(settings)
         MultiHopLimits(max_hops=settings.adaptive_graph_hops)
@@ -30,6 +32,7 @@ def validate_adaptive_settings(settings: Settings) -> None:
     if not settings.adaptive_retrieval:
         if (settings.adaptive_url is not None or settings.adaptive_model is not None
                 or settings.adaptive_api_key is not None or settings.adaptive_graph_hops != 0
+                or settings.adaptive_search_history
                 or limits != AdaptiveLimits(timeout_s=15.0)):
             raise InvalidInput("adaptive retrieval settings require SCONE_ADAPTIVE_RETRIEVAL=1")
         return
@@ -60,4 +63,5 @@ def build_adaptive_retrieval(settings: Settings, engine: MemoryEngine) -> Adapti
         api_key=settings.adaptive_api_key, timeout=settings.adaptive_timeout,
         group_relations=graph is not None, max_evidence_bytes=settings.adaptive_max_evidence_bytes)
     return AdaptiveRetriever(engine, assessor, limits=limits, graph_limits=graph,
+        include_search_history=settings.adaptive_search_history,
         failure_policy="retain_verified", empty_selection_policy="retain_verified", evidence_policy="original_and_selected")

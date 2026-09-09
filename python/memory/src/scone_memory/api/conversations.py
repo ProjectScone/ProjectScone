@@ -365,6 +365,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                                   "policy": answer_review.policy if answer_review is not None else "off"},
                 "adaptive_retrieval": {"configured": adaptive_retriever is not None,
                     "limits": adaptive_retriever.limits.model_dump(mode="json") if adaptive_retriever is not None else None,
+                    "search_history": adaptive_retriever.include_search_history if adaptive_retriever is not None else False,
                     "graph_max_hops": adaptive_retriever.graph_limits.max_hops
                         if adaptive_retriever is not None and adaptive_retriever.graph_limits is not None else 0},
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
