@@ -131,31 +131,39 @@ def test_the_step_is_atomic(tmp_path, monkeypatch):
 
 
 def test_two_openers_racing_on_a_v5_file_apply_the_step_once(tmp_path):
-    """Two processes starting against the same v5 file must not both ALTER.
-    The second waits on the write lock, re-reads the version under it, finds
-    the step done, and carries on."""
+    """Concurrent openers serialize migration and derived-index setup."""
     import threading
 
     path = tmp_path / "live.db"
     write_v5_file(path)
     results: dict[str, object] = {}
+    gate = threading.Barrier(4)
 
     def opener(name):
+        store = None
         try:
+            gate.wait(timeout=10)
             store = SqliteDocumentStore(path)
             results[name] = schema_version(store.conn)
         except Exception as e:  # noqa: BLE001
             results[name] = f"{type(e).__name__}: {e}"
+        finally:
+            if store is not None:
+                store.conn.close()
 
     threads = [threading.Thread(target=opener, args=(f"t{i}",)) for i in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=30)
-    assert all(v == SCHEMA_VERSION for v in results.values()), results
+    assert not any(t.is_alive() for t in threads), results
+    assert len(results) == 4 and all(v == SCHEMA_VERSION for v in results.values()), results
     probe = sqlite3.connect(path)
-    assert [r[1] for r in probe.execute("PRAGMA table_info(facts)")].count("quote") == 1, "the column was added exactly once"
-    assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+    try:
+        assert [r[1] for r in probe.execute("PRAGMA table_info(facts)")].count("quote") == 1, "the column was added exactly once"
+        assert probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+    finally:
+        probe.close()
 
 
 def test_a_step_finished_by_someone_else_is_recognised_under_the_lock(tmp_path):
