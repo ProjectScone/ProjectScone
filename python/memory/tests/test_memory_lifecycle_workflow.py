@@ -7,7 +7,16 @@ from scone_memory.integrations.scoped_tools import ScopedMemoryTools
 from scone_memory.retrieval.recall_scope import RecallScope
 
 
-async def test_cancelled_job_remains_searchable_until_retention_and_space_deletion(engine):
+@pytest.fixture
+def job_engine(engine):
+    methods = ('create_job', 'update_job', 'get_job', 'list_jobs')
+    if not all(callable(getattr(engine.documents, method, None)) for method in methods):
+        pytest.skip('document store does not support the ingest-job lifecycle')
+    return engine
+
+
+async def test_cancelled_job_remains_searchable_until_retention_and_space_deletion(job_engine):
+    engine = job_engine
     engine.clock = lambda: '2026-01-01T00:00:00Z'
     job = await engine.ingest_batch('alpha', [Record('Juniper uses Polaris.'), Record('Juniper ships in April.')],
         request_id='batch-1')
@@ -64,7 +73,8 @@ async def test_expiry_honors_host_forget_guard_and_leaves_protected_evidence(eng
     assert await engine.events.query('alpha', kind='expire') == []
 
 
-async def test_job_page_limit_uses_current_host_configuration(engine):
+async def test_job_page_limit_uses_current_host_configuration(job_engine):
+    engine = job_engine
     engine.MAX_JOBS_PAGE = 2
     with pytest.raises(InvalidInput, match='1 through 2'):
         await engine.jobs('alpha', limit=3)
