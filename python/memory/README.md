@@ -64,6 +64,12 @@ not meaning. Use `LocalEmbedder()` (fastembed, bge-small) or
 `RemoteEmbedder(base_url, model)` (any OpenAI-compatible `/embeddings`,
 including Ollama) for real semantics.
 
+Scone's ONNX embedding and offline reranking paths set `ORT_DISABLE_TELEMETRY=1`
+before importing the runtime and disable telemetry through its API. If your host
+imports ONNX Runtime or FastEmbed first, export that variable before starting
+the process. A later API call cannot undo earlier initialization events; see
+[ONNX Runtime's telemetry documentation](https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md).
+
 ## Server
 
 ```sh

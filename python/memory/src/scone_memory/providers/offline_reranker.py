@@ -9,12 +9,13 @@ Inference runs off the event loop with at most one outstanding worker per
 instance. Cancellation cannot interrupt an ONNX CPU kernel: callers cancel
 promptly, late results are discarded, and the slot stays occupied until that
 worker exits. ONNX Runtime telemetry is disabled before session construction.
-No private executor, downloads, or environment changes are used.
+No private executor or downloads are used. Native telemetry is disabled through
+the environment before importing the optional runtime, then through its API.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import asdict
 import hashlib
 import importlib
@@ -26,6 +27,7 @@ import threading
 from typing import Protocol, cast
 
 from ..retrieval.reranking import MAX_RERANK_BYTES, MAX_RERANK_LIMIT, RerankCandidate, RerankScore
+from ._onnx import prepare_onnx_runtime
 
 _MODELS = frozenset({"Xenova/ms-marco-MiniLM-L-6-v2", "Xenova/ms-marco-MiniLM-L-12-v2", "BAAI/bge-reranker-base"})
 _REQUIRED = ("config.json", "tokenizer_config.json", "tokenizer.json", "special_tokens_map.json", "onnx/model.onnx")
@@ -229,15 +231,14 @@ class OfflineCrossEncoderReranker:
         except Exception:
             raise ValueError(_ERROR) from None
         try:
+            prepare_onnx_runtime()
             encoder_factory = cast(_EncoderFactory,getattr(importlib.import_module("fastembed.rerank.cross_encoder"),"TextCrossEncoder"))
             tokenizer_factory = cast(_TokenizerFactory,getattr(importlib.import_module("tokenizers"),"Tokenizer"))
-            disable_telemetry = cast(Callable[[],None],getattr(importlib.import_module("onnxruntime"),"disable_telemetry_events"))
         except ImportError:
             raise ValueError("offline reranking requires scone-memory[offline-rerank]") from None
         except Exception:
             raise ValueError(_ERROR) from None
         try:
-            disable_telemetry()
             self._encoder = encoder_factory(model_name=model_name,specific_model_path=str(path),local_files_only=True,
                 providers=["CPUExecutionProvider"],cuda=False,threads=threads,lazy_load=False)
             loaded = self._encoder.model.tokenizer
