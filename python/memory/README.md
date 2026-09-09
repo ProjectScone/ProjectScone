@@ -334,6 +334,18 @@ supplied graph, not the entire memory store; connectivity is not confidence.
 Analysis failures leave ordinary recall available with an explicit unavailable
 status. Neither option enables external services or model calls.
 
+Activity graphs use `await memory.graph(space, fact_limit=400)` or
+`GET /v1/graph?fact_limit=400`. The fact budget accepts 1–2,000 records and is
+separate from the event window. Indexed reads filter by space and, for focused
+graphs, source before applying a shared budget. Focused source groups are
+visited in episode-ID order; selected facts are displayed in fact-ID order.
+`facts_truncated` reports omitted or unvisited claims without claiming an exact
+omission count. `fact_read_status` is `bounded`, `unavailable`, `failed`, or
+`not_read`. Custom document stores can implement
+[`GraphFactReader`](src/scone_memory/core/graph_read.py); unsupported readers
+produce an explicitly partial graph instead of scanning the full fact ledger.
+This bounds fact selection, not all incident links or the total graph size.
+
 The [self-hosted reranking evaluator](src/scone_memory/testing/self_hosted_reranking.py)
 and [Qdrant comparison](src/scone_memory/testing/qdrant_comparison.py) are runnable
 package modules. They use isolated fixtures and record failures as well as

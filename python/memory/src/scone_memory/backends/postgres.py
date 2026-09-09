@@ -158,6 +158,8 @@ class PostgresDocumentStore:
         excluded_reason TEXT, quote TEXT);
     CREATE INDEX IF NOT EXISTS facts_key ON {s}.facts (space, subject, predicate);
     CREATE INDEX IF NOT EXISTS facts_subject_id ON {s}.facts (space, subject, id);
+    CREATE INDEX IF NOT EXISTS facts_space_id ON {s}.facts (space, id);
+    CREATE INDEX IF NOT EXISTS facts_source_id ON {s}.facts (space, source_episode_id, id);
     CREATE TABLE IF NOT EXISTS {s}.fact_links (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
         created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
@@ -414,6 +416,17 @@ class PostgresDocumentStore:
         if not include_closed:
             sql += " AND status = 'active'"
         return [_fact(r) for r in await self._rows(sql + " ORDER BY id", (space,))]
+
+    async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import graph_fact_read_limit
+        cap = graph_fact_read_limit(source_episode_id, limit)
+        if source_episode_id is None:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s ORDER BY id LIMIT %s',
+                (space, cap))
+        else:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s '
+                'AND source_episode_id = %s ORDER BY id LIMIT %s', (space, source_episode_id, cap))
+        return [_fact(row) for row in rows]
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         rows = await self._rows(

@@ -117,6 +117,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.executescript("""BEGIN;
 CREATE INDEX IF NOT EXISTS chunks_window ON chunks(space, episode_id, ordinal, id);
 CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
+CREATE INDEX IF NOT EXISTS facts_space_id ON facts(space, id);
+CREATE INDEX IF NOT EXISTS facts_source_id ON facts(space, source_episode_id, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 COMMIT;""")
@@ -523,6 +525,17 @@ class SqliteDocumentStore:
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
+
+    async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import graph_fact_read_limit
+        cap = graph_fact_read_limit(source_episode_id, limit)
+        if source_episode_id is None:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_space_id WHERE space = ? ORDER BY id LIMIT ?',
+                (space, cap))
+        else:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_source_id WHERE space = ? '
+                'AND source_episode_id = ? ORDER BY id LIMIT ?', (space, source_episode_id, cap))
+        return [_fact(row) for row in rows]
 
     async def search_facts(self, space: str, query: str, when: str, limit: int,
                            scope: TextFilter | None = None) -> list[Fact]:

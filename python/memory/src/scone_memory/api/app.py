@@ -909,9 +909,11 @@ def create_app(
     async def get_graph(
         session_id: Optional[str] = None, episode_id: Optional[int] = None, since: Optional[str] = None,
         limit: int = 400, space: str = Depends(space_for),
+        fact_limit: int = Query(default=400, ge=1, le=2000),
     ) -> dict:
         """Recorded relations only; see scone_memory/graph.py."""
-        g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit)
+        g = await engine.graph(space, session_id=session_id, episode_id=episode_id, since=since, limit=limit,
+                               fact_limit=fact_limit)
         return {"evidence": engine.events.name if engine.events else "none", **g.as_dict()}
 
     @app.get("/v1/doctor")

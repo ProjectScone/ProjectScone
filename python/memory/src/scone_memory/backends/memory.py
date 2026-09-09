@@ -21,6 +21,7 @@ from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, Ne
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
+from ..core.graph_read import graph_fact_read_limit
 
 
 class InMemoryDocumentStore:
@@ -36,6 +37,9 @@ class InMemoryDocumentStore:
         self._links_by_fact: dict[tuple[str, int], list[int]] = defaultdict(list)
         self._facts_by_subject: dict[tuple[str, str], list[int]] = defaultdict(list)
         self._fact_subject_keys: dict[int, tuple[str, str]] = {}
+        self._facts_by_space: dict[str, list[int]] = defaultdict(list)
+        self._facts_by_source: dict[tuple[str, int], list[int]] = defaultdict(list)
+        self._fact_graph_keys: dict[int, tuple[str, int | None]] = {}
         self._tombstones: dict[tuple[str, int], Tombstone] = {}
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
@@ -79,6 +83,10 @@ class InMemoryDocumentStore:
         for fact_id in fact_ids:
             del self._facts[fact_id]
             self._fact_subject_keys.pop(fact_id, None)
+            self._fact_graph_keys.pop(fact_id, None)
+        self._facts_by_space.pop(space, None)
+        for key in [key for key in self._facts_by_source if key[0] == space]:
+            del self._facts_by_source[key]
         for subject_key in [key for key in self._facts_by_subject if key[0] == space]:
             del self._facts_by_subject[subject_key]
         for endpoint_key in [key for key in self._links_by_fact if key[0] == space]:
@@ -280,6 +288,7 @@ class InMemoryDocumentStore:
         key = (fact.space, fact.subject)
         self._facts_by_subject[key].append(fact.fact_id)
         self._fact_subject_keys[fact.fact_id] = key
+        self._index_graph_fact(fact)
         return fact
 
     async def update_fact(self, fact: Fact) -> None:
@@ -294,6 +303,28 @@ class InMemoryDocumentStore:
             insort(self._facts_by_subject[new_key], fact.fact_id)
             self._fact_subject_keys[fact.fact_id] = new_key
         self._facts[fact.fact_id] = fact
+
+        self._index_graph_fact(fact)
+
+    def _index_graph_fact(self, fact: Fact) -> None:
+        key = (fact.space, fact.source_episode_id)
+        old = self._fact_graph_keys.get(fact.fact_id)
+        if old == key:
+            return
+        if old is not None:
+            self._facts_by_space[old[0]].remove(fact.fact_id)
+            if old[1] is not None:
+                self._facts_by_source[(old[0], old[1])].remove(fact.fact_id)
+        insort(self._facts_by_space[fact.space], fact.fact_id)
+        if fact.source_episode_id is not None:
+            insort(self._facts_by_source[(fact.space, fact.source_episode_id)], fact.fact_id)
+        self._fact_graph_keys[fact.fact_id] = key
+
+    async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
+        cap = graph_fact_read_limit(source_episode_id, limit)
+        ids = (self._facts_by_space.get(space, ()) if source_episode_id is None else
+               self._facts_by_source.get((space, source_episode_id), ()))
+        return [self._facts[fact_id] for fact_id in ids[:cap]]
 
     async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
         """Exact subject candidates, with at most 129 indexed record reads."""
