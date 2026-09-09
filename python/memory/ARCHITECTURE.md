@@ -19,6 +19,8 @@ on an engine instance.
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
 | `memory/archive.py` | Export original records and import with identity, source and link remapping |
 | `memory/fact_placement.py` | Place temporal claims, preserve restatement identity and close covered intervals |
+| `memory/fact_review.py` | Human decisions, historical batch ordering and fact visibility changes |
+| `memory/catalog.py` | Source inventory, fact selection, profiles, metadata aggregates and status reads |
 | `memory/engine.py` | Coordinate the public API and remaining ingestion and lifecycle operations |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
@@ -83,6 +85,13 @@ storage, and event payloads and revision ordering are unchanged. This boundary
 does not add transaction isolation between concurrent assertions or a bound on
 the number of rival facts read for a subject and predicate.
 
+Review and visibility changes receive a `FactReviewRuntime` containing storage,
+clock, event and bound decision callbacks. Approval, rejection, exclusion,
+inclusion and manual closure keep their public engine methods. Batches validate
+the starting revision, apply in historical order and return per-ID outcomes in
+caller order. Cancellation can leave earlier decisions applied, and event
+failures can follow persisted changes; this is not a transactional batch.
+
 Fact selection uses the optional `GraphFactReader` capability in
 `core/graph_read.py`, coordinated by `retrieval/activity_facts.py`. The default
 budget is 400 facts (maximum 2,000), shared across source groups with one-row
@@ -105,12 +114,25 @@ Reranker failures retain baseline ordering; ranking scores do not become
 probabilities of correctness. Indexed facts are checked against retained records
 and fall back to a scan when the optional index is unavailable or invalid.
 
+Catalog queries receive a document store directly. Profile reads also receive a
+clock; status reads receive a typed identity callback evaluated after the
+revision read, so current embedder/store/vector labels remain live. The engine
+reexports `Profile`, `RecentActivity` and source-walk constants and preserves its
+public query signatures. Its source-page wrapper forwards the current walk
+settings rather than freezing them when the engine is created.
+
+Catalog source pages retain descending-ID order, space and kind filters,
+metadata filtering across batches, and continuation when the read budget runs
+out. Counts, scopes, pending distillation and fact selection retain their
+existing scans and status rules. This separation adds neither indexed aggregate
+queries nor an atomic snapshot across catalog reads.
+
 Existing public engine methods and imports of shared validation helpers remain
 available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
-The engine decomposition is ongoing. Ingestion job coordination, fact lifecycle,
-retention/deletion and inventory operations still need their own
+The engine decomposition is ongoing. Ingestion job coordination, relationship validation,
+retention/deletion and derivation coordination still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
 

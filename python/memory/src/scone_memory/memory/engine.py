@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import time
 from uuid import uuid4
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, fact_placement, fact_review
+from . import archive, catalog, fact_placement, fact_review
+from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
+                      SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
 from .fact_placement import Placement as _Placement, _covers as _covers
 from .archive import ImportSummary as ImportSummary, _fact_identity as _fact_identity, _rederived as _rederived
@@ -93,13 +95,6 @@ from ..core.ports import (
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
-#: Rows read at a time when walking the inventory for matches, and how
-#: many such reads one page may cost. A filter matching nothing would
-#: otherwise read a whole space to prove a negative.
-SOURCE_WALK_PAGE = 200
-SOURCE_WALK_READS = 25
-
-
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job", "agent")
@@ -118,23 +113,6 @@ MAX_EXTERNAL_PAYLOAD = 4096
 AGENTS = ("claude-code", "codex", "other")
 AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result", "stop", "session_end")
 MAX_AGENT_TEXT = 65_536
-
-
-@dataclass(frozen=True)
-class RecentActivity:
-    """One ``dynamic`` excerpt with the episode it was cut from."""
-
-    episode_id: int
-    excerpt: str
-    created_at: str
-
-
-@dataclass
-class Profile:
-    static_facts: list[Fact] = field(default_factory=list)
-    dynamic: list[str] = field(default_factory=list)
-    #: ``dynamic`` with its evidence: same order, same excerpts, newest first.
-    recent: list[RecentActivity] = field(default_factory=list)
 
 
 @dataclass
@@ -1193,43 +1171,15 @@ class MemoryEngine:
         those holding at ``as_of`` when given. ``status`` selects one
         status instead (``proposed`` lists what awaits review). Excluded
         facts are left out unless asked for."""
-        check_space(space)
-        if status is not None and status not in STATUSES:
-            raise InvalidInput(f"status must be one of {STATUSES}, got {status!r}")
-        found = await self.documents.list_facts(space, include_closed=True)
-        if status is not None:
-            found = [f for f in found if f.status == status]
-        elif as_of is not None:
-            boundary = normalise_time(as_of)
-            found = [f for f in found if f.holds_at(boundary)]
-        else:
-            allowed = ("active", "closed") if include_closed else ("active",)
-            found = [f for f in found if f.status in allowed]
-        if not include_excluded:
-            found = [f for f in found if not f.excluded]
-        return sorted(found, key=lambda f: f.fact_id)
+        return await catalog.facts(self.documents, space, include_closed, as_of, status, include_excluded)
 
     # -- overviews --------------------------------------------------------
 
     async def profile(self, space: str, limit: int = 10) -> Profile:
-        check_space(space)
-        limit = max(1, min(limit, 50))
-        now = self.clock()
-        active = [f for f in await self.documents.list_facts(space, include_closed=False)
-                  if f.status == "active" and not f.excluded
-                  and f.valid_from <= now and (f.valid_until is None or f.valid_until > now)]
-        active.sort(key=lambda f: (-f.confidence, f.fact_id))
-        recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
-                  for e in await self.documents.recent_episodes(space, limit)]
-        return Profile(
-            static_facts=active[:limit],
-            dynamic=[r.excerpt for r in recent],
-            recent=recent,
-        )
+        return await catalog.profile(self.documents, space, limit, clock=self.clock)
 
     async def tags(self, space: str) -> dict[str, int]:
-        check_space(space)
-        return dict(sorted((await self.documents.counts(space)).tags.items()))
+        return await catalog.tags(self.documents, space)
 
     async def pending_derivation(self, space: str) -> int:
         """Groups of active claims a derivation pass has not seen at their
@@ -1242,18 +1192,11 @@ class MemoryEngine:
     async def pending_distillation(self, space: str) -> int:
         """Episodes no claim cites yet. The same definition the distiller
         and memory_pending use, so the three surfaces agree."""
-        check_space(space)
-        counts = await self.documents.counts(space)
-        if counts.episodes == 0:
-            return 0
-        referenced = {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)}
-        return sum(1 for e in await self.documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
+        return await catalog.pending_distillation(self.documents, space)
 
     async def cited_episode_ids(self, space: str) -> set[int]:
         """The episodes some claim cites, whatever the claim's status."""
-        check_space(space)
-        return {f.source_episode_id for f in await self.documents.list_facts(space, include_closed=True)
-                if f.source_episode_id is not None}
+        return await catalog.cited_episode_ids(self.documents, space)
 
     async def overview(
         self, space: str, *, limit: int = 20, before: int | None = None,
@@ -1286,77 +1229,21 @@ class MemoryEngine:
         reaching that bound is reported as more to come rather than as the
         end.
         """
-        check_space(space)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-            raise InvalidInput("limit must be an integer from 1 through 100")
-        if before is not None and (isinstance(before, bool) or not isinstance(before, int) or not 1 <= before <= 2**63-1):
-            raise InvalidInput("before must be a positive signed 64-bit episode ID")
-        if kind is not None and kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}")
-        page = getattr(self.documents, "page_episodes", None)
-        if not callable(page):
-            raise InvalidInput("this document store does not implement source inventory")
-        if conditions is None:
-            rows = await page(space, before, limit + 1, kind)
-            more = len(rows) > limit
-            return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
-
-        from ..retrieval.filters import parse_filter
-
-        narrow = parse_filter(conditions)
-        kept: list[Episode] = []
-        cursor, reads, ended = before, 0, False
-        while len(kept) < limit and reads < SOURCE_WALK_READS:
-            batch = await page(space, cursor, SOURCE_WALK_PAGE, kind)
-            reads += 1
-            filled = False
-            for episode in batch:
-                cursor = episode.episode_id
-                if narrow.matches(episode.metadata):
-                    kept.append(episode)
-                    if len(kept) == limit:
-                        filled = True
-                        break
-            if filled:
-                # Stopped on a full page, not on the end of the store: the
-                # rest of this batch has not been looked at yet.
-                break
-            if len(batch) < SOURCE_WALK_PAGE:
-                # The store had nothing more to give, so this is the end of
-                # the space rather than the end of what was read.
-                ended = True
-                break
-        return SourcePage(kept, not ended, None if ended else cursor)
+        return await catalog.source_page(self.documents, space, before=before, limit=limit, kind=kind,
+            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest
         first by (created_at, episode_id); with ``limit``, the newest N of
         them in that same order. This is a walk over the space's episodes,
         fine for a session's turns, not a query language."""
-        check_space(space)
-        clean = normalise_metadata(where)
-        if not clean:
-            raise InvalidInput("episodes() needs at least one where pair")
-        counts = await self.documents.counts(space)
-        found = [
-            e for e in await self.documents.recent_episodes(space, max(counts.episodes, 1))
-            if all(e.metadata.get(k) == v for k, v in clean.items())
-        ]
-        found.sort(key=lambda e: (e.created_at, e.episode_id))
-        return found[-limit:] if limit else found
+        return await catalog.episodes(self.documents, space, where, limit)
 
     async def scopes(self, space: str) -> dict[str, dict[str, int]]:
         """Episode counts per metadata key and value: which users, agents
         and sessions have memory here. Walks the episodes, which is fine
         for an overview and avoids asking every store for a new query."""
-        check_space(space)
-        counts = await self.documents.counts(space)
-        out: dict[str, dict[str, int]] = {}
-        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
-            for key, value in episode.metadata.items():
-                out.setdefault(key, {})
-                out[key][value] = out[key].get(value, 0) + 1
-        return {k: dict(sorted(v.items())) for k, v in sorted(out.items())}
+        return await catalog.scopes(self.documents, space)
 
     async def revision(self, space: str) -> int:
         """The space's write counter. A page that renders a list can record
@@ -1365,20 +1252,9 @@ class MemoryEngine:
         return await self.documents.revision(space)
 
     async def status(self, space: str) -> Status:
-        check_space(space)
-        counts = await self.documents.counts(space)
-        pending = sum(1 for f in await self.documents.list_facts(space, include_closed=True) if f.status == "proposed")
-        return Status(
-            space=space,
-            episodes=counts.episodes,
-            chunks=counts.chunks,
-            bytes=counts.bytes,
-            pending_review=pending,
-            revision=await self.documents.revision(space),
-            embedder=self.embedder.id,
-            document_store=self.documents.name,
-            vector_index=self.vectors.name,
-        )
+        return await catalog.status(self.documents, space, identity=lambda: {
+            "embedder": self.embedder.id, "document_store": self.documents.name, "vector_index": self.vectors.name,
+        })
 
     # -- portability ------------------------------------------------------
 
