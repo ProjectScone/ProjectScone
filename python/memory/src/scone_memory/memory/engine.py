@@ -8,29 +8,50 @@ answers, because a thin answer that says it is thin beats a 500.
 
 from __future__ import annotations
 
-import dataclasses
-from copy import deepcopy
-
 import hashlib
-import math
-import re
 import time
-from collections import OrderedDict
 from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from ..retrieval import fusion
-from ..retrieval.fact_search import IndexedFactSearch
+from . import archive
+from .archive import ImportSummary as ImportSummary, _fact_identity as _fact_identity, _rederived as _rederived
+from ..ingestion import batch as ingestion_batch
+from ..ingestion.batch import EMBED_BATCH as EMBED_BATCH
+from ..ingestion.records import (
+    Record as Record, RecoveryReport as RecoveryReport,
+    _Pending as _Pending, _DupOf as _DupOf,
+    content_hash as content_hash, contextual_prefix as contextual_prefix,
+)
+from ..retrieval import fact_recall
+from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+                                UNFILTERED_DEPTH as UNFILTERED_DEPTH)
+from ..retrieval.episode_scope import episode_fits as _fits
+from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
-from ..retrieval.reranking import (Reranker, RerankCandidate, candidate_is_retained, rerank_candidates,
-                                   validate_candidate_limit, validate_rerank_options)
-from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
+from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
+from ..ingestion.chunker import DEFAULT_TARGET
+from ..core.validation import (
+    ORIGINS as ORIGINS,
+    STATUSES as STATUSES,
+    SPACE_NAME as SPACE_NAME,
+    METADATA_KEY as METADATA_KEY,
+    MAX_METADATA_KEYS as MAX_METADATA_KEYS,
+    MAX_METADATA_VALUE as MAX_METADATA_VALUE,
+    KINDS as KINDS,
+    MAX_QUERY as MAX_QUERY,
+    MAX_LIMIT as MAX_LIMIT,
+    MAX_SOURCE as MAX_SOURCE,
+    retention_policy as retention_policy,
+    check_space as check_space,
+    normalise_tags as normalise_tags,
+    normalise_metadata as normalise_metadata,
+    normalise_term as normalise_term,
+    normalise_time as normalise_time,
+)
 from ..core.errors import Conflict, Gone, InvalidInput, NotFound
-from ..retrieval.lexical import tokenize
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
-    MAX_CONTENT_BYTES,
     Added,
     Attachment,
     BatchDecision,
@@ -48,9 +69,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
-    RecallItem,
     RecallResult,
-    RerankTrace,
     Status,
 )
 from ..capture.redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
@@ -60,7 +79,6 @@ from ..core.ports import (
     Embedder,
     Event,
     EventLog,
-    NewChunk,
     NewEpisode,
     NewEvent,
     NewFact,
@@ -70,56 +88,19 @@ from ..core.ports import (
     SourcePage,
     TextFilter,
     VectorIndex,
-    VectorPoint,
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
-SPACE_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
-METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-MAX_METADATA_KEYS = 16
-MAX_METADATA_VALUE = 256
-KINDS = ("note", "file", "conversation", "observation", "connector")
-MAX_QUERY = 1_000
-MAX_LIMIT = 50
-MAX_SOURCE = 1_000
-#: How many candidates each lane contributes before fusion.
-LANE_DEPTH = 4
-#: How much wider each lane looks when the store cannot take the filter
-#: itself. Bounded: post-filtering cannot be made exact by widening, so
-#: this buys a reasonable corpus rather than pretending to buy every one.
-UNFILTERED_DEPTH = 25
 #: Rows read at a time when walking the inventory for matches, and how
 #: many such reads one page may cost. A filter matching nothing would
 #: otherwise read a whole space to prove a negative.
 SOURCE_WALK_PAGE = 200
 SOURCE_WALK_READS = 25
-FACT_SCOPE_CACHE_LIMIT = 256
-#: Chunk texts per embedding call during batch ingest.
-EMBED_BATCH = 64
 
 
-def contextual_prefix(episode: "NewEpisode") -> str:
-    """The context a chunk loses when cut from its episode: when it
-    happened, where it came from, and whose it is. Prepended to the text
-    that is embedded (research experiment 8, Anthropic's contextual
-    retrieval without the LLM), never to the text that is stored, so
-    invariant I1 holds and recall still returns exact excerpts. Only
-    fields that exist are named; an empty prefix means no change."""
-    parts = []
-    if episode.created_at:
-        parts.append(episode.created_at[:10])
-    if episode.source:
-        parts.append(episode.source)
-    for key in ("user_id", "agent_id", "session_id"):
-        value = episode.metadata.get(key) if episode.metadata else None
-        if value:
-            parts.append(f"{key.replace('_', ' ')} {value}")
-    return " | ".join(parts)
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job", "agent")
-ORIGINS = ("stated", "extracted", "inferred")
-STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
 #: What an attachment may be. Anything not here is refused rather than
 #: stored under a type the server would have to guess at on the way out.
@@ -158,34 +139,6 @@ class Profile:
     recent: list[RecentActivity] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class Record:
-    """One thing to remember, for batch ingest and for import."""
-
-    content: str
-    kind: str = "note"
-    source: Optional[str] = None
-    tags: Sequence[str] = ()
-    created_at: Optional[str] = None
-    metadata: Mapping[str, str] = field(default_factory=dict)
-    #: Identity for deduplication. By default two records with the same
-    #: text in a space are one episode. A transcript is different: the
-    #: second "ok" in a conversation is a second turn, so a chat adapter
-    #: keys each turn ("<session>#<n>") and identical text under different
-    #: keys is stored twice, while a retried write of the same key is not.
-    dedup_key: Optional[str] = None
-    #: The identity a dump carries. Import passes it through so a moved
-    #: store deduplicates exactly as its source did; callers leave it None.
-    content_hash: Optional[str] = None
-
-    @classmethod
-    def from_dict(cls, data: Mapping) -> "Record":
-        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash") if k in data}
-        if "content" not in known:
-            raise InvalidInput("a record needs content")
-        return cls(**known)
-
-
 @dataclass
 class Replaced:
     """What ``replace`` did: the record as stored (or found), the outcome,
@@ -196,33 +149,6 @@ class Replaced:
     replaced: Optional[ForgetReceipt] = None
 
 
-@dataclass
-class RecoveryReport:
-    """What recover() found: episodes brought to a complete state, of
-    which how many needed their chunks rebuilt, and marks with no
-    episode behind them (the write never landed)."""
-
-    completed: int = 0
-    rechunked: int = 0
-    forgotten: int = 0
-
-
-@dataclass
-class ImportSummary:
-    episodes: int = 0
-    #: Episodes already present in the target.
-    deduplicated: int = 0
-    facts: int = 0
-    #: Relations stored, and those dropped or already present.
-    links: int = 0
-    links_skipped: int = 0
-    #: Episodes skipped because this space forgot that content on purpose.
-    tombstoned: int = 0
-    #: Facts already present in the target (same subject, predicate,
-    #: object, interval and status).
-    facts_skipped: int = 0
-
-
 @dataclass(frozen=True)
 class _Placement:
     covering: list
@@ -230,24 +156,6 @@ class _Placement:
     bound: Optional[str]
     bound_reason: Optional[str]
     bound_by: Optional[int]
-
-
-@dataclass(frozen=True)
-class _Pending:
-    slot: int
-    new: NewEpisode
-    #: Chunk texts, sliced in code points.
-    texts: list[str]
-    #: The same spans as UTF-8 byte offsets (spec rule 1.2).
-    spans: list[tuple[int, int]]
-
-
-@dataclass(frozen=True)
-class _DupOf:
-    """A record identical to an earlier one in the same batch; its id is
-    known only after that one is written."""
-
-    slot: int
 
 
 class _RecallEventItem(TypedDict):
@@ -383,58 +291,8 @@ class MemoryEngine:
         the stored content, which never changed) or, if nothing landed,
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
-        report = RecoveryReport()
-        marks = await self.documents.inflight()
-        for space, digest in marks:
-            episode = await self.documents.episode_by_hash(space, digest)
-            if episode is None:
-                report.forgotten += 1
-            else:
-                chunks = await self.documents.chunks_of(space, episode.episode_id)
-                if not chunks:
-                    spans = chunk_spans(episode.content, self.chunk_target)
-                    chunks = await self.documents.insert_chunks(
-                        [
-                            NewChunk(
-                                episode_id=episode.episode_id,
-                                space=space,
-                                ordinal=i,
-                                start=bs.start,
-                                end=bs.end,
-                                text=episode.content[sp.start : sp.end],
-                                created_at=episode.created_at,
-                            )
-                            for i, (sp, bs) in enumerate(zip(spans, byte_spans(episode.content, spans)))
-                        ]
-                    )
-                    report.rechunked += 1
-                as_new = NewEpisode(
-                    space=space, kind=episode.kind, content=episode.content, content_hash=episode.content_hash,
-                    created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
-                    tags=episode.tags, metadata=episode.metadata,
-                )
-                texts = [self._embed_text(as_new, c.text) for c in chunks]
-                vectors: list[list[float]] = []
-                for i in range(0, len(texts), EMBED_BATCH):
-                    vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
-                await self.vectors.upsert(
-                    [
-                        VectorPoint(
-                            chunk_id=c.chunk_id, space=space, episode_id=episode.episode_id, created_at=episode.created_at,
-                            vector=v, tags=episode.tags, metadata=episode.metadata,
-                        )
-                        for c, v in zip(chunks, vectors)
-                    ]
-                )
-                report.completed += 1
-            await self.documents.clear_inflight(space, digest)
-        if marks:
-            for space in sorted({s for s, _ in marks}):
-                await self._emit(space, "recover", {
-                    "marks": sum(1 for s, _ in marks if s == space),
-                    "completed": report.completed, "rechunked": report.rechunked, "forgotten": report.forgotten,
-                })
-        return report
+
+        return await ingestion_batch.recover(self._ingestion_runtime())
 
     # -- episodes ---------------------------------------------------------
 
@@ -558,74 +416,14 @@ class MemoryEngine:
         })
         return resolved
 
+    def _ingestion_runtime(self) -> ingestion_batch.IngestionRuntime:
+        return ingestion_batch.IngestionRuntime(
+            self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
+            self._embed_text, self._emit,
+        )
+
     async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
-        when = self.clock()
-        results: list[Added | _DupOf | None] = []
-        fresh: list[_Pending] = []
-        seen: dict[str, int] = {}  # content hash -> index into results
-        for record in records:
-            content = record.content
-            if not isinstance(content, str) or not content.strip():
-                raise InvalidInput("content must not be empty")
-            if len(content.encode()) > MAX_CONTENT_BYTES:
-                raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-            kind = record.kind
-            if kind not in KINDS:
-                raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
-            clean_tags = normalise_tags(record.tags)
-            clean_meta = normalise_metadata(record.metadata or {})
-            happened = normalise_time(record.created_at) if record.created_at else when
-            digest = record.content_hash or content_hash(space, content, record.dedup_key)
-            if not digest or len(digest) > 128:
-                raise InvalidInput("content_hash must be 1..=128 chars")
-            if digest in seen:
-                results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
-                fresh_or_dup = seen[digest]
-                results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
-                continue
-            existing = await self.documents.episode_by_hash(space, digest)
-            if existing is not None:
-                seen[digest] = len(results)
-                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
-                continue
-            seen[digest] = len(results)
-            results.append(None)
-            spans = chunk_spans(content, self.chunk_target)
-            fresh.append(
-                _Pending(
-                    slot=len(results) - 1,
-                    texts=[content[sp.start : sp.end] for sp in spans],
-                    new=NewEpisode(
-                        space=space,
-                        kind=kind,
-                        content=content,
-                        content_hash=digest,
-                        created_at=happened,
-                        ingested_at=when,
-                        source=record.source,
-                        tags=clean_tags,
-                        metadata=clean_meta,
-                    ),
-                    spans=[(sp.start, sp.end) for sp in byte_spans(content, spans)],
-                )
-            )
-
-        if fresh:
-            texts = [self._embed_text(p.new, t) for p in fresh for t in p.texts]
-            vectors: list[list[float]] = []
-            for i in range(0, len(texts), EMBED_BATCH):
-                vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
-            await self._write_batch(space, fresh, vectors, results)
-            await self.documents.bump_revision(space)
-
-        resolved: list[Added] = []
-        for r in results:
-            if isinstance(r, _DupOf):
-                target = cast(Added, results[r.slot])
-                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
-            else:
-                resolved.append(cast(Added, r))
-        return resolved
+        return await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
@@ -637,54 +435,7 @@ class MemoryEngine:
     async def _write_batch(
         self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
     ) -> None:
-        written: list[int] = []
-        try:
-            offset = 0
-            for pending in fresh:
-                # The mark outlives a crash; clear_inflight below is the
-                # last thing this episode's write does (see recover()).
-                await self.documents.mark_inflight(space, pending.new.content_hash)
-                episode = await self.documents.insert_episode(pending.new)
-                written.append(episode.episode_id)
-                chunks = await self.documents.insert_chunks(
-                    [
-                        NewChunk(
-                            episode_id=episode.episode_id,
-                            space=space,
-                            ordinal=i,
-                            start=a,
-                            end=b,
-                            text=text,
-                            created_at=episode.created_at,
-                        )
-                        for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
-                    ]
-                )
-                await self.vectors.upsert(
-                    [
-                        VectorPoint(
-                            chunk_id=c.chunk_id,
-                            space=space,
-                            episode_id=episode.episode_id,
-                            created_at=episode.created_at,
-                            vector=v,
-                            tags=pending.new.tags,
-                            metadata=pending.new.metadata,
-                        )
-                        for c, v in zip(chunks, vectors[offset : offset + len(chunks)])
-                    ]
-                )
-                offset += len(chunks)
-                await self.documents.clear_inflight(space, pending.new.content_hash)
-                results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
-        except Exception:
-            # Undo the partial batch so a retry starts clean.
-            for episode_id in written:
-                removed = await self.documents.delete_episode(space, episode_id)
-                await self.vectors.delete(removed)
-            for pending in fresh:
-                await self.documents.clear_inflight(space, pending.new.content_hash)
-            raise
+        await ingestion_batch.write_batch(self._ingestion_runtime(), space, fresh, vectors, results)
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
         """The episode, or Gone when a tombstone says it was forgotten, or
@@ -1076,277 +827,16 @@ class MemoryEngine:
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
         ``rerank=False`` explicitly disables the configured adapter."""
-        check_space(space)
-        query = query.strip()
-        if not query or len(query) > MAX_QUERY:
-            raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
-        limit = max(1, min(limit, MAX_LIMIT))
-        candidate_limit = validate_candidate_limit(self.candidate_limit if candidate_limit is None else candidate_limit)
-        if type(rerank) is not bool:
-            raise InvalidInput("rerank must be a boolean")
-        active_reranker = self.reranker if rerank else None
-        if active_reranker is not None:
-            validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
-        boundary = normalise_time(as_of) if as_of else None
-        clean_tags = normalise_tags(tags)
-        clean_where = normalise_metadata(where or {})
-        if kind is not None and kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}, got {kind!r}")
-        if source_prefix is not None and len(source_prefix) > MAX_SOURCE:
-            raise InvalidInput(f"source_prefix must be at most {MAX_SOURCE} chars")
-        since_at = normalise_time(since) if since else None
-        until_at = normalise_time(until) if until else None
-        # Refused before any lane runs: a filter that cannot mean anything
-        # must not come back as an answer drawn from everything. Imported
-        # here because filters read this module's rule for a metadata key.
-        from ..retrieval.filters import parse_filter
-
-        narrow_by = parse_filter(conditions) if conditions is not None else None
-        # A store that cannot take the filter returns its best few, all of
-        # which the filter may then reject, and the search comes back
-        # empty while the memory that answers it sits outside the window.
-        in_store = narrow_by is None or bool(getattr(self.documents, "narrows_metadata", False))
-        narrowing = (kind is not None or source_prefix is not None or since_at is not None
-                     or until_at is not None or narrow_by is not None)
-        depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
-        degraded: list[str] = []
-        started = time.perf_counter()
-        latency: dict[str, float] = {}
-        evidence = {
-            **self._query_for_evidence(query),
-            "limit": limit,
-            "as_of": boundary,
-            "tags": list(clean_tags),
-            "where": clean_where,
-            "embedder": self.embedder.id,
-            "contextual_embeddings": self.contextual_embeddings,
-            "similarity_floor": self.similarity_floor,
-            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
-                       "conditions": dict(conditions) if conditions is not None else None,
-                       "conditions_in_store": None if narrow_by is None else in_store},
-        }
-
-        vector_lane: list[tuple[int, float]] = []
-        try:
-            t0 = time.perf_counter()
-            [qvec] = await self.embedder.embed([query])
-            latency["embed"] = _ms(t0)
-            t0 = time.perf_counter()
-            vector_lane = await self.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
-            latency["vector"] = _ms(t0)
-        except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
-            degraded.append(f"vectors: {type(e).__name__}: {e}")
-
-        if candidate_limit is not None or active_reranker is not None:
-            vector_lane = vector_lane[:depth]
-
-        text_lane: list[tuple[int, float]] = []
-        try:
-            t0 = time.perf_counter()
-            text_lane = await self.documents.search_text(
-                space, query, depth,
-                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
-            )
-            latency["text"] = _ms(t0)
-        except Exception as e:  # noqa: BLE001
-            degraded.append(f"text: {type(e).__name__}: {e}")
-
-        if candidate_limit is not None or active_reranker is not None:
-            text_lane = text_lane[:depth]
-
-        if len(degraded) == 2:
-            latency["total"] = _ms(started)
-            await self._emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                               "error": "both lanes failed"})
-            raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
-
-        # An index that ranks without a cosine (a bridged store with an
-        # unknown score) reports NaN: its order counts for fusion, but no
-        # similarity is shown and no confidence is judged from it.
-        similarity = {cid: (None if math.isnan(score) else score) for cid, score in vector_lane}
-        # The best cosine the vector lane saw, before fusion, is the
-        # confidence signal. A degraded vector lane cannot judge (None); a
-        # lane that ran and found nothing is as weak as evidence gets.
-        top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
-        vector_ran = not any(d.startswith("vectors:") for d in degraded)
-        low_confidence: Optional[bool] = None
-        if self.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
-            low_confidence = top_similarity is None or top_similarity < self.similarity_floor
-        ranks = {
-            "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
-            "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
-        }
-        fused = fusion.rrf([vector_lane, text_lane])
-        chunks = {c.chunk_id: c for c in await self.documents.get_chunks(space, list(fused))}
-        now = self.clock()
-        items = [
-            fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now), similarity.get(cid))
-            for cid, score in fused.items()
-            if cid in chunks
-        ]
-        items = fusion.order(items)
-        episode_of = {cid: c.episode_id for cid, c in chunks.items()}
-        capped_items = fusion.cap_per_episode(items, episode_of)
-        baseline_allowed = {item.chunk_id for item in capped_items}
-        if active_reranker is None:
-            items = capped_items
-        episodes: dict[int, Episode] = {}
-        if narrowing:
-            # Read every candidate's episode and keep the ones that fit,
-            # before the limit is applied; the window is the lanes' depth.
-            for item in items:
-                eid = chunks[item.chunk_id].episode_id
-                if eid not in episodes:
-                    found = await self.documents.get_episode(space, eid)
-                    if found is not None:
-                        episodes[eid] = found
-            items = [
-                item for item in items
-                if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
-                and _fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
-            ]
-        scope = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
-        if active_reranker is not None:
-            # Stores/indexes may be stale or ignore optional filters. No adapter
-            # sees text until its original source, bytes and scope are verified.
-            retained = []
-            for item in items:
-                chunk = chunks[item.chunk_id]
-                episode = episodes.get(chunk.episode_id)
-                if episode is None:
-                    episode = await self.documents.get_episode(space, chunk.episode_id)
-                    if episode is not None:
-                        episodes[chunk.episode_id] = episode
-                if episode is not None and candidate_is_retained(chunk, episode, space, scope):
-                    retained.append(item)
-            items = retained
-        candidate_items = items
-        items = [item for item in items if item.chunk_id in baseline_allowed][:limit]
-        if self.demote_restated:
-            items = fusion.demote_restated(
-                items,
-                {cid: c.text for cid, c in chunks.items()},
-                {cid: c.created_at for cid, c in chunks.items()},
-            )
-        normalization_base = items[0].score if items else 0.0
-        items = fusion.normalise(items)
-        rerank_scores: dict[int, float] = {}
-        rerank_trace: RerankTrace | None = None
-        if active_reranker is not None:
-            # Preserve the legacy denominator, including restatement demotion,
-            # for both returned baseline items and additional candidates.
-            normalized = {
-                item.chunk_id: fusion.Fused(item.chunk_id,
-                    item.score / normalization_base if normalization_base > 0 else item.score,
-                    item.similarity)
-                for item in candidate_items
-            }
-            baseline_ids = [item.chunk_id for item in items]
-            candidate_order = baseline_ids + [item.chunk_id for item in candidate_items if item.chunk_id not in baseline_ids]
-            candidates = tuple(RerankCandidate(
-                chunk_id=cid, episode_id=chunks[cid].episode_id, text=chunks[cid].text,
-                source=episodes[chunks[cid].episode_id].source, created_at=chunks[cid].created_at,
-                baseline_score=normalized[cid].score, similarity=normalized[cid].similarity,
-                lanes=tuple((lane, rank[cid]) for lane, rank in ranks.items() if cid in rank),
-            ) for cid in candidate_order)
-            outcome = await rerank_candidates(active_reranker, query, candidates,
-                limit=self.rerank_limit, max_bytes=self.rerank_max_bytes, timeout=self.rerank_timeout)
-            rerank_trace = outcome.trace
-            latency["rerank"] = outcome.trace.duration_ms
-            if outcome.failure is not None:
-                degraded.append(f"rerank: {outcome.failure}")
-            if outcome.trace.status == "applied":
-                rerank_scores = outcome.scores
-                ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]
-                items = fusion.cap_per_episode([normalized[cid] for cid in ranked], episode_of)[:limit]
-            # A cooperative adapter can yield while a source is forgotten or
-            # replaced. Never emit a stale passage after that asynchronous step.
-            fresh = {chunk.chunk_id: chunk for chunk in await self.documents.get_chunks(space, [item.chunk_id for item in items])} if items else {}
-            surviving = []
-            for item in items:
-                fresh_chunk = fresh.get(item.chunk_id)
-                if fresh_chunk is None or fresh_chunk != chunks[item.chunk_id]:
-                    continue
-                episode = await self.documents.get_episode(space, fresh_chunk.episode_id)
-                if episode is not None and candidate_is_retained(fresh_chunk, episode, space, scope):
-                    episodes[fresh_chunk.episode_id] = episode
-                    surviving.append(item)
-            if len(surviving) < len(items):
-                degraded.append("rerank: retained_sources_changed")
-            items = surviving
-
-        for item in items:
-            eid = chunks[item.chunk_id].episode_id
-            if eid not in episodes:
-                found = await self.documents.get_episode(space, eid)
-                if found is not None:
-                    episodes[eid] = found
-
-        result_items = []
-        for item in items:
-            chunk = chunks[item.chunk_id]
-            episode = episodes.get(chunk.episode_id)
-            result_items.append(
-                RecallItem(
-                    chunk_id=chunk.chunk_id,
-                    episode_id=chunk.episode_id,
-                    text=chunk.text,
-                    score=round(item.score, 6),
-                    rerank_score=rerank_scores.get(item.chunk_id),
-                    similarity=None if item.similarity is None else round(item.similarity, 6),
-                    lanes={lane: r[chunk.chunk_id] for lane, r in ranks.items() if chunk.chunk_id in r},
-                    created_at=chunk.created_at,
-                    source=episode.source if episode else None,
-                    tags=episode.tags if episode else (),
-                    metadata=dict(episode.metadata) if episode else {},
-                )
-            )
-        fact_scope = scope if narrowing or clean_tags or clean_where else None
-        facts = await self._facts_for_query(space, query, boundary or now, scope=fact_scope, degraded=degraded)
-        previous = await self._history_for(space, facts, boundary or now, scope=fact_scope) if history else []
-        counts = await self.documents.counts(space)
-        result = RecallResult(
-            items=result_items,
-            rerank=rerank_trace,
-            facts=facts,
-            history=previous,
-            degraded=degraded,
-            top_similarity=top_similarity,
-            low_confidence=low_confidence,
-            returned_bytes=sum(len(i.text.encode()) for i in result_items),
-            space_bytes=counts.bytes,
+        runtime = RecallRuntime(
+            documents=self.documents, vectors=self.vectors, embedder=self.embedder,
+            clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
+            candidate_limit=self.candidate_limit, reranker=self.reranker,
+            rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
+            rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
+            demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
         )
-        latency["total"] = _ms(started)
-        if candidate_limit is not None:
-            evidence["candidate_limit"] = candidate_limit
-        if rerank_trace is not None:
-            evidence["rerank"] = rerank_trace.model_dump(mode="json")
-        event = await self._emit(space, "recall", {
-            **evidence,
-            "latency_ms": latency,
-            "degraded": degraded,
-            # Only the returned items are recorded; candidates the lanes
-            # saw but fusion dropped are not, so coverage is "returned".
-            "items": [
-                {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
-                 "similarity": i.similarity, "lanes": i.lanes,
-                 **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
-                for i in result_items
-            ],
-            "items_coverage": "returned",
-            "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
-            "top_similarity": top_similarity,
-            "low_confidence": low_confidence,
-            "facts": len(facts),
-            "fact_ids": [f.fact_id for f in facts],
-            "returned_bytes": result.returned_bytes,
-            "space_bytes": result.space_bytes,
-        })
-        if event is not None:
-            result.event_id = event.event_id
-        return result
+        return await recall(runtime, space, query, limit, as_of, tags, where, history,
+                            kind, source_prefix, since, until, conditions, candidate_limit, rerank)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
@@ -1438,125 +928,12 @@ class MemoryEngine:
     ):
         """The recorded relations around a session or an episode (or the
         latest activity when neither is given). See ``graph.py``."""
-        from ..retrieval import graph as G
+        from ..retrieval.activity_graph import build_activity_graph
 
         check_space(space)
         limit = max(1, min(limit, 2000))
-        g = G.Graph()
-        if self.events is None:
-            return g
-        focused = session_id is not None or episode_id is not None
-        # A focused graph must reach the events that mention its subject even
-        # when they are older than the window, and must leave out agent
-        # events that merely happened nearby. A session focus keeps that
-        # session's events; an episode focus keeps the agent events linked to
-        # that episode. Unfocused: the newest window, as is.
-        window = await self.events.query(space, since=since, limit=limit)
-        g.truncated = len(window) >= limit
-        if focused:
-            scan = await self.events.query(space, kind="agent", since=since, limit=2000)
-            g.truncated = g.truncated or len(scan) >= 2000
-            if session_id is not None:
-                agent_events = [e for e in scan if e.payload.get("session_id") == session_id]
-            else:
-                agent_events = [e for e in scan if e.payload.get("episode_id") == episode_id]
-        else:
-            agent_events = [e for e in window if e.kind == "agent"]
-        recall_events = [e for e in window if e.kind == "recall" and "error" not in e.payload]
-        feedback_events = [e for e in window if e.kind == "feedback"]
-
-        episode_ids: set[int] = set()
-        if episode_id is not None:
-            episode_ids.add(episode_id)
-        for e in agent_events:
-            if e.payload.get("episode_id") is not None:
-                episode_ids.add(int(cast(int, e.payload["episode_id"])))
-        chunk_ids: set[int] = set()
-        for e in recall_events:
-            for item in cast(Sequence[_RecallEventItem], e.payload.get("items") or []):
-                chunk_ids.add(int(item["chunk_id"]))
-        chunks = await self.documents.get_chunks(space, sorted(chunk_ids)) if chunk_ids else []
-        if focused:
-            keep = {c.chunk_id for c in chunks if c.episode_id in episode_ids}
-            recall_events = [e for e in recall_events if any(int(i["chunk_id"]) in keep for i in cast(Sequence[_RecallEventItem], e.payload.get("items") or []))]
-            chunks = [c for c in chunks if c.chunk_id in keep]
-        for c in chunks:
-            episode_ids.add(c.episode_id)
-
-        def draw_episode(ep) -> None:
-            g.add(G.Node(f"episode:{ep.episode_id}", "episode", ep.content[:80], ep.created_at,
-                         {"kind": ep.kind, "source": ep.source, "tags": list(ep.tags),
-                          "metadata": dict(ep.metadata), "content": ep.content}))
-
-        for eid in sorted(episode_ids):
-            ep = await self.documents.get_episode(space, eid)
-            if ep is None:
-                continue
-            draw_episode(ep)
-        for c in chunks:
-            if f"episode:{c.episode_id}" in g.nodes:
-                g.add(G.Node(f"chunk:{c.chunk_id}", "chunk", c.text[:80], c.created_at, {"ordinal": c.ordinal, "start": c.start, "end": c.end, "text": c.text}))
-                g.link(f"episode:{c.episode_id}", f"chunk:{c.chunk_id}", "chunked_into")
-        facts = await self.documents.list_facts(space, include_closed=True)
-        wanted = [f for f in facts if (f.source_episode_id in episode_ids) or not focused]
-        # A claim's source is part of the claim. Drawing the claim while
-        # leaving out the episode it came from turns provenance into a
-        # silent absence, which reads as "no evidence" rather than "not in
-        # this snapshot". Sources the window never mentioned are hydrated
-        # here, bounded the same way the window is, and whatever does not
-        # fit is counted so the snapshot can say what it left out. An
-        # episode that was forgotten has no node and no edge, which is the
-        # truth about it rather than an omission.
-        elsewhere = list(dict.fromkeys(
-            f.source_episode_id for f in wanted
-            if f.source_episode_id is not None and f"episode:{f.source_episode_id}" not in g.nodes))
-        for eid in sorted(elsewhere)[:limit]:
-            ep = await self.documents.get_episode(space, eid)
-            if ep is None:
-                # The claim names a source that is gone. That is not a
-                # budget: it is evidence that was forgotten, and saying so
-                # separately is the difference between "out of view" and
-                # "no longer exists".
-                g.provenance_missing += 1
-            else:
-                draw_episode(ep)
-        g.provenance_omitted = max(0, len(elsewhere) - limit)
-        for f in wanted:
-            g.add(G.Node(f"claim:{f.fact_id}", "claim", f"{f.subject} {f.predicate.replace('_', ' ')} {f.object}", f.valid_from, {
-                "status": f.status, "origin": f.origin, "confidence": f.confidence, "valid_from": f.valid_from,
-                "valid_until": f.valid_until, "closed_reason": f.closed_reason, "excluded_reason": f.excluded_reason,
-                "source_episode_id": f.source_episode_id, "superseded_by": f.superseded_by,
-            }))
-        # The typed relations among the claims drawn, each once.
-        drawn = set()
-        for f in wanted:
-            for link in await self.documents.fact_links(space, f.fact_id):
-                ends = (f"claim:{link.from_fact}", f"claim:{link.to_fact}")
-                if link.link_id not in drawn and ends[0] in g.nodes and ends[1] in g.nodes:
-                    drawn.add(link.link_id)
-                    g.link(ends[0], ends[1], link.kind, source_episode_id=link.source_episode_id)
-        if not focused:
-            captured = {f"episode:{e.payload.get('episode_id')}" for e in agent_events}
-            missing_capture = {n.id for n in g.nodes.values() if n.kind == "episode"} - captured
-            if missing_capture:
-                # Hydrating an old source without its capture event leaves a
-                # real session path broken. Match stored IDs only, within the
-                # same space/time scope, and keep this second read bounded.
-                captures = await self.events.query(space, kind="agent", since=since, limit=2000)
-                matching = [e for e in captures if f"episode:{e.payload.get('episode_id')}" in missing_capture]
-                agent_events.extend(matching[:limit])
-                g.truncated = g.truncated or len(captures) >= 2000 or len(matching) > limit
-        for e in agent_events:
-            G.add_agent_event(g, e)
-        for e in recall_events:
-            G.add_recall_event(g, e)
-            for fid in cast(Sequence[int], e.payload.get("fact_ids") or []):
-                g.link(f"recall:{e.event_id}", f"claim:{int(fid)}", "held")
-        for e in feedback_events:
-            if f"recall:{e.payload.get('recall_event_id')}" in g.nodes:
-                G.add_feedback_event(g, e)
-        G.add_claim_edges(g)
-        return g
+        return await build_activity_graph(self.documents, self.events, space,
+            session_id=session_id, episode_id=episode_id, since=since, limit=limit)
 
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
@@ -1581,106 +958,19 @@ class MemoryEngine:
         })  # type: ignore[return-value]
 
     async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:
-        if scope is None:
-            return True
-        if fact.source_episode_id is None:
-            return False
-        episode = await self.documents.get_episode(space, fact.source_episode_id)
-        if episode is None or episode.space != space:
-            return False
-        return (set(scope.tags).issubset(episode.tags)
-                and all(episode.metadata.get(key) == value for key, value in scope.where.items())
-                and (scope.as_of is None or episode.created_at <= scope.as_of)
-                and _fits(episode, scope.kind, scope.source_prefix, scope.since, scope.until, scope.conditions))
+        return await fact_recall.fact_fits_scope(self.documents, space, fact, scope)
 
     async def _facts_for_query(self, space: str, query: str, when: str, limit: int = 10,
                                scope: TextFilter | None = None, degraded: list[str] | None = None) -> list[Fact]:
-        terms = set(tokenize(query))
-        if not terms:
-            return []
-        if isinstance(self.documents, IndexedFactSearch):
-            try:
-                raw: object = await self.documents.search_facts(space, query, when, limit, scope=deepcopy(scope))
-                if not isinstance(raw, list) or len(raw) > limit:
-                    raise ValueError("invalid indexed facts")
-                # Detach snapshots before any awaited point reads; mutable store
-                # objects must not change the evidence being checked in place.
-                facts: list[Fact] = []
-                for candidate in raw:
-                    if not isinstance(candidate, Fact):
-                        raise ValueError("invalid indexed fact")
-                    facts.append(Fact.model_validate(candidate.model_dump(), strict=True))
-                if len({fact.fact_id for fact in facts}) != len(facts):
-                    raise ValueError("duplicate indexed facts")
-                for fact in facts:
-                    if (fact.space != space or fact.excluded or not fact.holds_at(when)
-                            or not terms.intersection(tokenize(f"{fact.subject} {fact.predicate} {fact.object}"))
-                            or not await self._fact_fits_scope(space, fact, scope)):
-                        raise ValueError("ineligible indexed fact")
-                    current = await self.documents.get_fact(space, fact.fact_id)
-                    if current is None or current != fact:
-                        raise ValueError("stale indexed fact")
-                facts.sort(key=lambda fact: (-len(terms.intersection(tokenize(
-                    f"{fact.subject} {fact.predicate} {fact.object}"))), -fact.confidence, fact.fact_id))
-                return facts
-            except Exception:
-                if degraded is not None:
-                    degraded.append("fact_index: unavailable")
-        return await self._scan_facts_for_query(space, query, when, limit, scope)
+        return await fact_recall.facts_for_query(self.documents, space, query, when, limit, scope, degraded)
 
     async def _scan_facts_for_query(self, space: str, query: str, when: str, limit: int = 10,
-                               scope: TextFilter | None = None) -> list[Fact]:
-        terms = set(tokenize(query))
-        if not terms:
-            return []
-        scored = []
-        # Keep only eligibility booleans, never mutable source records. A source
-        # decision lasts for this scan (until eviction), not for later queries.
-        source_eligibility: OrderedDict[int, bool] = OrderedDict()
-        # Closed facts are included on purpose: asked about 2023, the
-        # fact that held in 2023 is the answer even if it closed since.
-        for fact in await self.documents.list_facts(space, include_closed=True):
-            if fact.excluded or not fact.holds_at(when):
-                continue
-            overlap = len(terms & set(tokenize(f"{fact.subject} {fact.predicate} {fact.object}")))
-            if not overlap:
-                continue
-            source_id = fact.source_episode_id
-            if scope is not None and source_id is not None:
-                if source_id in source_eligibility:
-                    eligible = source_eligibility[source_id]
-                    source_eligibility.move_to_end(source_id)
-                else:
-                    eligible = await self._fact_fits_scope(space, fact, scope)
-                    source_eligibility[source_id] = eligible
-                    if len(source_eligibility) > FACT_SCOPE_CACHE_LIMIT:
-                        source_eligibility.popitem(last=False)
-            else:
-                eligible = await self._fact_fits_scope(space, fact, scope)
-            if eligible:
-                scored.append((-overlap, -fact.confidence, fact.fact_id, fact))
-        scored.sort(key=lambda t: t[:3])
-        return [t[3] for t in scored[:limit]]
+                                  scope: TextFilter | None = None) -> list[Fact]:
+        return await fact_recall.scan_facts_for_query(self.documents, space, query, when, limit, scope)
 
     async def _history_for(self, space: str, facts: Sequence[Fact], when: str, limit: int = 20,
                            scope: TextFilter | None = None) -> list[Fact]:
-        """The closed ledger facts sharing a subject and predicate with any of
-        ``facts`` and begun by ``when``, oldest first: the chain of what was
-        believed before. Nothing that started after the reader's boundary
-        leaks through; excluded facts stay out, as everywhere; proposals and
-        declined candidates never held, so they are not history."""
-        if not facts:
-            return []
-        keys = {(f.subject, f.predicate) for f in facts}
-        shown = {f.fact_id for f in facts}
-        chain = [
-            f for f in await self.documents.list_facts(space, include_closed=True)
-            if (f.subject, f.predicate) in keys and f.fact_id not in shown
-            and f.status == "closed" and not f.excluded and f.valid_from <= when
-            and await self._fact_fits_scope(space, f, scope)
-        ]
-        chain.sort(key=lambda f: (f.valid_from, f.fact_id))
-        return chain[:limit]
+        return await fact_recall.history_for(self.documents, space, facts, when, limit, scope)
 
     # -- facts ------------------------------------------------------------
 
@@ -2324,31 +1614,8 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders."""
         check_space(space)
-        counts = await self.documents.counts(space)
-        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
-            yield {
-                "type": "episode",
-                "space": space,
-                "episode_id": episode.episode_id,
-                "kind": episode.kind,
-                "content": episode.content,
-                "content_hash": episode.content_hash,
-                "source": episode.source,
-                "tags": list(episode.tags),
-                "metadata": dict(episode.metadata),
-                "created_at": episode.created_at,
-            }
-        facts = await self.documents.list_facts(space, include_closed=True)
-        for fact in facts:
-            yield {"type": "fact", **fact.model_dump(exclude={"space"})}
-        # A relation is part of the ledger's history, so it moves with it;
-        # each link is read from both ends and written once.
-        seen: set[int] = set()
-        for fact in facts:
-            for link in await self.documents.fact_links(space, fact.fact_id):
-                if link.link_id not in seen:
-                    seen.add(link.link_id)
-                    yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
+        async for record in archive.export_records(self.documents, space):
+            yield record
 
     async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
         """Load an export. Episodes go through the normal ingest, so they
@@ -2365,120 +1632,11 @@ class MemoryEngine:
         deduplicating a same-space move and not a renamed one."""
         await self._living(space)
         check_space(space)
-        summary = ImportSummary()
-        episodes: list[Record] = []
-        source_ids: list[Optional[int]] = []
-        facts: list[Mapping] = []
-        links: list[Mapping] = []
-        for record in records:
-            kind = record.get("type", "episode")
-            if kind == "episode":
-                episode = _rederived(Record.from_dict(record), record.get("space"), space)
-                # Forgetting was a decision; an archive that carries the
-                # forgotten content does not undo it unless told to.
-                digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
-                if not resurrect and await self.documents.tombstone_by_hash(space, digest) is not None:
-                    summary.tombstoned += 1
-                    continue
-                episodes.append(episode)
-                source_ids.append(record.get("episode_id"))
-            elif kind == "fact":
-                facts.append(record)
-            elif kind == "fact_link":
-                links.append(record)
-            else:
-                raise InvalidInput(f"unknown record type {kind!r}")
-        # Ids are store-local (spec 3.1). Provenance in the dump names the
-        # source store's episodes, so it is remapped through the ids this
-        # import produced; a reference to an episode not in the dump is
-        # dropped rather than pointed at an unrelated record.
-        id_map: dict[int, int] = {}
-        for old_id, added in zip(source_ids, await self.remember_many(space, episodes)):
-            summary.episodes += 0 if added.deduplicated else 1
-            summary.deduplicated += 1 if added.deduplicated else 0
-            if old_id is not None:
-                id_map[int(old_id)] = added.episode_id
-        existing = {_fact_identity(f): f.fact_id for f in await self.documents.list_facts(space, include_closed=True)}
-        # Fact ids are store-local too: a link's ends are remapped through
-        # the ids this import produced or found already present.
-        fact_map: dict[int, int] = {}
-        for f in facts:
-            source = f.get("source_episode_id")
-            new = NewFact(
-                space=space,
-                subject=normalise_term(str(f["subject"]), "subject"),
-                predicate=normalise_term(str(f["predicate"]), "predicate"),
-                object=str(f["object"]),
-                valid_from=normalise_time(str(f["valid_from"])),
-                confidence=float(f.get("confidence", 1.0)),
-                valid_until=normalise_time(str(f["valid_until"])) if f.get("valid_until") else None,
-                status=str(f.get("status", "active")),
-                closed_reason=f.get("closed_reason"),
-                source_episode_id=id_map.get(int(source)) if source is not None else None,
-                origin=str(f.get("origin", "stated")),
-                excluded_reason=f.get("excluded_reason"),
-                superseded_by=None,  # ids are store-local; the reason text keeps the history
-                quote=f.get("quote"),
-            )
-            if new.status not in STATUSES or new.origin not in ORIGINS:
-                raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
-            identity = (
-                new.subject, new.predicate, new.object, new.valid_from, new.valid_until,
-                new.status, new.closed_reason, new.confidence,
-            )
-            if identity in existing:
-                summary.facts_skipped += 1
-                if f.get("fact_id") is not None:
-                    fact_map[int(f["fact_id"])] = existing[identity]
-                continue
-            stored = await self.documents.insert_fact(new)
-            existing[identity] = stored.fact_id
-            if f.get("fact_id") is not None:
-                fact_map[int(f["fact_id"])] = stored.fact_id
-            summary.facts += 1
-        for record in links:
-            kind = str(record.get("kind", ""))
-            from_fact = fact_map.get(int(record["from_fact"]))
-            to_fact = fact_map.get(int(record["to_fact"]))
-            if kind not in LINK_KINDS or from_fact is None or to_fact is None or from_fact == to_fact:
-                # A link to a fact not in the dump is dropped, not pointed at
-                # an unrelated record; a bad kind is a bad record.
-                summary.links_skipped += 1
-                continue
-            source = record.get("source_episode_id")
-            new_link = NewFactLink(
-                space=space, from_fact=from_fact, to_fact=to_fact, kind=kind,
-                created_at=normalise_time(str(record["created_at"])) if record.get("created_at") else self.clock(),
-                source_episode_id=id_map.get(int(source)) if source is not None else None,
-                quote=record.get("quote"),
-            )
-            already = any((l.to_fact, l.kind) == (to_fact, kind) for l in await self.documents.fact_links(space, from_fact) if l.from_fact == from_fact)
-            if already:
-                summary.links_skipped += 1
-                continue
-            await self.documents.insert_fact_link(new_link)
-            summary.links += 1
-        if summary.facts or summary.links:
-            await self.documents.bump_revision(space)
-        return summary
+        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many)
+        return await archive.import_records(runtime, space, records, resurrect=resurrect)
 
 
 # -- validation helpers -----------------------------------------------------
-
-
-
-
-def retention_policy(policy: Mapping[str, float]) -> dict[str, float]:
-    """A retention policy: episode kinds to the days they are kept. Only
-    episodes have retention; facts, links and tombstones are not kinds."""
-    clean: dict[str, float] = {}
-    for kind, days in dict(policy or {}).items():
-        if kind not in KINDS:
-            raise InvalidInput(f"retention kind must be one of {KINDS}, got {kind!r}")
-        if isinstance(days, bool) or not isinstance(days, (int, float)) or not math.isfinite(days) or days <= 0:
-            raise InvalidInput(f"retention days for {kind} must be a positive number, got {days!r}")
-        clean[kind] = float(days)
-    return clean
 
 
 def _reason(reason: str) -> str:
@@ -2492,106 +1650,11 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
-def _fact_identity(fact: Fact) -> tuple:
-    """Two facts are the same record only when every stored field agrees;
-    a different reason or confidence is a different record."""
-    return (
-        fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until,
-        fact.status, fact.closed_reason, fact.confidence,
-    )
-
-
 def _covers(fact: Fact, instant) -> bool:
     """True when ``instant`` lies in ``[valid_from, valid_until)``."""
     if parse_rfc3339(fact.valid_from) > instant:
         return False
     return fact.valid_until is None or parse_rfc3339(fact.valid_until) > instant
-
-
-def check_space(space: str) -> None:
-    if not SPACE_NAME.match(space or ""):
-        raise InvalidInput(f"space name must be 1..=64 chars of [a-z0-9-_], got {space!r}")
-
-
-def normalise_tags(tags: Sequence[str]) -> tuple[str, ...]:
-    seen: list[str] = []
-    for tag in tags:
-        clean = tag.strip().casefold()
-        if not clean:
-            continue
-        if len(clean) > 64:
-            raise InvalidInput(f"tag too long: {tag!r}")
-        if clean not in seen:
-            seen.append(clean)
-    return tuple(seen)
-
-
-def normalise_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
-    if len(metadata) > MAX_METADATA_KEYS:
-        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys")
-    clean: dict[str, str] = {}
-    for key, value in metadata.items():
-        if not METADATA_KEY.match(key or ""):
-            raise InvalidInput(f"metadata key must match [a-z][a-z0-9_]{{0,31}}, got {key!r}")
-        if not isinstance(value, str) or not value or len(value) > MAX_METADATA_VALUE:
-            raise InvalidInput(f"metadata value for {key!r} must be 1..={MAX_METADATA_VALUE} chars")
-        clean[key] = value
-    return clean
-
-
-def normalise_term(value: str, what: str) -> str:
-    clean = " ".join(value.strip().casefold().split())
-    if not clean:
-        raise InvalidInput(f"{what} must not be empty")
-    return clean
-
-
-def normalise_time(value: str) -> str:
-    try:
-        return format_rfc3339(parse_rfc3339(value))
-    except ValueError as e:
-        raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
-
-
-def _fits(episode: Episode, kind: Optional[str], source_prefix: Optional[str], since: Optional[str],
-          until: Optional[str], conditions=None) -> bool:
-    """The narrowing rule, shared with the Rust engine: kind equal, source
-    starting with the prefix as literal text (an episode without a source
-    matches no prefix), created_at inside the inclusive bounds.
-
-    Metadata conditions are checked here as well as pushed into the store,
-    and that is not redundant. The push-down keeps the store from spending
-    its window on memories the caller excluded. This final check prevents
-    out-of-scope answers even when a store cannot express the filter; it
-    cannot recover eligible memories omitted from a candidate window."""
-    if conditions is not None and not conditions.matches(episode.metadata):
-        return False
-    if kind is not None and episode.kind != kind:
-        return False
-    if source_prefix is not None and (episode.source is None or not episode.source.startswith(source_prefix)):
-        return False
-    if since is not None and episode.created_at < since:
-        return False
-    return not (until is not None and episode.created_at > until)
-
-
-def _rederived(record: Record, source_space: Optional[str], space: str) -> Record:
-    """The record with its content_hash dropped when it is the default
-    derivation under the source space, so ingest derives it for the
-    target space instead."""
-    if record.content_hash is None or not source_space or source_space == space:
-        return record
-    if record.content_hash == content_hash(str(source_space), record.content):
-        return dataclasses.replace(record, content_hash=None)
-    return record
-
-
-def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:
-    if dedup_key is not None:
-        if not dedup_key or len(dedup_key) > 256:
-            raise InvalidInput("dedup_key must be 1..=256 chars")
-        return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
-    return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()
 
 
 def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
