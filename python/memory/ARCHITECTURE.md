@@ -1,7 +1,8 @@
 # Python memory architecture
 
 `MemoryEngine` is the public entry point for storage and memory operations.
-Retrieval components depend on typed ports rather than on an engine instance.
+Retrieval, ingestion and archive components depend on typed ports rather than
+on an engine instance.
 
 | Component | Responsibility |
 |---|---|
@@ -13,6 +14,7 @@ Retrieval components depend on typed ports rather than on an engine instance.
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
 | `retrieval/reranking.py` | Bounded adapter calls, output validation and fallback ordering |
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
+| `memory/archive.py` | Export original records and import with identity, source and link remapping |
 | `memory/engine.py` | Coordinate the public API and remaining ingestion, lifecycle and graph operations |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
@@ -41,6 +43,19 @@ completes interrupted episodes from their retained content or clears orphan
 markers. This extraction preserves those operations and their ordering; it does
 not add cross-store transactions or change cancellation/recovery semantics.
 
+Archive import receives an `ArchiveRuntime` with the document store, clock and
+normal ingestion callback. The engine retains space validation and deleted-space
+guards. Export depends only on the document store and yields episodes, facts and
+unique links; chunks and vectors are derived again through ingestion on import.
+`ImportSummary` and existing identity helper imports remain engine aliases.
+
+An imported source ID is remapped before fact identity is compared. Distinct
+retained sources, origins or quotes remain distinct facts, preserving link ends.
+Repeating an import does not create an unexcluded copy of a fact suppressed by
+the target. Tombstoned content stays omitted unless resurrection is explicit.
+Store-local supersession IDs retain their existing import behavior; this is not
+a complete cross-store snapshot or a transaction across document/vector stores.
+
 The refactor preserves candidate depth, filter semantics, fusion ordering,
 scope verification, cancellation propagation and degraded-mode reporting.
 Reranker failures retain baseline ordering; ranking scores do not become
@@ -52,7 +67,7 @@ available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
 The engine decomposition is ongoing. Ingestion job coordination, fact lifecycle,
-retention/deletion, activity graphs and import/export still need their own
+retention/deletion and activity graphs still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
 
@@ -65,3 +80,9 @@ not a new answer-accuracy benchmark.
 Ingestion checks exercise direct component calls, batch rollback, UTF-8 offsets,
 deduplication and recovery from writes interrupted at different stages. The
 engine contract suite also runs those behaviors with a real Qdrant server.
+
+Archive checks cover direct component calls, renamed spaces, shifted IDs,
+distinct fact provenance, repeated import, UTF-8 chunk rebuilding and explicit
+resurrection. Contract tests run with in-memory, SQLite, embedded Qdrant and a
+self-managed Qdrant server; real cross-language transfer remains a separate,
+explicitly configured test.

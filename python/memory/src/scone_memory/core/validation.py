@@ -16,6 +16,10 @@ MAX_METADATA_KEYS = 16
 
 MAX_METADATA_VALUE = 256
 
+ORIGINS = ("stated", "extracted", "inferred")
+
+STATUSES = ("active", "closed", "proposed", "declined")
+
 KINDS = ("note", "file", "conversation", "observation", "connector")
 
 MAX_QUERY = 1_000

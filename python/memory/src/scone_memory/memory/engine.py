@@ -8,14 +8,14 @@ answers, because a thin answer that says it is thin beats a 500.
 
 from __future__ import annotations
 
-import dataclasses
-
 import hashlib
 import time
 from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
+from . import archive
+from .archive import ImportSummary as ImportSummary, _fact_identity as _fact_identity, _rederived as _rederived
 from ..ingestion import batch as ingestion_batch
 from ..ingestion.batch import EMBED_BATCH as EMBED_BATCH
 from ..ingestion.records import (
@@ -32,6 +32,8 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core.validation import (
+    ORIGINS as ORIGINS,
+    STATUSES as STATUSES,
     SPACE_NAME as SPACE_NAME,
     METADATA_KEY as METADATA_KEY,
     MAX_METADATA_KEYS as MAX_METADATA_KEYS,
@@ -99,8 +101,6 @@ SOURCE_WALK_READS = 25
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job", "agent")
-ORIGINS = ("stated", "extracted", "inferred")
-STATUSES = ("active", "closed", "proposed", "declined")
 JOB_STATUSES = ("running", "completed", "failed")
 #: What an attachment may be. Anything not here is refused rather than
 #: stored under a type the server would have to guess at on the way out.
@@ -147,22 +147,6 @@ class Replaced:
     added: Added
     outcome: str
     replaced: Optional[ForgetReceipt] = None
-
-
-@dataclass
-class ImportSummary:
-    episodes: int = 0
-    #: Episodes already present in the target.
-    deduplicated: int = 0
-    facts: int = 0
-    #: Relations stored, and those dropped or already present.
-    links: int = 0
-    links_skipped: int = 0
-    #: Episodes skipped because this space forgot that content on purpose.
-    tombstoned: int = 0
-    #: Facts already present in the target (same subject, predicate,
-    #: object, interval and status).
-    facts_skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -1743,31 +1727,8 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders."""
         check_space(space)
-        counts = await self.documents.counts(space)
-        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
-            yield {
-                "type": "episode",
-                "space": space,
-                "episode_id": episode.episode_id,
-                "kind": episode.kind,
-                "content": episode.content,
-                "content_hash": episode.content_hash,
-                "source": episode.source,
-                "tags": list(episode.tags),
-                "metadata": dict(episode.metadata),
-                "created_at": episode.created_at,
-            }
-        facts = await self.documents.list_facts(space, include_closed=True)
-        for fact in facts:
-            yield {"type": "fact", **fact.model_dump(exclude={"space"})}
-        # A relation is part of the ledger's history, so it moves with it;
-        # each link is read from both ends and written once.
-        seen: set[int] = set()
-        for fact in facts:
-            for link in await self.documents.fact_links(space, fact.fact_id):
-                if link.link_id not in seen:
-                    seen.add(link.link_id)
-                    yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
+        async for record in archive.export_records(self.documents, space):
+            yield record
 
     async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
         """Load an export. Episodes go through the normal ingest, so they
@@ -1784,99 +1745,8 @@ class MemoryEngine:
         deduplicating a same-space move and not a renamed one."""
         await self._living(space)
         check_space(space)
-        summary = ImportSummary()
-        episodes: list[Record] = []
-        source_ids: list[Optional[int]] = []
-        facts: list[Mapping] = []
-        links: list[Mapping] = []
-        for record in records:
-            kind = record.get("type", "episode")
-            if kind == "episode":
-                episode = _rederived(Record.from_dict(record), record.get("space"), space)
-                # Forgetting was a decision; an archive that carries the
-                # forgotten content does not undo it unless told to.
-                digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
-                if not resurrect and await self.documents.tombstone_by_hash(space, digest) is not None:
-                    summary.tombstoned += 1
-                    continue
-                episodes.append(episode)
-                source_ids.append(record.get("episode_id"))
-            elif kind == "fact":
-                facts.append(record)
-            elif kind == "fact_link":
-                links.append(record)
-            else:
-                raise InvalidInput(f"unknown record type {kind!r}")
-        # Ids are store-local (spec 3.1). Provenance in the dump names the
-        # source store's episodes, so it is remapped through the ids this
-        # import produced; a reference to an episode not in the dump is
-        # dropped rather than pointed at an unrelated record.
-        id_map: dict[int, int] = {}
-        for old_id, added in zip(source_ids, await self.remember_many(space, episodes)):
-            summary.episodes += 0 if added.deduplicated else 1
-            summary.deduplicated += 1 if added.deduplicated else 0
-            if old_id is not None:
-                id_map[int(old_id)] = added.episode_id
-        existing = {_fact_identity(f): f.fact_id for f in await self.documents.list_facts(space, include_closed=True)}
-        # Fact ids are store-local too: a link's ends are remapped through
-        # the ids this import produced or found already present.
-        fact_map: dict[int, int] = {}
-        for f in facts:
-            source = f.get("source_episode_id")
-            new = NewFact(
-                space=space,
-                subject=normalise_term(str(f["subject"]), "subject"),
-                predicate=normalise_term(str(f["predicate"]), "predicate"),
-                object=str(f["object"]),
-                valid_from=normalise_time(str(f["valid_from"])),
-                confidence=float(f.get("confidence", 1.0)),
-                valid_until=normalise_time(str(f["valid_until"])) if f.get("valid_until") else None,
-                status=str(f.get("status", "active")),
-                closed_reason=f.get("closed_reason"),
-                source_episode_id=id_map.get(int(source)) if source is not None else None,
-                origin=str(f.get("origin", "stated")),
-                excluded_reason=f.get("excluded_reason"),
-                superseded_by=None,  # ids are store-local; the reason text keeps the history
-                quote=f.get("quote"),
-            )
-            if new.status not in STATUSES or new.origin not in ORIGINS:
-                raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
-            identity = _fact_identity(new)
-            if identity in existing:
-                summary.facts_skipped += 1
-                if f.get("fact_id") is not None:
-                    fact_map[int(f["fact_id"])] = existing[identity]
-                continue
-            stored = await self.documents.insert_fact(new)
-            existing[identity] = stored.fact_id
-            if f.get("fact_id") is not None:
-                fact_map[int(f["fact_id"])] = stored.fact_id
-            summary.facts += 1
-        for record in links:
-            kind = str(record.get("kind", ""))
-            from_fact = fact_map.get(int(record["from_fact"]))
-            to_fact = fact_map.get(int(record["to_fact"]))
-            if kind not in LINK_KINDS or from_fact is None or to_fact is None or from_fact == to_fact:
-                # A link to a fact not in the dump is dropped, not pointed at
-                # an unrelated record; a bad kind is a bad record.
-                summary.links_skipped += 1
-                continue
-            source = record.get("source_episode_id")
-            new_link = NewFactLink(
-                space=space, from_fact=from_fact, to_fact=to_fact, kind=kind,
-                created_at=normalise_time(str(record["created_at"])) if record.get("created_at") else self.clock(),
-                source_episode_id=id_map.get(int(source)) if source is not None else None,
-                quote=record.get("quote"),
-            )
-            already = any((l.to_fact, l.kind) == (to_fact, kind) for l in await self.documents.fact_links(space, from_fact) if l.from_fact == from_fact)
-            if already:
-                summary.links_skipped += 1
-                continue
-            await self.documents.insert_fact_link(new_link)
-            summary.links += 1
-        if summary.facts or summary.links:
-            await self.documents.bump_revision(space)
-        return summary
+        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many)
+        return await archive.import_records(runtime, space, records, resurrect=resurrect)
 
 
 # -- validation helpers -----------------------------------------------------
@@ -1893,36 +1763,11 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
-def _fact_identity(fact: Fact | NewFact) -> tuple:
-    """Import identity includes retained evidence after source-ID remapping.
-
-    Store-local fact/supersession IDs are not preserved. Exclusion is mutable
-    target policy: reimporting the same evidence must not create a fresh,
-    unexcluded copy of a fact the target has suppressed.
-    """
-    return (
-        fact.subject, fact.predicate, fact.object, fact.valid_from, fact.valid_until,
-        fact.status, fact.closed_reason, fact.confidence,
-        fact.source_episode_id, fact.origin, fact.quote,
-    )
-
-
 def _covers(fact: Fact, instant) -> bool:
     """True when ``instant`` lies in ``[valid_from, valid_until)``."""
     if parse_rfc3339(fact.valid_from) > instant:
         return False
     return fact.valid_until is None or parse_rfc3339(fact.valid_until) > instant
-
-
-def _rederived(record: Record, source_space: Optional[str], space: str) -> Record:
-    """The record with its content_hash dropped when it is the default
-    derivation under the source space, so ingest derives it for the
-    target space instead."""
-    if record.content_hash is None or not source_space or source_space == space:
-        return record
-    if record.content_hash == content_hash(str(source_space), record.content):
-        return dataclasses.replace(record, content_hash=None)
-    return record
 
 
 def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
