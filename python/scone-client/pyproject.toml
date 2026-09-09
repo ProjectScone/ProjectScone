@@ -8,7 +8,7 @@ version = "0.2.1"
 description = "Python client for the Scone HTTP API, a local-first temporal memory engine"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "ProjectScone contributors" }]
 keywords = ["scone", "memory", "recall", "client"]
 dependencies = ["requests>=2.25"]

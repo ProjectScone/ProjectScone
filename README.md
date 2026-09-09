@@ -1,5 +1,7 @@
 <p align="center"><strong>🥐 Scone</strong></p>
 
+<p align="center">ProjectScone · A JudgeHuman project by ProjectScone contributors</p>
+
 <p align="center">
   <strong>A self-hosted RAG and memory framework for agents and applications.</strong>
 </p>
@@ -559,4 +561,51 @@ bytes, latency, storage and ingestion cost reported separately.
 For the repository layout, local test setup and contribution workflow, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-MIT. Built by studying what came before and keeping the receipts.
+Current versions use the [ProjectScone Research Attribution License](LICENSE),
+a custom MIT-derived license with a mandatory research and academic citation
+condition. This is not the unmodified MIT License. Third-party materials retain
+their own licenses; earlier versions released under MIT retain those terms.
+
+### Research and academic citation
+
+If you use ProjectScone or a substantial portion of its code for research or
+academic work, you **must cite this repository** in resulting publications,
+theses, reports, presentations, and other publicly shared research outputs.
+For datasets or software artifacts, include the citation in accompanying
+documentation. Credit **ProjectScone contributors** as the author, **JudgeHuman** as the
+company, and **ProjectScone** as the project, and include the repository URL.
+Use MLA, APA, Chicago, or another recognized academic citation style; citations
+generated using EasyBib or BibTeX are accepted. Exact versions, commit hashes,
+and individual file references are **not required**. See [LICENSE](LICENSE)
+for the complete condition.
+
+Citation metadata is available in [CITATION.cff](CITATION.cff), which GitHub uses
+for its **Cite this repository** action. Ready-to-copy examples follow.
+
+**MLA / EasyBib (MLA)**
+
+> ProjectScone contributors. *ProjectScone*. JudgeHuman, 2026,
+> https://github.com/DrDrewCain/ProjectScone.
+
+**APA**
+
+> ProjectScone contributors. (2026). *ProjectScone* [Computer software]. JudgeHuman.
+> https://github.com/DrDrewCain/ProjectScone.
+
+**Chicago**
+
+> ProjectScone contributors. *ProjectScone*. JudgeHuman, 2026. Computer software.
+> https://github.com/DrDrewCain/ProjectScone.
+
+**BibTeX**
+
+```bibtex
+@misc{projectscone2026,
+  author       = {ProjectScone contributors},
+  title        = {{ProjectScone}},
+  year         = {2026},
+  howpublished = {JudgeHuman},
+  note         = {Computer software},
+  url          = {https://github.com/DrDrewCain/ProjectScone}
+}
+```

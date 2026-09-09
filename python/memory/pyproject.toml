@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Memory infrastructure for LLMs, RAG and agents: verbatim episodes, a dated fact ledger, hybrid recall and an evidence log over pluggable stores (SQLite, MongoDB, PostgreSQL, Qdrant, Redis, Chroma, LanceDB), served by FastAPI and MCP"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "LicenseRef-ProjectScone-Research-Attribution-1.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ProjectScone contributors" }]
 keywords = ["memory", "agents", "retrieval", "rag", "temporal", "knowledge", "qdrant", "mongodb", "postgres", "pgvector", "redis", "chroma", "lancedb", "fastapi", "mcp", "langchain", "llamaindex"]
