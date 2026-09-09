@@ -5,7 +5,8 @@ import json
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler,
+                      field_validator, model_serializer, model_validator)
 
 _LINE_BREAK = re.compile(r'\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]')
 
@@ -24,10 +25,11 @@ def _reject_constant(value: str) -> object:
 
 
 class AnswerRequirements(BaseModel):
-    """Instructions guide models; accepts() checks only format, bytes and lines.
+    """Instructions guide models; accepts() checks output contracts.
 
     JSON mode requires one object, without fences, duplicate keys or nonstandard
-    constants. It does not validate an application schema or factual accuracy.
+    constants. An optional application schema checks fields and values, never
+    factual accuracy.
     Nothing is stripped, truncated or repaired. A trailing line break counts as
     another line. Consumers must withhold rejected output from their observers.
     """
@@ -37,6 +39,28 @@ class AnswerRequirements(BaseModel):
     max_bytes: int = Field(default=64000, ge=1, le=128000)
     max_lines: int | None = Field(default=None, ge=1, le=1000)
     format: Literal['text', 'json_object'] = 'text'
+    output_schema: dict[str, object] | None = None
+
+    @field_validator('output_schema', mode='before')
+    @classmethod
+    def bounded_schema(cls, value: object) -> dict[str, object] | None:
+        if value is None:
+            return None
+        from .output_schema import compile_schema
+        return compile_schema(value)
+
+    @model_validator(mode='after')
+    def schema_format(self) -> AnswerRequirements:
+        if self.output_schema is not None and self.format != 'json_object':
+            raise ValueError('output_schema requires json_object format')
+        return self
+
+    @model_serializer(mode='wrap')
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result = handler(self)
+        if self.output_schema is None:
+            result.pop('output_schema', None)
+        return result
 
     @field_validator('instructions')
     @classmethod
@@ -54,6 +78,9 @@ class AnswerRequirements(BaseModel):
             if self.max_lines is not None and len(_LINE_BREAK.findall(answer)) + 1 > self.max_lines:
                 return False
             if self.format == 'json_object':
+                if self.output_schema is not None:
+                    from .output_schema import accepts_schema
+                    return accepts_schema(answer, self.output_schema)
                 # Preserve JSON number syntax without imposing Python integer or
                 # float range limits: this gate checks syntax, not numeric values.
                 value = json.loads(answer, object_pairs_hook=_unique_object,
