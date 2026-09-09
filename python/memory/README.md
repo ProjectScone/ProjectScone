@@ -579,9 +579,24 @@ The self-hosted adapter requires native OpenAI-compatible tool-call support.
 It does not execute tool-shaped prose, capture reasoning fields, follow redirects,
 use environment proxies, discover/download models, or select a fallback provider.
 It rejects incomplete replies, duplicate JSON keys/call IDs, non-finite numbers,
-and oversized responses. Logs contain outcome and elapsed time, not message text.
+and oversized responses.
 HTTP resources are closed before a reply is accepted; cooperative cleanup can
 run beyond the deadline, but late success is rejected.
+
+Both tool adapters emit INFO-level `tool_model.started` and `tool_model.finished`
+events with a shared call ID. Diagnostics distinguish `native`,
+`structured_action`, and `structured_answer` requests, and record request/response
+bytes, time to response headers, elapsed time, HTTP status, and the configured
+output-token limit. Failures identify HTTP errors, transport errors/timeouts,
+request deadlines, response-byte limits, or invalid responses; external
+cancellation remains a separate outcome. Public errors remain generic.
+An allowlisted finish reason can expose a provider's `length` termination.
+Optional `prompt_tokens`, `completion_tokens`, and `total_tokens` are reported
+only when the provider supplies bounded nonnegative integers; missing or invalid
+values remain unknown, not zero. These counters do not prove context fit or
+answer correctness. Logs omit prompts, responses, reasoning, model/endpoint
+identifiers, credentials, and raw exception text. Response bytes count decoded
+body bytes received before success or failure, not network transfer bytes.
 
 For an explicitly configured model with unreliable native tool calls but JSON
 schema support, `SelfHostedStructuredToolChat` implements the same `ToolModel`
