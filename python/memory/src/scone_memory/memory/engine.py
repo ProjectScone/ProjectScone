@@ -10,17 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import time
-from uuid import uuid4
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_review
+from . import archive, catalog, fact_placement, fact_review, retention
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
 from .fact_placement import Placement as _Placement, _covers as _covers
 from .archive import ImportSummary as ImportSummary, _fact_identity as _fact_identity, _rederived as _rederived
-from ..ingestion import batch as ingestion_batch
+from ..ingestion import batch as ingestion_batch, jobs as ingestion_jobs
 from ..ingestion.batch import EMBED_BATCH as EMBED_BATCH
 from ..ingestion.records import (
     Record as Record, RecoveryReport as RecoveryReport,
@@ -53,7 +52,7 @@ from ..core.validation import (
     normalise_term as normalise_term,
     normalise_time as normalise_time,
 )
-from ..core.errors import Conflict, Gone, InvalidInput, NotFound
+from ..core.errors import Conflict, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     Added,
@@ -67,7 +66,6 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
-    JobItem,
     IngestJob,
     SpaceReceipt,
     Tombstone,
@@ -87,8 +85,6 @@ from ..core.ports import (
     NewEvent,
     NewFact,
     NewFactLink,
-    NewJob,
-    NewTombstone,
     SourcePage,
     TextFilter,
     VectorIndex,
@@ -404,21 +400,21 @@ class MemoryEngine:
     ) -> None:
         await ingestion_batch.write_batch(self._ingestion_runtime(), space, fresh, vectors, results)
 
+    def _retention_runtime(self) -> retention.RetentionRuntime:
+        return retention.RetentionRuntime(
+            self.documents, self.vectors, self.blobs, self.events, self.clock, self._emit,
+            self._episode_or_gone, self.impact, self.forget, self._living,
+            self.space_deleted, self._space_receipt,
+        )
+
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
         """The episode, or Gone when a tombstone says it was forgotten, or
         NotFound when the id never meant anything here."""
-        found = await self.documents.get_episode(space, episode_id)
-        if found is not None:
-            return found
-        stone = await self.documents.tombstone(space, episode_id)
-        if stone is not None:
-            raise Gone(f"episode {episode_id} was forgotten on {stone.forgotten_at}", stone.forgotten_at)
-        raise NotFound(f"episode {episode_id} not found in {space!r}")
+        return await retention.episode_or_gone(self._retention_runtime(), space, episode_id)
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         """The record that an episode was forgotten, or None."""
-        check_space(space)
-        return await self.documents.tombstone(space, episode_id)
+        return await retention.tombstone(self._retention_runtime(), space, episode_id)
 
     async def doctor(self, space: str) -> DoctorReport:
         """What references what across the space's stores, read only: chunks
@@ -426,52 +422,7 @@ class MemoryEngine:
         forgotten or an unknown episode, links with a missing end, held
         attachments no episode carries. A store that cannot be walked is
         named in not_inspected rather than reported clean."""
-        check_space(space)
-        counts = await self.documents.counts(space)
-        facts = await self.documents.list_facts(space, include_closed=True)
-        report = DoctorReport(space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts))
-        episode_ids = {e.episode_id for e in await self.documents.recent_episodes(space, max(counts.episodes, 1))}
-        stones = {t.episode_id for t in await self.documents.list_tombstones(space)}
-        report.tombstones = len(stones)
-        for fact in facts:
-            source = fact.source_episode_id
-            if source is None or source in episode_ids:
-                continue
-            (report.facts_citing_forgotten if source in stones else report.facts_citing_unknown).append(fact.fact_id)
-        fact_ids = {f.fact_id for f in facts}
-        seen: set[int] = set()
-        for fact in facts:
-            for link in await self.documents.fact_links(space, fact.fact_id):
-                if link.link_id in seen:
-                    continue
-                seen.add(link.link_id)
-                if link.from_fact not in fact_ids or link.to_fact not in fact_ids:
-                    report.links_with_missing_ends.append(link.link_id)
-        report.links = len(seen)
-        chunk_index = getattr(self.documents, "chunk_index", None)
-        chunk_ids: Optional[set[int]] = None
-        if callable(chunk_index):
-            pairs = await chunk_index(space)
-            chunk_ids = {chunk_id for chunk_id, _ in pairs}
-            report.chunks_without_episode = sorted(chunk_id for chunk_id, episode_id in pairs if episode_id not in episode_ids)
-        else:
-            report.not_inspected.append("chunks")
-        vector_ids = getattr(self.vectors, "ids", None)
-        if callable(vector_ids) and chunk_ids is not None:
-            report.vectors_without_chunk = sorted(v for v in await vector_ids(space) if v not in chunk_ids)
-        else:
-            report.not_inspected.append("vectors")
-        held = getattr(self.blobs, "held", None)
-        if callable(held):
-            linked = await self.blobs.linked(space)
-            report.attachments_unlinked = [a for a in await held(space) if a not in linked]
-        else:
-            report.not_inspected.append("attachments")
-        report.healthy = not any([
-            report.chunks_without_episode, report.vectors_without_chunk, report.facts_citing_forgotten,
-            report.facts_citing_unknown, report.links_with_missing_ends, report.attachments_unlinked,
-        ])
-        return report
+        return await retention.doctor(self._retention_runtime(), space)
 
     async def expire(self, space: str, policy: Mapping[str, float], *, limit: int = 100,
                      dry_run: bool = False) -> ExpiryReport:
@@ -480,103 +431,46 @@ class MemoryEngine:
         days before this engine's clock, oldest first, at most ``limit``
         in one pass. Facts never expire; the claims that cited a forgotten
         episode stand. ``dry_run`` reports and forgets nothing."""
-        check_space(space)
-        clean = retention_policy(policy)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
-            raise InvalidInput("limit must be an integer in 1..10000")
-        now = parse_rfc3339(self.clock())
-        counts = await self.documents.counts(space)
-        due = []
-        for episode in await self.documents.recent_episodes(space, max(counts.episodes, 1)):
-            days = clean.get(episode.kind)
-            if days is not None and (now - parse_rfc3339(episode.created_at)).total_seconds() > days * 86400:
-                due.append(episode)
-        due.sort(key=lambda e: (e.created_at, e.episode_id))
-        report = ExpiryReport(space=space, policy=dict(clean), remaining=len(due), dry_run=dry_run)
-        if dry_run:
-            return report
-        for episode in due[:limit]:
-            report.receipts.append(await self.forget(space, episode.episode_id))
-            report.forgotten.append(episode.episode_id)
-        report.remaining = len(due) - len(report.forgotten)
-        await self._emit(space, "expire", {"policy": dict(clean), "forgotten": len(report.forgotten),
-                                           "remaining": report.remaining, "limit": limit})
-        return report
+        return await retention.expire(self._retention_runtime(), space, policy, limit=limit, dry_run=dry_run)
 
     async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
         """What forgetting the episode would take with it and leave, with
         nothing removed. The claims and links that cite it are reported,
         not closed: a source being gone is a fact about the evidence."""
-        check_space(space)
-        await self._episode_or_gone(space, episode_id)
-        carried = [a.attachment_id for a in await self.blobs.for_episode(space, episode_id)]
-        released = await self.blobs.released_by(space, episode_id)
-        facts = await self.documents.list_facts(space, include_closed=True)
-        citing_links: dict[int, int] = {}
-        for fact in facts:
-            for link in await self.documents.fact_links(space, fact.fact_id):
-                if link.source_episode_id == episode_id:
-                    citing_links[link.link_id] = link.link_id
-        return ForgetReceipt(
-            episode_id=episode_id,
-            chunks=len(await self.documents.chunks_of(space, episode_id)),
-            attachments_released=released,
-            attachments_kept=[a for a in carried if a not in released],
-            facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
-            links_citing=sorted(citing_links),
-        )
+        return await retention.impact(self._retention_runtime(), space, episode_id)
 
     async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
         """Remove the episode, its chunks and vectors, and release the
         attachments nothing else carries; return the receipt that
         ``impact`` would have shown. Claims and links stand."""
-        check_space(space)
-        started = time.perf_counter()
-        try:
-            receipt = await self.impact(space, episode_id)
-        except NotFound as error:
-            await self._emit(space, "forget", {"episode_id": episode_id, "error": type(error).__name__, "latency_ms": _ms(started)})
-            raise
-        episode = await self._episode_or_gone(space, episode_id)
-        removed = await self.documents.delete_episode(space, episode_id)
-        await self.vectors.delete(removed)
-        await self.blobs.unlink(space, episode_id)
-        # The tombstone outlives the episode: the id keeps meaning something
-        # and the decision is not undone by a later import.
-        stone = await self.documents.record_tombstone(NewTombstone(
-            space=space, episode_id=episode_id, content_hash=episode.content_hash, forgotten_at=self.clock(),
-        ))
-        receipt = receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
-        await self.documents.bump_revision(space)
-        await self._emit(space, "forget", {
-            "episode_id": episode_id, "chunks_removed": len(removed),
-            "attachments_released": len(receipt.attachments_released),
-            "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
-            "latency_ms": _ms(started),
-        })
-        return receipt
+        return await retention.forget(self._retention_runtime(), space, episode_id)
 
     # -- ingest jobs ---------------------------------------------------------
 
+    def _jobs_runtime(self) -> ingestion_jobs.JobRuntime:
+        return ingestion_jobs.JobRuntime(
+            self.documents, self.clock, self._emit, self._living, self._able,
+            self._keeps_jobs, self._reads_jobs, self.remember_many, self.record_job,
+            self.job, self.MAX_JOBS_PAGE,
+        )
+
     def _able(self, *methods: str) -> bool:
-        return all(callable(getattr(self.documents, name, None)) for name in methods)
+        return ingestion_jobs.able(self.documents, *methods)
 
     #: What a store must implement to record a batch, and to read one back.
     #: They are separate because a store may do one and not the other, and
     #: advertising the wrong one turns a refusal into a server error.
-    RECORDS_JOBS = ("create_job", "update_job")
-    READS_JOBS = ("get_job", "list_jobs")
+    RECORDS_JOBS = ingestion_jobs.RECORDS_JOBS
+    READS_JOBS = ingestion_jobs.READS_JOBS
 
     def _keeps_jobs(self) -> None:
         """Recording jobs is a store's choice: one that cannot keep them
         says so rather than pretending a batch was never tracked."""
-        if not self._able(*self.RECORDS_JOBS):
-            raise InvalidInput("this document store does not record ingest jobs")
+        ingestion_jobs.keeps_jobs(self._able, self.RECORDS_JOBS)
 
     def _reads_jobs(self) -> None:
         """Reading a job back is a separate choice from recording one."""
-        if not self._able(*self.READS_JOBS):
-            raise InvalidInput("this document store does not read ingest jobs")
+        ingestion_jobs.reads_jobs(self._able, self.READS_JOBS)
 
     async def ingest_batch(self, space: str, records: Iterable[Record], *,
                            request_id: Optional[str] = None) -> "IngestJob":
@@ -587,138 +481,68 @@ class MemoryEngine:
         ``consolidated_at`` only when a model has read claims out of the
         record, which happens later and may never happen. A request id
         makes a retry the same job rather than a second one."""
-        check_space(space)
-        await self._living(space)
-        self._keeps_jobs()
-        if request_id:
-            already = await self.documents.job_by_request(space, request_id)
-            if already is not None:
-                return already
-        added = await self.remember_many(space, list(records))
-        return await self.record_job(space, added, request_id=request_id)
+        return await ingestion_jobs.ingest_batch(self._jobs_runtime(), space, records, request_id=request_id)
 
     async def record_job(self, space: str, added: Sequence[Added], *,
                          request_id: Optional[str] = None) -> "IngestJob":
         """Keep the receipt for records that have just landed. Separate
         from ingesting them, because a caller may have written the batch
         its own way and still owes the person a receipt."""
-        check_space(space)
-        self._keeps_jobs()
-        when = self.clock()
-        items = tuple(
-            JobItem(index=index, episode_id=one.episode_id, outcome=one.outcome,
-                    state="searchable", searchable_at=when)
-            for index, one in enumerate(added)
-        )
-        job = await self.documents.create_job(NewJob(
-            job_id=uuid4().hex, space=space, created_at=when, request_id=request_id, items=items))
-        await self._emit(space, "ingest_job", {
-            "job_id": job.job_id, "records": len(items), "request_id": request_id,
-        })
-        return job
+        return await ingestion_jobs.record_job(self._jobs_runtime(), space, added, request_id=request_id)
 
     async def job_for_request(self, space: str, request_id: str) -> Optional["IngestJob"]:
         """The job this request already made, if it made one."""
-        check_space(space)
-        if not self._able("job_by_request"):
-            return None
-        return await self.documents.job_by_request(space, request_id)
+        return await ingestion_jobs.job_for_request(self._jobs_runtime(), space, request_id)
 
     async def job(self, space: str, job_id: str) -> "IngestJob":
         """One batch's receipt."""
-        check_space(space)
-        self._reads_jobs()
-        found = await self.documents.get_job(space, job_id)
-        if found is None:
-            raise NotFound(f"job {job_id!r} in {space!r}")
-        return found
+        return await ingestion_jobs.job(self._jobs_runtime(), space, job_id)
 
     #: The most batches one page may carry.
-    MAX_JOBS_PAGE = 100
+    MAX_JOBS_PAGE = ingestion_jobs.MAX_JOBS_PAGE
 
     async def jobs(self, space: str, limit: int = 20, before: Optional[str] = None) -> list["IngestJob"]:
         """Recent batches, newest first. ``before`` continues from the last
         job of a previous page; a cursor naming no job is refused rather
         than quietly returning the newest page again."""
-        check_space(space)
-        self._reads_jobs()
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.MAX_JOBS_PAGE:
-            raise InvalidInput(f"limit must be an integer from 1 through {self.MAX_JOBS_PAGE}")
-        if before is not None and await self.documents.get_job(space, before) is None:
-            raise NotFound(f"job {before!r} in {space!r}")
-        return await self.documents.list_jobs(space, limit, before)
+        return await ingestion_jobs.jobs(self._jobs_runtime(), space, limit=limit, before=before)
 
     async def cancel_job(self, space: str, job_id: str) -> "IngestJob":
         """Stop expecting more of this batch. What has already been read
         stays read and what was searchable stays searchable: cancelling a
         job abandons the work still to come, it does not delete memory."""
-        job = await self.job(space, job_id)
-        if job.cancelled_at:
-            raise InvalidInput(f"job {job_id!r} was already cancelled at {job.cancelled_at}")
-        when = self.clock()
-        stopped = job.model_copy(update={
-            "cancelled_at": when,
-            "items": [item if item.consolidated_at else item.model_copy(update={"state": "cancelled"})
-                      for item in job.items],
-        })
-        await self.documents.update_job(stopped)
-        await self._emit(space, "ingest_job", {"job_id": job_id, "cancelled": len(stopped.items)})
-        return stopped
+        return await ingestion_jobs.cancel_job(self._jobs_runtime(), space, job_id)
 
     async def note_failed(self, space: str, episode_id: int, error: str) -> int:
         """Record that reading this record failed, against the record it
         failed on rather than against the batch. The attempt is counted,
         so a retry that works still shows it took two goes."""
-        check_space(space)
-        if not callable(getattr(self.documents, "mark_failed", None)):
-            return 0
-        return await self.documents.mark_failed(space, episode_id, error[:500], self.clock())
+        return await ingestion_jobs.note_failed(self._jobs_runtime(), space, episode_id, error)
 
     async def note_consolidated(self, space: str, episode_ids: Sequence[int]) -> int:
         """Record that these episodes have been read into claims. Marking
         the same episode twice moves nothing, so a re-run of the extractor
         does not rewrite a receipt that already stands."""
-        check_space(space)
-        if not callable(getattr(self.documents, "mark_consolidated", None)):
-            return 0
-        return await self.documents.mark_consolidated(space, list(episode_ids), self.clock())
+        return await ingestion_jobs.note_consolidated(self._jobs_runtime(), space, episode_ids)
 
     # -- a whole space ------------------------------------------------------
 
     async def _living(self, space: str) -> None:
         """Refuse a space that was deleted: a key left in config must not
         re-create what was erased."""
-        when = await self.space_deleted(space)
-        if when is not None:
-            raise NotFound(f"space {space!r} was deleted at {when}")
+        return await retention.living(self._retention_runtime(), space)
 
     async def space_deleted(self, space: str) -> Optional[str]:
         """When the space was deleted, or None while it lives. A store
         that cannot record a deletion has never deleted one."""
-        check_space(space)
-        deleted = getattr(self.documents, "space_deleted", None)
-        return await deleted(space) if callable(deleted) else None
+        return await retention.space_deleted(self._retention_runtime(), space)
 
     async def _space_receipt(self, space: str) -> SpaceReceipt:
-        counts = await self.documents.counts(space)
-        facts = await self.documents.list_facts(space, include_closed=True)
-        links: set[int] = set()
-        for fact in facts:
-            for link in await self.documents.fact_links(space, fact.fact_id):
-                links.add(link.link_id)
-        released, kept = await self.blobs.release_space(space, preview=True)
-        return SpaceReceipt(
-            space=space, episodes=counts.episodes, chunks=counts.chunks, facts=len(facts), links=len(links),
-            tombstones=len(await self.documents.list_tombstones(space)),
-            events=(await self.events.purge(space, preview=True)) if self.events is not None else 0,
-            attachments_released=released, attachments_kept=kept,
-        )
+        return await retention.space_receipt(self._retention_runtime(), space)
 
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""
-        check_space(space)
-        await self._living(space)
-        return await self._space_receipt(space)
+        return await retention.space_impact(self._retention_runtime(), space)
 
     async def delete_space(self, space: str) -> SpaceReceipt:
         """Remove everything the space holds, in order: attachment holds
@@ -726,25 +550,7 @@ class MemoryEngine:
         space with their vectors, then the event trail; mark the space
         deleted so no write re-creates it. Returns the receipt
         ``space_impact`` would have shown, with the counts of the deed."""
-        check_space(space)
-        await self._living(space)
-        if not callable(getattr(self.documents, "delete_space", None)):
-            raise InvalidInput("this document store does not implement delete-space")
-        preview = await self._space_receipt(space)
-        deleted_at = self.clock()
-        released, kept = await self.blobs.release_space(space)
-        gone = await self.documents.delete_space(space, deleted_at)
-        sweep = getattr(self.vectors, "delete_space", None)
-        if sweep is not None:
-            await sweep(space)
-        else:
-            await self.vectors.delete(list(gone.chunk_ids))
-        events = (await self.events.purge(space)) if self.events is not None else 0
-        return preview.model_copy(update={
-            "episodes": gone.episodes, "chunks": len(gone.chunk_ids), "facts": gone.facts, "links": gone.links,
-            "tombstones": gone.tombstones, "events": events, "attachments_released": released,
-            "attachments_kept": kept, "deleted_at": deleted_at,
-        })
+        return await retention.delete_space(self._retention_runtime(), space)
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
