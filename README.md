@@ -541,6 +541,13 @@ Neither architecture alone proves the other one's reliability.
 
 ## Measurement status
 
+The [Python public-QA baseline](python/memory/benchmarks/public-qa-v1.results.md)
+ran 200 unchanged HotpotQA/SQuAD questions across three self-managed models
+(600 responses). Overall exact match was 64% for Gemma E4B, 61% for Llama 3.1
+8B, and 59% for Llama 3.2 3B. The report separates retrieval coverage, generation,
+latency, and model memory; this sampled development run is not an official
+leaderboard submission or a full semantic-accuracy measurement.
+
 Historical **Rust-only** baseline: LongMemEval-S session-level all-evidence
 Recall@15 81.0%, any-evidence 94.0%, byte context reduction 97.8%. The run used
 all 500 questions, including 30 abstention items that the

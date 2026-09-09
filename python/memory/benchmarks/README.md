@@ -1,5 +1,8 @@
 # Public QA experiments
 
+The completed [8 September 2026 baseline](public-qa-v1.results.md) records
+600 responses, retrieval coverage, answer scores, latency, and loaded-model sizes.
+
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
 adapter using original public questions and source paragraphs. They do not
