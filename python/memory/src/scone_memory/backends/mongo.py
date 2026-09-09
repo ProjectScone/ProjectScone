@@ -113,6 +113,8 @@ class MongoDocumentStore:
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
         await self.facts.create_index([("space", 1), ("subject", 1), ("_id", 1)])
+        await self.facts.create_index([("space", 1), ("_id", 1)])
+        await self.facts.create_index([("space", 1), ("source_episode_id", 1), ("_id", 1)])
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
         await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("_id", 1)])
@@ -370,6 +372,17 @@ class MongoDocumentStore:
         if not include_closed:
             query["status"] = "active"
         return [_fact(doc) async for doc in self.facts.find(query).sort("_id", 1)]
+
+    async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import graph_fact_read_limit
+        cap = graph_fact_read_limit(source_episode_id, limit)
+        if not cap:
+            return []  # MongoDB limit(0) would remove the bound.
+        query: dict[str, object] = {'space':space}
+        if source_episode_id is not None:
+            query['source_episode_id'] = source_episode_id
+        cursor = self.facts.find(query).sort('_id', 1).limit(cap)
+        return [_fact(doc) async for doc in cursor]
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         cursor = self.facts.find({"space": space, "subject": subject, "predicate": predicate}).sort("_id", 1)

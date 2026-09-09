@@ -13,6 +13,7 @@ on an engine instance.
 | `retrieval/fact_recall.py` | Validated indexed fact lookup, scan fallback and historical facts |
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
 | `retrieval/activity_graph.py` | Read activity and retained sources into a graph of recorded relationships |
+| `retrieval/activity_facts.py` | Coordinate indexed fact reads with a shared budget and validated partial results |
 | `retrieval/graph.py` | Graph values and typed edge construction without storage reads |
 | `retrieval/reranking.py` | Bounded adapter calls, output validation and fallback ordering |
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
@@ -66,10 +67,21 @@ sources that no longer exist. Retrieval edges retain their lane/rank labels;
 similarity is never promoted to a factual relationship. Graph data structures
 and edge helpers remain separate from storage reads and graph analysis.
 
-These windows bound event reads and additional source hydration, not the number
-of facts scanned or all nodes returned. Fact listing still reads the space's full
-ledger. This extraction does not solve large-ledger graph scaling or introduce
-an atomic snapshot across the document and event stores.
+Fact selection uses the optional `GraphFactReader` capability in
+`core/graph_read.py`, coordinated by `retrieval/activity_facts.py`. The default
+budget is 400 facts (maximum 2,000), shared across source groups with one-row
+lookahead. Stores filter by space and optional source before the indexed limit;
+the graph never falls back to full-ledger listing. Focused reads visit sources
+in episode-ID order, then order selected facts by fact ID. All fact statuses
+remain visible. Unvisited source groups conservatively mark the result partial.
+
+`facts_truncated` and `fact_read_status` distinguish bounded partial results,
+unsupported readers, failed snapshots and graphs that did not read facts.
+Malformed or failed reads discard the fact snapshot; cancellation propagates.
+The coordinator applies a two-second cooperative deadline to fact reads.
+Event and additional source windows remain separate. Incident-link reads and
+the total returned node count are not globally bounded by the fact budget;
+the graph is not an atomic snapshot across document and event stores.
 
 The refactor preserves candidate depth, filter semantics, fusion ordering,
 scope verification, cancellation propagation and degraded-mode reporting.

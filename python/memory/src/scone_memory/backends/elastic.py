@@ -459,6 +459,18 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import graph_fact_read_limit
+        cap = graph_fact_read_limit(source_episode_id, limit)
+        if not cap:
+            return []
+        filters: list[dict] = [{'term':{'space':space}}]
+        if source_episode_id is not None:
+            filters.append({'term':{'source_episode_id':source_episode_id}})
+        hits = await self._search('facts', query={'bool':{'filter':filters}}, size=cap,
+                                  sort=[{'fact_id':'asc'}])
+        return [_fact(hit) for hit in hits]
+
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         filters = [{"term": {"space": space}}, {"term": {"subject": subject}}, {"term": {"predicate": predicate}}]
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
