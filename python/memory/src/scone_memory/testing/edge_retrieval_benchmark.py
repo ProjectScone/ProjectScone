@@ -135,6 +135,8 @@ class _CachedBGE:
             raise FileNotFoundError("embedding cache must be an existing local directory")
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        from ..providers._onnx import prepare_onnx_runtime
+        prepare_onnx_runtime()
         from fastembed import TextEmbedding
         self._model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=str(cache),
                                     local_files_only=True, threads=1)

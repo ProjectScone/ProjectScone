@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Optional, Sequence
 
+from ..providers._onnx import prepare_onnx_runtime
+
 MODELS = {
     "bge-small-en-v1.5": ("BAAI/bge-small-en-v1.5", 384),
     "bge-base-en-v1.5": ("BAAI/bge-base-en-v1.5", 768),
@@ -16,6 +18,7 @@ class LocalEmbedder:
 
     def __init__(self, name: str = "bge-small-en-v1.5", cache_dir: Optional[str] = None) -> None:
         try:
+            prepare_onnx_runtime()
             from fastembed import TextEmbedding
         except ImportError as e:  # pragma: no cover
             raise ImportError("LocalEmbedder needs fastembed: pip install 'scone-memory[local-embed]'") from e
