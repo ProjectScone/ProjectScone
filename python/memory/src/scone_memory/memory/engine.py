@@ -14,7 +14,8 @@ from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, fact_placement
+from . import archive, fact_placement, fact_review
+from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
 from .fact_placement import Placement as _Placement, _covers as _covers
 from .archive import ImportSummary as ImportSummary, _fact_identity as _fact_identity, _rederived as _rederived
 from ..ingestion import batch as ingestion_batch
@@ -113,10 +114,6 @@ ATTACHMENT_TYPES = (
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
-#: What one reviewed batch may do to the facts it names.
-DECISIONS = ("approve", "decline", "exclude")
-#: Ids one batch may carry. A review queue, not a migration.
-MAX_DECISIONS = 500
 MAX_EXTERNAL_PAYLOAD = 4096
 AGENTS = ("claude-code", "codex", "other")
 AGENT_EVENTS = ("session_start", "prompt", "response", "tool_use", "tool_result", "stop", "session_end")
@@ -1121,35 +1118,19 @@ class MemoryEngine:
     async def _truncate(self, covering: list[Fact], start: str, by_fact_id: int) -> None:
         await fact_placement.truncate(self.documents, covering, start, by_fact_id)
 
+    def _review_runtime(self) -> fact_review.FactReviewRuntime:
+        return fact_review.FactReviewRuntime(
+            self.documents, self.clock, self._emit, self._place, self._truncate,
+            self._proposed, self.approve, self.decline, self.exclude, self._decide_one,
+        )
+
     async def approve(self, space: str, fact_id: int, actor: Optional[str] = None) -> Fact:
         """A person accepts a proposed fact: it enters the ledger exactly as
         an assertion at its own valid_from would, truncating what it
         covers and bounded by what starts later. A proposal that restates
         a fact already held is marked declined as a duplicate and the held
         fact is returned."""
-        check_space(space)
-        fact = await self._proposed(space, fact_id)
-        placement = await self._place(space, fact.subject, fact.predicate, fact.object, fact.valid_from, exclude_id=fact.fact_id)
-        if placement.restates is not None:
-            await self.documents.update_fact(
-                fact.model_copy(update={"status": "declined", "closed_reason": f"duplicate of fact {placement.restates.fact_id}"})
-            )
-            await self.documents.bump_revision(space)
-            await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id, "actor": actor})
-            return placement.restates
-        accepted = fact.model_copy(update={
-            "status": "closed" if placement.bound else "active",
-            "valid_until": placement.bound,
-            "closed_reason": placement.bound_reason,
-            "superseded_by": placement.bound_by,
-        })
-        await self.documents.update_fact(accepted)
-        await self._truncate(placement.covering, fact.valid_from, fact.fact_id)
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_review", {
-            "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering], "actor": actor,
-        })
-        return accepted
+        return await fact_review.approve(self._review_runtime(), space, fact_id, actor=actor)
 
     async def decide(
         self,
@@ -1173,126 +1154,32 @@ class MemoryEngine:
         outcome, keyed by the id that was sent, so one refusal does not
         hide what the rest did.
         """
-        check_space(space)
-        if decision not in DECISIONS:
-            raise InvalidInput(f"decision must be one of {DECISIONS}, got {decision!r}")
-        if not fact_ids:
-            raise InvalidInput("decide needs at least one fact id")
-        if len(fact_ids) > MAX_DECISIONS:
-            raise InvalidInput(f"decide takes at most {MAX_DECISIONS} ids, got {len(fact_ids)}")
-        if decision in ("decline", "exclude"):
-            reason = _reason(reason or "")
-        current = await self.documents.revision(space)
-        if expect_revision is not None and expect_revision != current:
-            raise Conflict(
-                f"space {space!r} is at revision {current}, the batch was built from {expect_revision}",
-                revision=current,
-            )
-        known = {}
-        outcomes: dict[int, DecisionOutcome] = {}
-        for fact_id in fact_ids:
-            if fact_id in outcomes or fact_id in known:
-                continue
-            found = await self.documents.get_fact(space, fact_id)
-            if found is None:
-                outcomes[fact_id] = DecisionOutcome(fact_id=fact_id, outcome="not_found")
-            else:
-                known[fact_id] = found
-        for fact in sorted(known.values(), key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)):
-            outcomes[fact.fact_id] = await self._decide_one(space, decision, fact.fact_id, reason, actor)
-        applied = sum(1 for o in outcomes.values() if o.outcome not in ("not_found", "refused"))
-        return BatchDecision(
-            results=[outcomes[fact_id] for fact_id in dict.fromkeys(fact_ids)],
-            applied=applied,
-            revision=await self.documents.revision(space),
-        )
+        return await fact_review.decide(self._review_runtime(), space, decision, fact_ids, reason=reason, actor=actor, expect_revision=expect_revision)
 
     async def _decide_one(
         self, space: str, decision: str, fact_id: int, reason: Optional[str], actor: Optional[str]
     ) -> DecisionOutcome:
-        try:
-            if decision == "approve":
-                landed = await self.approve(space, fact_id, actor=actor)
-                if landed.fact_id != fact_id:
-                    return DecisionOutcome(fact_id=fact_id, outcome="duplicate_of", held_fact_id=landed.fact_id)
-                return DecisionOutcome(fact_id=fact_id, outcome="approved")
-            if decision == "decline":
-                await self.decline(space, fact_id, reason or "", actor=actor)
-                return DecisionOutcome(fact_id=fact_id, outcome="declined")
-            await self.exclude(space, fact_id, reason or "", actor=actor)
-            return DecisionOutcome(fact_id=fact_id, outcome="excluded")
-        except NotFound as e:
-            return DecisionOutcome(fact_id=fact_id, outcome="not_found", error=str(e))
-        except InvalidInput as e:
-            return DecisionOutcome(fact_id=fact_id, outcome="refused", error=str(e))
+        return await fact_review.decide_one(self._review_runtime(), space, decision, fact_id, reason, actor)
 
     async def decline(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         """A person rejects a proposed fact. It never held; the reason is kept."""
-        check_space(space)
-        reason = _reason(reason)
-        fact = await self._proposed(space, fact_id)
-        declined = fact.model_copy(update={"status": "declined", "closed_reason": reason})
-        await self.documents.update_fact(declined)
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_review", {"fact_id": fact_id, "decision": "declined", "actor": actor})
-        return declined
+        return await fact_review.decline(self._review_runtime(), space, fact_id, reason, actor=actor)
 
     async def _proposed(self, space: str, fact_id: int) -> Fact:
-        fact = await self.documents.get_fact(space, fact_id)
-        if fact is None:
-            raise NotFound(f"fact {fact_id} not found in {space!r}")
-        if fact.status != "proposed":
-            raise InvalidInput(f"fact {fact_id} is {fact.status}, not proposed")
-        return fact
+        return await fact_review.proposed(self._review_runtime(), space, fact_id)
 
     async def exclude(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         """Suppress a ledger fact from recall without touching its interval
         or its history. The third operation beside close (it stopped
         holding) and forget (the data is gone)."""
-        check_space(space)
-        reason = _reason(reason)
-        fact = await self.documents.get_fact(space, fact_id)
-        if fact is None:
-            raise NotFound(f"fact {fact_id} not found in {space!r}")
-        if not fact.in_ledger:
-            raise InvalidInput(f"fact {fact_id} is {fact.status}; only ledger facts can be excluded")
-        excluded = fact.model_copy(update={"excluded_reason": reason})
-        await self.documents.update_fact(excluded)
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "exclude", "actor": actor})
-        return excluded
+        return await fact_review.exclude(self._review_runtime(), space, fact_id, reason, actor=actor)
 
     async def include(self, space: str, fact_id: int, actor: Optional[str] = None) -> Fact:
         """Undo exclude."""
-        check_space(space)
-        fact = await self.documents.get_fact(space, fact_id)
-        if fact is None:
-            raise NotFound(f"fact {fact_id} not found in {space!r}")
-        if not fact.excluded:
-            return fact
-        included = fact.model_copy(update={"excluded_reason": None})
-        await self.documents.update_fact(included)
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_exclude", {"fact_id": fact_id, "action": "include", "actor": actor})
-        return included
+        return await fact_review.include(self._review_runtime(), space, fact_id, actor=actor)
 
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
-        check_space(space)
-        reason = _reason(reason)
-        fact = await self.documents.get_fact(space, fact_id)
-        if fact is None:
-            raise NotFound(f"fact {fact_id} not found in {space!r}")
-        if fact.status == "closed":
-            return fact
-        if not fact.in_ledger:
-            raise InvalidInput(f"fact {fact_id} is {fact.status}; decline a proposal instead of closing it")
-        closed = fact.model_copy(
-            update={"status": "closed", "valid_until": self.clock(), "closed_reason": reason}
-        )
-        await self.documents.update_fact(closed)
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor})
-        return closed
+        return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
 
     async def facts(
         self,
@@ -1524,13 +1411,6 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
-
-
-def _reason(reason: str) -> str:
-    reason = reason.strip()
-    if not reason or len(reason) > 500:
-        raise InvalidInput("reason must be 1..=500 chars")
-    return reason
 
 
 def _ms(since: float) -> float:
