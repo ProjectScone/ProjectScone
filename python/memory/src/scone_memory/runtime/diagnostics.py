@@ -22,6 +22,9 @@ _FIELDS = frozenset({
     "episode_id", "context_bytes", "reference_count", "status_code", "method", "route",
     "episodes", "proposed", "accepted", "rejected", "parked", "failed", "expired",
     "records_considered", "has_more",
+    "protocol", "phase", "failure_kind", "headers_ms", "http_status",
+    "request_bytes", "response_bytes", "output_token_limit", "finish_reason",
+    "prompt_tokens", "completion_tokens", "total_tokens",
 })
 
 
