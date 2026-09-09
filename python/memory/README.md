@@ -1361,6 +1361,26 @@ The assessor's `sufficient` verdict is a fallible model judgment, not an answer
 accuracy guarantee. This option remains off by default and does not automatically
 enable itself in the HTTP service when a model is loaded.
 
+`AdaptiveRetriever(..., include_search_history=True)` additionally supplies a
+private `EvidenceAssessmentContext` to an assessor implementing
+`assess_with_context(question, candidates, context)`. The self-hosted assessor
+supports this interface; existing `assess(question, candidates)` adapters remain
+unchanged when the option is off. Incompatible adapters are rejected before
+retrieval when history is enabled.
+
+The context records completed query strings, round numbers, degraded-retrieval
+flags, additions to each bounded candidate pool, and remaining query/round
+budgets. It helps an assessor distinguish attempted searches from missing
+information, following the research-history concept in the RAGFlow reference.
+Zero additions can mean duplicates, filtering or exhausted capacity; it does
+not establish absence or completeness. Counts describe search-time observations,
+not currently retained evidence or globally new facts. Only the freshly checked
+candidate snapshot can support a selection. History stays within the individual
+run and is not added to public diagnostics; assessor input remains untrusted data.
+The provider bounds serialized history to 64,000 UTF-8 bytes and keeps one model
+request per assessment. No extra search, retry or sufficiency verdict is forced.
+This is an optional capability, not a measured answer-accuracy improvement.
+
 The standard `serve` launcher can mount it explicitly for custom-model,
 saved-connection and persona **text** sessions:
 
@@ -1374,6 +1394,7 @@ SCONE_ADAPTIVE_MAX_QUERIES=6
 SCONE_ADAPTIVE_CANDIDATE_LIMIT=20
 SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES=16000
 SCONE_ADAPTIVE_GRAPH_HOPS=3
+# SCONE_ADAPTIVE_SEARCH_HISTORY=1  # Optional attempted-query context for the assessor.
 # SCONE_ADAPTIVE_API_KEY=  # Only for an authenticated assessor endpoint.
 ```
 
@@ -1390,7 +1411,7 @@ empty selections, plus `original_and_selected` to retain the original query's
 verified pool alongside later selection. These policies are described below;
 none establishes answer accuracy. They preserve scope and source checks across
 every round. `adaptive_retrieval` in conversation capabilities reports configuration,
-budgets and graph hops independently of reply-model availability. Turn context
+budgets, graph hops and `search_history` independently of reply-model availability. Turn context
 receipts report rounds, queries, fallback, truncation and graph work. These are
 current-process context receipts, not a durable reconstruction after restart.
 When embedding `create_conversation_app`, its optional `adaptive_retriever` must

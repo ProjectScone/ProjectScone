@@ -71,7 +71,7 @@ async def test_actual_context_pair_does_not_put_labels_in_prompt_and_does_not_ov
     assert provenance["loaded_code_identity_verified"] is False
     assert provenance["captured_at_utc"].endswith("+00:00")
     package = Path(__file__).parent.parent / "src" / "scone_memory"
-    expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "providers/llm.py",
+    expected = {"realtime/context.py", "retrieval/path_evidence.py", "retrieval/adaptive.py", "retrieval/search_history.py", "providers/llm.py",
                 "providers/evidence_assessor.py", "retrieval/evidence_groups.py", "retrieval/evidence_blend.py", "retrieval/adaptive_graph.py", "retrieval/multihop.py",
                 "realtime/answer_review.py", "realtime/review_evidence.py", "realtime/evidence_answer.py", "realtime/text.py", "realtime/tool_answer.py",
                 "providers/answer_reviewer.py", "providers/evidence_selector.py", "testing/generation_ablation.py",

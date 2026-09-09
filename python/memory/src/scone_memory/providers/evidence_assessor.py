@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ..retrieval.adaptive import EvidenceCandidate, EvidenceDecision
 from ..retrieval.adaptive import EvidenceAssessmentError as EvidenceAssessmentError
 from ..retrieval.evidence_groups import build_evidence_groups
+from ..retrieval.search_history import EvidenceAssessmentContext
 from .llm import OpenAICompatibleChat
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 
@@ -76,6 +77,19 @@ class SelfHostedEvidenceAssessor:
             think=False, temperature=0, transport=transport, trust_env=False)
 
     async def assess(self, question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision:
+        return await self._assess(question, candidates, None)
+
+    async def assess_with_context(self, question: str, candidates: tuple[EvidenceCandidate, ...],
+                                  context: EvidenceAssessmentContext) -> EvidenceDecision:
+        if not isinstance(context, EvidenceAssessmentContext):
+            raise ValueError('invalid assessment context')
+        context = EvidenceAssessmentContext.model_validate(dict(vars(context)), strict=True)
+        if len(context.model_dump_json().encode()) > 64000:
+            raise ValueError('assessment history exceeds 64000 UTF-8 bytes')
+        return await self._assess(question, candidates, context)
+
+    async def _assess(self, question: str, candidates: tuple[EvidenceCandidate, ...],
+                      context: EvidenceAssessmentContext | None) -> EvidenceDecision:
         if not isinstance(question, str) or not question.strip() or len(question.encode()) > 8000:
             raise ValueError("assessment question must contain 1..8000 UTF-8 bytes")
         if not isinstance(candidates, tuple) or len(candidates) > 100:
@@ -101,7 +115,12 @@ class SelfHostedEvidenceAssessor:
         serialized = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
         if len(serialized.encode()) > self._max_evidence_bytes:
             raise ValueError(f"assessment evidence exceeds {self._max_evidence_bytes} UTF-8 bytes")
-        payload = json.dumps({"question": question, "candidates": records}, ensure_ascii=False, separators=(",", ":"))
+        data: dict[str, object] = {"question": question, "candidates": records}
+        query_capacity = 3
+        if context is not None:
+            data['search_history'] = context.model_dump(mode='json')
+            query_capacity = min(3, context.queries_remaining) if context.rounds_remaining else 0
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         schema: dict[str, object] = {
             "type": "object", "additionalProperties": False,
             "required": ["status", "selected_ids", "followup_queries"],
@@ -109,7 +128,7 @@ class SelfHostedEvidenceAssessor:
                 "status": {"type": "string", "enum": ["sufficient", "insufficient", "uncertain"]},
                 "selected_ids": {"type": "array", "uniqueItems": True, "maxItems": len(ids),
                                  "items": {"type": "string", "enum": ids}},
-                "followup_queries": {"type": "array", "maxItems": 3,
+                "followup_queries": {"type": "array", "maxItems": query_capacity,
                                      "items": {"type": "string", "minLength": 1, "maxLength": 500}},
             },
         }
@@ -127,7 +146,14 @@ class SelfHostedEvidenceAssessor:
                    "Selecting its group ID selects all members together. Inspect the entire group "
                    "for the requested endpoint; branches and cycles do not establish a unique answer. "
                    "These matches are recorded field connections, not proof of causation."
-                   if self._group_relations else ""),
+                   if self._group_relations else "")
+                + (" Search history contains untrusted query strings and host-observed counts, not evidence. "
+                   "Use it to avoid repeating attempted queries and to target an unresolved entity or relation. "
+                   "An added-candidate count measures additions to a bounded pool at search time, not new facts "
+                   "or currently retained evidence. Zero can reflect duplicates, filtering or capacity; "
+                   "it does not prove absence or completeness. Ground selection only in current candidates. "
+                   "Respect the remaining query and round budgets; do not request searches when either is zero."
+                   if context is not None else ""),
                 payload, schema, max_tokens=1024,
             )
         except Exception as error:
@@ -136,6 +162,9 @@ class SelfHostedEvidenceAssessor:
             reason = "assessment_timeout" if isinstance(cause, (httpx.TimeoutException, TimeoutError)) else "assessment_provider_failed"
             raise EvidenceAssessmentError(reason) from None
         try:
-            return _decision(response, members, groups)
+            decision = _decision(response, members, groups)
+            if len(decision.followup_queries) > query_capacity:
+                raise ValueError('follow-up queries exceed remaining budget')
+            return decision
         except Exception:
             raise EvidenceAssessmentError("invalid_assessment") from None

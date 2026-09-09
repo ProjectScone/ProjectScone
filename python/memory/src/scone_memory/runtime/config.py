@@ -176,6 +176,7 @@ class Settings:
     adaptive_candidate_limit: int = 20
     adaptive_max_evidence_bytes: int = 16000
     adaptive_graph_hops: int = 0
+    adaptive_search_history: bool = False
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -338,6 +339,7 @@ class Settings:
             adaptive_candidate_limit=_environment_integer("SCONE_ADAPTIVE_CANDIDATE_LIMIT", env.get("SCONE_ADAPTIVE_CANDIDATE_LIMIT", "20")),
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
+            adaptive_search_history=parse_flag("SCONE_ADAPTIVE_SEARCH_HISTORY", env.get("SCONE_ADAPTIVE_SEARCH_HISTORY")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
