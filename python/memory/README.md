@@ -1395,12 +1395,13 @@ answers, or broken paths and propose a replacement. Scone adopts that replacemen
 only after a second review reports it supported. Evidence IDs must come from the
 delivered packet, and issue quotations must match the draft exactly. Malformed
 reviews never trigger an automatic repair call. The reviewer sees the current
-question, draft, and memory packet; it does not receive system instructions or
-the full conversation history.
+question, draft, and memory packet. Explicit `answer_requirements`, when configured,
+are shared with it; other system instructions and full conversation history are
+not supplied.
 
 When enabled, review buffers the draft. The observer receives the final text
 once; only that text enters conversation history and assistant capture. Without
-a reviewer, existing streaming behavior is unchanged. Greetings and other turns
+a reviewer or answer requirements, existing streaming behavior is unchanged. Greetings and other turns
 without prepared memory skip this memory-specific review.
 
 `report` retains the original draft if review fails or remains uncertain and its
@@ -1409,6 +1410,55 @@ reply unless review reports support. Both policies reject stale or unavailable
 sources. The returned `answer_review` receipt records the outcome, correction,
 issue codes, and source status separately; `verified_accuracy` is always false.
 A supported review is a model judgment, not independent proof of correctness.
+
+For consumers that need a constrained answer, configure an output contract:
+
+```python
+from scone_memory.realtime.answer_requirements import AnswerRequirements
+
+requirements = AnswerRequirements(
+    instructions="Return only the requested entity name, without explanation.",
+    max_bytes=160,
+    max_lines=1,
+)
+conversation = TextConversation(
+    memory, "authorized-space", "short-answer-session",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    answer_requirements=requirements,
+    answer_reviewer=SelfHostedAnswerReviewer(endpoint, model, timeout=20),
+    turn_timeout=90,
+)
+```
+
+The same requirements guide generation and review. Code enforces nonblank text,
+UTF-8 byte and line limits before publication or assistant capture; a trailing
+line break counts as another line. `format="json_object"` additionally requires
+one strict JSON object without fences, duplicate keys, or NaN/Infinity constants.
+This checks JSON syntax, not application schema, instruction compliance, or
+factual accuracy. Scone never truncates or rewrites an answer to make it pass.
+
+Requirements work without review and apply to ordinary generation, native tools,
+extractive answers, and abstentions. Output is buffered until checked, including
+turns with no retrieved memory. Incompatible output raises a content-free
+`RuntimeError`; the user's message remains recorded, but the rejected assistant
+text is not published or captured and the conversation closes. Budget checks
+include requirements added to the system message.
+
+An invalid proposed revision is rejected before a confirmation call. Under
+`report`, a compliant original may still be returned; an invalid original is
+withheld under either policy. `answer_review.format_status` describes the returned
+text (`unchecked`, `satisfied`, or `rejected`). The `answer_format_rejected` error
+can also identify a rejected proposal when the returned original is compliant.
+Format acceptance does not establish support: `require_supported` still requires
+a supported review and retained sources.
+
+Standalone callers can pass `requirements=requirements` to `review_answer` or
+`review_tool_answer`; they must inspect the receipt and withhold rejected formats
+as well as stale/unavailable sources. Custom reviewers used with requirements
+must implement `review_with_requirements(question, answer, evidence, evidence_ids,
+requirements)` in addition to `review`. Legacy reviewers continue working when no
+requirements are configured. These are programmatic host options; the default
+HTTP server does not expose per-conversation output contracts yet.
 
 Review uses one deadline, at most two model calls, and a reserve for final source
 checks. Preparation and review share the same budget; each bounded source-read
