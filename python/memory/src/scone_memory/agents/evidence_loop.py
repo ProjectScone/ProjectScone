@@ -48,6 +48,13 @@ class ToolModel(Protocol):
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep: ...
 
 
+class ConstrainedToolModel(ToolModel, Protocol):
+    """Optional provider capability; the host still validates returned text."""
+
+    async def complete_with_requirements(self, messages: list[dict[str, object]],
+        tools: list[dict[str, object]], requirements: AnswerRequirements) -> ToolStep: ...
+
+
 class ToolOutcome(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     call_id: str
@@ -144,6 +151,15 @@ class EvidenceToolLoop:
         self._model, self._tools = model, tools
         self._limits = ToolLoopLimits.model_validate((limits or ToolLoopLimits()).model_dump())
         self._answer_requirements = validated_requirements(answer_requirements)
+
+    async def _complete(self, transcript: list[dict[str, object]], schemas: list[dict[str, object]]) -> ToolStep:
+        messages, tools = json.loads(_json(transcript)), json.loads(_json(schemas))
+        constrained = getattr(self._model, 'complete_with_requirements', None)
+        if self._answer_requirements is None or not callable(constrained):
+            return await self._model.complete(messages, tools)
+        requirements = validated_requirements(self._answer_requirements)
+        assert requirements is not None
+        return await cast(ConstrainedToolModel, self._model).complete_with_requirements(messages, tools, requirements)
 
     async def run(self, messages: list[dict[str, str]]) -> ToolLoopResult:
         limits = self._limits
@@ -267,7 +283,7 @@ class EvidenceToolLoop:
                 try:
                     # Independent copies stop an adapter from mutating the
                     # authoritative transcript, schemas, or paired call IDs.
-                    step = await asyncio.create_task(self._model.complete(json.loads(_json(transcript)), schemas))
+                    step = await asyncio.create_task(self._complete(transcript, schemas))
                     check_deadline()
                 except (asyncio.CancelledError, TimeoutError):
                     raise

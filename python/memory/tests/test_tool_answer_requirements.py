@@ -86,7 +86,7 @@ async def test_provider_requests_preserve_contract_and_original_query(engine, ex
     async def serve(request):
         body = json.loads(request.content)
         requests.append(body)
-        content = json.dumps({'action':'answer', 'answer':answer}) if structured and not exhausted else answer
+        content = '{"action":"answer","answer":'+answer+'}' if structured and not exhausted else answer
         return httpx.Response(200, json={'choices':[{'finish_reason':'stop',
             'message':{'role':'assistant', 'content':content}}]})
     provider = SelfHostedStructuredToolChat if structured else SelfHostedToolChat
@@ -97,10 +97,11 @@ async def test_provider_requests_preserve_contract_and_original_query(engine, ex
         limits=ToolLoopLimits(max_tool_calls=1 if exhausted else 4),
         answer_requirements=AnswerRequirements(format='json_object', instructions='Use the star field.')).run(
             [{'role':'user', 'content':query}])
-    assert result.text == answer and result.tool_calls == result.model_calls == 1
+    assert result.text == ('{"star":"Polaris"}' if structured else answer)
+    assert result.tool_calls == result.model_calls == 1
     assert await result.validate() and result.verified_accuracy is False
     body = requests[0]
-    assert ('response_format' in body) is (structured and not exhausted)
+    assert ('response_format' in body) is structured
     assert {'role':'user', 'content':query} in body['messages']
     if structured:
         assert body['messages'][-1] == {'role':'user', 'content':query}
@@ -125,3 +126,65 @@ async def test_requirements_remain_optional_for_legacy_callers(engine):
     result = await EvidenceToolLoop(Script(ToolStep(content=reply)), binding(engine)).run(
         [{'role':'user', 'content':'Which star?'}])
     assert result.text == reply
+
+
+async def test_capable_provider_receives_separate_contract_snapshot(engine):
+    class Constrained(Script):
+        async def complete(self, messages, tools):
+            pytest.fail('format-capable provider used unconstrained path')
+
+        async def complete_with_requirements(self, messages, tools, requirements):
+            assert requirements.max_lines == 1
+            object.__setattr__(requirements, 'max_lines', None)
+            return ToolStep(content='Polaris\nExplanation')
+
+    with pytest.raises(RuntimeError, match='answer format'):
+        await EvidenceToolLoop(Constrained(), binding(engine),
+            answer_requirements=AnswerRequirements(max_lines=1)).run(
+                [{'role':'user', 'content':'Which star?'}])
+
+
+@pytest.mark.parametrize('exhausted', [False, True])
+async def test_object_generation_preserves_numbers_and_escaped_content(engine, exhausted):
+    await engine.remember('alpha', 'Juniper uses Polaris.', metadata={'team':'blue'})
+    requests = []
+    value = '{\n "measurement": 1.234567890123456789, "large": 1e400, "note": "quoted \\\" text\\nline"\n}'
+    async def serve(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        content = value if exhausted else '{"action":"answer","answer":'+value+'}'
+        return httpx.Response(200, json={'choices':[{'finish_reason':'stop',
+            'message':{'role':'assistant', 'content':content}}]})
+    model = SelfHostedStructuredToolChat('http://127.0.0.1:11434/v1', 'test-model',
+        transport=httpx.MockTransport(serve))
+    result = await EvidenceToolLoop(model, binding(engine), initial_search=True,
+        limits=ToolLoopLimits(max_tool_calls=1 if exhausted else 4),
+        answer_requirements=AnswerRequirements(format='json_object', max_lines=1)).run(
+            [{'role':'user', 'content':'Report the measurement.'}])
+    assert result.text == '{"measurement":1.234567890123456789,"large":1e400,"note":"quoted \\\" text\\nline"}'
+    schema = requests[0]['response_format']['json_schema']['schema']
+    if exhausted:
+        assert schema['type'] == 'object'
+    else:
+        branch = next(b for b in schema['anyOf'] if b['properties']['action']['const']=='answer')
+        assert branch['properties']['answer']['type'] == 'object'
+
+
+async def test_object_contract_preserves_intermediate_tool_calls(engine):
+    await engine.remember('alpha', 'Juniper uses Polaris.', metadata={'team':'blue'})
+    requests = []
+    async def serve(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        content = ('{"action":"search_memory","query":"Juniper","limit":1}'
+                   if len(requests) == 1 else '{"action":"answer","answer":{"star":"Polaris"}}')
+        return httpx.Response(200, json={'choices':[{'finish_reason':'stop',
+            'message':{'role':'assistant', 'content':content}}]})
+    model = SelfHostedStructuredToolChat('http://127.0.0.1:11434/v1', 'test-model',
+        transport=httpx.MockTransport(serve))
+    result = await EvidenceToolLoop(model, binding(engine),
+        answer_requirements=AnswerRequirements(format='json_object')).run(
+            [{'role':'user', 'content':'Which star does Juniper use?'}])
+    assert result.text == '{"star":"Polaris"}' and result.model_calls == 2
+    assert result.tool_calls == 1 and result.tool_outcomes[0].name == 'search_memory'
+    assert result.source_status == 'retained' and await result.validate()

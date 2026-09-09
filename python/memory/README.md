@@ -574,14 +574,29 @@ reply = await EvidenceToolLoop(
 Requirements are validated and copied at construction, supplied on every model
 request, and included in the transcript byte budget. Both early answers and
 answers after tools are exhausted must satisfy the format, UTF-8 byte and line
-limits before `run()` returns. Invalid output raises `RuntimeError` with
-`tool answer format rejected`; it is not trimmed, repaired or retried. The
+limits before `run()` returns. Invalid returned text raises `RuntimeError` with
+`tool answer format rejected`; it is not repaired or retried. The
 loop's own reply limit still applies. Source revalidation remains mandatory.
 The structured adapter's final-writing prompt respects the caller's requested
 format instead of requiring prose or an explanation. `json_object` validates
 JSON object syntax, not a field schema or factual correctness; textual
 instructions guide the model but are not deterministic semantic checks.
-Omitting `answer_requirements` preserves the existing SDK return contract.
+`SelfHostedStructuredToolChat` uses an object-valued answer branch and a final
+JSON-object response schema when these requirements request `json_object`.
+Valid generated objects are rendered as compact JSON for the text API. Only
+whitespace outside strings is removed; number tokens (including precision and
+exponents), escapes, string contents and key order are preserved. Fenced JSON,
+trailing prose, duplicate keys and wrong value types are rejected by the
+provider, not repaired. Raw response formatting can therefore differ from the
+returned JSON serialization; record both when evaluating this mode.
+
+Custom providers may implement the optional
+`ConstrainedToolModel.complete_with_requirements(messages, tools, requirements)`
+capability to apply generation constraints. They receive independent copies
+of both the messages and requirements. Providers with only `complete()` remain
+supported through prompt guidance and the host's return gate. Omitting
+`answer_requirements` preserves the existing SDK return contract and provider
+action schema. TextConversation keeps its separate review/repair boundary.
 
 By default the SDK model chooses search queries. `EvidenceToolLoop(...,
 initial_search=True)` first searches the final user message with `limit=5`,
