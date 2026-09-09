@@ -6,6 +6,8 @@ Retrieval components depend on typed ports rather than on an engine instance.
 | Component | Responsibility |
 |---|---|
 | `core/validation.py` | Shared names, metadata, tags, timestamps and retention rules |
+| `ingestion/records.py` | Batch records, recovery reports and content identity helpers |
+| `ingestion/batch.py` | Chunking, deduplication, embedding, ordered writes, rollback and crash recovery |
 | `retrieval/recall.py` | Lane execution, fusion, source verification, optional reranking and result assembly |
 | `retrieval/fact_recall.py` | Validated indexed fact lookup, scan fallback and historical facts |
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
@@ -24,6 +26,21 @@ freeze stored records: a source can still be deleted or replaced during an
 awaited reranker call, and retained-source checks still run before delivery.
 Bound evidence callbacks remain live.
 
+Batch ingestion and recovery similarly receive an `IngestionRuntime` with
+document/vector stores, an embedder, clock, chunk target and callbacks for
+embedding text and event emission. The internal batch entry point expects the
+engine to check space access first; recovery runs over its configured stores
+during engine startup. The engine retains public remember events,
+attachments, replacement semantics and job coordination. It reexports `Record`,
+`RecoveryReport`, content identity helpers and the existing batch constant.
+
+All fresh records are embedded before the first document write. Each write's
+inflight marker precedes its episode, chunks and vectors; marker removal follows
+vector persistence. Ordinary write errors roll back the partial batch. Recovery
+completes interrupted episodes from their retained content or clears orphan
+markers. This extraction preserves those operations and their ordering; it does
+not add cross-store transactions or change cancellation/recovery semantics.
+
 The refactor preserves candidate depth, filter semantics, fusion ordering,
 scope verification, cancellation propagation and degraded-mode reporting.
 Reranker failures retain baseline ordering; ranking scores do not become
@@ -34,7 +51,7 @@ Existing public engine methods and imports of shared validation helpers remain
 available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
-The engine decomposition is ongoing. Ingestion and recovery, fact lifecycle,
+The engine decomposition is ongoing. Ingestion job coordination, fact lifecycle,
 retention/deletion, activity graphs and import/export still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
@@ -44,3 +61,7 @@ an actual Qdrant replay of 200 unchanged public questions. With identical storag
 and a fixed clock, complete model requests and recall results matched the prior
 implementation on all 200 questions. This is behavior-equivalence evidence,
 not a new answer-accuracy benchmark.
+
+Ingestion checks exercise direct component calls, batch rollback, UTF-8 offsets,
+deduplication and recovery from writes interrupted at different stages. The
+engine contract suite also runs those behaviors with a real Qdrant server.

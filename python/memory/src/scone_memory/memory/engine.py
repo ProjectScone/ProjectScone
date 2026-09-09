@@ -16,6 +16,13 @@ from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
+from ..ingestion import batch as ingestion_batch
+from ..ingestion.batch import EMBED_BATCH as EMBED_BATCH
+from ..ingestion.records import (
+    Record as Record, RecoveryReport as RecoveryReport,
+    _Pending as _Pending, _DupOf as _DupOf,
+    content_hash as content_hash, contextual_prefix as contextual_prefix,
+)
 from ..retrieval import fact_recall
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -23,7 +30,7 @@ from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
-from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
+from ..ingestion.chunker import DEFAULT_TARGET
 from ..core.validation import (
     SPACE_NAME as SPACE_NAME,
     METADATA_KEY as METADATA_KEY,
@@ -43,7 +50,6 @@ from ..core.validation import (
 from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
-    MAX_CONTENT_BYTES,
     Added,
     Attachment,
     BatchDecision,
@@ -71,7 +77,6 @@ from ..core.ports import (
     Embedder,
     Event,
     EventLog,
-    NewChunk,
     NewEpisode,
     NewEvent,
     NewFact,
@@ -81,7 +86,6 @@ from ..core.ports import (
     SourcePage,
     TextFilter,
     VectorIndex,
-    VectorPoint,
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
@@ -90,27 +94,8 @@ from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 #: otherwise read a whole space to prove a negative.
 SOURCE_WALK_PAGE = 200
 SOURCE_WALK_READS = 25
-#: Chunk texts per embedding call during batch ingest.
-EMBED_BATCH = 64
 
 
-def contextual_prefix(episode: "NewEpisode") -> str:
-    """The context a chunk loses when cut from its episode: when it
-    happened, where it came from, and whose it is. Prepended to the text
-    that is embedded (research experiment 8, Anthropic's contextual
-    retrieval without the LLM), never to the text that is stored, so
-    invariant I1 holds and recall still returns exact excerpts. Only
-    fields that exist are named; an empty prefix means no change."""
-    parts = []
-    if episode.created_at:
-        parts.append(episode.created_at[:10])
-    if episode.source:
-        parts.append(episode.source)
-    for key in ("user_id", "agent_id", "session_id"):
-        value = episode.metadata.get(key) if episode.metadata else None
-        if value:
-            parts.append(f"{key.replace('_', ' ')} {value}")
-    return " | ".join(parts)
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
 EXTERNAL_EVENT_KINDS = ("job", "agent")
@@ -154,34 +139,6 @@ class Profile:
     recent: list[RecentActivity] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class Record:
-    """One thing to remember, for batch ingest and for import."""
-
-    content: str
-    kind: str = "note"
-    source: Optional[str] = None
-    tags: Sequence[str] = ()
-    created_at: Optional[str] = None
-    metadata: Mapping[str, str] = field(default_factory=dict)
-    #: Identity for deduplication. By default two records with the same
-    #: text in a space are one episode. A transcript is different: the
-    #: second "ok" in a conversation is a second turn, so a chat adapter
-    #: keys each turn ("<session>#<n>") and identical text under different
-    #: keys is stored twice, while a retried write of the same key is not.
-    dedup_key: Optional[str] = None
-    #: The identity a dump carries. Import passes it through so a moved
-    #: store deduplicates exactly as its source did; callers leave it None.
-    content_hash: Optional[str] = None
-
-    @classmethod
-    def from_dict(cls, data: Mapping) -> "Record":
-        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash") if k in data}
-        if "content" not in known:
-            raise InvalidInput("a record needs content")
-        return cls(**known)
-
-
 @dataclass
 class Replaced:
     """What ``replace`` did: the record as stored (or found), the outcome,
@@ -190,17 +147,6 @@ class Replaced:
     added: Added
     outcome: str
     replaced: Optional[ForgetReceipt] = None
-
-
-@dataclass
-class RecoveryReport:
-    """What recover() found: episodes brought to a complete state, of
-    which how many needed their chunks rebuilt, and marks with no
-    episode behind them (the write never landed)."""
-
-    completed: int = 0
-    rechunked: int = 0
-    forgotten: int = 0
 
 
 @dataclass
@@ -226,24 +172,6 @@ class _Placement:
     bound: Optional[str]
     bound_reason: Optional[str]
     bound_by: Optional[int]
-
-
-@dataclass(frozen=True)
-class _Pending:
-    slot: int
-    new: NewEpisode
-    #: Chunk texts, sliced in code points.
-    texts: list[str]
-    #: The same spans as UTF-8 byte offsets (spec rule 1.2).
-    spans: list[tuple[int, int]]
-
-
-@dataclass(frozen=True)
-class _DupOf:
-    """A record identical to an earlier one in the same batch; its id is
-    known only after that one is written."""
-
-    slot: int
 
 
 class _RecallEventItem(TypedDict):
@@ -379,58 +307,8 @@ class MemoryEngine:
         the stored content, which never changed) or, if nothing landed,
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
-        report = RecoveryReport()
-        marks = await self.documents.inflight()
-        for space, digest in marks:
-            episode = await self.documents.episode_by_hash(space, digest)
-            if episode is None:
-                report.forgotten += 1
-            else:
-                chunks = await self.documents.chunks_of(space, episode.episode_id)
-                if not chunks:
-                    spans = chunk_spans(episode.content, self.chunk_target)
-                    chunks = await self.documents.insert_chunks(
-                        [
-                            NewChunk(
-                                episode_id=episode.episode_id,
-                                space=space,
-                                ordinal=i,
-                                start=bs.start,
-                                end=bs.end,
-                                text=episode.content[sp.start : sp.end],
-                                created_at=episode.created_at,
-                            )
-                            for i, (sp, bs) in enumerate(zip(spans, byte_spans(episode.content, spans)))
-                        ]
-                    )
-                    report.rechunked += 1
-                as_new = NewEpisode(
-                    space=space, kind=episode.kind, content=episode.content, content_hash=episode.content_hash,
-                    created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
-                    tags=episode.tags, metadata=episode.metadata,
-                )
-                texts = [self._embed_text(as_new, c.text) for c in chunks]
-                vectors: list[list[float]] = []
-                for i in range(0, len(texts), EMBED_BATCH):
-                    vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
-                await self.vectors.upsert(
-                    [
-                        VectorPoint(
-                            chunk_id=c.chunk_id, space=space, episode_id=episode.episode_id, created_at=episode.created_at,
-                            vector=v, tags=episode.tags, metadata=episode.metadata,
-                        )
-                        for c, v in zip(chunks, vectors)
-                    ]
-                )
-                report.completed += 1
-            await self.documents.clear_inflight(space, digest)
-        if marks:
-            for space in sorted({s for s, _ in marks}):
-                await self._emit(space, "recover", {
-                    "marks": sum(1 for s, _ in marks if s == space),
-                    "completed": report.completed, "rechunked": report.rechunked, "forgotten": report.forgotten,
-                })
-        return report
+
+        return await ingestion_batch.recover(self._ingestion_runtime())
 
     # -- episodes ---------------------------------------------------------
 
@@ -554,74 +432,14 @@ class MemoryEngine:
         })
         return resolved
 
+    def _ingestion_runtime(self) -> ingestion_batch.IngestionRuntime:
+        return ingestion_batch.IngestionRuntime(
+            self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
+            self._embed_text, self._emit,
+        )
+
     async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
-        when = self.clock()
-        results: list[Added | _DupOf | None] = []
-        fresh: list[_Pending] = []
-        seen: dict[str, int] = {}  # content hash -> index into results
-        for record in records:
-            content = record.content
-            if not isinstance(content, str) or not content.strip():
-                raise InvalidInput("content must not be empty")
-            if len(content.encode()) > MAX_CONTENT_BYTES:
-                raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-            kind = record.kind
-            if kind not in KINDS:
-                raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
-            clean_tags = normalise_tags(record.tags)
-            clean_meta = normalise_metadata(record.metadata or {})
-            happened = normalise_time(record.created_at) if record.created_at else when
-            digest = record.content_hash or content_hash(space, content, record.dedup_key)
-            if not digest or len(digest) > 128:
-                raise InvalidInput("content_hash must be 1..=128 chars")
-            if digest in seen:
-                results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
-                fresh_or_dup = seen[digest]
-                results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
-                continue
-            existing = await self.documents.episode_by_hash(space, digest)
-            if existing is not None:
-                seen[digest] = len(results)
-                results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
-                continue
-            seen[digest] = len(results)
-            results.append(None)
-            spans = chunk_spans(content, self.chunk_target)
-            fresh.append(
-                _Pending(
-                    slot=len(results) - 1,
-                    texts=[content[sp.start : sp.end] for sp in spans],
-                    new=NewEpisode(
-                        space=space,
-                        kind=kind,
-                        content=content,
-                        content_hash=digest,
-                        created_at=happened,
-                        ingested_at=when,
-                        source=record.source,
-                        tags=clean_tags,
-                        metadata=clean_meta,
-                    ),
-                    spans=[(sp.start, sp.end) for sp in byte_spans(content, spans)],
-                )
-            )
-
-        if fresh:
-            texts = [self._embed_text(p.new, t) for p in fresh for t in p.texts]
-            vectors: list[list[float]] = []
-            for i in range(0, len(texts), EMBED_BATCH):
-                vectors.extend(await self.embedder.embed(texts[i : i + EMBED_BATCH]))
-            await self._write_batch(space, fresh, vectors, results)
-            await self.documents.bump_revision(space)
-
-        resolved: list[Added] = []
-        for r in results:
-            if isinstance(r, _DupOf):
-                target = cast(Added, results[r.slot])
-                resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
-            else:
-                resolved.append(cast(Added, r))
-        return resolved
+        return await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
@@ -633,54 +451,7 @@ class MemoryEngine:
     async def _write_batch(
         self, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
     ) -> None:
-        written: list[int] = []
-        try:
-            offset = 0
-            for pending in fresh:
-                # The mark outlives a crash; clear_inflight below is the
-                # last thing this episode's write does (see recover()).
-                await self.documents.mark_inflight(space, pending.new.content_hash)
-                episode = await self.documents.insert_episode(pending.new)
-                written.append(episode.episode_id)
-                chunks = await self.documents.insert_chunks(
-                    [
-                        NewChunk(
-                            episode_id=episode.episode_id,
-                            space=space,
-                            ordinal=i,
-                            start=a,
-                            end=b,
-                            text=text,
-                            created_at=episode.created_at,
-                        )
-                        for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
-                    ]
-                )
-                await self.vectors.upsert(
-                    [
-                        VectorPoint(
-                            chunk_id=c.chunk_id,
-                            space=space,
-                            episode_id=episode.episode_id,
-                            created_at=episode.created_at,
-                            vector=v,
-                            tags=pending.new.tags,
-                            metadata=pending.new.metadata,
-                        )
-                        for c, v in zip(chunks, vectors[offset : offset + len(chunks)])
-                    ]
-                )
-                offset += len(chunks)
-                await self.documents.clear_inflight(space, pending.new.content_hash)
-                results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
-        except Exception:
-            # Undo the partial batch so a retry starts clean.
-            for episode_id in written:
-                removed = await self.documents.delete_episode(space, episode_id)
-                await self.vectors.delete(removed)
-            for pending in fresh:
-                await self.documents.clear_inflight(space, pending.new.content_hash)
-            raise
+        await ingestion_batch.write_batch(self._ingestion_runtime(), space, fresh, vectors, results)
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
         """The episode, or Gone when a tombstone says it was forgotten, or
@@ -2150,14 +1921,6 @@ def _rederived(record: Record, source_space: Optional[str], space: str) -> Recor
     if record.content_hash == content_hash(str(source_space), record.content):
         return dataclasses.replace(record, content_hash=None)
     return record
-
-
-def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:
-    if dedup_key is not None:
-        if not dedup_key or len(dedup_key) > 256:
-            raise InvalidInput("dedup_key must be 1..=256 chars")
-        return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
-    return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()
 
 
 def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
