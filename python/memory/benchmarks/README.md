@@ -23,6 +23,10 @@ the original answer instructions to that reviewer. Exact match falls to 62%:
 preserving output instructions does not fix comparison and entity-role errors.
 The report retains every changed answer and distinguishes fallback preservation
 from successful repair. Review remains optional.
+The [repeated-search compaction comparison](public-search-compaction-v1.results.md)
+records 400 paired tool-loop turns. Exact match stays at 56.5% while offered
+tool-result bytes fall 28.11%; dataset-level gains and regressions keep this
+presentation option disabled by default.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
