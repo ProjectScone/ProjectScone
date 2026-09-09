@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 from ..core.errors import InvalidInput
-from ..memory.engine import METADATA_KEY
+from ..core.validation import METADATA_KEY
 
 #: Conditions in one filter. Beyond this it is a program in a loop.
 MAX_CONDITIONS = 200

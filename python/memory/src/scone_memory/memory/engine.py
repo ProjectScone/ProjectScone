@@ -11,22 +11,36 @@ from __future__ import annotations
 import dataclasses
 
 import hashlib
-import math
-import re
 import time
 from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from ..retrieval import fact_recall, fusion
+from ..retrieval import fact_recall
+from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+                                UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
-from ..retrieval.reranking import (Reranker, RerankCandidate, candidate_is_retained, rerank_candidates,
-                                   validate_candidate_limit, validate_rerank_options)
+from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET, byte_spans, chunk_spans
+from ..core.validation import (
+    SPACE_NAME as SPACE_NAME,
+    METADATA_KEY as METADATA_KEY,
+    MAX_METADATA_KEYS as MAX_METADATA_KEYS,
+    MAX_METADATA_VALUE as MAX_METADATA_VALUE,
+    KINDS as KINDS,
+    MAX_QUERY as MAX_QUERY,
+    MAX_LIMIT as MAX_LIMIT,
+    MAX_SOURCE as MAX_SOURCE,
+    retention_policy as retention_policy,
+    check_space as check_space,
+    normalise_tags as normalise_tags,
+    normalise_metadata as normalise_metadata,
+    normalise_term as normalise_term,
+    normalise_time as normalise_time,
+)
 from ..core.errors import Conflict, Gone, InvalidInput, NotFound
-from ..retrieval.lexical import tokenize
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     MAX_CONTENT_BYTES,
@@ -47,9 +61,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
-    RecallItem,
     RecallResult,
-    RerankTrace,
     Status,
 )
 from ..capture.redact import SECRET_PATTERNS, redact_secrets  # noqa: F401 - re-exported for callers
@@ -73,20 +85,6 @@ from ..core.ports import (
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
 
-SPACE_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
-METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-MAX_METADATA_KEYS = 16
-MAX_METADATA_VALUE = 256
-KINDS = ("note", "file", "conversation", "observation", "connector")
-MAX_QUERY = 1_000
-MAX_LIMIT = 50
-MAX_SOURCE = 1_000
-#: How many candidates each lane contributes before fusion.
-LANE_DEPTH = 4
-#: How much wider each lane looks when the store cannot take the filter
-#: itself. Bounded: post-filtering cannot be made exact by widening, so
-#: this buys a reasonable corpus rather than pretending to buy every one.
-UNFILTERED_DEPTH = 25
 #: Rows read at a time when walking the inventory for matches, and how
 #: many such reads one page may cost. A filter matching nothing would
 #: otherwise read a whole space to prove a negative.
@@ -1074,277 +1072,16 @@ class MemoryEngine:
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
         ``rerank=False`` explicitly disables the configured adapter."""
-        check_space(space)
-        query = query.strip()
-        if not query or len(query) > MAX_QUERY:
-            raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
-        limit = max(1, min(limit, MAX_LIMIT))
-        candidate_limit = validate_candidate_limit(self.candidate_limit if candidate_limit is None else candidate_limit)
-        if type(rerank) is not bool:
-            raise InvalidInput("rerank must be a boolean")
-        active_reranker = self.reranker if rerank else None
-        if active_reranker is not None:
-            validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
-        boundary = normalise_time(as_of) if as_of else None
-        clean_tags = normalise_tags(tags)
-        clean_where = normalise_metadata(where or {})
-        if kind is not None and kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}, got {kind!r}")
-        if source_prefix is not None and len(source_prefix) > MAX_SOURCE:
-            raise InvalidInput(f"source_prefix must be at most {MAX_SOURCE} chars")
-        since_at = normalise_time(since) if since else None
-        until_at = normalise_time(until) if until else None
-        # Refused before any lane runs: a filter that cannot mean anything
-        # must not come back as an answer drawn from everything. Imported
-        # here because filters read this module's rule for a metadata key.
-        from ..retrieval.filters import parse_filter
-
-        narrow_by = parse_filter(conditions) if conditions is not None else None
-        # A store that cannot take the filter returns its best few, all of
-        # which the filter may then reject, and the search comes back
-        # empty while the memory that answers it sits outside the window.
-        in_store = narrow_by is None or bool(getattr(self.documents, "narrows_metadata", False))
-        narrowing = (kind is not None or source_prefix is not None or since_at is not None
-                     or until_at is not None or narrow_by is not None)
-        depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
-        degraded: list[str] = []
-        started = time.perf_counter()
-        latency: dict[str, float] = {}
-        evidence = {
-            **self._query_for_evidence(query),
-            "limit": limit,
-            "as_of": boundary,
-            "tags": list(clean_tags),
-            "where": clean_where,
-            "embedder": self.embedder.id,
-            "contextual_embeddings": self.contextual_embeddings,
-            "similarity_floor": self.similarity_floor,
-            "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
-                       "conditions": dict(conditions) if conditions is not None else None,
-                       "conditions_in_store": None if narrow_by is None else in_store},
-        }
-
-        vector_lane: list[tuple[int, float]] = []
-        try:
-            t0 = time.perf_counter()
-            [qvec] = await self.embedder.embed([query])
-            latency["embed"] = _ms(t0)
-            t0 = time.perf_counter()
-            vector_lane = await self.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
-            latency["vector"] = _ms(t0)
-        except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
-            degraded.append(f"vectors: {type(e).__name__}: {e}")
-
-        if candidate_limit is not None or active_reranker is not None:
-            vector_lane = vector_lane[:depth]
-
-        text_lane: list[tuple[int, float]] = []
-        try:
-            t0 = time.perf_counter()
-            text_lane = await self.documents.search_text(
-                space, query, depth,
-                TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
-            )
-            latency["text"] = _ms(t0)
-        except Exception as e:  # noqa: BLE001
-            degraded.append(f"text: {type(e).__name__}: {e}")
-
-        if candidate_limit is not None or active_reranker is not None:
-            text_lane = text_lane[:depth]
-
-        if len(degraded) == 2:
-            latency["total"] = _ms(started)
-            await self._emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                               "error": "both lanes failed"})
-            raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
-
-        # An index that ranks without a cosine (a bridged store with an
-        # unknown score) reports NaN: its order counts for fusion, but no
-        # similarity is shown and no confidence is judged from it.
-        similarity = {cid: (None if math.isnan(score) else score) for cid, score in vector_lane}
-        # The best cosine the vector lane saw, before fusion, is the
-        # confidence signal. A degraded vector lane cannot judge (None); a
-        # lane that ran and found nothing is as weak as evidence gets.
-        top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
-        vector_ran = not any(d.startswith("vectors:") for d in degraded)
-        low_confidence: Optional[bool] = None
-        if self.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
-            low_confidence = top_similarity is None or top_similarity < self.similarity_floor
-        ranks = {
-            "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
-            "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
-        }
-        fused = fusion.rrf([vector_lane, text_lane])
-        chunks = {c.chunk_id: c for c in await self.documents.get_chunks(space, list(fused))}
-        now = self.clock()
-        items = [
-            fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now), similarity.get(cid))
-            for cid, score in fused.items()
-            if cid in chunks
-        ]
-        items = fusion.order(items)
-        episode_of = {cid: c.episode_id for cid, c in chunks.items()}
-        capped_items = fusion.cap_per_episode(items, episode_of)
-        baseline_allowed = {item.chunk_id for item in capped_items}
-        if active_reranker is None:
-            items = capped_items
-        episodes: dict[int, Episode] = {}
-        if narrowing:
-            # Read every candidate's episode and keep the ones that fit,
-            # before the limit is applied; the window is the lanes' depth.
-            for item in items:
-                eid = chunks[item.chunk_id].episode_id
-                if eid not in episodes:
-                    found = await self.documents.get_episode(space, eid)
-                    if found is not None:
-                        episodes[eid] = found
-            items = [
-                item for item in items
-                if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
-                and _fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
-            ]
-        scope = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                           kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
-        if active_reranker is not None:
-            # Stores/indexes may be stale or ignore optional filters. No adapter
-            # sees text until its original source, bytes and scope are verified.
-            retained = []
-            for item in items:
-                chunk = chunks[item.chunk_id]
-                episode = episodes.get(chunk.episode_id)
-                if episode is None:
-                    episode = await self.documents.get_episode(space, chunk.episode_id)
-                    if episode is not None:
-                        episodes[chunk.episode_id] = episode
-                if episode is not None and candidate_is_retained(chunk, episode, space, scope):
-                    retained.append(item)
-            items = retained
-        candidate_items = items
-        items = [item for item in items if item.chunk_id in baseline_allowed][:limit]
-        if self.demote_restated:
-            items = fusion.demote_restated(
-                items,
-                {cid: c.text for cid, c in chunks.items()},
-                {cid: c.created_at for cid, c in chunks.items()},
-            )
-        normalization_base = items[0].score if items else 0.0
-        items = fusion.normalise(items)
-        rerank_scores: dict[int, float] = {}
-        rerank_trace: RerankTrace | None = None
-        if active_reranker is not None:
-            # Preserve the legacy denominator, including restatement demotion,
-            # for both returned baseline items and additional candidates.
-            normalized = {
-                item.chunk_id: fusion.Fused(item.chunk_id,
-                    item.score / normalization_base if normalization_base > 0 else item.score,
-                    item.similarity)
-                for item in candidate_items
-            }
-            baseline_ids = [item.chunk_id for item in items]
-            candidate_order = baseline_ids + [item.chunk_id for item in candidate_items if item.chunk_id not in baseline_ids]
-            candidates = tuple(RerankCandidate(
-                chunk_id=cid, episode_id=chunks[cid].episode_id, text=chunks[cid].text,
-                source=episodes[chunks[cid].episode_id].source, created_at=chunks[cid].created_at,
-                baseline_score=normalized[cid].score, similarity=normalized[cid].similarity,
-                lanes=tuple((lane, rank[cid]) for lane, rank in ranks.items() if cid in rank),
-            ) for cid in candidate_order)
-            outcome = await rerank_candidates(active_reranker, query, candidates,
-                limit=self.rerank_limit, max_bytes=self.rerank_max_bytes, timeout=self.rerank_timeout)
-            rerank_trace = outcome.trace
-            latency["rerank"] = outcome.trace.duration_ms
-            if outcome.failure is not None:
-                degraded.append(f"rerank: {outcome.failure}")
-            if outcome.trace.status == "applied":
-                rerank_scores = outcome.scores
-                ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]
-                items = fusion.cap_per_episode([normalized[cid] for cid in ranked], episode_of)[:limit]
-            # A cooperative adapter can yield while a source is forgotten or
-            # replaced. Never emit a stale passage after that asynchronous step.
-            fresh = {chunk.chunk_id: chunk for chunk in await self.documents.get_chunks(space, [item.chunk_id for item in items])} if items else {}
-            surviving = []
-            for item in items:
-                fresh_chunk = fresh.get(item.chunk_id)
-                if fresh_chunk is None or fresh_chunk != chunks[item.chunk_id]:
-                    continue
-                episode = await self.documents.get_episode(space, fresh_chunk.episode_id)
-                if episode is not None and candidate_is_retained(fresh_chunk, episode, space, scope):
-                    episodes[fresh_chunk.episode_id] = episode
-                    surviving.append(item)
-            if len(surviving) < len(items):
-                degraded.append("rerank: retained_sources_changed")
-            items = surviving
-
-        for item in items:
-            eid = chunks[item.chunk_id].episode_id
-            if eid not in episodes:
-                found = await self.documents.get_episode(space, eid)
-                if found is not None:
-                    episodes[eid] = found
-
-        result_items = []
-        for item in items:
-            chunk = chunks[item.chunk_id]
-            episode = episodes.get(chunk.episode_id)
-            result_items.append(
-                RecallItem(
-                    chunk_id=chunk.chunk_id,
-                    episode_id=chunk.episode_id,
-                    text=chunk.text,
-                    score=round(item.score, 6),
-                    rerank_score=rerank_scores.get(item.chunk_id),
-                    similarity=None if item.similarity is None else round(item.similarity, 6),
-                    lanes={lane: r[chunk.chunk_id] for lane, r in ranks.items() if chunk.chunk_id in r},
-                    created_at=chunk.created_at,
-                    source=episode.source if episode else None,
-                    tags=episode.tags if episode else (),
-                    metadata=dict(episode.metadata) if episode else {},
-                )
-            )
-        fact_scope = scope if narrowing or clean_tags or clean_where else None
-        facts = await self._facts_for_query(space, query, boundary or now, scope=fact_scope, degraded=degraded)
-        previous = await self._history_for(space, facts, boundary or now, scope=fact_scope) if history else []
-        counts = await self.documents.counts(space)
-        result = RecallResult(
-            items=result_items,
-            rerank=rerank_trace,
-            facts=facts,
-            history=previous,
-            degraded=degraded,
-            top_similarity=top_similarity,
-            low_confidence=low_confidence,
-            returned_bytes=sum(len(i.text.encode()) for i in result_items),
-            space_bytes=counts.bytes,
+        runtime = RecallRuntime(
+            documents=self.documents, vectors=self.vectors, embedder=self.embedder,
+            clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
+            candidate_limit=self.candidate_limit, reranker=self.reranker,
+            rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
+            rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
+            demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
         )
-        latency["total"] = _ms(started)
-        if candidate_limit is not None:
-            evidence["candidate_limit"] = candidate_limit
-        if rerank_trace is not None:
-            evidence["rerank"] = rerank_trace.model_dump(mode="json")
-        event = await self._emit(space, "recall", {
-            **evidence,
-            "latency_ms": latency,
-            "degraded": degraded,
-            # Only the returned items are recorded; candidates the lanes
-            # saw but fusion dropped are not, so coverage is "returned".
-            "items": [
-                {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
-                 "similarity": i.similarity, "lanes": i.lanes,
-                 **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
-                for i in result_items
-            ],
-            "items_coverage": "returned",
-            "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
-            "top_similarity": top_similarity,
-            "low_confidence": low_confidence,
-            "facts": len(facts),
-            "fact_ids": [f.fact_id for f in facts],
-            "returned_bytes": result.returned_bytes,
-            "space_bytes": result.space_bytes,
-        })
-        if event is not None:
-            result.event_id = event.event_id
-        return result
+        return await recall(runtime, space, query, limit, as_of, tags, where, history,
+                            kind, source_prefix, since, until, conditions, candidate_limit, rerank)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
@@ -2377,21 +2114,6 @@ class MemoryEngine:
 # -- validation helpers -----------------------------------------------------
 
 
-
-
-def retention_policy(policy: Mapping[str, float]) -> dict[str, float]:
-    """A retention policy: episode kinds to the days they are kept. Only
-    episodes have retention; facts, links and tombstones are not kinds."""
-    clean: dict[str, float] = {}
-    for kind, days in dict(policy or {}).items():
-        if kind not in KINDS:
-            raise InvalidInput(f"retention kind must be one of {KINDS}, got {kind!r}")
-        if isinstance(days, bool) or not isinstance(days, (int, float)) or not math.isfinite(days) or days <= 0:
-            raise InvalidInput(f"retention days for {kind} must be a positive number, got {days!r}")
-        clean[kind] = float(days)
-    return clean
-
-
 def _reason(reason: str) -> str:
     reason = reason.strip()
     if not reason or len(reason) > 500:
@@ -2417,52 +2139,6 @@ def _covers(fact: Fact, instant) -> bool:
     if parse_rfc3339(fact.valid_from) > instant:
         return False
     return fact.valid_until is None or parse_rfc3339(fact.valid_until) > instant
-
-
-def check_space(space: str) -> None:
-    if not SPACE_NAME.match(space or ""):
-        raise InvalidInput(f"space name must be 1..=64 chars of [a-z0-9-_], got {space!r}")
-
-
-def normalise_tags(tags: Sequence[str]) -> tuple[str, ...]:
-    seen: list[str] = []
-    for tag in tags:
-        clean = tag.strip().casefold()
-        if not clean:
-            continue
-        if len(clean) > 64:
-            raise InvalidInput(f"tag too long: {tag!r}")
-        if clean not in seen:
-            seen.append(clean)
-    return tuple(seen)
-
-
-def normalise_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
-    if len(metadata) > MAX_METADATA_KEYS:
-        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys")
-    clean: dict[str, str] = {}
-    for key, value in metadata.items():
-        if not METADATA_KEY.match(key or ""):
-            raise InvalidInput(f"metadata key must match [a-z][a-z0-9_]{{0,31}}, got {key!r}")
-        if not isinstance(value, str) or not value or len(value) > MAX_METADATA_VALUE:
-            raise InvalidInput(f"metadata value for {key!r} must be 1..={MAX_METADATA_VALUE} chars")
-        clean[key] = value
-    return clean
-
-
-def normalise_term(value: str, what: str) -> str:
-    clean = " ".join(value.strip().casefold().split())
-    if not clean:
-        raise InvalidInput(f"{what} must not be empty")
-    return clean
-
-
-def normalise_time(value: str) -> str:
-    try:
-        return format_rfc3339(parse_rfc3339(value))
-    except ValueError as e:
-        raise InvalidInput(f"not an RFC 3339 timestamp: {value!r}") from e
-
 
 
 def _rederived(record: Record, source_space: Optional[str], space: str) -> Record:
