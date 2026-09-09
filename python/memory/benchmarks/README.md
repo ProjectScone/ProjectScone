@@ -9,6 +9,9 @@ The [generation follow-up](passage-window-generation-v1.results.md) records
 200 additional Gemma responses, including exact-match gains and regressions.
 The [cross-encoder retrieval comparison](public-reranking-v1.results.md) measures
 wider candidate pools and CPU reranking, including coverage regressions and cost.
+The [retained-source comparison](source-budget-v1.results.md) measures five,
+eight and ten sources within the same context budget, with a separately recorded
+native shutdown failure after all observations were saved.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
