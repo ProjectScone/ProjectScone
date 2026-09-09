@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from ..agents.evidence_loop import ToolCall, ToolStep
 from .llm import _thinking_options
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
+from .tool_diagnostics import ToolCallDiagnostics
 
 if TYPE_CHECKING:
     import httpx
@@ -135,18 +136,34 @@ class SelfHostedToolChat:
             headers['Authorization'] = f'Bearer {self._key}'
         started = time.monotonic()
         outcome = 'cancelled'
+        diagnostics = ToolCallDiagnostics(protocol, started, len(encoded), self._max_tokens, self._timeout)
+        diagnostics.log_started(logger)
 
         async def request() -> ToolStep:
             async with httpx.AsyncClient(timeout=self._timeout, trust_env=False, follow_redirects=False,
                                         transport=self._transport) as client:
                 async with client.stream('POST', self._endpoint, content=encoded, headers=headers) as response:
+                    diagnostics.phase = 'response'
+                    diagnostics.http_status = response.status_code
+                    diagnostics.headers_ms = (time.monotonic() - started) * 1000
                     response.raise_for_status()
                     raw = bytearray()
                     async for part in response.aiter_bytes():
+                        diagnostics.response_bytes += len(part)
                         if len(raw) + len(part) > self._max_bytes:
+                            diagnostics.failure_kind = 'response_bytes'
                             raise ValueError('tool response byte limit')
                         raw.extend(part)
-                    result = parse(bytes(raw))
+                    diagnostics.phase = 'parse'
+                    response_body = bytes(raw)
+                    try:
+                        metadata = _decode(response_body)
+                    except (ValueError, TypeError, RecursionError):
+                        pass  # The existing parser still owns response acceptance.
+                    else:
+                        diagnostics.observe(metadata)
+                    result = parse(response_body)
+                    diagnostics.phase = 'cleanup'
             return result
 
         try:
@@ -158,13 +175,26 @@ class SelfHostedToolChat:
                 if time.monotonic() - started >= self._timeout:
                     raise TimeoutError()
                 outcome = 'completed'
+                diagnostics.phase = 'completed'
                 return result
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             outcome = 'failed'
+            if diagnostics.failure_kind is None:
+                if isinstance(exc, httpx.TimeoutException):
+                    diagnostics.failure_kind = 'transport_timeout'
+                elif isinstance(exc, TimeoutError):
+                    diagnostics.failure_kind = 'request_timeout'
+                elif isinstance(exc, httpx.HTTPStatusError):
+                    diagnostics.failure_kind = 'http_error'
+                elif isinstance(exc, httpx.RequestError):
+                    diagnostics.failure_kind = 'transport_error'
+                elif diagnostics.phase == 'parse' and isinstance(exc, (ValueError, TypeError, RecursionError)):
+                    diagnostics.failure_kind = 'invalid_response'
+                else:
+                    diagnostics.failure_kind = 'internal_error'
             raise RuntimeError('tool model unavailable') from None
         finally:
             # No prompts, responses, endpoint credentials, or exception text.
-            logger.info('tool_model.finished protocol=%s outcome=%s elapsed_ms=%.3f', protocol, outcome,
-                        (time.monotonic() - started) * 1000)
+            diagnostics.log_finished(logger, outcome)
