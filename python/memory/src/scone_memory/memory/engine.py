@@ -491,7 +491,7 @@ class MemoryEngine:
             days = clean.get(episode.kind)
             if days is not None and (now - parse_rfc3339(episode.created_at)).total_seconds() > days * 86400:
                 due.append(episode)
-        due.sort(key=lambda e: (e.created_at, e.episode_id))
+        due.sort(key=lambda e: (parse_rfc3339(e.created_at), e.episode_id))
         report = ExpiryReport(space=space, policy=dict(clean), remaining=len(due), dry_run=dry_run)
         if dry_run:
             return report
