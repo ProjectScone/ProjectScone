@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_review, retention
+from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -750,6 +750,10 @@ class MemoryEngine:
 
     # -- facts ------------------------------------------------------------
 
+    def _relationships_runtime(self) -> fact_relationships.FactRelationshipsRuntime:
+        return fact_relationships.FactRelationshipsRuntime(self.documents, self.clock, self._emit,
+            self._living, self._assert_placed, self.link_facts, self._depends_on)
+
     async def assert_fact(
         self,
         space: str,
@@ -776,31 +780,9 @@ class MemoryEngine:
         a link records each premise. Both are checked before anything is
         written: an unknown target, one in another space, or one that is
         only proposed or declined refuses the whole assertion."""
-        await self._living(space)
-        check_space(space)
-        premises = [int(f) for f in derived_from]
-        if premises:
-            if origin == "stated":
-                origin = "inferred"
-            elif origin != "inferred":
-                raise InvalidInput("a derived claim is inferred; it cannot claim another origin")
-        targets = {}
-        for target_id in ([extends] if extends is not None else []) + premises:
-            target = await self.documents.get_fact(space, target_id)
-            if target is None:
-                raise NotFound(f"fact {target_id} not found in {space!r}")
-            if not target.in_ledger:
-                raise InvalidInput(f"fact {target_id} is {target.status}; only a held or closed fact can be built on")
-            targets[target_id] = target
-        if extends is not None and (targets[extends].subject, targets[extends].predicate) == (subject, predicate):
-            raise InvalidInput("an extension cannot supersede what it extends; assert an update instead")
-        fact = await self._assert_placed(space, subject, predicate, object, valid_from=valid_from, confidence=confidence,
-                                         source_episode_id=source_episode_id, origin=origin, proposed=proposed, quote=quote)
-        if extends is not None:
-            await self.link_facts(space, fact.fact_id, extends, "extends")
-        for premise in premises:
-            await self.link_facts(space, fact.fact_id, premise, "derived_from")
-        return fact
+        return await fact_relationships.assert_fact(self._relationships_runtime(), space, subject, predicate, object,
+            valid_from=valid_from, confidence=confidence, source_episode_id=source_episode_id,
+            origin=origin, proposed=proposed, quote=quote, extends=extends, derived_from=derived_from)
 
     async def link_facts(
         self, space: str, from_fact: int, to_fact: int, kind: str, *,
@@ -810,38 +792,8 @@ class MemoryEngine:
         from / contradicts / supports ``to_fact``. The same link twice is one
         link. A quote must sit in the source episode it names. A dependency
         (extends, derived_from) that would close a cycle is refused."""
-        await self._living(space)
-        check_space(space)
-        if kind not in LINK_KINDS:
-            raise InvalidInput(f"link kind must be one of {LINK_KINDS}, got {kind!r}")
-        if from_fact == to_fact:
-            raise InvalidInput("a fact cannot be linked to itself")
-        for fact_id in (from_fact, to_fact):
-            if await self.documents.get_fact(space, fact_id) is None:
-                raise NotFound(f"fact {fact_id} not found in {space!r}")
-        if quote is not None:
-            if not quote.strip() or len(quote) > 2000:
-                raise InvalidInput("quote must be 1..2000 characters when given")
-            if source_episode_id is None:
-                raise InvalidInput("a quote needs a source_episode_id to be checked against")
-            episode = await self.documents.get_episode(space, source_episode_id)
-            if episode is None:
-                raise NotFound(f"source episode {source_episode_id} not found in {space!r}")
-            if quote not in episode.content:
-                raise InvalidInput(f"quote is not a substring of episode {source_episode_id}; the link was not stored")
-        for existing in await self.documents.fact_links(space, from_fact):
-            if (existing.from_fact, existing.to_fact, existing.kind) == (from_fact, to_fact, kind):
-                return existing
-        if kind in DEPENDENCY_KINDS and await self._depends_on(space, to_fact, from_fact):
-            raise InvalidInput(f"fact {from_fact} cannot {kind.replace('_', ' ')} fact {to_fact}: that would close a dependency cycle")
-        link = await self.documents.insert_fact_link(NewFactLink(
-            space=space, from_fact=from_fact, to_fact=to_fact, kind=kind, created_at=self.clock(),
-            source_episode_id=source_episode_id, quote=quote,
-        ))
-        await self.documents.bump_revision(space)
-        await self._emit(space, "fact_link", {"link_id": link.link_id, "from_fact": from_fact, "to_fact": to_fact,
-                                              "kind": kind, "source_episode_id": source_episode_id})
-        return link
+        return await fact_relationships.link_facts(self._relationships_runtime(), space, from_fact, to_fact, kind,
+            source_episode_id=source_episode_id, quote=quote)
 
     async def fact(self, space: str, fact_id: int) -> Fact:
         """One fact of the space, whatever its status."""
@@ -860,19 +812,7 @@ class MemoryEngine:
 
     async def _depends_on(self, space: str, start: int, target: int) -> bool:
         """Whether ``start`` reaches ``target`` along dependency links."""
-        seen, frontier = {start}, [start]
-        while frontier:
-            fact_id = frontier.pop()
-            for link in await self.documents.fact_links(space, fact_id):
-                if link.from_fact != fact_id or link.kind not in DEPENDENCY_KINDS or link.to_fact in seen:
-                    continue
-                if link.to_fact == target:
-                    return True
-                seen.add(link.to_fact)
-                frontier.append(link.to_fact)
-            if len(seen) > 10_000:
-                raise InvalidInput("dependency chain too long to check")
-        return False
+        return await fact_relationships.depends_on(self.documents, space, start, target)
 
     def _placement_runtime(self) -> fact_placement.FactPlacementRuntime:
         return fact_placement.FactPlacementRuntime(self.documents, self.clock, self._emit,
