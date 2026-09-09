@@ -1602,23 +1602,18 @@ answer mode, and count free-form generation calls. Gold labels are used only for
 scoring after selection. Quoting sources can inflate lexical scores; compare
 selection relevance and evidence coverage separately from generative accuracy.
 
-#### Migration from the experimental framework adapters
+#### Native session interfaces
 
-The three former `integrations/pipecat*.py` modules and their optional dependency
-have been removed. Replace processor factories with the `TextModel` protocol
-above and import `TextConversation` from `scone_memory.realtime.text`.
-Audio imports are now `scone_memory.realtime.voice` and
-`scone_memory.realtime.audio`. No compatibility layer pretends a framework
-processor is a native Scone provider. Existing HTTP routes, result field names,
-saved transcripts and request-replay semantics remain unchanged.
+Implement the `TextModel` protocol above and import `TextConversation` from
+`scone_memory.realtime.text`. Audio session and provider interfaces live in
+`scone_memory.realtime.voice` and `scone_memory.realtime.audio`.
 
 ### Scone Voice (native sessions)
 
 Scone owns the audio runtime in `scone_memory.realtime.voice.VoiceSession`: its event types,
 bounded input queue, turn lifecycle, interruption, response/speech sequencing and
 memory capture. It uses standard Python `asyncio` and the native Scone engine.
-**No Pipecat installation, import, probe environment or framework scheduler is
-required.** Python 3.11+ is needed for this runtime's structured deadlines; the
+Python 3.11+ is needed for this runtime's structured deadlines; the
 base package and independent Rust/Python CLIs retain their existing requirements.
 
 The native provider interfaces live in `scone_memory.realtime.audio`:
@@ -2156,8 +2151,8 @@ work; the existing memory server is not a conversation server.
 
 Install `pip install 'scone-memory[speech]'` to use the native
 `scone_memory.providers.speech.CartesiaSpeech` and `ElevenLabsSpeech` adapters.
-They implement `realtime.audio.SpeechSynthesizer` directly; no Pipecat or provider
-orchestration SDK is required. Select the provider, model and voice explicitly:
+They implement `realtime.audio.SpeechSynthesizer` directly without a provider
+orchestration SDK. Select the provider, model and voice explicitly:
 
 ```python
 import os
