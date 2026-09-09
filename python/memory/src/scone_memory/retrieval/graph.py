@@ -11,7 +11,7 @@ are edges labelled as retrieval evidence with their lane and rank.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from ..core.ports import Event
 
@@ -48,6 +48,8 @@ class Graph:
     #: the same way. Forgetting is not a budget: this is evidence that is
     #: gone, and a reader should be able to tell the two apart.
     provenance_missing: int = 0
+    facts_truncated: bool = False
+    fact_read_status: Literal['not_read', 'bounded', 'unavailable', 'failed'] = 'not_read'
 
     def add(self, node: Node) -> None:
         self.nodes.setdefault(node.id, node)
@@ -63,6 +65,8 @@ class Graph:
             "truncated": self.truncated,
             "provenance_omitted": self.provenance_omitted,
             "provenance_missing": self.provenance_missing,
+            "facts_truncated": self.facts_truncated,
+            "fact_read_status": self.fact_read_status,
             "counts": {kind: sum(1 for n in self.nodes.values() if n.kind == kind) for kind in sorted({n.kind for n in self.nodes.values()})},
         }
 

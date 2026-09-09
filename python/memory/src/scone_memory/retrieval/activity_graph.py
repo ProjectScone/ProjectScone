@@ -2,14 +2,17 @@
 
 The public engine validates space and clamps the event/provenance window first.
 Graph assembly performs reads only; storage references are captured at dispatch.
-The window is not a total node or fact-scan limit.
+Fact inventory uses a separate bounded source-aware read. Incident links and
+other node reads retain their existing behavior; this is not a total work limit.
 """
 from __future__ import annotations
 
 from typing import Optional, Sequence, TypedDict, cast
 
 from ..core.ports import DocumentStore, EventLog
+from ..core.graph_read import DEFAULT_GRAPH_FACTS
 from . import graph as G
+from .activity_facts import read_activity_facts
 
 
 class _RecallEventItem(TypedDict):
@@ -26,6 +29,7 @@ async def build_activity_graph(
     episode_id: Optional[int] = None,
     since: Optional[str] = None,
     limit: int = 400,
+    fact_limit: int = DEFAULT_GRAPH_FACTS,
 ) -> G.Graph:
     """Hydrate stored sources and typed edges without inferring relationships."""
     g = G.Graph()
@@ -83,8 +87,10 @@ async def build_activity_graph(
         if f"episode:{c.episode_id}" in g.nodes:
             g.add(G.Node(f"chunk:{c.chunk_id}", "chunk", c.text[:80], c.created_at, {"ordinal": c.ordinal, "start": c.start, "end": c.end, "text": c.text}))
             g.link(f"episode:{c.episode_id}", f"chunk:{c.chunk_id}", "chunked_into")
-    facts = await documents.list_facts(space, include_closed=True)
-    wanted = [f for f in facts if (f.source_episode_id in episode_ids) or not focused]
+    selected = await read_activity_facts(documents, space, episode_ids if focused else None, fact_limit)
+    wanted = selected.facts
+    g.facts_truncated, g.fact_read_status = selected.truncated, selected.status
+    g.truncated = g.truncated or selected.truncated
     # A claim's source is part of the claim. Drawing the claim while
     # leaving out the episode it came from turns provenance into a
     # silent absence, which reads as "no evidence" rather than "not in

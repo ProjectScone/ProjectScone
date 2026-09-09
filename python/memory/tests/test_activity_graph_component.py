@@ -70,7 +70,8 @@ async def test_no_event_log_returns_empty_graph_without_document_reads():
             pytest.fail('no storage read when activity log absent')
     graph = await build_activity_graph(UnavailableDocuments(), None, 'alpha')
     assert graph.as_dict() == {'nodes':[], 'edges':[], 'truncated':False,
-        'provenance_omitted':0, 'provenance_missing':0, 'counts':{}}
+        'provenance_omitted':0, 'provenance_missing':0, 'counts':{},
+        'facts_truncated':False, 'fact_read_status':'not_read'}
 
 
 async def test_cancel_during_source_hydration_propagates_without_mutation():

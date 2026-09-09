@@ -914,6 +914,7 @@ class MemoryEngine:
         episode_id: Optional[int] = None,
         since: Optional[str] = None,
         limit: int = 400,
+        *, fact_limit: int = 400,
     ):
         """The recorded relations around a session or an episode (or the
         latest activity when neither is given). See ``graph.py``."""
@@ -921,8 +922,10 @@ class MemoryEngine:
 
         check_space(space)
         limit = max(1, min(limit, 2000))
+        if type(fact_limit) is not int or not 1 <= fact_limit <= 2000:
+            raise InvalidInput('fact_limit must be an integer in 1..2000')
         return await build_activity_graph(self.documents, self.events, space,
-            session_id=session_id, episode_id=episode_id, since=since, limit=limit)
+            session_id=session_id, episode_id=episode_id, since=since, limit=limit, fact_limit=fact_limit)
 
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None

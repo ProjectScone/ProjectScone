@@ -13,11 +13,13 @@ on an engine instance.
 | `retrieval/fact_recall.py` | Validated indexed fact lookup, scan fallback and historical facts |
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
 | `retrieval/activity_graph.py` | Read activity and retained sources into a graph of recorded relationships |
+| `retrieval/activity_facts.py` | Coordinate indexed fact reads with a shared budget and validated partial results |
 | `retrieval/graph.py` | Graph values and typed edge construction without storage reads |
 | `retrieval/reranking.py` | Bounded adapter calls, output validation and fallback ordering |
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
 | `memory/archive.py` | Export original records and import with identity, source and link remapping |
 | `memory/fact_placement.py` | Place temporal claims, preserve restatement identity and close covered intervals |
+| `memory/fact_review.py` | Human decisions, historical batch ordering and fact visibility changes |
 | `memory/engine.py` | Coordinate the public API and remaining ingestion and lifecycle operations |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
@@ -82,10 +84,27 @@ storage, and event payloads and revision ordering are unchanged. This boundary
 does not add transaction isolation between concurrent assertions or a bound on
 the number of rival facts read for a subject and predicate.
 
-These windows bound event reads and additional source hydration, not the number
-of facts scanned or all nodes returned. Fact listing still reads the space's full
-ledger. This extraction does not solve large-ledger graph scaling or introduce
-an atomic snapshot across the document and event stores.
+Review and visibility changes receive a `FactReviewRuntime` containing storage,
+clock, event and bound decision callbacks. Approval, rejection, exclusion,
+inclusion and manual closure keep their public engine methods. Batches validate
+the starting revision, apply in historical order and return per-ID outcomes in
+caller order. Cancellation can leave earlier decisions applied, and event
+failures can follow persisted changes; this is not a transactional batch.
+Fact selection uses the optional `GraphFactReader` capability in
+`core/graph_read.py`, coordinated by `retrieval/activity_facts.py`. The default
+budget is 400 facts (maximum 2,000), shared across source groups with one-row
+lookahead. Stores filter by space and optional source before the indexed limit;
+the graph never falls back to full-ledger listing. Focused reads visit sources
+in episode-ID order, then order selected facts by fact ID. All fact statuses
+remain visible. Unvisited source groups conservatively mark the result partial.
+
+`facts_truncated` and `fact_read_status` distinguish bounded partial results,
+unsupported readers, failed snapshots and graphs that did not read facts.
+Malformed or failed reads discard the fact snapshot; cancellation propagates.
+The coordinator applies a two-second cooperative deadline to fact reads.
+Event and additional source windows remain separate. Incident-link reads and
+the total returned node count are not globally bounded by the fact budget;
+the graph is not an atomic snapshot across document and event stores.
 
 The refactor preserves candidate depth, filter semantics, fusion ordering,
 scope verification, cancellation propagation and degraded-mode reporting.
@@ -97,7 +116,7 @@ Existing public engine methods and imports of shared validation helpers remain
 available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
-The engine decomposition is ongoing. Ingestion job coordination, fact lifecycle,
+The engine decomposition is ongoing. Ingestion job coordination, relationship validation,
 retention/deletion and inventory operations still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
