@@ -18,7 +18,8 @@ from .tool_chat import SelfHostedToolChat, _decode, _mapping, _step
 from .tool_synthesis import synthesis_history
 
 _PROTOCOL = (
-    'Choose exactly one action using the response JSON schema. Put public prose only in the answer field. '
+    'Choose exactly one action using the response JSON schema. Put final answer text only in the answer field. '
+    'Honor the caller\'s requested output format inside that answer string. '
     'For questions about stored knowledge, search_memory finds quoted passages and facts. '
     'trace_memory follows recorded relationships from a returned fact ID when it is available. '
     'read_memory reads neighboring chunks of a returned passage when surrounding context or exceptions are needed. '
@@ -235,8 +236,9 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
 
     No native tools are sent to the provider. A validated action is translated
     to one ToolCall for the host's existing scope/retention/budget checks. Once
-    tools are disabled, a separate evidence view supports ordinary prose in the
-    same final request. Early JSON answers still use the action protocol. Neither
+    tools are disabled, a separate evidence view supports the caller's answer
+    format in the same final request. Early answers carry that format inside
+    the action protocol's answer string. Neither
     stage guarantees action usefulness or answer correctness.
     """
 
