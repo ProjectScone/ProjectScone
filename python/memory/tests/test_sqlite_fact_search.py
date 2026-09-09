@@ -258,6 +258,51 @@ async def test_schema_repair_does_not_commit_caller_transaction(store: SqliteDoc
     assert store.conn.execute("SELECT name FROM sqlite_master WHERE name='fact_search_update'").fetchone() is None
 
 
+async def test_schema_repair_waits_for_writer_before_reading_derived_state(
+    store: SqliteDocumentStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    import scone_memory.backends.sqlite_fact_search as module
+
+    row = await fact(store, "needle")
+    store.conn.execute("DROP TRIGGER fact_search_update")
+    store.conn.commit()
+    writer_ready, state_read = Event(), Event()
+    derived_schema = module._derived_schema
+
+    def observed_schema(conn: sqlite3.Connection) -> tuple[bool, list[sqlite3.Row]]:
+        result = derived_schema(conn)
+        state_read.set()
+        return result
+
+    def competing_writer() -> None:
+        conn = sqlite3.connect(store.path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO meta VALUES ('concurrent_writer', 'preserved')")
+            writer_ready.set()
+            # Old code reads while this writer owns the lock, then fails its
+            # write upgrade. Correct code waits here before reading anything.
+            state_read.wait(timeout=0.5)
+            conn.commit()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(module, "_derived_schema", observed_schema)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(competing_writer)
+        try:
+            assert writer_ready.wait(timeout=5)
+            module.initialize_fact_search(store.conn)
+        finally:
+            writer.result(timeout=5)
+
+    assert not store.conn.in_transaction
+    assert store.conn.execute("SELECT value FROM meta WHERE key='concurrent_writer'").fetchone()[0] == "preserved"
+    assert await store.search_facts("alpha", "needle", WHEN, 1) == [row]
+
+
 async def test_schema_repair_failure_rolls_back_derived_work_only(store: SqliteDocumentStore) -> None:
     from scone_memory.backends.sqlite_fact_search import initialize_fact_search
     row = await fact(store,"oldtoken")

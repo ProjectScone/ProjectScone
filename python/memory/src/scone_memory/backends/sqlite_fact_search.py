@@ -106,6 +106,10 @@ def initialize_fact_search(conn: sqlite3.Connection) -> None:
     rebuild all disposable state and queue the ledger once in the savepoint.
     """
     with _savepoint(conn):
+        # Reserve the writer before reading schema state. A deferred read-to-
+        # write upgrade can fail immediately when another opener is writing.
+        # Matching no rows preserves metadata and any enclosing transaction.
+        conn.execute("UPDATE meta SET value=value WHERE 0")
         complete, objects = _derived_schema(conn)
         row = conn.execute("SELECT value FROM meta WHERE key=?",(_VERSION_KEY,)).fetchone()
         if complete and row is not None and row[0] == "1":
