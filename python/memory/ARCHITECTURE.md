@@ -20,10 +20,11 @@ on an engine instance.
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
 | `memory/archive.py` | Export original records and import with identity, source and link remapping |
 | `memory/fact_placement.py` | Place temporal claims, preserve restatement identity and close covered intervals |
+| `memory/fact_relationships.py` | Validate assertion premises, grounded links and directed dependency cycles |
 | `memory/fact_review.py` | Human decisions, historical batch ordering and fact visibility changes |
 | `memory/catalog.py` | Source inventory, fact selection, profiles, metadata aggregates and status reads |
 | `memory/retention.py` | Integrity inspection, expiry, forget receipts, tombstones and space deletion |
-| `memory/engine.py` | Coordinate the public API, attachments, replacement and relationship validation |
+| `memory/engine.py` | Coordinate the public API, attachments, replacement and external event recording |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
 its current document store, vector index, embedder and ranking configuration.
@@ -162,7 +163,7 @@ Existing public engine methods and imports of shared validation helpers remain
 available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
-The engine decomposition is ongoing. Relationship validation, attachment handling,
+The engine decomposition is ongoing. External event recording, attachment handling,
 replacement and derivation coordination still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
@@ -193,5 +194,21 @@ invalidation, preserved claims, tombstones, whole-space deletion and shared
 attachments. The same workflow runs over in-memory, SQLite and embedded Qdrant
 in the focused suite; additional configured backends use the contract fixture.
 Timezone-order regressions exercise bounded expiry with noncanonical clock
-timestamps. This refactor reduces `engine.py` from 1,326 to 1,132 lines while
+timestamps. The lifecycle refactor reduced `engine.py` from 1,326 to 1,132 lines while
 retaining its public method signatures and documentation.
+
+Fact relationships receive a `FactRelationshipsRuntime` with document storage,
+a clock, and bound lifecycle, placement, linking, dependency and event callbacks.
+All named premises are checked before placing an assertion. Link validation
+checks both endpoints in the requested space, verifies any source quote, returns
+existing identical links, and rejects directed dependency cycles before writing.
+New links are inserted before the revision bump and event emission. These
+operations retain their existing nontransactional behavior; concurrent writers
+are not serialized by this component.
+
+Relationship tests exercise standalone composition with in-memory and SQLite
+stores, plus engine integration with embedded Qdrant. They cover inferred origin,
+premise rejection before writes, source quotes, duplicate links without new
+events or revisions, dependency direction, cycle rejection and cancellation.
+This extraction reduces `engine.py` from 1,132 to 1,072 lines; it makes no
+retrieval accuracy or performance claim.
