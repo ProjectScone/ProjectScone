@@ -633,6 +633,9 @@ application configurations, not a sandbox or a hard validation CPU deadline.
 Schema-mode numbers use exact decimal validation, with at most 4,096 coefficient
 digits and an absolute exponent of 4,096. Syntax-only mode keeps its existing
 number behavior. Field validation does not verify an answer's factual accuracy.
+The [recorded application-schema probe](benchmarks/answer-output-schema-v1.results.md)
+improved requested-field compliance from 2/4 to 4/4 on the same four Gemma
+fixtures; three answers still used a full sentence instead of a short entity.
 
 By default the SDK model chooses search queries. `EvidenceToolLoop(...,
 initial_search=True)` first searches the final user message with `limit=5`,
