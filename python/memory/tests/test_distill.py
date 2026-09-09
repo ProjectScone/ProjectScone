@@ -357,7 +357,7 @@ async def test_openai_compatible_chat_posts_messages_and_reads_the_reply():
     assert body["model"] == "qwen3"
     assert body["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
     assert body["temperature"] == 0.0
-    assert body["think"] is False
+    assert body["reasoning_effort"] == "none" and "think" not in body
 
 
 async def test_openai_compatible_chat_leaves_think_out_unless_set():

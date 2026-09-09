@@ -28,7 +28,8 @@ async def test_assessor_selects_existing_evidence_without_requesting_reasoning()
     assert decision.status == "sufficient"
     assert decision.selected_ids == ("chunk:1", "chunk:2")
     body = seen[0]
-    assert body["max_tokens"] <= 1024 and body["think"] is False
+    assert body["max_tokens"] <= 1024 and body["reasoning_effort"] == "none"
+    assert "think" not in body
     schema = body["response_format"]["json_schema"]["schema"]
     assert schema["properties"]["selected_ids"]["items"]["enum"] == ["chunk:1", "chunk:2"]
     assert "reasoning" not in schema["properties"]
