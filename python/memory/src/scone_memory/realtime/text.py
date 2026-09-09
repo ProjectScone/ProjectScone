@@ -19,7 +19,8 @@ from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
-from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer
+from .answer_requirements import AnswerRequirements, validated_requirements
+from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer, require_contextual_reviewer
 from .context import ContextReceipt, MemoryContext
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
@@ -64,6 +65,9 @@ class TextConversation:
     Cleanup is cooperative and may exceed the cancellation deadline.
     Optional answer review buffers the draft until source checks and review
     finish; only the accepted final text reaches the observer and capture.
+    Optional answer_requirements are shared with generation and review. They
+    buffer all generation and gate final publication on format, byte and line
+    checks; natural-language instructions remain model guidance, not proof.
     Optional evidence selection instead constructs answers from checked source
     cards without a generation provider. Turns without prepared memory retain
     normal generation and streaming, with a skipped evidence-answer receipt.
@@ -82,6 +86,7 @@ class TextConversation:
     _tool_initial_search: bool
     _evidence_answer_policy: Literal["when_available", "required"]
     _answer_reviewer: AnswerReviewer | None
+    _answer_requirements: AnswerRequirements | None
     _review_limits: AnswerReviewLimits
     _review_policy: Literal["report", "require_supported"]
     _closed: bool
@@ -102,6 +107,7 @@ class TextConversation:
                  neighbor_chunks: int = 0,
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
                  review_policy: Literal["report", "require_supported"] = "report",
+                 answer_requirements: AnswerRequirements | None = None,
                  evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0,
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
@@ -141,6 +147,9 @@ class TextConversation:
             raise ValueError("review_policy must be report or require_supported")
         if answer_reviewer is not None and not callable(getattr(answer_reviewer, "review", None)):
             raise ValueError("answer_reviewer must implement review")
+        self._answer_requirements = validated_requirements(answer_requirements)
+        if answer_reviewer is not None:
+            require_contextual_reviewer(answer_reviewer, self._answer_requirements)
         if answer_reviewer is None and (review_limits is not None or review_policy != "report"):
             raise ValueError("review settings require answer_reviewer")
         if review_limits is not None and not isinstance(review_limits, AnswerReviewLimits):
@@ -159,6 +168,8 @@ class TextConversation:
         self._answer_reviewer, self._review_policy = answer_reviewer, review_policy
         self._review_limits = (AnswerReviewLimits.model_validate(dict(vars(review_limits)), strict=True)
                                if review_limits is not None else AnswerReviewLimits())
+        if self._answer_requirements is not None:
+            system_prompt += '\n\n' + self._answer_requirements.prompt()
         self._history = [{"role": "system", "content": system_prompt}]
         if _bytes(self._history) > max_history_bytes:
             raise ValueError("system prompt exceeds history byte limit")
@@ -296,8 +307,11 @@ class TextConversation:
             return _ABSTENTION, receipt, None, {
                 "status": "no_selection", "reason": "no_memory_evidence", "evidence_ids": [],
                 "source_status": "none", "mode": "extractive", "verified_accuracy": False}
-        draft = await self._generate(request, on_text if self._answer_reviewer is None else None)
+        buffered = self._answer_reviewer is not None or self._answer_requirements is not None
+        draft = await self._generate(request, None if buffered else on_text)
         if self._answer_reviewer is None:
+            if buffered:
+                await self._emit_final(messages, draft, on_text)
             skipped = ({"status": "skipped", "reason": "no_memory_evidence", "verified_accuracy": False}
                        if self._evidence_selector is not None else None)
             return draft, receipt, None, skipped
@@ -335,7 +349,8 @@ class TextConversation:
         if reviewer is None:
             raise RuntimeError('answer review unavailable')
         try:
-            reviewed = await review_tool_answer(reviewer, question, result, self._review_limits)
+            reviewed = await review_tool_answer(reviewer, question, result, self._review_limits,
+                requirements=self._answer_requirements)
             task = asyncio.current_task()
             if self._closed or (task is not None and task.cancelling()):
                 raise asyncio.CancelledError()
@@ -349,6 +364,8 @@ class TextConversation:
         return self._accept_review(reviewed)
 
     async def _emit_final(self, messages, text, on_text):
+        if self._answer_requirements is not None and not self._answer_requirements.accepts(text):
+            raise RuntimeError('answer format violates configured requirements')
         if len(text.encode("utf-8")) > self._max_reply:
             raise RuntimeError("model reply exceeded the byte limit")
         if _bytes([*messages, {"role": "assistant", "content": text}]) > self._max_history:
@@ -421,7 +438,8 @@ class TextConversation:
             if time.monotonic() >= deadline:
                 raise TimeoutError()
             reviewed = await review_answer(reviewer, question, draft, prepared.evidence, prepared.evidence_ids,
-                limits=self._review_limits, validate_evidence=prepared.validate, deadline=deadline)
+                limits=self._review_limits, validate_evidence=prepared.validate, deadline=deadline,
+                requirements=self._answer_requirements)
             if self._closed or (task is not None and task.cancelling()):
                 raise asyncio.CancelledError()
             if time.monotonic() >= deadline:
@@ -439,6 +457,8 @@ class TextConversation:
         receipt: dict[str, object] = reviewed.receipt.model_dump(mode="json")
         if reviewed.receipt.source_status != "retained":
             raise _AnswerReviewFailure("answer review evidence is stale or unavailable", receipt)
+        if reviewed.receipt.format_status == 'rejected':
+            raise _AnswerReviewFailure('answer format violates configured requirements', receipt)
         if self._review_policy == "require_supported" and reviewed.receipt.status != "supported":
             raise _AnswerReviewFailure("answer review did not support the reply", receipt)
         return reviewed.answer, receipt

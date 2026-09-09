@@ -8,6 +8,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Literal
 
 from ..realtime.answer_review import AnswerReviewDecision, AnswerReviewError
+from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 from .llm import OpenAICompatibleChat
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 
@@ -144,6 +145,17 @@ class SelfHostedAnswerReviewer:
 
     async def review(self, question: str, answer: str, evidence: str,
                      evidence_ids: tuple[str, ...]) -> AnswerReviewDecision:
+        return await self._review(question, answer, evidence, evidence_ids, None)
+
+    async def review_with_requirements(self, question: str, answer: str, evidence: str,
+        evidence_ids: tuple[str, ...], requirements: AnswerRequirements) -> AnswerReviewDecision:
+        fixed = validated_requirements(requirements)
+        if fixed is None:
+            raise ValueError('requirements must be AnswerRequirements')
+        return await self._review(question, answer, evidence, evidence_ids, fixed)
+
+    async def _review(self, question: str, answer: str, evidence: str,
+        evidence_ids: tuple[str, ...], requirements: AnswerRequirements | None) -> AnswerReviewDecision:
         if not isinstance(question, str) or not question.strip() or len(question.encode()) > 8000:
             raise ValueError("question must contain 1..8000 UTF-8 bytes")
         if not isinstance(answer, str) or not answer.strip() or len(answer.encode()) > self._max_answer_bytes:
@@ -159,6 +171,17 @@ class SelfHostedAnswerReviewer:
         data: dict[str, object] = {"question": question, "answer": answer, "evidence": evidence, "evidence_ids": evidence_ids}
         if spans is not None:
             data['answer_spans'] = spans
+        requirements_instruction = ''
+        if requirements is not None:
+            data['answer_requirements'] = requirements.model_dump(mode='json')
+            requirements_instruction = (
+                'The answer_requirements field contains host response requirements. '
+                'Check the draft and every proposed replacement against those requirements, '
+                'including instructions, UTF-8 max_bytes, max_lines and format. '
+                'A line break at the end counts as another line. json_object means one strict '
+                'JSON object without markdown fences, duplicate keys or nonstandard constants. '
+                'Preserve the requested concise form; do not expand a short answer into an explanation. '
+                'These requirements apply to the answer and revised_answer, not to the review envelope. ')
         payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         quote_instruction = (
             'Each issue must select answer_span_id from answer_spans for the part of the draft with a problem. '
@@ -181,7 +204,7 @@ class SelfHostedAnswerReviewer:
                 "supported requires empty issues and null revised_answer. Use needs_revision with at least "
                 "one issue when a concrete problem is found, and optionally propose a complete concise replacement "
                 "using only supplied evidence. Use uncertain with null revised_answer if you cannot judge. "
-                + quote_instruction + "Cite only supplied evidence IDs in issues. "
+                + quote_instruction + requirements_instruction + "Cite only supplied evidence IDs in issues. "
                 "Return the schema fields only; do not include analysis or an explanation outside them.",
                 payload, schema, max_tokens=2048,
             )
