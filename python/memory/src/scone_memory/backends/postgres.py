@@ -149,6 +149,7 @@ class PostgresDocumentStore:
         tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED);
     CREATE INDEX IF NOT EXISTS chunks_tsv ON {s}.chunks USING GIN (tsv);
     CREATE INDEX IF NOT EXISTS chunks_episode ON {s}.chunks (episode_id);
+    CREATE INDEX IF NOT EXISTS chunks_window ON {s}.chunks (space, episode_id, ordinal, id);
     CREATE INDEX IF NOT EXISTS chunks_space_created ON {s}.chunks (space, created_at);
     CREATE TABLE IF NOT EXISTS {s}.facts (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
@@ -156,10 +157,13 @@ class PostgresDocumentStore:
         closed_reason TEXT, source_episode_id BIGINT, origin TEXT NOT NULL DEFAULT 'stated', superseded_by BIGINT,
         excluded_reason TEXT, quote TEXT);
     CREATE INDEX IF NOT EXISTS facts_key ON {s}.facts (space, subject, predicate);
+    CREATE INDEX IF NOT EXISTS facts_subject_id ON {s}.facts (space, subject, id);
     CREATE TABLE IF NOT EXISTS {s}.fact_links (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
         created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
     CREATE INDEX IF NOT EXISTS fact_links_to ON {s}.fact_links (space, to_fact);
+    CREATE INDEX IF NOT EXISTS fact_links_from_id ON {s}.fact_links (space, from_fact, id);
+    CREATE INDEX IF NOT EXISTS fact_links_to_id ON {s}.fact_links (space, to_fact, id);
     CREATE TABLE IF NOT EXISTS {s}.tombstones (
         space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
         reason TEXT, PRIMARY KEY (space, episode_id));
@@ -299,6 +303,14 @@ class PostgresDocumentStore:
         )
         return [_chunk(r) for r in rows]
 
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        rows = await self._rows(
+            f'SELECT * FROM {self.schema}.chunks WHERE space = %s AND episode_id = %s AND ordinal >= %s ORDER BY ordinal, id LIMIT %s',
+            (space, episode_id, start_ordinal, limit))
+        return [_chunk(row) for row in rows]
+
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         await self._rows(
             f"INSERT INTO {self.schema}.inflight (space, content_hash) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING space",
@@ -409,6 +421,13 @@ class PostgresDocumentStore:
         )
         return [_fact(r) for r in rows]
 
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        rows = await self._rows(
+            f"SELECT * FROM {self.schema}.facts WHERE space = %s AND subject = %s ORDER BY id LIMIT %s",
+            (space, subject, max(0, min(limit, 129))),
+        )
+        return [_fact(row) for row in rows]
+
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         await self._rows(
             f"INSERT INTO {self.schema}.tombstones (space, episode_id, content_hash, forgotten_at, reason)"
@@ -452,6 +471,19 @@ class PostgresDocumentStore:
             (space, fact_id, fact_id),
         )
         return [_fact_link(r) for r in rows]
+
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        cap = max(0, min(limit, 129))
+        rows = await self._rows(
+            f"(SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = %s ORDER BY id LIMIT %s)"
+            f" UNION (SELECT * FROM {self.schema}.fact_links WHERE space = %s AND to_fact = %s ORDER BY id LIMIT %s)"
+            " ORDER BY id LIMIT %s", (space, fact_id, cap, space, fact_id, cap, cap),
+        )
+        return [_fact_link(row) for row in rows]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        row = await self._row(f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND id = %s", (space, link_id))
+        return _fact_link(row) if row is not None else None
 
     async def bump_revision(self, space: str) -> int:
         row = await self._row(

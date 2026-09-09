@@ -29,6 +29,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
+from ..runtime.conversation_review import ConversationReview
+from ..retrieval.adaptive import AdaptiveRetriever
+
 from ..memory.engine import check_space, normalise_time
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..core.models import RecallItem, RecallResult
@@ -38,6 +41,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, build_query_evidence_graph
 from ..retrieval.evidence_records import canonical_evidence, fingerprint, restrict_graph
 from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
+from .page_access import permits_local_bootstrap
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -87,6 +91,11 @@ def _without_cached_graph(result):
     context = dict(result["memory_context"])
     if context.pop("evidence_graph", None) is not None or "evidence_graph_status" in context:
         context["evidence_graph_status"] = "unavailable"
+    if isinstance(context.get('tool_retrieval'), dict):
+        tools = dict(context['tool_retrieval'])
+        tools.pop('packets', None)
+        tools['packets_status'] = 'unavailable'
+        context['tool_retrieval'] = tools
     return {**result, "memory_context": context}
 
 
@@ -94,7 +103,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
                             worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None,
                             local_console_key=None, runtime_available=None, model_connections_available=False,
-                            vision_available=None):
+                            vision_available=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -115,7 +124,16 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     creation and then run that persona's native text runtime. A host with a
     catalog and no bare runtime requires the choice; nothing is chosen for it.
     A voice session names a persona and is spoken to over its audio socket.
+    answer_review configures native text sessions only. When supplied, custom
+    runtime factories must accept answer_reviewer, review_policy and review_limits
+    keywords and honor the native TextConversation review contract.
+    adaptive_retriever must use this engine. Text runtime factories receive
+    adaptive_retriever and recall_timeout keywords when it is configured.
+    tool_retrieval describes the explicit ConversationTools binding installed by
+    the host on its text factories. It advertises configuration, not model health.
     """
+    from ..runtime.conversation_tools import ConversationTools
+
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
         raise ValueError("configure nonempty bearer keys")
@@ -132,6 +150,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("scoped_runtime_factory must be callable or None")
     if catalog is not None and not hasattr(catalog, "public"):
         raise ValueError("catalog must be a bound PersonaCatalog or None")
+    if answer_review is not None and not isinstance(answer_review, ConversationReview):
+        raise ValueError("answer_review must be a ConversationReview or None")
+    if adaptive_retriever is not None and (
+            not isinstance(adaptive_retriever, AdaptiveRetriever) or adaptive_retriever.memory is not engine):
+        raise ValueError("adaptive_retriever must use this memory engine")
+    if tool_retrieval is not None and (not isinstance(tool_retrieval, ConversationTools)
+            or adaptive_retriever is not None):
+        raise ValueError("tool_retrieval requires a compatible ConversationTools binding")
     # A catalog's sessions run the native text runtime, which streams.
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
     def bare_runtime_available():
@@ -328,6 +354,18 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def capabilities(space=Depends(space_for)):
         return {"schema_version": 1,
                 "text_configured": bare_runtime_available() or bool(catalog and catalog.personas),
+                "tool_retrieval": {"configured": tool_retrieval is not None,
+                    "protocol": tool_retrieval.mode if tool_retrieval is not None else "off",
+                    "initial_search": tool_retrieval.initial_search if tool_retrieval is not None else False,
+                    "available": tool_retrieval is not None and (bare_runtime_available() or bool(catalog and catalog.personas)),
+                    "limits": tool_retrieval.limits.model_dump(mode="json") if tool_retrieval is not None else None,
+                    "applies_to": "text", "verified_accuracy": False},
+                "answer_review": {"configured": answer_review is not None,
+                                  "policy": answer_review.policy if answer_review is not None else "off"},
+                "adaptive_retrieval": {"configured": adaptive_retriever is not None,
+                    "limits": adaptive_retriever.limits.model_dump(mode="json") if adaptive_retriever is not None else None,
+                    "graph_max_hops": adaptive_retriever.graph_limits.max_hops
+                        if adaptive_retriever is not None and adaptive_retriever.graph_limits is not None else 0},
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
@@ -411,11 +449,14 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return inspect(space, sid)
         try:
             fixed = RecallScope.from_mapping(current["recall_scope"])
+            conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
+            if adaptive_retriever is not None:
+                conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
             if chosen is not None:
-                runtime = chosen.text(engine, space, sid, **fixed.kwargs())
+                runtime = chosen.text(engine, space, sid, **fixed.kwargs(), **conversation_options)
             else:
-                runtime = (scoped_runtime_factory(space, sid, fixed)
-                           if scoped_runtime_factory is not None else runtime_factory(space, sid))
+                runtime = (scoped_runtime_factory(space, sid, fixed, **conversation_options)
+                           if scoped_runtime_factory is not None else runtime_factory(space, sid, **conversation_options))
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
@@ -653,6 +694,20 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             message = ("Conversation timed out before the reply completed. Check Sources to confirm what was saved, "
                        "then check the model connection and timeout before starting a new conversation."
                        if isinstance(error, TimeoutError) else "conversation turn failed; do not automatically retry")
+            from ..realtime.text import _AnswerReviewFailure
+            if isinstance(error, _AnswerReviewFailure):
+                from ..realtime.answer_review import AnswerReviewReceipt
+
+                # Only enum/count/status diagnostics may cross the API boundary.
+                # Never publish the draft, source text or provider exception.
+                try:
+                    review = AnswerReviewReceipt.model_validate_json(json.dumps(error.answer_review))
+                except (TypeError, ValueError):
+                    review = AnswerReviewReceipt(errors=("invalid_review",), source_status="unavailable")
+                receipt["answer_review"] = review.model_dump(mode="json")
+                message = ("Answer review could not verify its retained sources. No assistant reply was saved."
+                           if review.source_status != "retained" else
+                           "Answer review did not support this reply. No assistant reply was saved.")
             receipt.update(status="failed", error=message)
             settle(space, sid, request_id, "failed", error=receipt["error"])
             current = journal.get(space, sid)
@@ -986,9 +1041,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
         async def workspace_page(request: Request):
             body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
-            loopback = {"127.0.0.1", "localhost", "::1"}
-            if (local_console_key is not None and request.client is not None
-                    and request.client.host in loopback and request.url.hostname in loopback
+            if (local_console_key is not None and permits_local_bootstrap(request)
                     and request.url.path not in LEARN_PAGES):
                 encoded = json.dumps(local_console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
                 body = body.replace('"__SCONE_TOKEN__"', encoded)

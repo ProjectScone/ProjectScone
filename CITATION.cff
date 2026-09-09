@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+type: software
+message: >-
+  Research and academic use requires citation under LICENSE. Credit ProjectScone
+  contributors, JudgeHuman, and ProjectScone, and include the repository URL.
+  MLA, APA, Chicago, and citations generated using EasyBib or BibTeX are
+  accepted. Exact versions, commits, and file references are not required.
+title: ProjectScone
+authors:
+  - name: ProjectScone contributors
+repository-code: "https://github.com/DrDrewCain/ProjectScone"
+url: "https://github.com/DrDrewCain/ProjectScone"
+preferred-citation:
+  type: software
+  title: ProjectScone
+  authors:
+    - name: ProjectScone contributors
+  year: 2026
+  publisher:
+    name: JudgeHuman
+  url: "https://github.com/DrDrewCain/ProjectScone"
+keywords:
+  - retrieval-augmented generation
+  - memory
+  - agents

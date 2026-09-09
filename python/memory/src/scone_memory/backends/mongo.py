@@ -9,6 +9,7 @@ ranking agrees with the reference implementation in every contract test.
 
 from __future__ import annotations
 
+import re
 from typing import Mapping, Optional, Sequence
 
 from ..core.errors import SconeError
@@ -96,7 +97,7 @@ class MongoDocumentStore:
         self.episodes = self.db["episodes"]
         self.chunks = self.db["chunks"]
         self.facts = self.db["facts"]
-        self.fact_links = self.db["fact_links"]
+        self._fact_links = self.db["fact_links"]
         self.tombstones = self.db["tombstones"]
         self.counters = self.db["counters"]
         self.revisions = self.db["revisions"]
@@ -107,11 +108,15 @@ class MongoDocumentStore:
         await self.episodes.create_index([("space", 1), ("content_hash", 1)], unique=True)
         await self.episodes.create_index([("space", 1), ("created_at", -1)])
         await self.chunks.create_index([("episode_id", 1)])
+        await self.chunks.create_index([("space", 1), ("episode_id", 1), ("ordinal", 1), ("_id", 1)])
         await self.chunks.create_index([("space", 1), ("created_at", 1)])
         await self.chunks.create_index([("text", "text")])
         await self.facts.create_index([("space", 1), ("subject", 1), ("predicate", 1)])
-        await self.fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
-        await self.fact_links.create_index([("space", 1), ("to_fact", 1)])
+        await self.facts.create_index([("space", 1), ("subject", 1), ("_id", 1)])
+        await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
+        await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
+        await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("_id", 1)])
+        await self._fact_links.create_index([("space", 1), ("to_fact", 1), ("_id", 1)])
         await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -145,6 +150,8 @@ class MongoDocumentStore:
         doc = await self.counters.find_one_and_update(
             {"_id": name}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
         )
+        if doc is None:
+            raise SconeError("MongoDB counter update returned no document")
         return int(doc["seq"])
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
@@ -178,10 +185,10 @@ class MongoDocumentStore:
             chunk_ids=chunk_ids,
             episodes=await self.episodes.count_documents({"space": space}),
             facts=await self.facts.count_documents({"space": space}),
-            links=await self.fact_links.count_documents({"space": space}),
+            links=await self._fact_links.count_documents({"space": space}),
             tombstones=await self.tombstones.count_documents({"space": space}),
         )
-        for collection in (self.chunks, self.episodes, self.fact_links, self.facts, self.tombstones, self.inflight_marks):
+        for collection in (self.chunks, self.episodes, self._fact_links, self.facts, self.tombstones, self.inflight_marks):
             await collection.delete_many({"space": space})
         await self.revisions.delete_one({"_id": space})
         await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
@@ -221,6 +228,12 @@ class MongoDocumentStore:
         cursor = self.chunks.find({"space": space, "episode_id": episode_id}).sort("ordinal", 1)
         return [_chunk(doc) async for doc in cursor]
 
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        cursor = self.chunks.find({'space':space, 'episode_id':episode_id, 'ordinal':{'$gte':start_ordinal}})
+        return [_chunk(doc) async for doc in cursor.sort([('ordinal', 1), ('_id', 1)]).limit(limit)]
+
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         await self.inflight_marks.update_one(
             {"space": space, "content_hash": content_hash}, {"$setOnInsert": {"space": space, "content_hash": content_hash}}, upsert=True
@@ -243,17 +256,53 @@ class MongoDocumentStore:
         if filter.as_of:
             match["created_at"] = {"$lte": filter.as_of}
         pipeline: list[dict] = [{"$match": match}, {"$addFields": {"score": {"$meta": "textScore"}}}]
-        if filter.tags or filter.where:
+        if (filter.tags or filter.where or filter.conditions is not None
+                or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
             pipeline.append(
                 {"$lookup": {"from": "episodes", "localField": "episode_id", "foreignField": "_id", "as": "episode"}}
             )
             pipeline.append({"$unwind": "$episode"})
+            scope: dict[str, object] = {"episode.space": space}
+            if filter.kind is not None:
+                scope["episode.kind"] = filter.kind
+            if filter.source_prefix is not None:
+                # Mongo regex is case-sensitive; escape every metacharacter.
+                # Even an empty prefix requires an actual string source.
+                prefix = re.escape(filter.source_prefix).replace("\x00", r"\x00")
+                scope["episode.source"] = {"$type": "string", "$regex": "^" + prefix}
+            times: dict[str, str] = {}
+            if filter.since is not None:
+                times["$gte"] = filter.since
+            if filter.until is not None:
+                times["$lte"] = filter.until
+            if times:
+                scope["episode.created_at"] = times
             if filter.tags:
-                pipeline.append({"$match": {"episode.tags": {"$all": list(filter.tags)}}})
+                scope["episode.tags"] = {"$all": list(filter.tags)}
             for key, value in filter.where.items():
-                pipeline.append({"$match": {f"episode.metadata.{key}": value}})
-        pipeline += [{"$sort": {"score": -1, "_id": 1}}, {"$limit": limit}, {"$project": {"score": 1}}]
-        return [(doc["_id"], float(doc["score"])) async for doc in await self.chunks.aggregate(pipeline)]
+                scope[f"episode.metadata.{key}"] = value
+            pipeline.append({"$match": scope})
+        pipeline.append({"$sort": {"score": -1, "_id": 1}})
+        projection = {"score": 1}
+        if filter.conditions is None:
+            pipeline.append({"$limit": limit})
+        else:
+            # Settle parsed numeric/negation semantics exactly before limiting.
+            # Stream only ranked IDs, scores and metadata, not all chunk text.
+            projection["episode.metadata"] = 1
+        pipeline.append({"$project": projection})
+        cursor = await self.chunks.aggregate(pipeline, batchSize=100)
+        found: list[tuple[int, float]] = []
+        try:
+            async for doc in cursor:
+                if filter.conditions is not None and not filter.conditions.matches(doc["episode"].get("metadata", {})):
+                    continue
+                found.append((doc["_id"], float(doc["score"])))
+                if len(found) >= limit:
+                    break
+        finally:
+            await cursor.close()
+        return found
 
     async def recent_episodes(self, space: str, limit: int) -> list[Episode]:
         cursor = self.episodes.find({"space": space}).sort([("created_at", -1), ("_id", -1)]).limit(limit)
@@ -270,14 +319,14 @@ class MongoDocumentStore:
 
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
-        pipeline = [
+        pipeline: list[dict[str, object]] = [
             {"$match": {"space": space}},
             {"$group": {"_id": None, "n": {"$sum": 1}, "b": {"$sum": {"$binarySize": "$content"}}}},
         ]
         async for doc in await self.episodes.aggregate(pipeline):
             counts.episodes, counts.bytes = doc["n"], doc["b"]
         counts.chunks = await self.chunks.count_documents({"space": space})
-        tag_pipeline = [
+        tag_pipeline: list[dict[str, object]] = [
             {"$match": {"space": space}},
             {"$unwind": "$tags"},
             {"$group": {"_id": "$tags", "n": {"$sum": 1}}},
@@ -326,6 +375,13 @@ class MongoDocumentStore:
         cursor = self.facts.find({"space": space, "subject": subject, "predicate": predicate}).sort("_id", 1)
         return [_fact(doc) async for doc in cursor]
 
+    async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []  # MongoDB's limit(0) means unbounded.
+        cursor = self.facts.find({"space": space, "subject": subject}).sort("_id", 1).limit(cap)
+        return [_fact(doc) async for doc in cursor]
+
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         from pymongo.errors import DuplicateKeyError
 
@@ -333,7 +389,10 @@ class MongoDocumentStore:
             await self.tombstones.insert_one(dict(new.__dict__))
         except DuplicateKeyError:
             pass
-        return _tombstone(await self.tombstones.find_one({"space": new.space, "episode_id": new.episode_id}))
+        doc = await self.tombstones.find_one({"space": new.space, "episode_id": new.episode_id})
+        if doc is None:
+            raise SconeError("MongoDB tombstone disappeared during insert")
+        return _tombstone(doc)
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self.tombstones.find_one({"space": space, "episode_id": episode_id})
@@ -350,24 +409,51 @@ class MongoDocumentStore:
         from pymongo.errors import DuplicateKeyError
 
         key = {"space": new.space, "from_fact": new.from_fact, "to_fact": new.to_fact, "kind": new.kind}
-        existing = await self.fact_links.find_one(key)
+        existing = await self._fact_links.find_one(key)
         if existing is None:
             doc = {"_id": await self._next_id("fact_links"), **new.__dict__}
             try:
-                await self.fact_links.insert_one(doc)
+                await self._fact_links.insert_one(doc)
                 return _fact_link(doc)
             except DuplicateKeyError:
-                existing = await self.fact_links.find_one(key)
+                existing = await self._fact_links.find_one(key)
+        if existing is None:
+            raise SconeError("MongoDB fact link disappeared during insert")
         return _fact_link(existing)
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
-        cursor = self.fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
+        cursor = self._fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
+        return [_fact_link(doc) async for doc in cursor]
+
+    async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
+        """Read both incident directions, retaining stored direction and ID order."""
+        cap = max(0, min(limit, 129))
+        if not cap:
+            return []
+        cursor = self._fact_links.find({"space": space,
+            "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1).limit(cap)
+        return [_fact_link(doc) async for doc in cursor]
+
+    async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
+        doc = await self._fact_links.find_one({"space": space, "_id": link_id})
+        return _fact_link(doc) if doc is not None else None
+
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts; never expand to neighbors."""
+        wanted = list(dict.fromkeys(fact_ids[:16]))
+        cap = max(0, min(limit, 49))
+        if not wanted or not cap:
+            return []
+        cursor = self._fact_links.find({"space": space, "from_fact": {"$in": wanted},
+            "to_fact": {"$in": wanted}}).sort("_id", 1).limit(cap)
         return [_fact_link(doc) async for doc in cursor]
 
     async def bump_revision(self, space: str) -> int:
         doc = await self.revisions.find_one_and_update(
             {"_id": space}, {"$inc": {"revision": 1}}, upsert=True, return_document=True
         )
+        if doc is None:
+            raise SconeError("MongoDB revision update returned no document")
         return int(doc["revision"])
 
     async def revision(self, space: str) -> int:

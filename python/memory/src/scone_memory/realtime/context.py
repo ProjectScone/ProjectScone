@@ -14,6 +14,7 @@ from typing import NotRequired, TypedDict
 
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.recall_scope import RecallScope
+from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
 from ..retrieval.conversation_plan import overview_evidence, plan_conversation_retrieval
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
@@ -22,6 +23,7 @@ from ..retrieval.evidence_graph import MAX_FACTS, MAX_LINKS, QueryEvidenceGraph,
 from ..retrieval.evidence_records import EvidenceRecord, EvidenceRecords, canonical_evidence, fingerprint, restrict_graph
 from ..retrieval.multihop import MultiHopLimits, MultiHopResult, expand_multihop
 from ..retrieval.path_evidence import ordered_evidence_paths, path_records
+from .passage_windows import PassageWindows, passage_windows
 
 _PREFIX = (
     "Scone retrieved source material: optional background, not a user request, "
@@ -43,6 +45,16 @@ _CURRENT_CHAT_RECAP = re.compile(
     r"what (?:has|have) our conversations? been|"
     r"(?:summari[sz]e|recap) (?:this|our) (?:chat|conversation))(?: so far)?"
 )
+_ADAPTIVE_DIAGNOSTICS = frozenset({
+    "stale_evidence", "degraded_recall", "candidate_window", "candidate_limit", "query_evidence_share",
+    "filtered_evidence", "max_evidence_bytes", "duplicate_queries", "max_queries",
+    "no_evidence", "no_followup_queries", "no_new_queries", "max_rounds", "timeout",
+    "invalid_or_failed_assessment", "retrieval_failed",
+    "assessment_timeout", "assessment_provider_failed", "invalid_assessment",
+    "atomic_group_omitted",
+    "empty_selection_retained",
+    "original_query_blended",
+}) | GRAPH_REASONS
 
 
 def _conversation_only(query: str, messages: list[dict[str, object]]) -> bool:
@@ -98,6 +110,8 @@ class ContextReceipt(TypedDict):
     next_before: NotRequired[int | None]
     evidence_graph: NotRequired[dict[str, object]]
     evidence_graph_status: NotRequired[str]
+    evidence_revision: NotRequired[int]
+    evidence_graph_stale: NotRequired[bool]
     evidence_fingerprints: NotRequired[dict[str, str]]
     claim_fingerprints: NotRequired[dict[str, str]]
     relation_fingerprints: NotRequired[dict[str, str]]
@@ -108,6 +122,21 @@ class ContextReceipt(TypedDict):
     path_search_truncated: NotRequired[bool]
     multihop_status: NotRequired[str]
     multihop_coverage: NotRequired[dict[str, object]]
+    adaptive_status: NotRequired[str]
+    adaptive_evidence_basis: NotRequired[str]
+    adaptive_fallback_status: NotRequired[str]
+    adaptive_round_count: NotRequired[int]
+    adaptive_queries_used: NotRequired[int]
+    adaptive_truncated: NotRequired[bool]
+    adaptive_reasons: NotRequired[list[str]]
+    adaptive_errors: NotRequired[list[str]]
+    adaptive_atomic_group_omitted_count: NotRequired[int]
+    adaptive_graph_expansions: NotRequired[list[dict[str, object]]]
+    tool_retrieval: NotRequired[dict[str, object]]
+    passage_window_status: NotRequired[str]
+    passage_window_candidate_count: NotRequired[int]
+    passage_window_retained_count: NotRequired[int]
+    passage_window_anchors: NotRequired[dict[str, list[int]]]
 
 
 class MemoryContext:
@@ -117,12 +146,25 @@ class MemoryContext:
     mutable last-result slot. Provider delivery and use are not established here.
     ``path_quotes`` optionally repeats verified quotes in path order. It has no
     effect when ``structured_paths`` is disabled or no complete path fits.
+    An optional adaptive retriever must use this engine and fit ``recall_timeout``.
+    Its sufficiency assessment is a model judgment, not verified answer quality.
+    Resilient assessor failures can retain independently verified candidates;
+    coverage identifies these as unassessed fallback rather than model selection.
+    Adaptive search owns its deadline so equal timers cannot hide its timeout
+    receipt. Ordinary search and overview retain this context's timeout.
+    A store revision change during graph verification discards cached evidence,
+    including when the concurrent write was unrelated to the selected records.
+    ``neighbor_chunks`` (0..4, default off) adds verified adjacent chunks after
+    the ``limit`` ranked anchors, up to 24 total sources within the same byte
+    budget. It applies only to ordinary search; adaptive selection is unchanged.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
                  kind: str | None = None, source_prefix: str | None = None, since: str | None = None, until: str | None = None,
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
-                 structured_paths: bool = True, path_quotes: bool = False) -> None:
+                 structured_paths: bool = True, path_quotes: bool = False,
+                 adaptive_retriever: AdaptiveRetriever | None = None,
+                 neighbor_chunks: int = 0) -> None:
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise ValueError("session_id must contain 1..128 characters")
@@ -136,11 +178,20 @@ class MemoryContext:
             raise ValueError("structured_paths must be a boolean")
         if type(path_quotes) is not bool:
             raise ValueError("path_quotes must be a boolean")
+        if type(neighbor_chunks) is not int or not 0 <= neighbor_chunks <= 4:
+            raise ValueError("neighbor_chunks must be an integer from 0 to 4")
+        if adaptive_retriever is not None:
+            if adaptive_retriever.memory is not memory:
+                raise ValueError("adaptive_retriever must use the same memory engine")
+            if recall_timeout < adaptive_retriever.limits.timeout_s:
+                raise ValueError("recall_timeout must be at least adaptive_retriever.limits.timeout_s")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._limit, self._max_bytes, self._timeout = limit, max_context_bytes, recall_timeout
         self._structured_paths = structured_paths
         self._path_quotes = path_quotes
+        self._adaptive_retriever = adaptive_retriever
+        self._neighbor_chunks = neighbor_chunks
 
     async def _overview(self) -> OverviewResult:
         items: list[RecallItem] = []
@@ -206,10 +257,15 @@ class MemoryContext:
             logger.info("recall.routed", extra={"event": "recall.routed",
                         "session_id": self._session_id, "stage": plan.mode})
             recalled_facts: list[Fact] = []
+            adaptive_selected_ids: set[str] | None = None
+            adaptive_groups: tuple[tuple[str, ...], ...] = ()
+            adaptive_provenance: dict[str, tuple[str, ...]] = {}
+            adaptive_coverage: dict[str, object] | None = None
             low_confidence: bool | None
             event_id: int | None
             degraded: list[str]
-            async with asyncio.timeout(self._timeout):
+            search_timeout = None if plan.mode == "search" and self._adaptive_retriever is not None else self._timeout
+            async with asyncio.timeout(search_timeout):
                 if plan.mode == "overview":
                     overview = await self._overview()
                     items = overview_evidence(overview.items, limit=len(overview.items))
@@ -219,7 +275,57 @@ class MemoryContext:
                                     "has_more": overview.has_more, "next_before": overview.next_before})
                     coverage = _overview_coverage(overview.considered, overview.has_more)
                 else:
-                    result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                    if self._adaptive_retriever is None:
+                        result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                    else:
+                        adaptive = await self._adaptive_retriever.retrieve(self._space, plan.query,
+                            scope=self._scope, exclude_session_id=self._session_id)
+                        result = adaptive.recall
+                        reasons = sorted({reason if reason in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                          for reason in adaptive.reasons})
+                        errors = sorted({error if error in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                         for error in adaptive.errors})
+                        receipt.update({"adaptive_status": adaptive.status,
+                            "adaptive_evidence_basis": adaptive.evidence_basis, "adaptive_fallback_status": adaptive.fallback_status,
+                            "adaptive_round_count": len(adaptive.rounds), "adaptive_queries_used": adaptive.queries_used,
+                            "adaptive_truncated": adaptive.truncated, "adaptive_reasons": reasons,
+                            "adaptive_errors": errors})
+                        adaptive_selected_ids = ({f"chunk:{item.chunk_id}" for item in result.items}
+                                                 | {f"fact:{fact.fact_id}" for fact in result.facts})
+                        adaptive_groups = adaptive.selected_groups
+                        assessment_basis = ("unassessed_fallback" if adaptive.evidence_basis == "verified_candidates"
+                            else "unselected_candidates" if adaptive.evidence_basis == "unselected_candidates"
+                            else "model_judgment_over_selection" if adaptive.evidence_basis == "original_and_selected"
+                            else "model_judgment" if adaptive.status == "sufficient" else "bounded_retrieval_assessment")
+                        adaptive_coverage = {"assessment_status": adaptive.status,
+                            "assessment_basis": assessment_basis, "evidence_basis": adaptive.evidence_basis,
+                            "fallback_status": adaptive.fallback_status, "model_selected": adaptive.evidence_basis == "assessed_selection",
+                            "verified_sufficiency": False, "bounded": True, "truncated": adaptive.truncated,
+                            "round_count": len(adaptive.rounds), "queries_used": adaptive.queries_used,
+                            "reasons": reasons, "errors": errors, "selection_complete": False,
+                            "selected_omitted_count": len(adaptive_selected_ids)}
+                        if adaptive.evidence_basis == "original_and_selected":
+                            adaptive_provenance = {"original_query_ids": adaptive.original_query_ids,
+                                                   "model_selected_ids": adaptive.model_selected_ids}
+                            # Reserve complete provenance before packing; delivery
+                            # filtering below only reduces the serialized size.
+                            adaptive_coverage.update({key: list(ids) for key, ids in adaptive_provenance.items()})
+                        if adaptive.graph_expansions:
+                            graph_expansions: list[dict[str, object]] = [
+                                {"candidate_count": expansion.candidate_count, "added_count": expansion.added_count,
+                                 "omitted_count": expansion.omitted_count, "store_calls": expansion.store_calls,
+                                 "complete": expansion.complete, "truncated": expansion.truncated,
+                                 "reasons": sorted({reason if reason in _ADAPTIVE_DIAGNOSTICS else "unknown"
+                                                    for reason in expansion.reasons})}
+                                for expansion in adaptive.graph_expansions]
+                            receipt["adaptive_graph_expansions"] = graph_expansions
+                            adaptive_coverage["graph_expansions"] = graph_expansions
+                        if adaptive_groups:
+                            # Reserve the largest count before packing so final
+                            # coverage can only shrink the serialized byte cost.
+                            adaptive_coverage["atomic_group_omitted_count"] = len(adaptive_groups)
+                        coverage.update({"complete_history": False, "context_omitted_count": len(result.items),
+                                         "adaptive": adaptive_coverage})
                     items, low_confidence, event_id, degraded = result.items, result.low_confidence, result.event_id, result.degraded
                     candidate_count = len(items)
                     recalled_facts = result.facts
@@ -234,6 +340,7 @@ class MemoryContext:
             records = EvidenceRecords([], [])
             graph: QueryEvidenceGraph | None = None
             block = ""
+            windows: PassageWindows | None = None
             if not low_confidence:
                 if self._structured_paths and plan.mode == "search" and recalled_facts:
                     try:
@@ -243,9 +350,28 @@ class MemoryContext:
                                 exclude_session_id=self._session_id,
                                 limits=MultiHopLimits(max_nodes=MAX_FACTS, max_edges=MAX_LINKS,
                                     max_bytes=self._max_bytes, max_store_calls=128, max_candidates=128, per_node_limit=16))
+                        selection_omitted_facts = 0
+                        if adaptive_selected_ids is not None:
+                            selected_facts = {fact.fact_id: fact for fact in recalled_facts}
+                            selection_omitted_facts = sum(selected_facts.get(fact.fact_id) != fact for fact in expansion.facts)
+                            expansion.facts = [fact for fact in expansion.facts if selected_facts.get(fact.fact_id) == fact]
+                            selected_fact_ids = {fact.fact_id for fact in expansion.facts}
+                            expansion.edges = [edge for edge in expansion.edges
+                                if edge.from_fact in selected_fact_ids and edge.to_fact in selected_fact_ids
+                                and set(edge.source_fact_ids).issubset(selected_fact_ids)]
+                            selected_edge_ids = {edge.id for edge in expansion.edges}
+                            expansion.paths = [path for path in expansion.paths
+                                if set(path.fact_ids).issubset(selected_fact_ids) and set(path.edge_ids).issubset(selected_edge_ids)]
+                            expansion.seed_fact_ids = [fact_id for fact_id in expansion.seed_fact_ids if fact_id in selected_fact_ids]
+                            if selection_omitted_facts:
+                                expansion.coverage.complete = False
+                                expansion.coverage.reasons.append("adaptive_selection")
                         recalled_facts = expansion.facts
                         receipt["multihop_status"] = "prepared"
                         receipt["multihop_coverage"] = expansion.coverage.model_dump(mode="json")
+                        if adaptive_selected_ids is not None:
+                            receipt["multihop_coverage"].update(selection_restricted=True,
+                                selection_omitted_facts=selection_omitted_facts)
                     except Exception as error:
                         receipt["multihop_status"] = "timeout" if isinstance(error, TimeoutError) else "unavailable"
                         receipt["multihop_coverage"] = {"complete": False, "reasons": [receipt["multihop_status"]]}
@@ -265,14 +391,54 @@ class MemoryContext:
                     provisional_sources.append(candidate)
                     if len(provisional_items) == self._limit:
                         break
+                ranked_items = list(provisional_items)
+                if self._neighbor_chunks:
+                    receipt.update({"passage_window_status": "skipped", "passage_window_candidate_count": 0,
+                                    "passage_window_retained_count": 0, "passage_window_anchors": {}})
+                if self._neighbor_chunks and plan.mode == "search" and adaptive_selected_ids is None and ranked_items:
+                    try:
+                        async with asyncio.timeout(min(self._timeout, 1.0)):
+                            windows = await passage_windows(self._memory, self._space, ranked_items,
+                                radius=self._neighbor_chunks, scope=self._scope, session_id=self._session_id)
+                        provisional_items = windows.items
+                        candidate_count += len({item.chunk_id for item in provisional_items} - {item.chunk_id for item in items})
+                        receipt["passage_window_candidate_count"] = len(windows.anchors)
+                        receipt["passage_window_status"] = "partial" if windows.failed and windows.anchors else "unavailable" if windows.failed else "prepared"
+                    except Exception as window_error:
+                        receipt["passage_window_status"] = "timeout" if isinstance(window_error, TimeoutError) else "unavailable"
+                        logger.warning("passage_windows.failed", extra={"event": "passage_windows.failed",
+                            "session_id": self._session_id, "exception_type": type(window_error).__name__})
                 # One bounded verification pass serves inference and inspection.
-                # A failed optional graph read still leaves ordinary passages usable.
+                # A failed optional graph read still leaves ordinary passages usable
+                # unless the revision guard confirms that the read became stale.
+                # Adaptive passages must pass this post-assessment source check.
+                graph_stale = False
                 try:
                     async with asyncio.timeout(min(self._timeout, 1.0)):
-                        graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
+                        graph_revision = await self._memory.documents.revision(self._space)
+                        if windows is not None and windows.revision != graph_revision:
+                            graph_stale = True
+                            receipt["evidence_graph_stale"] = True
+                            raise RuntimeError("memory changed after passage window read")
+                        verified_graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
                             RecallResult(items=provisional_items, facts=recalled_facts, event_id=event_id),
                             scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id)
+                        if await self._memory.documents.revision(self._space) != graph_revision:
+                            graph_stale = True
+                            receipt["evidence_graph_stale"] = True
+                            if adaptive_selected_ids is not None and "stale_evidence" not in receipt["adaptive_reasons"]:
+                                receipt["adaptive_reasons"].append("stale_evidence")
+                            raise RuntimeError("memory changed during graph verification")
+                        graph = verified_graph
                     records = canonical_evidence(graph)
+                    if windows is not None:
+                        for node in graph.nodes:
+                            if node.kind == "chunk" and node.data.get("chunk_id") in windows.anchors:
+                                node.data["retrieval_basis"] = "passage_window"
+                        for edge in graph.edges:
+                            if edge.kind == "returned" and edge.target in {f"chunk:{key}" for key in windows.anchors}:
+                                edge.label = "Read near retrieved passage"
+                                edge.data["retrieval_basis"] = "passage_window"
                     if expansion is not None:
                         found_paths = ordered_evidence_paths(expansion, records, include_quotes=self._path_quotes)
                         candidates = found_paths.paths
@@ -280,10 +446,14 @@ class MemoryContext:
                         if found_paths.truncated:
                             coverage["paths_bounded"] = True
                 except Exception as graph_error:
+                    if windows is not None:
+                        provisional_items = ranked_items
+                        receipt["passage_window_status"] = "unavailable"
                     receipt["evidence_graph_status"] = "unavailable"
                     logger.warning("evidence_graph.failed", extra={"event": "evidence_graph.failed",
                         "session_id": self._session_id, "exception_type": type(graph_error).__name__})
-                retained_chunks = {node.data.get("chunk_id") for node in graph.nodes if node.kind == "chunk"} if graph else None
+                retained_chunks = ({node.data.get("chunk_id") for node in graph.nodes if node.kind == "chunk"}
+                                   if graph else set() if adaptive_selected_ids is not None or graph_stale else None)
                 eligible = [item for item in provisional_items
                             if (retained_chunks is None or item.chunk_id in retained_chunks)
                             and item.metadata.get("session_id") != self._session_id
@@ -324,16 +494,52 @@ class MemoryContext:
                     if len(candidate_text.encode()) <= self._max_bytes:
                         relations.append(relation)
                 for item in eligible:
-                    if item in selected_items or len(sources) >= self._limit:
+                    if item in selected_items or (len(sources) >= self._limit and (windows is None or item.chunk_id not in windows.anchors)):
                         continue
                     candidate = _source(item)
                     text = _source_block([*sources, candidate], coverage, claims, relations, paths)
                     if len(text.encode()) <= self._max_bytes:
                         sources.append(candidate)
                         selected_items.append(item)
+                if adaptive_groups:
+                    supplied_ids = ({f"chunk:{item.chunk_id}" for item in selected_items}
+                                    | {f"fact:{claim['fact_id']}" for claim in claims})
+                    omitted_groups = [group for group in adaptive_groups if not set(group).issubset(supplied_ids)]
+                    omitted_members = {member for group in omitted_groups for member in group}
+                    selected_items = [item for item in selected_items if f"chunk:{item.chunk_id}" not in omitted_members]
+                    sources = [_source(item) for item in selected_items]
+                    claims = [claim for claim in claims if f"fact:{claim['fact_id']}" not in omitted_members]
+                    retained_fact_ids = {claim["fact_id"] for claim in claims if isinstance(claim["fact_id"], int)}
+                    relations = [relation for relation in relations
+                        if relation["from_fact"] in retained_fact_ids and relation["to_fact"] in retained_fact_ids]
+                    retained_link_ids = {relation["link_id"] for relation in relations if isinstance(relation["link_id"], int)}
+                    retained_paths: list[EvidenceRecord] = []
+                    for path in paths:
+                        components = path_records(path, records)
+                        if (all(claim["fact_id"] in retained_fact_ids for claim in components.claims)
+                                and all(relation["link_id"] in retained_link_ids for relation in components.relations)):
+                            retained_paths.append(path)
+                    paths = retained_paths
+                    receipt["adaptive_atomic_group_omitted_count"] = len(omitted_groups)
+                    if adaptive_coverage is not None:
+                        adaptive_coverage["atomic_group_omitted_count"] = len(omitted_groups)
                 if sources or claims:
+                    if "adaptive" in coverage:
+                        coverage["context_omitted_count"] = candidate_count - len(sources)
+                    if adaptive_coverage is not None and adaptive_selected_ids is not None:
+                        supplied_ids = ({f"chunk:{item.chunk_id}" for item in selected_items}
+                                        | {f"fact:{claim['fact_id']}" for claim in claims})
+                        omitted_ids = adaptive_selected_ids - supplied_ids
+                        adaptive_coverage.update(selection_complete=not omitted_ids, selected_omitted_count=len(omitted_ids))
+                        adaptive_coverage.update({key: [identity for identity in ids if identity in supplied_ids]
+                                                  for key, ids in adaptive_provenance.items()})
                     block = _source_block(sources, coverage, claims, relations, paths)
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
+                if windows is not None:
+                    retained_windows = {str(item.chunk_id): windows.anchors[item.chunk_id]
+                        for item in selected_items if item.chunk_id in windows.anchors}
+                    receipt["passage_window_anchors"] = retained_windows
+                    receipt["passage_window_retained_count"] = len(retained_windows)
             lanes = {d.partition(":")[0] for d in degraded}
             receipt.update({"status": "prepared" if block else "empty", "recall_event_id": event_id,
                            "references": references, "context_sha256": hashlib.sha256(block.encode()).hexdigest() if block else None,
@@ -359,6 +565,7 @@ class MemoryContext:
                         {item.chunk_id for item in selected_items})
                     receipt["evidence_graph"] = graph.model_dump(mode="json")
                     receipt["evidence_graph_status"] = "prepared"
+                    receipt["evidence_revision"] = graph_revision
         except asyncio.CancelledError:
             receipt.update({"status": "cancelled", "error_type": "CancelledError"})
             raise

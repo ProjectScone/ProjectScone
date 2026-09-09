@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "receiver_medium_complete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Which storage medium does the service receiving Helios data use?",
+      "answer": "The receiving service is Lumen, which uses a magnetic tape library.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Helios sends its data to service Lumen."
+        },
+        {
+          "id": "chunk:2",
+          "text": "Service Lumen uses a magnetic tape library for storage."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "receiver_medium_incomplete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Which storage medium does the service receiving Helios data use?",
+      "answer": "Helios sends its data to service Lumen.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Helios sends its data to service Lumen."
+        },
+        {
+          "id": "chunk:2",
+          "text": "Service Lumen uses a magnetic tape library for storage."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "two_fields_complete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Give both the assigned owner and review date for ticket T8.",
+      "answer": "T8 is assigned to Rhea and is scheduled for review on October 12.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Ticket T8: owner Rhea; review date October 12. Ticket T9: owner Niko; review date November 3."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "two_fields_incomplete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Give both the assigned owner and review date for ticket T8.",
+      "answer": "T8 is assigned to Rhea. T9 is assigned to Niko.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Ticket T8: owner Rhea; review date October 12. Ticket T9: owner Niko; review date November 3."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "conditional_rule_complete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "What action and deadline apply when sensor S records a leak?",
+      "answer": "For a leak, close valve V within 15 seconds.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "When sensor S records a leak, close valve V within 15 seconds. If it records low battery instead, replace the battery within two days."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "conditional_rule_incomplete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "What action and deadline apply when sensor S records a leak?",
+      "answer": "When S records a leak, close valve V.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "When sensor S records a leak, close valve V within 15 seconds. If it records low battery instead, replace the battery within two days."
+        }
+      ],
+      "expected_acceptable": false
+    },
+    {
+      "id": "conflict_attribution_complete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Report each observer and the value they recorded for meter M.",
+      "answer": "Ari recorded 24 units; Bea recorded 28 units.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Ari recorded meter M at 24 units. Bea recorded meter M at 28 units. Both observations remain in the ledger."
+        }
+      ],
+      "expected_acceptable": true
+    },
+    {
+      "id": "conflict_attribution_incomplete",
+      "category": "answer_completeness",
+      "split": "development",
+      "question": "Report each observer and the value they recorded for meter M.",
+      "answer": "The recorded values were 24 and 28 units.",
+      "sources": [
+        {
+          "id": "chunk:1",
+          "text": "Ari recorded meter M at 24 units. Bea recorded meter M at 28 units. Both observations remain in the ledger."
+        }
+      ],
+      "expected_acceptable": false
+    }
+  ]
+}

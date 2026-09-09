@@ -6,6 +6,50 @@ on:
   pull_request:
 
 jobs:
+  terraform:
+    name: Terraform configuration and recovery guards
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_CONFIG_FILE: /dev/null
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      CHECKPOINT_DISABLE: "1"
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.1"
+          terraform_wrapper: false
+      - name: Prepare provider cache on the runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/terraform-provider-cache"
+          printf 'TF_PLUGIN_CACHE_DIR=%s\n' "$RUNNER_TEMP/terraform-provider-cache" >> "$GITHUB_ENV"
+      - name: Check deployment helper types
+        run: |
+          python -m pip install mypy==2.3.1
+          python -m mypy --strict scripts/terraform_env.py terraform/modules/compute/mount_volume.py
+      - name: Test private environment handling
+        run: python -m unittest discover -s scripts -p test_terraform_env.py
+      - name: Test Qdrant volume identity and mount guards
+        run: python -m unittest discover -s terraform/modules/compute/tests -p test_mount_volume.py
+      - name: Check storage foundation with a mock provider
+        run: |
+          terraform -chdir=terraform init -backend=false -input=false
+          terraform -chdir=terraform fmt -check -recursive
+          terraform -chdir=terraform validate
+          terraform -chdir=terraform test
+      - name: Check compute with a mock provider
+        run: |
+          terraform -chdir=terraform/modules/compute init -backend=false -input=false
+          terraform -chdir=terraform/modules/compute validate
+          terraform -chdir=terraform/modules/compute test
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -140,3 +184,40 @@ jobs:
           python -m pip install -q build twine
           python -m build -q
           python -m twine check dist/*
+
+  python-314:
+    name: Python 3.14 and AWS storage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python/memory
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.1
+        env:
+          DDB_LOCAL_TELEMETRY: "0"
+        ports:
+          - 8000:8000
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install runtime and emulator test dependencies
+        run: python -m pip install -q -e '.[test,aws-test,qdrant,mongo,vision]' mypy
+      - name: Test with disposable MongoDB and AWS emulators
+        env:
+          SCONE_TEST_MONGO_URL: mongodb://localhost:27017
+          SCONE_TEST_DYNAMODB_URL: http://127.0.0.1:8000
+        run: python -m pytest -q -p no:warnings
+      - name: Check new AWS backend types
+        run: python -m mypy --follow-imports=silent --strict src/scone_memory/backends/aws_blobs.py src/scone_memory/api/page_access.py

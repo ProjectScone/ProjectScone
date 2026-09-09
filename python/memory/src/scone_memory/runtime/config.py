@@ -20,6 +20,11 @@
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
+    SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
+    SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
+                                 alternatively load preprovisioned CPU model files; both required
+    SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS, *_THREADS, *_BATCH_SIZE
+                                 optional offline tuning (defaults 512, 2, 8); no model downloads
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -71,6 +76,11 @@ class Settings:
     #: Where attachment bytes live. Empty means beside the SQLite file
     #: when there is one, and in memory when there is not.
     blob_dir: str = ""
+    blobs: str = "auto"
+    s3_bucket: str | None = None
+    dynamodb_blob_table: str | None = None
+    aws_region: str | None = None
+    s3_prefix: str = "attachments/"
     #: Confidence below which a fact an agent submits over MCP is parked
     #: for a person instead of entering the ledger. Unset means none is.
     mcp_propose_below: Optional[float] = None
@@ -113,6 +123,11 @@ class Settings:
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
+    reranker_cross_encoder_dir: str | None = None
+    reranker_cross_encoder_model: str | None = None
+    reranker_cross_encoder_max_pair_tokens: int | None = None
+    reranker_cross_encoder_threads: int | None = None
+    reranker_cross_encoder_batch_size: int | None = None
     rerank_limit: int = 32
     rerank_max_bytes: int = 64000
     rerank_timeout: float = 1.0
@@ -139,11 +154,55 @@ class Settings:
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
     conversations_registry: Optional[str] = None
+    conversations_tool_mode: str = "off"
+    conversations_tool_initial_search: bool = True
+    conversations_tool_max_calls: int = 4
+    conversations_tool_max_rounds: int = 4
+    conversations_tool_timeout: float = 120.0
+    answer_review_policy: str = "off"
+    answer_review_url: str | None = None
+    answer_review_model: str | None = None
+    answer_review_api_key: str | None = field(default=None, repr=False)
+    answer_review_timeout: float = 20.0
+    answer_review_quote_mode: str = "text"
+    adaptive_retrieval: bool = False
+    adaptive_url: str | None = None
+    adaptive_model: str | None = None
+    adaptive_api_key: str | None = field(default=None, repr=False)
+    adaptive_timeout: float = 15.0
+    adaptive_max_rounds: int = 3
+    adaptive_max_queries: int = 6
+    adaptive_candidate_limit: int = 20
+    adaptive_max_evidence_bytes: int = 16000
+    adaptive_graph_hops: int = 0
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        from .conversation_review import validate_review_settings
+        from .conversation_retrieval import validate_adaptive_settings
+        from .conversation_tools import validate_tool_settings
+
+        validate_review_settings(self)
+        validate_adaptive_settings(self)
+        validate_tool_settings(self)
+        if self.blobs not in ("auto", "memory", "file", "s3"):
+            raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
+        if self.blobs in ("memory", "s3") and self.blob_dir:
+            raise InvalidInput("SCONE_BLOB_DIR cannot be combined with SCONE_BLOBS=memory or s3")
+        if self.blobs == "file" and not self.blob_dir:
+            raise InvalidInput("SCONE_BLOBS=file requires SCONE_BLOB_DIR")
+        for name, value in (("SCONE_S3_BUCKET", self.s3_bucket),
+                            ("SCONE_DYNAMODB_BLOB_TABLE", self.dynamodb_blob_table),
+                            ("SCONE_AWS_REGION", self.aws_region)):
+            if self.blobs == "s3":
+                if type(value) is not str or not value.strip() or "\x00" in value:
+                    raise InvalidInput(f"SCONE_BLOBS=s3 requires {name}")
+            elif value is not None:
+                raise InvalidInput(f"{name} requires SCONE_BLOBS=s3")
+        if self.blobs != "s3" and self.s3_prefix != "attachments/":
+            raise InvalidInput("SCONE_S3_PREFIX requires SCONE_BLOBS=s3")
         try:
             validate_candidate_limit(self.candidate_limit)
             validate_rerank_options(self.rerank_limit, self.rerank_max_bytes, self.rerank_timeout)
@@ -156,9 +215,31 @@ class Settings:
             raise InvalidInput(message) from None
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
+        for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):
+            if value is not None and (type(value) is not str or not value.strip() or "\x00" in value):
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be nonblank text")
+        if (self.reranker_cross_encoder_dir is None) != (self.reranker_cross_encoder_model is None):
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER_DIR and SCONE_RERANKER_CROSS_ENCODER_MODEL must be configured together")
+        if self.reranker_cross_encoder_dir is not None and self.reranker_factory is not None:
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER_DIR cannot be combined with SCONE_RERANKER_FACTORY")
+        for name, tuning, minimum, maximum in (
+            ("MAX_PAIR_TOKENS", self.reranker_cross_encoder_max_pair_tokens, 2, 8192),
+            ("THREADS", self.reranker_cross_encoder_threads, 1, 16),
+            ("BATCH_SIZE", self.reranker_cross_encoder_batch_size, 1, 128),
+        ):
+            if tuning is None:
+                continue
+            if type(tuning) is not int or not minimum <= tuning <= maximum:
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be an integer in {minimum}..{maximum}")
+            if self.reranker_cross_encoder_dir is None:
+                raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} requires the cross encoder directory and model")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
+        for suffix in ("DIR", "MODEL", "MAX_PAIR_TOKENS", "THREADS", "BATCH_SIZE"):
+            name = f"SCONE_RERANKER_CROSS_ENCODER_{suffix}"
+            if name in env and type(env[name]) is not str:
+                raise InvalidInput(f"{name} must be an environment string")
         for name in ("SCONE_RECALL_CANDIDATES", "SCONE_RERANKER_FACTORY", "SCONE_RERANK_LIMIT",
                      "SCONE_RERANK_MAX_BYTES", "SCONE_RERANK_TIMEOUT"):
             if env.get(name) is not None and not isinstance(env[name], str):
@@ -169,6 +250,11 @@ class Settings:
             embedder=env.get("SCONE_EMBEDDER", "hash"),
             sqlite_path=env.get("SCONE_SQLITE_PATH", "~/.scone-memory/memory.db"),
             blob_dir=env.get("SCONE_BLOB_DIR", ""),
+            blobs=env.get("SCONE_BLOBS", "auto"),
+            s3_bucket=env.get("SCONE_S3_BUCKET") or None,
+            dynamodb_blob_table=env.get("SCONE_DYNAMODB_BLOB_TABLE") or None,
+            aws_region=env.get("SCONE_AWS_REGION") or None,
+            s3_prefix=env.get("SCONE_S3_PREFIX", "attachments/"),
             mcp_propose_below=(float(env["SCONE_MCP_PROPOSE_BELOW"])
                                if env.get("SCONE_MCP_PROPOSE_BELOW") else None),
             mongo_url=env.get("SCONE_MONGO_URL"),
@@ -209,6 +295,14 @@ class Settings:
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
+            reranker_cross_encoder_dir=env.get("SCONE_RERANKER_CROSS_ENCODER_DIR") or None,
+            reranker_cross_encoder_model=env.get("SCONE_RERANKER_CROSS_ENCODER_MODEL") or None,
+            reranker_cross_encoder_max_pair_tokens=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS",
+                env["SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS"]) if "SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS" in env else None),
+            reranker_cross_encoder_threads=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_THREADS",
+                env["SCONE_RERANKER_CROSS_ENCODER_THREADS"]) if "SCONE_RERANKER_CROSS_ENCODER_THREADS" in env else None),
+            reranker_cross_encoder_batch_size=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE",
+                env["SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE"]) if "SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE" in env else None),
             rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
             rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
             rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
@@ -227,7 +321,28 @@ class Settings:
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
             conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
+            answer_review_policy=env.get("SCONE_ANSWER_REVIEW_POLICY", "off"),
+            answer_review_url=env.get("SCONE_ANSWER_REVIEW_URL") or None,
+            answer_review_model=env.get("SCONE_ANSWER_REVIEW_MODEL") or None,
+            answer_review_api_key=env.get("SCONE_ANSWER_REVIEW_API_KEY") or None,
+            answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
+            answer_review_quote_mode=env.get("SCONE_ANSWER_REVIEW_QUOTE_MODE", "text"),
+            adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
+            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or None,
+            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or None,
+            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or None,
+            adaptive_timeout=parse_seconds("SCONE_ADAPTIVE_TIMEOUT", env.get("SCONE_ADAPTIVE_TIMEOUT"), 15.0),
+            adaptive_max_rounds=_environment_integer("SCONE_ADAPTIVE_MAX_ROUNDS", env.get("SCONE_ADAPTIVE_MAX_ROUNDS", "3")),
+            adaptive_max_queries=_environment_integer("SCONE_ADAPTIVE_MAX_QUERIES", env.get("SCONE_ADAPTIVE_MAX_QUERIES", "6")),
+            adaptive_candidate_limit=_environment_integer("SCONE_ADAPTIVE_CANDIDATE_LIMIT", env.get("SCONE_ADAPTIVE_CANDIDATE_LIMIT", "20")),
+            adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
+            adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
+            conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
+            conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
+            conversations_tool_max_calls=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", "4")),
+            conversations_tool_max_rounds=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", "4")),
+            conversations_tool_timeout=parse_seconds("SCONE_CONVERSATIONS_TOOL_TIMEOUT", env.get("SCONE_CONVERSATIONS_TOOL_TIMEOUT"), 120.0),
             log_path=env.get("SCONE_LOG_PATH") or None,
         )
 
@@ -402,12 +517,25 @@ def _reranker_spec(spec: str) -> tuple[str, str]:
 
 
 def build_reranker(settings: Settings) -> Reranker | None:
-    """Load explicit trusted operator code; no default provider is selected.
+    """Load an explicit offline model or trusted code; no default is selected.
 
     The factory is synchronous and takes no required arguments. It returns an
     object with an async rerank method. The operator owns adapter resources and
     shutdown; the engine does not close an injected reranker.
+    The built-in cross encoder loads preprovisioned CPU files only. Its optional
+    provider module is imported only when the directory/model pair is selected.
     """
+    if settings.reranker_cross_encoder_dir is not None and settings.reranker_cross_encoder_model is not None:
+        try:
+            from ..providers.offline_reranker import OfflineCrossEncoderReranker
+
+            return OfflineCrossEncoderReranker(settings.reranker_cross_encoder_dir,
+                model_name=settings.reranker_cross_encoder_model,
+                max_pair_tokens=settings.reranker_cross_encoder_max_pair_tokens or 512,
+                threads=settings.reranker_cross_encoder_threads or 2,
+                batch_size=settings.reranker_cross_encoder_batch_size or 8)
+        except Exception:
+            raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER requires valid preprovisioned model files and scone-memory[offline-rerank]") from None
     if settings.reranker_factory is None:
         return None
     module, name = _reranker_spec(settings.reranker_factory)
@@ -571,12 +699,22 @@ def build_events(settings: Settings, documents=None):
 
 
 def build_blobs(settings: Settings):
-    """Where attachments are kept. SCONE_BLOB_DIR wins; otherwise a
-    directory beside the SQLite file, because a server whose database is
-    on disk should not lose its evidence on a restart. With no database on
-    disk there is nowhere obvious to write, so bytes stay in memory."""
+    """Select explicit attachment storage or preserve the existing default:
+    SCONE_BLOB_DIR, then beside SQLite, otherwise in memory. AWS construction
+    is lazy; no SDK, credential resolution, or service call until first use."""
     from ..backends.blobs import FileBlobStore, InMemoryBlobStore
 
+    if settings.blobs == "s3":
+        from ..backends.aws_blobs import S3BlobStore
+
+        assert settings.s3_bucket is not None and settings.dynamodb_blob_table is not None and settings.aws_region is not None
+        try:
+            return S3BlobStore(settings.s3_bucket, settings.dynamodb_blob_table,
+                               region_name=settings.aws_region, prefix=settings.s3_prefix)
+        except ValueError as error:
+            raise InvalidInput(str(error)) from None
+    if settings.blobs == "memory":
+        return InMemoryBlobStore()
     if settings.blob_dir:
         return FileBlobStore(Path(settings.blob_dir).expanduser())
     if settings.documents == "sqlite" and settings.sqlite_path not in ("", ":memory:"):
@@ -586,6 +724,7 @@ def build_blobs(settings: Settings):
 
 async def build_engine(settings: Settings) -> MemoryEngine:
     reranker = build_reranker(settings)
+    blobs = build_blobs(settings)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -608,7 +747,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_limit=settings.rerank_limit,
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
-        blobs=build_blobs(settings),
+        blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:
         await engine.embedder.embed(["warm up"])

@@ -55,7 +55,8 @@ async def test_a_streamed_reply_arrives_as_deltas_and_ends_with_completion():
     assert str(request.url) == "http://llm.local/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer k"
     body = json.loads(request.content)
-    assert body["messages"] == MESSAGES and body["stream"] is True and body["temperature"] == 0.3 and body["think"] is False
+    assert body["messages"] == MESSAGES and body["stream"] is True and body["temperature"] == 0.3
+    assert body["reasoning_effort"] == "none" and "think" not in body
 
 
 async def test_completion_is_the_finish_reason_when_no_done_marker_comes():

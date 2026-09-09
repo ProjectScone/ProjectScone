@@ -23,6 +23,7 @@ from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from .validation import validate_vector
+from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -114,10 +115,12 @@ def connect(path: str | Path) -> sqlite3.Connection:
     # Derived retrieval indices follow schema validation/migration: adding them
     # before check_schema would change the historical backup or failed upgrade.
     conn.executescript("""BEGIN;
+CREATE INDEX IF NOT EXISTS chunks_window ON chunks(space, episode_id, ordinal, id);
 CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 COMMIT;""")
+    initialize_fact_search(conn)
     return conn
 
 
@@ -377,6 +380,14 @@ class SqliteDocumentStore:
         ).fetchall()
         return [_chunk(r) for r in rows]
 
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        from ..core.chunk_window import validate_chunk_window
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        rows = self.conn.execute(
+            'SELECT * FROM chunks WHERE space = ? AND episode_id = ? AND ordinal >= ? ORDER BY ordinal, id LIMIT ?',
+            (space, episode_id, start_ordinal, limit)).fetchall()
+        return [_chunk(row) for row in rows]
+
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         self.conn.execute("INSERT OR IGNORE INTO inflight (space, content_hash) VALUES (?, ?)", (space, content_hash))
         self.conn.commit()
@@ -512,6 +523,11 @@ class SqliteDocumentStore:
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
+
+    async def search_facts(self, space: str, query: str, when: str, limit: int,
+                           scope: TextFilter | None = None) -> list[Fact]:
+        """Indexed exact-token lookup with temporal/scope filtering before limit."""
+        return [_fact(row) for row in search_fact_rows(self.conn,space,query,when,limit,scope)]
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         rows = self.conn.execute(

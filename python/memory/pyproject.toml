@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Memory infrastructure for LLMs, RAG and agents: verbatim episodes, a dated fact ledger, hybrid recall and an evidence log over pluggable stores (SQLite, MongoDB, PostgreSQL, Qdrant, Redis, Chroma, LanceDB), served by FastAPI and MCP"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "LicenseRef-ProjectScone-Research-Attribution-1.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ProjectScone contributors" }]
 keywords = ["memory", "agents", "retrieval", "rag", "temporal", "knowledge", "qdrant", "mongodb", "postgres", "pgvector", "redis", "chroma", "lancedb", "fastapi", "mcp", "langchain", "llamaindex"]
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -29,6 +30,8 @@ dependencies = ["pydantic>=2.5"]
 
 [project.optional-dependencies]
 agents = ["cryptography>=42"]
+aws = ["boto3>=1.40,<2"]
+aws-test = ["scone-memory[aws,test]", "moto[s3,dynamodb]>=5,<6"]
 mongo = ["pymongo>=4.13"]
 qdrant = ["qdrant-client>=1.12"]
 api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
@@ -37,9 +40,10 @@ remote-embed = ["httpx>=0.27"]
 speech = ["httpx>=0.27,<1"]
 vision = ["httpx>=0.27,<1", "Pillow>=10.4"]
 local-embed = ["fastembed>=0.4"]
+offline-rerank = ["fastembed>=0.8,<0.9"]
 postgres = ["psycopg[binary,pool]>=3.2", "pgvector>=0.3"]
 redis = ["redis>=5"]
-elasticsearch = ["elasticsearch>=8,<9"]
+elasticsearch = ["elasticsearch[async]>=8,<9"]
 milvus = ["pymilvus>=2.5"]
 milvus-lite = ["pymilvus[milvus_lite]>=2.5"]
 chroma = ["chromadb>=1.0"]
@@ -47,8 +51,8 @@ lancedb = ["lancedb>=0.20"]
 langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.12"]
 openai-agents = ["openai-agents>=0.2"]
-all = ["scone-memory[mongo,qdrant,postgres,redis,elasticsearch,milvus,chroma,lancedb,api,mcp,remote-embed,local-embed]"]
-test = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fastapi>=0.115", "mcp>=2,<3", "cryptography>=42"]
+all = ["scone-memory[aws,mongo,qdrant,postgres,redis,elasticsearch,milvus,chroma,lancedb,api,mcp,remote-embed,local-embed,offline-rerank]"]
+test = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fastapi>=0.115", "mcp>=2,<3", "cryptography>=42", "uvicorn>=0.30", "websockets>=13", "Pillow>=10.4"]
 
 [project.scripts]
 scone-memory = "scone_memory.runtime.cli:main"

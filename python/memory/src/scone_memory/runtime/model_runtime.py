@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import json
 from fastapi import HTTPException, Request
 
 from ..core.errors import InvalidInput
+from ..agents.evidence_loop import ToolLoopLimits, ToolModel
 from ..ingestion.derive import Deriver
 from ..ingestion.distill import Distiller
 from ..ingestion.worker import ConsolidationWorker
@@ -21,6 +23,7 @@ from ..realtime.persona import ModelChoice, Persona, VoiceChoice
 from ..realtime.providers import BoundPersona, ProviderRegistry
 from ..realtime.text import TextConversation
 from .config import Settings
+from .conversation_tools import ConversationTools
 from .model_connections import ModelConnection, ModelConnectionStore, api_key
 
 
@@ -93,14 +96,20 @@ def text_model_factory(connection: ModelConnection, *, think: bool | None = None
     return create
 
 
-def self_hosted_text_runtime(engine, store: ModelConnectionStore, *, think: bool | None = None):
-    def create(space, session_id, scope):
+def self_hosted_text_runtime(engine, store: ModelConnectionStore, *, think: bool | None = None,
+                             tools: ConversationTools | None = None):
+    def create(space, session_id, scope, **conversation_options):
         connection = store.get('chat')
         if connection is None:
             raise InvalidInput('No self-hosted chat model is configured')
+        if tools is not None:
+            return TextConversation(engine, space, session_id,
+                tool_model_factory=tools.factory(connection, think=think), tool_limits=tools.limits,
+                tool_initial_search=tools.initial_search,
+                turn_timeout=connection.timeout_s, **scope.kwargs(), **conversation_options)
         # The immutable connection stays with this session, even across edits.
         return TextConversation(engine, space, session_id, text_model_factory(connection, think=think),
-                                turn_timeout=connection.timeout_s, **scope.kwargs())
+                                turn_timeout=connection.timeout_s, **scope.kwargs(), **conversation_options)
     return create
 
 
@@ -112,9 +121,16 @@ def _alias(role: str, connection: ModelConnection) -> str:
 @dataclass(frozen=True)
 class _SelfHostedBoundPersona(BoundPersona):
     turn_timeout: float
+    tool_model_factory: Callable[[], ToolModel] | None = None
+    tool_limits: ToolLoopLimits | None = None
+    tool_initial_search: bool = False
 
     def text(self, *args, **options):
         options.setdefault('turn_timeout', self.turn_timeout)
+        if self.tool_model_factory is not None:
+            options.setdefault('tool_model_factory', self.tool_model_factory)
+            options.setdefault('tool_limits', self.tool_limits)
+            options.setdefault('tool_initial_search', self.tool_initial_search)
         return super().text(*args, **options)
 
     def voice(self, *args, **options):
@@ -125,9 +141,11 @@ class _SelfHostedBoundPersona(BoundPersona):
 class DynamicSelfHostedCatalog:
     """A self-hosted voice persona exists only while all three services are configured."""
 
-    def __init__(self, store: ModelConnectionStore, *, think: bool | None = None):
+    def __init__(self, store: ModelConnectionStore, *, think: bool | None = None,
+                 tools: ConversationTools | None = None):
         self.store = store
         self.think = think
+        self.tools = tools
 
     def _current(self, *, legacy: bool = False) -> PersonaCatalog:
         from ..providers.speech import SelfHostedOpenAISpeech
@@ -162,7 +180,9 @@ class DynamicSelfHostedCatalog:
         )
         bound = registry.resolve(persona)
         selected = _SelfHostedBoundPersona(bound.persona, bound.model_factory, bound.stt_factory,
-                                      bound.tts_factory, bound.activity_factory, chat.timeout_s)
+            bound.tts_factory, bound.activity_factory, chat.timeout_s,
+            self.tools.factory(chat, think=self.think) if self.tools else None,
+            self.tools.limits if self.tools else None, self.tools.initial_search if self.tools else False)
         return PersonaCatalog((persona,), {persona.id: selected})
 
     @property

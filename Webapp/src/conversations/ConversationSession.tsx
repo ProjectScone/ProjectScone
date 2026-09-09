@@ -5,9 +5,12 @@ import {DeleteConversation} from './DeleteConversation';
 import {RecallScopeSummary} from './RecallScopeControls';
 import {LiveReply} from './LiveReply';
 import {VoiceControls} from './VoiceControls';
+import {useTranscriptHeight} from './useTranscriptHeight';
+import {useConversationFade} from './useConversationFade';
 import {session,transcript,turnReceipt,type ConversationSession as Session,type Transcript,type TurnResult} from './contracts';
 
 export function ConversationSession({api,sid,onSession,textConfigured,voiceSupported,deletionSupported,cancellationSupported,paginationSupported,streamingSupported,onRemoved}:{api:ApiClient;sid:string;onSession:(value:Session)=>void;textConfigured:boolean;voiceSupported:boolean;deletionSupported:boolean;cancellationSupported:boolean;paginationSupported:boolean;streamingSupported:boolean;onRemoved:(sid:string,acknowledged:boolean)=>void}){
+  const threadRef=useTranscriptHeight();
   const [current,setCurrent]=useState<Session|null>(null),[saved,setSaved]=useState<Transcript|null>(null);
   const [error,setError]=useState(''),[draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[verified,setVerified]=useState(false);
   const [voiceVerified,setVoiceVerified]=useState(false),[audioStopRequested,setAudioStopRequested]=useState(false);
@@ -136,7 +139,9 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
   }
   const terminal=current&&['ended','failed','interrupted'].includes(current.state);
   const voice=current?.mode==='voice';
-  return <><section className="conversation-thread" aria-label={voice?'Voice conversation':'Text conversation'}>
+  const deliveryMessage=delivery||(terminal?'Saved messages remain in your memory.':streamingSupported?'Live public text · saved replies verified separately':'Completed replies · not a token stream');
+  const deliveryFade=useConversationFade<HTMLSpanElement>(deliveryMessage);
+  return <><section ref={threadRef} className="conversation-thread" aria-label={voice?'Voice conversation':'Text conversation'}>
     <header className="conversation-thread-header"><div><span className="eyebrow">{voice?'Voice':'Text'} session · {sid.slice(0,8)}</span><h2>{current?.state==='ended'?'Conversation ended':current?.state==='interrupted'?'Conversation interrupted':current?.state==='failed'?'Conversation failed':'A conversation that remembers'}</h2></div>
       {terminal&&deletionSupported?<DeleteConversation api={api} sid={sid} enabled={verified} onRemoved={onRemoved}/>:<button onClick={stop} disabled={!verified||current?.state!=='running'}>End conversation</button>}</header>
     {current&&<RecallScopeSummary scope={current.recall_scope}/>}
@@ -171,7 +176,7 @@ export function ConversationSession({api,sid,onSession,textConfigured,voiceSuppo
         if(!event.repeat)void send();
       }} aria-describedby="conversation-keyboard-hint" placeholder={!textConfigured?'Text runtime not configured. Saved messages are still available.':terminal?'This session is closed. Start a new conversation.':'Ask about something in your memory…'} disabled={!textConfigured||!verified||Boolean(terminal)} rows={3}/>
       <span id="conversation-keyboard-hint" className="conversation-caption">Enter to send · Shift+Enter for a new line</span>
-      <div className="conversation-composer-footer"><span role="status">{delivery|| (terminal?'Saved messages remain in your memory.':streamingSupported?'Live public text · saved replies verified separately':'Completed replies · not a token stream')}</span>
+      <div className="conversation-composer-footer"><span role="status" ref={deliveryFade} className="conversation-delivery-transition">{deliveryMessage}</span>
         {cancellationSupported&&cancelTarget&&current?.state==='running'?<button type="button" disabled={!verified||cancelling} onClick={cancelReply}>{cancelling?'Cancelling…':'Cancel reply'}</button>:<button className="primary" type="submit" aria-label="Send message" disabled={!textConfigured||!verified||current?.state!=='running'||busy||!draft.trim()}>Send ↑</button>}
       </div>
     </form>}

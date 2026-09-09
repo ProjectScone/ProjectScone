@@ -163,6 +163,36 @@ index on MongoDB and a clock-driven sweep elsewhere. No store migrates
 another build's data: each stamps a schema version and refuses a
 mismatch, SQLite excepted for the one recorded step.
 
+### Indexed fact recall
+
+SQLite accelerates lexical fact lookup with a derived token index. Query token
+overlap, confidence/ID ordering, historical validity, and source filters retain
+the ledger scan's semantics. Facts outside the requested source scope cannot
+consume the result limit. The engine checks returned facts against current ledger
+records; an unavailable or invalid index falls back to scanning and reports
+`fact_index: unavailable` in recall degradation. Other document stores retain
+their existing scan unless they implement the optional `IndexedFactSearch` port.
+
+SQL triggers record fact edits made by older clients as well as this library.
+The next lookup refreshes pending terms for that space. Existing databases incur
+an initial backfill; missing or incompatible derived objects are rebuilt on open.
+The index does not change the ledger schema version. Historical-chain retrieval
+still scans, and common query terms can still require sorting many matching
+postings. This index does not accelerate vector retrieval or model generation.
+
+Measure exact result parity and warm lookup latency on disposable synthetic
+ledgers, with initial indexing reported separately:
+
+```sh
+python -m scone_memory.testing.fact_search_benchmark \
+  --sizes 1000 10000 50000 --repeats 5 --output /path/to/new-report.json
+```
+
+The diagnostic includes sparse terms, common terms, and a source filter that
+rejects most higher-ranked matches. It reports full ledger rows materialized and
+fact point reads; it does not claim constant-time lookup or generation accuracy.
+No model, network connection, or application database is used.
+
 ## Preserve an original image from the CLI
 
 ```sh
@@ -215,6 +245,62 @@ save and does not retry. Inspect the store before repeating it. There is no
 automatic host image capture, missing-image reconstruction or Rust CLI parity
 claim. Export/import still carries references, not a portable copy of image bytes.
 
+### Optional S3 attachment storage
+
+Install `scone-memory[aws]` and select pre-provisioned resources explicitly:
+
+```sh
+SCONE_BLOBS=s3
+SCONE_S3_BUCKET=your-attachment-bucket
+SCONE_DYNAMODB_BLOB_TABLE=your-blob-metadata-table
+SCONE_AWS_REGION=us-east-1
+SCONE_S3_PREFIX=attachments/
+```
+
+S3 stores attachment bytes; DynamoDB stores their space ownership, episode
+references, and cleanup journals. This is an attachment backend, not a DynamoDB
+replacement for the document ledger, conversation journal, or retrieval index.
+Configure those stores separately. `SCONE_BLOBS=auto` preserves existing defaults;
+`file` requires `SCONE_BLOB_DIR`, and `memory` explicitly selects ephemeral bytes.
+Contradictory storage settings fail at startup.
+
+The adapter uses the AWS SDK credential chain; prefer workload IAM roles.
+Constructing it does not resolve credentials or contact AWS. Supply a private,
+versioned S3 bucket dedicated to attachments with default SSE-KMS encryption and a DynamoDB table with
+string partition key `pk` and string sort key `sk`. Configure table encryption,
+PITR, and least-privilege access to that table, bucket prefix, and KMS key.
+The role also needs `s3:ListBucket` on the dedicated bucket so S3 HEAD can report
+missing objects as 404 during interrupted-upload recovery; 403 is treated as an
+error, never proof that bytes are absent.
+Deployment container instructions are in [`deploy/aws`](../../deploy/aws/README.md).
+Reusable Terraform configuration lives in the repository-root `terraform/`
+directory. Supply deployment values through the environment; private `.env`
+files, populated variable files, plans, and state stay ignored.
+
+Each S3 upload has an immutable generation key. DynamoDB transactions publish
+ownership and persist deletion intents before S3 cleanup. Cleanup targets the
+recorded version, so a delayed delete cannot remove a newly published generation.
+S3 and DynamoDB do not provide a shared atomic transaction: failed operations
+raise and retain recovery state. Operators can call
+`await engine.blobs.recover_uploads(space, after=cursor, limit=100)` on this
+adapter to fence unpublished uploads and retry cleanup. Each call returns a
+`RecoveryPage` with `visited` and `next_cursor`; follow the cursor until it is
+`None` to complete a sweep. Repeat sweeps after paused writers finish; an attempt
+is not proof that no late write can arrive. Pending upload intents are retained
+for that purpose. No automatic background recovery is configured.
+
+This initial adapter has explicit capacity bounds: 25 MiB per attachment, 1,024
+held attachments per space, 1,024 episode references per attachment, and 300 KiB
+per metadata item. Over-budget operations fail; these limits are not a claim of
+unbounded storage capacity. Partition reads are strongly consistent and use
+queries, not table scans. SDK calls run off the event loop with bounded waits;
+cancellation cannot interrupt an already running SDK request.
+
+Run emulator tests with `pip install -e '.[aws-test]'` followed by
+`pytest tests/test_aws_blobs.py tests/test_aws_blob_config.py`. Tests use synthetic
+resources and credentials through Moto; they do not provision AWS resources or
+measure AWS throughput.
+
 ## LlamaIndex and LangChain workflows
 
 The optional `llamaindex` and `langchain` extras can coexist over one Scone
@@ -256,6 +342,57 @@ The root [.env.example](../../.env.example) lists supported settings without
 credentials. Keep private values in ignored `.env.local` with mode `0600`;
 `scripts/serve-self-hosted.sh --check` validates its format before an explicit launch.
 
+### Offline cross-encoder reranking
+
+Install `scone-memory[offline-rerank]` to rank retained passages with a dedicated
+CPU model instead of asking a chat model to assign relevance scores:
+
+```python
+from scone_memory.providers.offline_reranker import OfflineCrossEncoderReranker
+
+reranker = OfflineCrossEncoderReranker(
+    "/srv/models/ms-marco-MiniLM-L-6-v2",
+    model_name="Xenova/ms-marco-MiniLM-L-6-v2",
+)
+memory = await MemoryEngine(
+    documents, vectors, embedder, reranker=reranker,
+    rerank_limit=16, rerank_timeout=2,
+).open()
+result = await memory.recall(
+    "authorized-space", "Who approves external data exports?",
+    limit=3, candidate_limit=32,
+)
+```
+
+The directory must already contain the model's ONNX weights, configuration, and
+tokenizer files. Provision those artifacts separately; the adapter makes no
+download or inference network calls and never loads remote Python model code.
+Supported plain ONNX models are `Xenova/ms-marco-MiniLM-L-6-v2`,
+`Xenova/ms-marco-MiniLM-L-12-v2`, and `BAAI/bge-reranker-base`. Other models can
+use the existing caller-supplied `Reranker` interface.
+`model_identity` records artifact hashes for reproducible runs. Runtime settings
+also accept `SCONE_RERANKER_CROSS_ENCODER_DIR` and
+`SCONE_RERANKER_CROSS_ENCODER_MODEL`; these are mutually exclusive with the
+existing trusted `SCONE_RERANKER_FACTORY` option.
+
+Scores are raw model logits used for ordering, not confidence or a support
+threshold. Negative scores can still identify the best available evidence.
+Candidate depth, scope checks, result size, and reranking budgets remain owned by
+Scone's retrieval pipeline. Every full query/passage pair must fit the configured
+token limit and the model's declared limit. Oversized pairs fail reranking rather
+than silently scoring a truncated prefix; the existing retrieval fallback and
+failure trace remain visible. This does not expand a model's context window.
+
+Inference runs off the event loop, with one active CPU job per adapter. Cancelling
+the awaiting request does not stop an already running ONNX operation; its result
+is discarded and its slot stays occupied until it finishes.
+
+The isolated evaluator accepts `--cross-encoder-dir /srv/models/MODEL` together
+with `--model MODEL_NAME`, `--embedding-cache EXISTING_BGE_CACHE`, and
+`--output NEW_REPORT.json`. It compares ordinary fusion, expanded candidate
+retrieval, and offline reranking on the same synthetic cases. It measures passage
+retrieval, not generated-answer accuracy.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
@@ -290,6 +427,328 @@ vectors, a callable filter over the metadata dict), which is the recipe
 above.
 
 ## Using it from a framework
+
+For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
+engine to one host-selected space. Its `openai()` and `anthropic()` methods
+render the same four contracts: `search_memory`, `add_memory`, `read_profile`,
+and `trace_memory`. Hosts can allowlist a subset. The host executes returned
+tool calls with `await box.run(name, arguments)`; installing an adapter does
+not automatically enable a tool loop in HTTP Conversations or the MCP server.
+
+```python
+from scone_memory.integrations.tools import ToolBox
+
+box = ToolBox(engine, "default", tools=["search_memory", "trace_memory"])
+found = await box.run("search_memory", {"query": "who maintains Juniper?"})
+if found["ok"] and found["facts"]:
+    evidence = await box.run("trace_memory", {
+        "seed_fact_id": found["facts"][0]["fact_id"], "max_hops": 3,
+    })
+```
+
+Tracing returns complete quoted claims with source episode IDs and recorded
+origins, directed stored relations, and ordered paths. Object-to-subject
+matches are labeled `subject_object`. Traversal uses the ledger's subject
+normalization (case folding and collapsed whitespace) and also checks exact
+spelling for directly inserted records, sharing the same work limits. It does
+not infer aliases or join merely similar names.
+Contradictions remain separate evidence, never a path continuation or an
+automatically chosen winner. Quote retention is checked; factual accuracy is
+not certified. Source text remains untrusted data for the receiving model.
+
+The trace is read-only and bounded: 16 facts, 32 edges, 256 traversal store
+calls/candidates, eight paths, and a two-second async timeout. Two additional
+revision reads fence native writes. Complete source episodes may be loaded
+during point reads. The evidence packet is capped at 64,000 UTF-8 bytes before
+the ToolBox envelope. Every source must match any supplied tags. Missing or
+ineligible seeds return empty evidence; timeouts, changed revisions, and store
+failures return an unavailable result without partial quotes. Direct adapter
+writes require adapter transaction discipline. Coverage describes this seed's
+bounded neighborhood, never completeness of an answer to an arbitrary query.
+
+For read tools that must preserve a conversation or application's narrower
+scope, use `ScopedMemoryTools`:
+
+```python
+from scone_memory.integrations.scoped_tools import ScopedMemoryTools
+from scone_memory.retrieval.recall_scope import RecallScope
+
+box = ScopedMemoryTools(engine, "default",
+    scope=RecallScope.validated(where={"collection": "manuals"},
+                               kind="file", source_prefix="manuals/"),
+    exclude_session_id="current-session",
+)
+schema = box.openai()  # or box.anthropic()
+found = await box.run("search_memory", {"query": "Juniper", "limit": 5})
+```
+
+This binding offers `search_memory`, `trace_memory`, and `read_memory`. Space, metadata,
+source kind/prefix, inclusive source dates and excluded session are fixed by the
+host and cannot be supplied or widened in tool arguments. There are no write or
+unfiltered profile operations. Search returns retained passage bytes and quoted
+fact provenance; it makes one native retrieval request and no assessor-model
+call. It uses a 20-candidate / 32,000-byte evidence window, then returns at most
+`limit` combined facts and passages (facts first). Omitted output is counted and
+marked truncated. Search coverage never certifies completeness for the question.
+
+`read_memory` accepts a retained `chunk_id` and `before`/`after` counts in 0–4
+(both default to 1). It returns up to nine exact neighboring chunks from the same
+authorized source, preserving their IDs and byte spans. Its optional document
+store port, `ChunkWindowLookup.page_chunks`, filters by space, episode and ordinal
+before limiting the read to ten rows, including one look-ahead row. Memory,
+SQLite, MongoDB, PostgreSQL and Elasticsearch implement this port; older custom
+stores return `unsupported_chunk_window` instead of loading every chunk.
+Coverage records the returned ordinals and whether later chunks were observed;
+it never claims document or answer completeness. Read items use a placeholder
+score of `0.0`, not a relevance or confidence estimate. Source validation can
+still load the full episode through point reads.
+
+Each call has a configurable 1–30 second cooperative deadline (default 2) and a
+512–64,000 UTF-8 byte result cap (default 64,000). Oversized output is refused as a
+whole, without clipped quotations or paths. Tracing also retains its stricter
+native two-second deadline, checked before accepting output even if a backend
+suppressed cancellation. Source point reads may load larger episodes and
+cooperative cleanup can exceed deadlines. Errors are content-free codes;
+external cancellation propagates. Tool results are checked snapshots, not
+permanent evidence: an enclosing answer pipeline must revalidate sources before
+publishing an answer based on them. No HTTP tool loop or automatic tool execution
+is installed by constructing this binding.
+
+For an opt-in model-native tool turn, use the bounded host controller:
+
+```python
+import os
+from scone_memory.agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits
+from scone_memory.providers.tool_chat import SelfHostedToolChat
+
+model = SelfHostedToolChat(
+    os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+    api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+)
+reply = await EvidenceToolLoop(model, box, limits=ToolLoopLimits(
+    max_tool_calls=4, max_tool_rounds=4, timeout_s=120.0,
+)).run([{"role": "user", "content": "What is the recorded Juniper dependency chain?"}])
+print(reply.text)
+print(reply.source_status, reply.evidence_ids)
+# Immutable JSON packets retain the passages, quoted claims, directed paths,
+# source identifiers, and partial-coverage markers supplied to the model.
+packets = reply.evidence_packets
+```
+
+By default the SDK model chooses search queries. `EvidenceToolLoop(...,
+initial_search=True)` first searches the final user message with `limit=5`,
+before the first model request. This host-initiated search uses the same scope,
+source checks, deadline and byte limits as model-requested tools, and consumes
+one tool call. It does not consume a model decision round. Call outcomes identify
+their `origin` as `host` or `model`. An unavailable initial search prevents
+generation; an empty search is shown to the model without proving absence from
+memory. This mode requires a final, nonblank user message of at most 8,000 UTF-8
+bytes and fails before storage access if that query is invalid.
+
+Tracing becomes available after retained facts
+are discovered; nearby reading becomes available after retained chunks are
+discovered. Both accept only IDs returned during that turn. This discovery gate
+belongs to the loop; standalone `box.run()` enforces scope without turn history. Host scope still
+applies to every expanded source. Every declared call receives a matching tool
+response, including denials. Attempts consume the call budget; both results and
+denials consume the aggregate tool-byte budget. If complete pairing cannot fit,
+the turn fails before another model request. Exhausting calls or rounds permits
+one final request with tools disabled; further tool calls are protocol failures.
+
+Within one run, repeated `read_memory` calls reuse retained evidence after fresh
+source validation. Matching includes normalized default offsets and windows
+with different anchors that cover the same already-read whole source. Whole-source
+matching requires contiguous ordinals from zero and explicit untruncated source
+coverage; narrower windows remain separate reads. Search and trace calls, failed
+or empty reads, and results rejected by the output budget are not cached.
+A reused call returns a compact reference to the earlier tool result, reports
+`reused=true` in its outcome, and still consumes a call and output bytes. It
+does not append duplicate source packets to the receipt or establish completeness.
+Source changes or failed revalidation stop the turn before another model request.
+
+Defaults bound the transcript to 256,000 bytes, all tool output to 128,000 bytes,
+and the final reply to 16,000 bytes. No intermediate text is published. Sources,
+chunks, facts, and links are frozen before model consumption and rechecked before
+the result is returned. Native revision changes or changed/deleted snapshots fail
+the turn. This uses bounded point reads, not a database-wide atomic transaction;
+direct adapter writes still need transaction discipline. `box.prepare()` shares
+one tool deadline across retrieval and snapshotting. Each later validation pass
+is also bounded, within the overall loop deadline.
+
+The self-hosted adapter requires native OpenAI-compatible tool-call support.
+It does not execute tool-shaped prose, capture reasoning fields, follow redirects,
+use environment proxies, discover/download models, or select a fallback provider.
+It rejects incomplete replies, duplicate JSON keys/call IDs, non-finite numbers,
+and oversized responses. Logs contain outcome and elapsed time, not message text.
+HTTP resources are closed before a reply is accepted; cooperative cleanup can
+run beyond the deadline, but late success is rejected.
+
+For an explicitly configured model with unreliable native tool calls but JSON
+schema support, `SelfHostedStructuredToolChat` implements the same `ToolModel`
+interface:
+
+```python
+from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
+
+model = SelfHostedStructuredToolChat(
+    os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+    api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+)
+```
+
+It requests one schema-constrained search, trace, read, or answer action, validates it
+again on the host, and translates it into the existing bounded tool protocol.
+Trace and read seeds must be retained IDs. Scope, execution, source checks, and budgets
+remain in the host controller. This adapter does not silently repair JSON or
+execute ordinary prose. Tool results are rendered as explicitly marked evidence
+messages for providers without native tool-message support. It is opt-in; native
+and ordinary chat adapters retain their existing behavior.
+
+Protocol compatibility is not evidence of better answers. In a nine-case
+synthetic development comparison on `llama3.2-ctx8k`, structured actions fixed a
+malformed native trace-call case, but the model still invented a missing bridge,
+reversed a dependency, conflated `painted by` with `depends on`, and answered a
+manufacturer question without searching. The checked-in cases are in
+`tests/fixtures/tool_action_cases.json`; their expectations require manual
+source-grounded adjudication. These are development findings, not a held-out
+accuracy score, and do not justify enabling this adapter by default.
+
+The controller does not persist workflow checkpoints or automatically capture
+chat messages. For conversation history, capture, and public callbacks, opt in
+through `TextConversation`:
+
+```python
+from scone_memory.realtime.text import TextConversation
+
+conversation = TextConversation(engine, "default", "chat-1",
+    tool_model_factory=lambda: SelfHostedToolChat(
+        os.environ["SCONE_CHAT_URL"], os.environ["SCONE_CHAT_MODEL"],
+        api_key=os.environ.get("SCONE_CHAT_API_KEY"),
+    ),
+    where={"collection": "manuals"},
+    tool_limits=ToolLoopLimits(max_tool_calls=4),
+    turn_timeout=120,
+)
+try:
+    reply = await conversation.reply("What is the Juniper dependency chain?")
+    receipt = reply["memory_context"]["tool_retrieval"]
+finally:
+    await conversation.close()
+```
+
+Tool mode uses the actual conversation history, with current-session records
+excluded from tool searches. It bypasses prompt-based memory preparation and
+cannot be combined with independent adaptive retrieval or
+extractive selection. The usual conversation deadline and reply/history byte
+limits still apply. A public callback receives one final reply after source and
+history checks; sources are checked again before assistant capture. A callback
+can observe a reply whose later capture fails, so the terminal result remains
+the confirmation of completion. ToolModel adapters own per-request resources.
+
+Receipts include call outcomes (including content-free error codes), retained
+IDs, source IDs, and fingerprints. Direct replies also contain transient source
+packets. Outcome IDs are host-assigned ordinals (`tool-1`, etc.); unknown tool
+names are normalized so model-authored strings cannot become cached diagnostics.
+Custom `create_conversation_app` runtimes can use this mode today;
+cached HTTP receipts discard the packets and rebuild the existing graph from
+matching retained source/fact/link fingerprints. Deleted or changed evidence
+disappears on refresh. Graph inspection remains bounded and may be partial.
+The composed server can select tool mode explicitly for its saved self-hosted
+chat connection:
+
+```sh
+SCONE_MODEL_CONNECTIONS=~/.scone-memory/model-connections.json
+SCONE_CONVERSATIONS_JOURNAL=~/.scone-memory/conversations.db
+SCONE_CONVERSATIONS_TOOL_MODE=structured # off (default), native, structured
+SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=1 # default when tool mode is enabled
+# SCONE_CONVERSATIONS_TOOL_MAX_CALLS=4
+# SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS=4
+# SCONE_CONVERSATIONS_TOOL_TIMEOUT=120
+```
+
+Configure the chat connection in the model settings or supply `SCONE_CHAT_URL`
+and `SCONE_CHAT_MODEL` as connection defaults. Served tool mode performs the
+host-initiated search by default. Set `SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=0`
+to let the model choose whether to search. SDK `TextConversation` exposes the
+same option as `tool_initial_search=True`, with the SDK default remaining false.
+
+`native` requires native OpenAI-compatible tool calls; `structured` requires
+JSON-schema responses. There
+is no automatic protocol or provider fallback. The setting applies to ordinary
+text sessions and text sessions using a self-hosted persona; voice keeps its
+existing pipeline. Sessions capture the connection at creation, and every turn
+gets a fresh tool model. `SCONE_CHAT_THINK` is forwarded when explicitly set.
+
+The whole tool turn has the configured timeout, while each provider request is
+bounded by the smaller of that budget and the saved connection timeout. The
+existing whole-conversation turn timeout can end it sooner. Calls and rounds
+accept 1–16; the tool timeout accepts 0.01–600 seconds. Transcript, output and
+reply byte limits retain `ToolLoopLimits` defaults. Startup refuses combinations
+with adaptive retrieval, trusted custom model factories or custom
+persona catalogs. Those integrations can still bind their own SDK pipelines.
+
+The structured adapter renders tool results as explicitly labeled, untrusted
+evidence in plain chat roles. After a completed tool exchange it repeats the
+latest actual user question so the provider's answer target does not become the
+last source packet. This rendering does not change stored conversation history;
+the expanded history is checked against the adapter's 1 MB limit before sending.
+Its tool-selection instructions distinguish reading neighboring document chunks
+from tracing a mentioned entity's relationships to find a requested attribute.
+This guides the model's choice; it does not change retrieval permissions,
+increase budgets, or establish that an answer follows from the retained evidence.
+
+When the host disables tools at the end of the turn budget, the structured
+adapter switches that final request to prose writing from a dedicated evidence
+view. It preserves the actual conversation, source quotations, recorded triples,
+origins and validity dates, stored links, and path directions. Equal source
+records are deduplicated; conflicting versions and incomplete paths fail before
+the request. Ranking scores and machine confidence remain in the diagnostic
+receipts, outside the writer's view. Numeric values inside source quotations are
+preserved. Coverage limits and retrieval failures remain visible.
+
+This uses the same model and final request, with no additional retrieval or
+model call. It removes transient action history rather than generating a summary
+of the sources. The projected history is bounded to 1 MB; records are never
+sliced to fit. The adapter's 64,000-byte answer limit and the host's configured
+reply limit still apply, and original source snapshots are revalidated before
+publication. Early `answer` actions remain on the existing JSON path. Final prose
+can still misunderstand an attribute or invent a connection; evidence retention
+does not certify the generated answer.
+
+`/v1/conversations/capabilities` exposes `tool_retrieval` protocol, budgets and
+whether a text connection is configured. This is configuration availability,
+not a model-health probe or an accuracy claim. Without a saved chat connection,
+text remains unavailable; enabling the mode does not install a model.
+
+`source_status="retained"` confirms source revalidation, not answer entailment;
+`verified_accuracy` remains false. Without initial search, a model can skip
+retrieval; either policy can still misunderstand a relation or emit a tool
+request as prose. In a synthetic 3B Ollama development
+probe, invalid trace arguments and tool-shaped prose prevented a useful answer.
+That probe is not a successful accuracy benchmark; tool-use reliability remains
+a separate quality requirement before enabling this mode by default.
+Before host-initiated search, a two-question served 3B development probe skipped retrieval for a
+natural memory question and repeatedly reread one passage when explicitly asked
+to use tools, missing a neighboring exception. Successful protocol execution and
+retained citations did not make those answers correct. With initial search,
+follow-up SQLite and MongoDB/Qdrant probes both returned the requested cutoff
+and outage exception for the explicitly guided question. The general question
+still omitted the cutoff despite retaining its evidence. These two synthetic
+questions used a hash embedder and are integration probes, not a retrieval or
+generation accuracy benchmark. A subsequent controlled replay identified plain-role
+message ordering as a contributor to the omitted cutoff: restoring the real
+question after tool results produced both requested facts with the same three
+tool calls. An actual served SQLite probe confirmed both facts for both questions.
+The guided question used four calls instead of two, including a duplicate read;
+this change does not establish more efficient tool planning. Eight simpler
+fixed-evidence cases retained both requested answer details with either rendering.
+These are synthetic development observations, not general accuracy guarantees.
+Whole-source reuse subsequently reduced the guided probe's last tool result from
+1,411 to 260 bytes, skipping its duplicate read preparation after revalidation.
+Total tool output fell from 4,392 to 3,241 bytes; four tool attempts remained.
+The answer still included the cutoff and outage hold. This measures reduced
+duplicate work and context, not better model planning or general accuracy.
+Served mode stays opt-in.
 
 Framework adapters live under `scone_memory.integrations`; each needs its
 framework installed (`pip install 'scone-memory[langchain]'`,
@@ -434,6 +893,20 @@ facts. That block never enters shared history or captured transcripts. The
 default 8,000-byte budget omits whole passages rather than silently clipping them.
 A low-confidence result supplies no source block.
 
+`MemoryContext(..., neighbor_chunks=1)` and
+`TextConversation(..., neighbor_chunks=1)` optionally read one stored chunk on
+each side of a ranked passage. The radius accepts 0..4 and defaults to 0.
+Ranked anchors keep priority; neighboring chunks use the remaining byte budget,
+with at most 24 total sources. `MemoryContext.limit` still bounds the ranked
+anchors. Every added passage retains its original chunk ID, exact text and
+source fingerprint; the graph labels it as a nearby passage read. Receipts
+include window status, candidate/retained counts and anchor IDs. Window reads
+have a separate deadline of at most one second (or `recall_timeout` when lower).
+A window failure preserves ordinary ranked evidence; stale or invalid added
+evidence is discarded. This option does not expand adaptive selections or
+recent-history overviews. Tool conversations use their bounded `read_memory`
+operation instead. Added context is not proof of relevance or answer accuracy.
+
 Ranked queries with recalled claims can expand bounded relationships inside the
 same scope. With `structured_paths=True` (the default), complete ordered paths
 and their quoted claims enter the same context byte budget; related conflicting
@@ -464,13 +937,670 @@ existing output path. Keep private evaluation reports outside version control.
 Add `--ordered-quotes` to test the optional quote projection in the path variant;
 the flat baseline remains unchanged.
 
+Add `--tool-mode native` or `--tool-mode structured` to compare the same baseline
+against the actual scoped `EvidenceToolLoop`. Tool candidates use the installed
+model, 512 output tokens per request, four tool attempts/rounds, and 16,000-byte
+transcript, aggregate tool-output and reply limits. Initial retrieval defaults
+on; `--no-tool-initial-search` tests model-initiated retrieval. Use `--no-tool-think`
+when the selected endpoint supports disabling that option. Tool mode cannot be
+combined with the independent adaptive, extractive, or path-projection
+candidate options. No fixture answer labels or required quotes reach the model.
+
+Chat-completions adapters translate explicit `think=False` to
+`reasoning_effort="none"` and `think=True` to `reasoning_effort="medium"`.
+Leaving `think=None` preserves the server default. The endpoint and model must
+support the requested reasoning effort; Ollama's native `think` field does not
+control reasoning on its OpenAI-compatible endpoint.
+
+Tool candidates can also use `--review-model YOUR_INSTALLED_REVIEWER
+--review-quote-mode spans --review-policy require_supported`. The reviewer uses
+the same retained-packet review helper as text conversations: it receives the
+original tool evidence, may propose one correction, and must confirm that
+correction before adoption. Source checks run before/after review and again
+before accepting the final result. The original `--timeout` tool budget also
+bounds review; `--review-timeout` cannot extend it. Choose both budgets to cover
+the installed models. The baseline remains unreviewed. These are retrieval,
+generation and review evaluations; they do not run conversation capture.
+
+Tool rows record model-request hashes/bytes, provider-call counts, read reuse,
+and post-run coverage of evidence observed at the provider boundary. Failed
+generation keeps its observed evidence coverage but receives zero successful
+answer credit; successful final source retention is reported separately.
+Reviewed rows retain the draft, its elapsed time, review duration and receipt,
+and the final accepted text. Rejected review retains the draft for diagnosis
+but earns no successful answer credit. Generation-call counts exclude review
+calls; the review receipt records its rounds separately. A review verdict is
+not a correctness label.
+Relation quotes participate in the coverage audit for both variants. Tool
+request sizes describe the model-neutral transcript and schemas, not the wire
+encoding of a particular provider. This evaluator uses temporary SQLite storage;
+omit `--embedding-cache` for a hash-embedder integration check, not a semantic
+retrieval benchmark.
+
 Receipts report `prepared`, `empty`, `skipped` or `failed`, source episode/chunk
 references, recall event ID when available, context hash/bytes, omissions and
 sanitized degradation/error types. They prove preparation—not delivery or use.
 Cancellation propagates instead of producing a success receipt.
 
+#### Adaptive evidence retrieval
+
+For applications with an explicit question plan, the SDK also provides a
+model-free `StructuredEvidenceAssessor`. Each requirement asks for recorded
+values of an exact subject/predicate, subjects of an exact predicate/object,
+a simple directed path of one exact predicate to a named endpoint, or a recorded
+attribute reached through explicitly allowed predicates. Every requirement needs a complete witness before
+its verdict is `sufficient`; this verdict describes the supplied plan and
+records, not semantic truth or general question-answer accuracy.
+
+```python
+from scone_memory.retrieval.structured_evidence import (
+    EvidenceRequirement, StructuredEvidenceAssessor,
+)
+from scone_memory.retrieval.adaptive import AdaptiveRetriever
+from scone_memory.retrieval.recall_scope import RecallScope
+
+question = "Which dependency path connects aster to denver?"
+assessor = StructuredEvidenceAssessor(question, (
+    EvidenceRequirement(kind="path", subject="aster", predicate="depends on",
+                        object="denver", max_hops=3),
+))
+result = await AdaptiveRetriever(memory, assessor).retrieve(
+    "authorized-space", question,
+    scope=RecallScope.validated(where={"collection": "manuals"}),
+)
+```
+
+The application authors the requirements and binds them to the exact question.
+There is no automatic intent parser or implicit HTTP activation. Identity matching
+is literal: synonyms, case differences and alternate predicates need an explicit
+application mapping. Terminal, negative, and whole-index completeness claims are
+unsupported. A missing path means no witness within the supplied candidate and
+hop bounds; it does not prove there is no path in the knowledge store.
+
+Applications that already hold authorized `EvidenceCandidate` records can inspect
+each requirement directly, without another model call:
+
+```python
+assessment = await assessor.assess_with_coverage(question, candidates)
+for row in assessment.coverage:
+    print(row.requirement, row.witness_ids, row.followup_query)
+```
+
+`witness_ids` identify the exact matching facts and connecting path;
+`selected_ids` also retain competing values around those witnesses. The report
+includes every requirement and missing query, even though the adaptive decision
+limits follow-up queries to three. `work_used` counts path-edge examinations;
+candidate indexing and direct lookups have separate input bounds. A row can have
+a positive witness and `work_exhausted=True` when traversal found evidence before
+running out of budget. The aggregate decision remains `uncertain` in that case.
+These diagnostics contain requirements and record IDs, without copying candidate
+text. They do not replace scope authorization or source-retention validation.
+The existing `assess()` interface returns the same report's `decision`.
+
+To search from an already reached entity when a route is incomplete, opt into
+`followup_strategy="bridge"` on `StructuredEvidenceAssessor`. For example, if
+the requirement needs `invoice → team → office → location` and the first round
+finds only the first two edges, the follow-up can search `office located in`.
+The partial route is selected as one atomic group so adaptive retrieval carries
+it into the next round and revalidates its sources. It is reported separately in
+`bridge_ids`, with no positive witness and an `insufficient` (or budget-exhausted
+`uncertain`) verdict. Only the complete original requirement can be sufficient.
+
+This deterministic strategy keeps up to three reached frontier entities per
+missing requirement, prioritizing deeper routes and breaking depth ties in
+candidate/traversal order. A known continuation replaces its prefix as a search
+frontier; another branch stays eligible. It reserves a hop for the missing
+relation and retains competing values around each chosen path. Coverage reports
+the primary `followup_query` and up to two `alternative_queries`. The decision
+still issues at most three queries, prioritizing each requirement's primary gap
+before branch alternatives. It does not exhaustively search every branch.
+Names longer than the requirement identity limit are never truncated;
+without a usable bridge it falls back to the original requirement query.
+The default `"requirement"` strategy keeps the original query/selection behavior.
+
+When a round has multiple follow-up queries, adaptive retrieval divides its
+remaining candidate and byte capacity among the pending queries. Unused capacity
+remains available to later queries. This prevents an early result window from
+filling the entire pool before another query contributes. The total budgets stay
+unchanged; `query_evidence_share` records omissions caused by that allocation.
+
+For “Who uses Polaris?”, leave the subject unknown instead of reversing the
+stored relation:
+
+```python
+users_of_polaris = EvidenceRequirement(kind="fact", predicate="uses", object="Polaris")
+# Matches “Juniper uses Polaris”, not “Polaris uses Juniper”.
+```
+
+Fact requirements must name at least one endpoint; path requirements still need
+both. These lookups inspect the bounded candidate set and retain all matching
+subjects plus competing recorded values around their witnesses. They do not
+claim to enumerate every user across an entire index.
+
+For an attribute whose owning entity is not known in advance, use
+`reachable_fact`:
+
+```python
+office_location = EvidenceRequirement(
+    kind="reachable_fact", subject="invoice", predicate="located in",
+    via=("assigned to", "managed by"), max_hops=3,
+)
+# Requires invoice -> team -> office, then office's recorded location.
+# A team name, an unrelated office, or a missing bridge cannot satisfy it.
+```
+
+`via` contains 1–8 allowed exact predicates, which may occur in any order or
+repeat along a route. The final `predicate` must be distinct from them.
+At least one bridge is required; use `fact` for a direct attribute. `max_hops`
+counts both bridge facts and the final attribute fact (2–6 total). Omit `object`
+to retain recorded values, or supply it to require a particular value while
+keeping competing observations. Breadth-first traversal keeps one shortest
+supporting route per reachable subject and continues looking for other matching
+subjects within the bounds. It does not enumerate every alternative route.
+The full witnesses and competing values form one atomic group per requirement.
+An attribute owner need not be a graph leaf: this contract cannot establish an
+“ultimate” destination unless the application's relation semantics justify it.
+It supplies recorded evidence connections, not a synthesized transitive fact.
+This is available to both the adaptive assessor and the quote selector below;
+it does not automatically change ordinary conversations or model tool choices.
+
+The assessor accepts 1–8 requirements and at most 100 candidates / 128,000 UTF-8
+candidate bytes. Path-edge work defaults to 256 and is configurable up to 2,048;
+exhaustion returns `uncertain`, preserving other witnessed requirements. It emits
+up to three follow-up search queries for missing requirements. Competing recorded
+values around witnesses remain together in atomic groups; no winner is inferred.
+The native retriever still owns candidate discovery, scope, timing, and source
+revalidation. Invalidated selected groups are omitted together. This does not
+turn a passage that looks like a triple into a stored fact.
+
+The same explicit plan can govern quote-based answer selection with
+`StructuredEvidenceSelector`. It requires all fact/path witnesses, including
+competing recorded values, to fit in at most three whole cards. A missing bridge,
+reversed path, or different predicate produces no selection. The answer remains
+the original quoted records and citations; no model writes the public answer.
+
+```python
+from scone_memory.realtime.structured_selector import StructuredEvidenceSelector
+from scone_memory.realtime.text import TextConversation
+
+question = "Which dependency path connects aster to denver?"
+requirements = (
+    EvidenceRequirement(kind="path", subject="aster", predicate="depends on",
+                        object="denver", max_hops=3),
+)
+conversation = TextConversation(memory, "authorized-space", "planned-answer-1",
+    evidence_selector=StructuredEvidenceSelector(question, requirements),
+    evidence_answer_policy="required",
+    where={"collection": "manuals"},
+)
+try:
+    reply = await conversation.reply(question)
+finally:
+    await conversation.close()
+```
+
+This is a fixed, application-authored question plan, not automatic intent
+understanding. For another question, the application must supply its corresponding
+plan. The selector checks only offered cards: missing or budget-omitted evidence
+cannot establish a global negative. Path checks match recorded triples; they do
+not certify extraction correctness, quote entailment, causation, or source truth.
+`verified_accuracy` remains false. The synthetic tool-action development cases
+also exercise this selector with hand-authored plans; passing them is a contract
+check, not a natural-language generation accuracy result.
+
+Selections from this selector are atomic: if the entire selected quote set
+exceeds the answer byte limit, the renderer abstains instead of publishing a
+partial chain. Other selectors may request this behavior through
+`EvidenceSelection(atomic=True, card_ids=...)`. Receipts expose
+`atomic_selection` and count output-budget omissions.
+
+`evidence_answer_policy="required"` needs an evidence selector and never falls
+back to generation. Empty or skipped retrieval returns a recorded abstention
+with `source_status="none"`; failed preparation returns an error. No generation
+provider is needed. The default `"when_available"` policy retains normal
+generation when no memory is prepared. This SDK policy and selector are opt-in;
+the default server configuration does not automatically create question plans.
+
+An optional bounded loop assesses retrieved evidence, keeps selected records,
+and searches for missing information before generation. The host supplies an
+`EvidenceAssessor`; the core fixes the memory space and session filters for every
+search. Model output can select existing IDs and propose queries, but cannot
+change authorization or run tools. Candidate, query, round, byte and time limits
+are independent. Source changes during assessment invalidate the affected
+evidence; errors and timeouts return an explicit uncertain result.
+
+```python
+from scone_memory.providers.evidence_assessor import SelfHostedEvidenceAssessor
+from scone_memory.providers.llm import OpenAICompatibleTextModel
+from scone_memory.retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever
+from scone_memory.realtime.text import TextConversation
+
+endpoint = "http://inference.home.arpa:11434/v1"
+model = "my-installed-model"
+adaptive = AdaptiveRetriever(
+    memory, SelfHostedEvidenceAssessor(endpoint, model, timeout=30),
+    limits=AdaptiveLimits(max_rounds=3, max_queries=6, timeout_s=30.0),
+)
+conversation = TextConversation(
+    memory, "authorized-space", "session-1",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    where={"collection": "manuals"}, adaptive_retriever=adaptive,
+    recall_timeout=30, turn_timeout=90,
+)
+```
+
+Use and close the conversation as above. The retriever must bind the same
+engine; `recall_timeout` must cover its deadline, and the full turn also needs
+time for generation. Greetings and overview retrieval keep their existing flow.
+The assessor's `sufficient` verdict is a fallible model judgment, not an answer
+accuracy guarantee. This option remains off by default and does not automatically
+enable itself in the HTTP service when a model is loaded.
+
+The standard `serve` launcher can mount it explicitly for custom-model,
+saved-connection and persona **text** sessions:
+
+```dotenv
+SCONE_ADAPTIVE_RETRIEVAL=1
+SCONE_ADAPTIVE_URL=http://127.0.0.1:11434/v1
+SCONE_ADAPTIVE_MODEL=YOUR_INSTALLED_MODEL
+SCONE_ADAPTIVE_TIMEOUT=15
+SCONE_ADAPTIVE_MAX_ROUNDS=3
+SCONE_ADAPTIVE_MAX_QUERIES=6
+SCONE_ADAPTIVE_CANDIDATE_LIMIT=20
+SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES=16000
+SCONE_ADAPTIVE_GRAPH_HOPS=3
+# SCONE_ADAPTIVE_API_KEY=  # Only for an authenticated assessor endpoint.
+```
+
+This requires `SCONE_CONVERSATIONS_JOURNAL` and a separately configured text
+model or persona to reply. Assessor credentials are independent of generation,
+extraction and answer review. The full conversation-turn timeout still includes
+retrieval, generation and any answer review; allocate enough time for all enabled
+stages. Greetings and overview queries keep their existing routing. Voice is
+unchanged. Graph hops default to zero (disabled); enabling 1..6 hops uses the
+native `MultiHopLimits` defaults for the other per-expansion work bounds.
+
+Served adaptive retrieval uses `retain_verified` for assessment failures and
+empty selections, plus `original_and_selected` to retain the original query's
+verified pool alongside later selection. These policies are described below;
+none establishes answer accuracy. They preserve scope and source checks across
+every round. `adaptive_retrieval` in conversation capabilities reports configuration,
+budgets and graph hops independently of reply-model availability. Turn context
+receipts report rounds, queries, fallback, truncation and graph work. These are
+current-process context receipts, not a durable reconstruction after restart.
+When embedding `create_conversation_app`, its optional `adaptive_retriever` must
+bind the same engine; custom text factories must accept and honor the native
+`adaptive_retriever` and `recall_timeout` keywords.
+
+The default `failure_policy="retain_verified"` recovers from assessor errors,
+invalid decisions, and assessment timeouts by independently rechecking the last
+bounded candidate snapshot. It reserves `min(1 second, timeout_s / 4)` within the
+existing deadline for that check; it does not retry the model or run new searches.
+Changed, deleted, out-of-scope, or unverifiable evidence is omitted. Retrieval
+and source-verification failures still return no evidence. Cancellation propagates.
+
+Recovered evidence has `status="uncertain"`, `evidence_basis="verified_candidates"`,
+and `fallback_status="retained"`; the original sanitized assessment error remains
+visible. This is an unassessed candidate pool, not a sufficient answer or a model
+selection. Recovery preserves host-known atomic groups and groups from prior valid
+decisions only; a failed response cannot establish new groups. Native context
+receipts expose the basis, fallback status, and delivery completeness separately. Use
+`failure_policy="empty"` when any assessment failure should discard all evidence.
+
+A valid assessment can also return `insufficient` or `uncertain` with no selected
+records. The separate default `empty_selection_policy="retain_verified"` retains
+the final offered candidate snapshot after source revalidation. Its basis is
+`unselected_candidates`, its round still records zero model-selected records,
+and `fallback_status` remains `not_used`. The insufficiency or uncertainty stays
+visible; keeping a known partial route does not establish its missing endpoint.
+Candidate retention does not establish relevance either: the bounded pool may
+include distractors that the assessor did not select.
+
+This policy applies only when the final valid decision selected nothing. It does
+not resurrect earlier pools discarded during follow-up searches, or replace a
+nonempty selection that later loses its sources. Existing scope, deadline, byte,
+and atomic-group checks still apply. Use `empty_selection_policy="empty"` to
+preserve model-only selection, independently of assessment-failure handling.
+
+To protect against later searches drifting away from the original question,
+opt into `evidence_policy="original_and_selected"`. The retriever saves the first
+verified query pool, including any enabled graph expansion, and combines it with
+the final model selection. Reciprocal rank fusion gives each lane a vote using
+`1 / (60 + rank)`; whole atomic components compete by their strongest member's
+score. Ties use original-query order first. Packing uses the existing candidate
+and UTF-8 byte limits, so either lane can lose records when the combined pool
+does not fit. Scores indicate ranking, not relevance or factual confidence.
+
+The host revalidates the union before packing. Original snapshots take precedence
+for shared IDs; a later search cannot replace a changed original source under
+the same identity. Verification reads at most two bounded pools within the
+existing deadline. Each input lane is capped at 128,000 serialized bytes; the
+combined output still uses the configured, potentially smaller context budget.
+Valid atomic contracts learned in earlier rounds continue to apply across both
+lanes, so restoring original evidence cannot expose a surviving group fragment.
+`original_query_ids` and `model_selected_ids` distinguish the
+origins of returned records and may overlap. Native context filters those origin
+lists again after its own packing. A model's `sufficient` verdict describes its
+selection; it does not certify the blended evidence or generated answer. Losing
+selected evidence to validation or packing downgrades the result to `uncertain`.
+
+This policy keeps the original pool even when a successful workflow ends with an
+empty selection; it takes precedence over terminal empty-selection handling.
+Assessor errors still use the separate failure policy. Follow-up retrieval and
+selection behavior are unchanged. The default remains `evidence_policy="model_selected"`.
+Compare with `--adaptive-evidence-policy original_and_selected` in the evaluator;
+neither this option nor the adaptive strategy is automatically enabled in HTTP.
+The explicit served configuration above selects `original_and_selected`.
+
+For a controlled comparison against existing compact paths, add
+`--adaptive-model YOUR_INSTALLED_MODEL --baseline-paths --adaptive-timeout 30
+--adaptive-rounds 3` to the generation evaluator. Each row records the selected
+variant and adaptive diagnostics; frozen answer checks remain separate from
+source coverage and manual semantic review. The assessment transport timeout
+uses the requested adaptive budget; the retriever enforces the remaining total
+budget across all calls. Reports record both limits and the failure policy; use
+`--adaptive-failure-policy empty` to compare the explicit empty-on-failure behavior.
+Use `--adaptive-empty-selection-policy empty` for the separate valid-empty-selection
+comparison; the report records both policies.
+Receipts distinguish assessment timeouts, provider failures and invalid model decisions without
+including raw provider errors or source text.
+
+For optional atomic relation selection, construct the assessor with
+`group_relations=True, max_evidence_bytes=16000`. The pure
+`retrieval.evidence_groups.build_evidence_groups` helper groups supplied facts
+by exact object-to-subject matches, preserving branches and cycles. It does not
+invent semantic links or search beyond the supplied candidate pool. Existing
+stored-link kinds are still handled by the separate graph expansion stage.
+
+To gather missing connecting facts **before** assessment, pass
+`graph_limits=MultiHopLimits(...)` to `AdaptiveRetriever` (import it from
+`scone_memory.retrieval.multihop`). The host expands verified recall seeds using
+bounded stored-link reads and ledger-normalized object-to-subject joins, within the same
+space, source filters, session exclusion, and adaptive deadline. With graph
+expansion enabled, all candidate sources and facts share the engine clock
+boundary; future-created sources are excluded. It verifies expanded source
+records before disclosing them to the assessor.
+
+In-memory, SQLite, MongoDB, PostgreSQL and Elasticsearch document stores expose
+the bounded subject and incident-link reads used by this traversal, plus link
+lookups for source revalidation. Candidate reads return at most 129 records,
+in identifier order, including the traversal's lookahead record. PostgreSQL
+uses indexes on space, subject or link endpoint, and identifier; Elasticsearch
+uses exact keyword filters and bounded search sizes. The host still checks
+source scope and validity for each candidate before retaining it. These reads
+do not equate a connected route with an entailed answer.
+
+This option prioritizes connected fact components within the adaptive candidate
+and byte budgets. Exact components become host-owned atomic groups: partial
+model selections or later source loss omit the whole group. These known groups
+also survive an assessor failure, so fallback can retain a route gathered before
+assessment. Use `group_relations=True` on the self-hosted assessor to let the
+model select the components directly. Stored links retain their kinds and
+orientation in the separate evidence graph; an exact component is not a claim
+of causation or an inferred answer.
+
+`graph_limits=None` keeps expansion disabled. Enable it in the generation
+comparison with `--expand-relations`; reports record the graph limits and
+per-expansion coverage and work. Graph limits apply to each expansion; the
+adaptive round cap bounds their number and the total deadline bounds the run.
+`store_calls` counts traversal and its source revalidation; additional adaptive
+checks are bounded by the candidate count and deadline. Reaching a hop,
+candidate, store-call, node, edge, or byte limit leaves explicit incomplete coverage. Even an exhausted
+reachable graph does not establish query completeness. Graph expansion uses
+bounded adjacency reads; it does not search beyond the fixed scope or infer unrecorded links. Initial recall retains its existing backend
+behavior, including the current fact-seed lookup implementation.
+
+A selected group expands to all of its original evidence IDs. The model-neutral
+`EvidenceDecision.selected_groups` contract carries that requirement through
+source revalidation and conversation packing: if any member changes or cannot
+fit, the whole group is omitted. Independent ungrouped evidence can still be
+used. Atomic membership is by evidence ID: separately recalled chunks remain
+independent, even when they quote a grouped fact. This does not guarantee atomic
+delivery of equivalent source content across representations. Receipts expose
+group omissions; a complete group does not prove that the answer is sufficient
+or correct. Grouping stays off by default.
+
+The adapter's `max_evidence_bytes` bounds the serialized evidence array including
+group metadata and joins. It is separate from the core's input-evidence budget
+and the conversation's final context budget; configure all three explicitly.
+Add `--group-relations` to the adaptive evaluator command to compare this mode
+against ordinary compact paths. Every input record is represented once or
+construction fails; no source or group is silently clipped to fit.
+
 See [the executable native example](examples/realtime_conversation.py). It uses
 real Scone memory and scheduling with a scripted provider, not live inference.
+
+#### Optional answer review
+
+A complete evidence path does not guarantee that a model follows it correctly.
+The native conversation can review its public draft against the delivered memory
+packet and attempt one correction:
+
+```python
+from scone_memory.providers.answer_reviewer import SelfHostedAnswerReviewer
+from scone_memory.realtime.answer_review import AnswerReviewLimits
+
+conversation = TextConversation(
+    memory, "authorized-space", "reviewed-session",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    answer_reviewer=SelfHostedAnswerReviewer(endpoint, model, timeout=20),
+    review_limits=AnswerReviewLimits(timeout_s=20.0, max_rounds=2),
+    review_policy="report",
+    turn_timeout=90,
+)
+```
+
+The first review may identify unsupported claims, contradictions, incomplete
+answers, or broken paths and propose a replacement. Scone adopts that replacement
+only after a second review reports it supported. Evidence IDs must come from the
+delivered packet, and issue quotations must match the draft exactly. Malformed
+reviews never trigger an automatic repair call. The reviewer sees the current
+question, draft, and memory packet; it does not receive system instructions or
+the full conversation history.
+
+When enabled, review buffers the draft. The observer receives the final text
+once; only that text enters conversation history and assistant capture. Without
+a reviewer, existing streaming behavior is unchanged. Greetings and other turns
+without prepared memory skip this memory-specific review.
+
+`report` retains the original draft if review fails or remains uncertain and its
+sources can still be validated. `require_supported` rejects an eligible memory
+reply unless review reports support. Both policies reject stale or unavailable
+sources. The returned `answer_review` receipt records the outcome, correction,
+issue codes, and source status separately; `verified_accuracy` is always false.
+A supported review is a model judgment, not independent proof of correctness.
+
+Review uses one deadline, at most two model calls, and a reserve for final source
+checks. Preparation and review share the same budget; each bounded source-read
+pass also has a one-second cap. Source checks use the original context revision,
+fixed scope, exact records, and immutable snapshots. Even an unrelated native
+write changes the revision and can conservatively invalidate review. The full
+conversation timeout must cover retrieval, generation, review, and capture.
+
+For an isolated comparison, add `--review-model YOUR_INSTALLED_MODEL
+--review-timeout 20 --review-policy report` to the generation evaluator. Only the
+candidate is reviewed. Reports preserve its public draft, final answer, review
+receipt, and separate draft/review timing; gold answers never enter review.
+For the standard HTTP server, configure the reviewer explicitly alongside
+`SCONE_CONVERSATIONS_JOURNAL` and a text model or persona catalog:
+
+```dotenv
+SCONE_ANSWER_REVIEW_POLICY=require_supported
+SCONE_ANSWER_REVIEW_URL=http://127.0.0.1:11434/v1
+SCONE_ANSWER_REVIEW_MODEL=YOUR_INSTALLED_MODEL
+SCONE_ANSWER_REVIEW_TIMEOUT=20
+SCONE_ANSWER_REVIEW_QUOTE_MODE=text
+# SCONE_ANSWER_REVIEW_API_KEY=  # Only when your reviewer requires authentication.
+```
+
+`off` is the default; `report` and `require_supported` follow the policies above.
+The reviewer has its own endpoint, model and optional credential; it never
+borrows the chat/extraction key. Configuration does not install a model. The
+standard `serve` launcher applies review to custom-model, saved-connection and
+persona **text** sessions. Voice sessions are unchanged. The authenticated
+conversation capabilities endpoint reports `answer_review.configured` and
+`answer_review.policy`, independently of text-model availability.
+
+`SCONE_ANSWER_REVIEW_QUOTE_MODE=spans` selects an alternative structured review
+protocol. The host gives the reviewer numbered draft excerpts; each issue
+selects one excerpt instead of copying its text. The host returns that exact
+text through the existing `answer_quote` field. Only an `incomplete_answer`
+omission can select no span. Unknown spans, extra fields and foreign evidence
+identifiers are rejected. Set `quote_mode="spans"` on `SelfHostedAnswerReviewer`
+for the same behavior in the SDK. The default `text` protocol is unchanged.
+
+The span catalog preserves the whole draft, with at most 128 excerpts of at
+most 2,000 characters each. Sentence/newline boundaries are preferred; long
+units are split, and highly fragmented drafts use fixed-size excerpts to stay
+bounded. These are mechanical spans, not claims inferred by another model.
+The catalog adds input text but no model requests. It prevents altered draft
+quotations, not incorrect review judgments; measure correct-answer rejection
+as well as false approval before choosing a reviewer or protocol. The isolated
+review evaluator accepts `--quote-mode spans` and records the selection in its
+report. Compare both modes using the same model, corpus and limits.
+
+Native and structured tool conversations can use the same review settings.
+Review receives the exact retained tool packets, including quoted claims,
+ordered paths, source identifiers and coverage limits. It performs no new
+retrieval. Even a tool turn with no retained evidence is reviewed, so an early
+answer cannot bypass a required review. `report` permits the original draft
+after an uncertain or failed review only when source validation succeeds;
+`require_supported` withholds it. A proposed replacement is accepted only after
+a second supported verdict. Review remains a fallible model judgment.
+
+The tool turn's original deadline also bounds review and its source checks;
+review cannot start a fresh tool budget. Accepted replacements must fit both
+the tool and conversation reply limits, plus the history limit. Source changes
+block publication regardless of policy, and sources are checked again after
+the public callback before capture. Leave time for review when configuring the
+tool and whole-conversation budgets. This adds up to two reviewer requests;
+the tool receipt's `model_calls` counts generation/tool decisions, while
+`answer_review.rounds` reports review requests separately.
+
+Reviewed text arrives as one final public delta. Failed required reviews save
+no assistant reply and expose a content-free `answer_review` diagnostic in the
+current process's turn receipt. Lifecycle failure messages survive restart;
+full per-turn review/context receipts are not reconstructed after restart.
+When embedding `create_conversation_app` directly, pass a `ConversationReview`
+from `scone_memory.runtime.conversation_review`; custom runtime factories must
+accept and honor its `answer_reviewer`, `review_policy` and `review_limits`
+keywords. The standard server supplies compatible native factories.
+
+The review endpoint must support structured JSON output with `anyOf` and `const`.
+Status-specific branches prevent a constrained decoder from returning, for
+example, `supported` alongside a proposed correction. Host validation still
+checks quotations, evidence IDs and response bounds; schema validity does not
+establish that the review judgment is correct.
+
+Evaluate the reviewer separately from answer generation with labeled drafts:
+
+```sh
+python -m scone_memory.testing.answer_review_evaluation \
+  --fixture tests/fixtures/answer_review/v1.json \
+  --output /tmp/scone-review-baseline.json \
+  --endpoint http://127.0.0.1:11434/v1 --model YOUR_INSTALLED_MODEL
+```
+
+The included original synthetic cases are **development** cases covering direct
+facts, invented facts, justified abstention, missed answers, unresolved conflicts
+and incomplete routes. Add separately held-out cases before making quality claims.
+`tests/fixtures/answer_review/contrastive.json` adds 20 synthetic development
+drafts in ten pairs: each pair shares the same question and sources but contains
+one acceptable and one unacceptable answer. It covers negation, unit conversion,
+ownership changes, cross-source routes, causality, quantifiers, inventory scope,
+tables, conflicting observations and instructions embedded in source text.
+Pass that path to `--fixture` to compare reviewers on these cases. Reporting a
+low false-approval rate alone is insufficient: a reviewer that rejects both
+members of every pair accepts none of the correct answers.
+`tests/fixtures/answer_review/completeness.json` adds eight development drafts
+where both members contain supported statements, but only one answers every
+explicitly requested part. It covers a receiver's storage medium, owner plus
+date, conditional action plus deadline, and attribution of conflicting values.
+These cases distinguish answering the question from merely saying something
+true about the sources. They are not held-out evidence of general accuracy.
+Each call reviews the original draft once; proposed revisions are recorded only
+as a boolean and are not adopted. This isolates reviewer judgment from generation
+and correction quality. Labels, categories and splits never enter model inputs.
+
+Reports separate false approvals, false rejections, abstentions and failures,
+with summaries by split and category. Approval precision uses approved drafts as
+its denominator; false-approval rate uses all labeled unacceptable drafts;
+acceptable-answer recall uses all labeled acceptable drafts. Decision coverage
+counts only `supported`/`needs_revision`, and labeled agreement counts correct
+decisions over **all** observations. An unavailable or uncertain review never
+counts as a correct rejection. Missing denominators are `null`, not perfect scores.
+The report omits source/draft/revision text and provider error messages. It includes
+a SHA-256 of the normalized fixture, labels, timing and enum diagnostics. Output
+must be a new file. Only the explicitly selected model is called; an optional
+credential comes from `SCONE_ANSWER_REVIEW_API_KEY`.
+Use `--progress` for one flushed JSON event on stderr after each completed case,
+including failures. Events contain case ID, repeat, completed/total counts,
+status, error code and elapsed milliseconds; they omit evidence, drafts, labels,
+revisions, credentials and provider error messages. The final report is still
+written only when the run completes. SDK callers can pass a synchronous
+`on_observation` callback to `evaluate_reviews`; it runs outside the review timer,
+and callback failures propagate instead of becoming model failures.
+Timeouts rely on cooperative asynchronous providers; a late result earns no
+credit even if a provider swallows cancellation. The evaluator cannot forcibly
+interrupt blocking synchronous work inside a custom provider.
+
+#### Optional extractive answers
+
+For memory questions where exact recorded wording matters, a model can select
+evidence instead of composing a free-form answer:
+
+```python
+from scone_memory.providers.evidence_selector import SelfHostedEvidenceSelector
+
+conversation = TextConversation(
+    memory, "authorized-space", "extractive-session",
+    lambda: OpenAICompatibleTextModel(endpoint, model, timeout=45, trust_env=False),
+    evidence_selector=SelfHostedEvidenceSelector(endpoint, model, timeout=20),
+    evidence_answer_timeout=20,
+    turn_timeout=90,
+)
+```
+
+When memory is prepared, Scone builds bounded source cards and makes at most one
+selection call. The model returns up to three known card IDs; Scone renders the
+original quotations and source IDs. No free-form generator runs on this path.
+Complete supplied paths and connected contradictions stay together in a card;
+their constituent passages cannot bypass that grouping. Whole cards are omitted
+when they exceed a budget. A path records ordered statements and stored link
+directions; it does not assert a new transitive relationship or infer an endpoint.
+An exact same-episode passage duplicate is removed only after its standalone
+claim card fits the budget. Different sources, text, and claims stay separate;
+`deduplicated_card_count` is distinct from budget omissions.
+
+Selection cards also carry typed claim triples, their origins and source IDs,
+and ordered path steps. This preserves route identity when several claims quote
+the same paragraph. A structural object-to-subject match remains distinct from
+a stored relationship and its traversal direction. These fields count toward
+the evidence byte budget; they do not change the public quotation rendering or
+establish that a quotation entails a stored claim. Existing custom selectors
+can still construct cards without this optional metadata.
+
+Sources are checked before and after selection against the original scope,
+revision, and records. Preparation, selection, and validation share one deadline.
+Stale sources, invalid selections, or provider failures suppress the answer. A
+valid empty selection returns a fixed no-support message. Only the final rendered
+text enters history, capture, and the text callback.
+
+The `evidence_answer` receipt lists delivered cards and evidence IDs, omissions,
+and source status. `verified_accuracy` remains false: exact quotations prevent
+new model-authored claims, but the model can still select irrelevant or incomplete
+evidence. This is an extractive answer mode, not a guarantee of fluent generation
+accuracy. Turns without prepared memory use the normal model and streaming flow.
+An evidence selector and answer reviewer cannot be enabled together. Custom
+selectors implement the `EvidenceSelector` protocol; their lifecycle belongs to
+the caller. This native option is not automatically enabled on HTTP routes.
+
+Add `--evidence-selector-model YOUR_INSTALLED_MODEL --evidence-answer-timeout 20`
+to the generation evaluator to enable it for the candidate only. Reports separate
+context evidence coverage from `selected_evidence_coverage`, record the actual
+answer mode, and count free-form generation calls. Gold labels are used only for
+scoring after selection. Quoting sources can inflate lexical scores; compare
+selection relevance and evidence coverage separately from generative accuracy.
 
 #### Migration from the experimental framework adapters
 

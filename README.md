@@ -1,7 +1,9 @@
 <p align="center"><strong>🥐 Scone</strong></p>
 
+<p align="center">ProjectScone · A JudgeHuman project by ProjectScone contributors</p>
+
 <p align="center">
-  <strong>Evidence-grounded memory for humans, agents, and applications. First-class Rust and Python libraries, local execution, and self-hosting.</strong>
+  <strong>A self-hosted RAG and memory framework for agents and applications.</strong>
 </p>
 
 <p align="center">
@@ -14,11 +16,10 @@
 
 ---
 
-Scone helps software build on what it has already learned: preserve source
-material, retrieve relevant evidence, and inspect dated claims and corrections.
-The ambition is continuity across assistants, applications, and storage providers
-without repeatedly explaining the same context. Portability and consistency are
-engineering promises to test, not consequences of storing something as JSON.
+Scone stores source material, retrieves relevant evidence, and tracks claims,
+relationships, and corrections over time. Use it to give agents persistent
+memory and connect language models to your knowledge through Python and Rust
+libraries, HTTP, and MCP.
 
 Rust and Python are first-class native libraries today. Python also has a
 distinct [HTTP client](python/scone-client). Neither native library requires the
@@ -41,20 +42,18 @@ The native Python real-time pipeline has direct `CartesiaSpeech` and
 `ElevenLabsSpeech` adapters in `scone_memory.providers.speech`. Install the
 `speech` extra to use them. Each requires explicit `api_key`, `model`, and `voice`
 arguments; there is no default account, silent provider fallback or automatic
-retry. They stream bounded signed 16-bit PCM audio through Scone's own audio
-protocol, without a Pipecat runtime dependency. Close interrupted iterators and
+retry. They stream bounded signed 16-bit PCM audio through Scone's audio
+protocol. Close interrupted iterators and
 call `aclose()` on the adapter when its session ends. Provider credentials belong
 on the server, never in browser configuration. Live provider billing and account
 availability are not established by the isolated adapter tests.
 
 ### Roadmap
 
-ProjectScone is building an open-source persistent-memory and real-time agent
-platform, informed by Supermemory and Pipecat. Native Rust and Python memory
-libraries, CLIs, HTTP and MCP servers are available; live capture and the console
-remain previews.
-Streaming voice/media pipelines and complete cross-language portability are
-completion milestones, not current release claims.
+Development focuses on retrieval and answer quality, multimodal ingestion,
+real-time conversations, agent orchestration, and reliable operation on
+self-managed infrastructure. The console and live capture are currently previews;
+full streaming media workflows and cross-language data portability remain in progress.
 
 The locally maintained capability baseline maps 65 capability groups to current
 Rust, Python and webapp behavior, source/test evidence, remaining gaps and seven
@@ -69,12 +68,10 @@ them for the receiving engine. It rejects custom identities and conflicting
 evidence instead of silently losing them. This is a bounded conformance path;
 full cross-language portability remains an M1 completion requirement.
 
-Both reference projects inform the functional scope. Scone's roadmap includes
-connectors, profiles, temporal relationships, multimodal ingestion, streaming
-voice, agent pipelines, client integrations and operational tooling. Completing
-a UI screen or installing a dependency does not complete the underlying feature.
-Each milestone must verify every affected native library, CLI, shared contract
-and web surface. Neither language inherits the other's benchmark results.
+The roadmap also includes connectors, profiles, temporal relationships,
+client integrations, and operational tooling. Validation covers the affected
+libraries, CLIs, shared contracts, and web interfaces. Rust and Python benchmark
+results are reported separately.
 
 | | |
 |---|---|
@@ -544,6 +541,13 @@ Neither architecture alone proves the other one's reliability.
 
 ## Measurement status
 
+The [Python public-QA baseline](python/memory/benchmarks/public-qa-v1.results.md)
+ran 200 unchanged HotpotQA/SQuAD questions across three self-managed models
+(600 responses). Overall exact match was 64% for Gemma E4B, 61% for Llama 3.1
+8B, and 59% for Llama 3.2 3B. The report separates retrieval coverage, generation,
+latency, and model memory; this sampled development run is not an official
+leaderboard submission or a full semantic-accuracy measurement.
+
 Historical **Rust-only** baseline: LongMemEval-S session-level all-evidence
 Recall@15 81.0%, any-evidence 94.0%, byte context reduction 97.8%. The run used
 all 500 questions, including 30 abstention items that the
@@ -564,4 +568,51 @@ bytes, latency, storage and ingestion cost reported separately.
 For the repository layout, local test setup and contribution workflow, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-MIT. Built by studying what came before and keeping the receipts.
+Current versions use the [ProjectScone Research Attribution License](LICENSE),
+a custom MIT-derived license with a mandatory research and academic citation
+condition. This is not the unmodified MIT License. Third-party materials retain
+their own licenses; earlier versions released under MIT retain those terms.
+
+### Research and academic citation
+
+If you use ProjectScone or a substantial portion of its code for research or
+academic work, you **must cite this repository** in resulting publications,
+theses, reports, presentations, and other publicly shared research outputs.
+For datasets or software artifacts, include the citation in accompanying
+documentation. Credit **ProjectScone contributors** as the author, **JudgeHuman** as the
+company, and **ProjectScone** as the project, and include the repository URL.
+Use MLA, APA, Chicago, or another recognized academic citation style; citations
+generated using EasyBib or BibTeX are accepted. Exact versions, commit hashes,
+and individual file references are **not required**. See [LICENSE](LICENSE)
+for the complete condition.
+
+Citation metadata is available in [CITATION.cff](CITATION.cff), which GitHub uses
+for its **Cite this repository** action. Ready-to-copy examples follow.
+
+**MLA / EasyBib (MLA)**
+
+> ProjectScone contributors. *ProjectScone*. JudgeHuman, 2026,
+> https://github.com/DrDrewCain/ProjectScone.
+
+**APA**
+
+> ProjectScone contributors. (2026). *ProjectScone* [Computer software]. JudgeHuman.
+> https://github.com/DrDrewCain/ProjectScone.
+
+**Chicago**
+
+> ProjectScone contributors. *ProjectScone*. JudgeHuman, 2026. Computer software.
+> https://github.com/DrDrewCain/ProjectScone.
+
+**BibTeX**
+
+```bibtex
+@misc{projectscone2026,
+  author       = {ProjectScone contributors},
+  title        = {{ProjectScone}},
+  year         = {2026},
+  howpublished = {JudgeHuman},
+  note         = {Computer software},
+  url          = {https://github.com/DrDrewCain/ProjectScone}
+}
+```

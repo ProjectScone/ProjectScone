@@ -2,7 +2,7 @@
 name = "scone-cli"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Scone: a local-first temporal memory engine — CLI, MCP server, and HTTP API"
 readme = "../../README.md"

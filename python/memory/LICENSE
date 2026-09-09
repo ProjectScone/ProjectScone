@@ -1,6 +1,14 @@
-MIT License
+ProjectScone Research Attribution License, Version 1.0
+
+SPDX-License-Identifier: LicenseRef-ProjectScone-Research-Attribution-1.0
+
+This is a custom license derived from the MIT License. It adds a mandatory
+research and academic citation condition and is not the unmodified MIT License.
 
 Copyright (c) 2026 ProjectScone contributors
+
+Company: JudgeHuman
+Project: ProjectScone
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -9,8 +17,32 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. The above copyright notice and this entire license, including the research
+   and academic citation condition below, shall be included in all copies or
+   substantial portions of the Software.
+
+2. If you use the Software or any substantial portion of its code in research
+   or academic work, you must properly cite ProjectScone in any resulting
+   publication, thesis, report, presentation, or other publicly shared research
+   output that relies on that use. For a dataset, software artifact, or other
+   output without a bibliography, include the citation in its accompanying
+   documentation or acknowledgments.
+
+   The citation must credit ProjectScone contributors as the author, identify JudgeHuman
+   as the company and ProjectScone as the project, and include the repository
+   URL: https://github.com/DrDrewCain/ProjectScone. Use a recognized academic
+   citation style, such as MLA, APA, or Chicago. Citations generated using
+   EasyBib or BibTeX are acceptable. Exact versions, commit hashes, and
+   individual file or module references are not required.
+
+   A citation to an unrelated paper, upstream dependency, or service does not
+   replace citation of ProjectScone. This condition does not require disclosure
+   of otherwise unpublished research or confidential information.
+
+This license applies only to material whose copyright holders have made it
+available under these terms. Separately licensed third-party material remains
+subject to its own license and attribution requirements. This license does not
+revoke permissions previously granted for earlier versions under other terms.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

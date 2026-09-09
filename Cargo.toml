@@ -5,5 +5,5 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.1"
 edition = "2024"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/DrDrewCain/ProjectScone"

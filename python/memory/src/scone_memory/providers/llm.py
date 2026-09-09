@@ -15,11 +15,13 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import AsyncGenerator
 
 from typing import TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
     import httpx
+    from ..realtime.events import ReplyCompleted, TextDelta
 
 from ..core.errors import SconeError
 
@@ -27,6 +29,15 @@ from ..core.errors import SconeError
 #: error, never a stuck process.
 DEFAULT_TIMEOUT = 180.0
 logger = logging.getLogger(__name__)
+
+
+def _thinking_options(think: bool | None) -> dict[str, str]:
+    """Translate the public toggle to the chat-completions wire protocol."""
+    if think is None:
+        return {}
+    if type(think) is not bool:
+        raise ValueError('think must be a boolean or None')
+    return {'reasoning_effort': 'medium' if think else 'none'}
 
 
 def _log_finished(
@@ -71,9 +82,10 @@ class OpenAICompatibleChat:
     """Any OpenAI-compatible ``/chat/completions`` endpoint over httpx.
 
     ``temperature`` defaults to zero so the same text distils to the
-    same facts twice; servers default to sampling otherwise. ``think``
-    is only sent when set, because Ollama honours it for reasoning
-    models while real OpenAI endpoints reject unknown fields.
+    same facts twice; servers default to sampling otherwise. Explicit
+    ``think`` settings map to ``reasoning_effort`` (false: none, true:
+    medium); unset preserves the endpoint default. The endpoint and
+    model must support the requested effort.
     """
 
     def __init__(
@@ -117,8 +129,7 @@ class OpenAICompatibleChat:
             ],
             "temperature": self.temperature,
         }
-        if self.think is not None:
-            body["think"] = self.think
+        body.update(_thinking_options(self.think))
         return body
 
     async def complete(self, system: str, user: str) -> str:
@@ -219,7 +230,7 @@ class OpenAICompatibleTextModel:
         self._client = httpx.AsyncClient(timeout=timeout, transport=transport, trust_env=trust_env)
         self._httpx = httpx
 
-    async def respond(self, messages: list[dict[str, str]]):
+    async def respond(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
         from ..realtime.events import ReplyCompleted, TextDelta
 
         started, call_id = time.perf_counter(), uuid.uuid4().hex[:12]
@@ -255,14 +266,13 @@ class OpenAICompatibleTextModel:
                 _log_finished(call_id, self._chat.model, "stream", started, outcome,
                               exception_type, first_token_ms)
 
-    async def _respond(self, messages: list[dict[str, str]]):
+    async def _respond(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
         from ..realtime.events import ReplyCompleted, TextDelta
 
         body = {"model": self._chat.model, "messages": list(messages), "temperature": self._chat.temperature, "stream": True}
         if self._max_output_tokens is not None:
             body["max_tokens"] = self._max_output_tokens
-        if self._chat.think is not None:
-            body["think"] = self._chat.think
+        body.update(_thinking_options(self._chat.think))
         try:
             async with self._client.stream("POST", f"{self._chat.base_url}/chat/completions", json=body,
                                            headers=self._chat._headers()) as response:

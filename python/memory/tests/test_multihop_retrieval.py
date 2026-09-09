@@ -1,7 +1,7 @@
 """Offline, source-verified bounded traversal, exercised on both local stores."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -55,6 +55,66 @@ async def test_three_source_chain_is_read_only_and_has_exact_directed_path(engin
     assert result.paths[-1].directions == ["forward", "forward"]
     assert result.coverage.complete
     assert await engine.documents.revision("alpha") == revision
+
+
+@pytest.mark.parametrize("receiver", ["Nacre", "  NORTH   Gate  ", "Straße"])
+async def test_engine_asserted_subjects_join_preserved_object_spelling(engine, receiver):
+    facts = []
+    for subject, predicate, obj in [("Morrow", "forwards to", receiver),
+                                     (receiver, "uses", "optical archive")]:
+        quote = f"{subject} {predicate} {obj}."
+        source = await engine.remember("alpha", quote, created_at=STAMP)
+        facts.append(await engine.assert_fact("alpha", subject, predicate, obj,
+            valid_from=STAMP, source_episode_id=source.episode_id, quote=quote))
+    assert facts[0].object != facts[1].subject
+    result = await expand_multihop(engine.documents, "alpha", seeds=RecallResult(facts=[facts[0]]))
+    assert result.facts == facts
+    assert result.paths[-1].fact_ids == [value.fact_id for value in facts]
+    assert result.edges[-1].kind == "subject_object"
+
+
+@pytest.mark.parametrize("change", [{"subject": "Beacon-demo"}, {"space": "beta"}, {"object": "forged"}])
+async def test_normalized_subject_lookup_rejects_spoofed_candidates(engine, change):
+    first = await fact(engine, "Aster", "depends on", "Beacon")
+    target = await fact(engine, "beacon", "uses", "archive")
+    async def lookup(space, subject, limit):
+        return [target.model_copy(update=change)] if subject == "beacon" else []
+    engine.documents.facts_by_subject = AsyncMock(side_effect=lookup)
+    result = await expand_multihop(engine.documents, "alpha", seed_fact_ids=[first.fact_id])
+    assert result.facts == [first]
+    assert result.edges == []
+
+
+@pytest.mark.parametrize("unavailable", ["filtered", "deleted"])
+async def test_normalized_subject_lookup_keeps_source_validation(engine, unavailable):
+    first = await fact(engine, "Aster", "depends on", "Beacon", tags=["public"])
+    target = await fact(engine, "beacon", "uses", "private archive", tags=["private"])
+    if unavailable == "deleted":
+        await engine.forget("alpha", target.source_episode_id)
+    result = await expand_multihop(engine.documents, "alpha", seed_fact_ids=[first.fact_id],
+        scope=TextFilter(tags=("public",)) if unavailable == "filtered" else None)
+    assert result.facts == [first]
+    assert "private archive" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("canonical_count", [2, 3])
+async def test_normalized_and_raw_subject_queries_share_per_node_allowance(engine, canonical_count):
+    first = await fact(engine, "Aster", "depends on", "Beacon", tags=["public"])
+    for number in range(canonical_count):
+        await fact(engine, "beacon", "uses", str(number), tags=["private"])
+    for number in range(3):
+        await fact(engine, "Beacon", "uses", str(number), tags=["private"])
+    reader = engine.documents.facts_by_subject
+    engine.documents.facts_by_subject = AsyncMock(wraps=reader)
+    result = await expand_multihop(engine.documents, "alpha", seed_fact_ids=[first.fact_id],
+        scope=TextFilter(tags=("public",)), limits=MultiHopLimits(per_node_limit=2))
+    assert result.facts == [first]
+    assert result.counts.candidates == 4  # seed plus the shared three-candidate window
+    assert not result.coverage.complete and "candidate_window" in result.coverage.reasons
+    expected = [call("alpha", "beacon", 3)]
+    if canonical_count == 2:
+        expected.append(call("alpha", "Beacon", 1))
+    assert engine.documents.facts_by_subject.await_args_list == expected
 
 
 async def test_stored_contradiction_retains_direction_and_never_selects_winner(engine):
@@ -176,13 +236,15 @@ async def test_stale_recall_seed_is_rejected(engine):
     assert result.facts == []
 
 
-async def test_exact_entity_join_does_not_use_semantic_similarity(engine):
+async def test_normalized_entity_join_does_not_use_semantic_similarity(engine):
     first = await fact(engine, "Aster", "depends on", "Beacon")
-    await fact(engine, "beacon", "located in", "Paris")
+    normalized = await fact(engine, "beacon", "located in", "Paris")
+    exact = await fact(engine, "Beacon", "located in", "Oslo")
     await fact(engine, "Beacon project", "located in", "Rome")
+    await fact(engine, "Beacon-demo", "located in", "Berlin")
     result = await expand_multihop(engine.documents, "alpha", seed_fact_ids=[first.fact_id])
-    assert result.facts == [first]
-    assert result.edges == []
+    assert result.facts == [first, normalized, exact]
+    assert len(result.edges) == 2
 
 
 async def test_metadata_conditions_and_excluded_session_apply_to_bridges(engine):
@@ -252,8 +314,9 @@ async def test_dense_fanout_reports_postfilter_window_and_bounded_work(engine):
     assert eligible.fact_id not in [f.fact_id for f in result.facts]
     assert result.coverage.truncated and "candidate_window" in result.coverage.reasons
     assert result.counts.candidates <= 5
-    assert result.counts.store_calls <= 16
-    engine.documents.facts_by_subject.assert_awaited_once_with("alpha", "Beacon", 4)
+    assert result.counts.store_calls <= 17
+    assert engine.documents.facts_by_subject.await_args_list == [
+        call("alpha", "beacon", 4), call("alpha", "Beacon", 4)]
 
 
 async def test_output_byte_budget_includes_unicode_paths_and_counters(engine):

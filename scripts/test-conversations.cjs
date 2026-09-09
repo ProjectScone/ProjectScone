@@ -4,16 +4,26 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const http=require('node:http');
-const {chromium}=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.SCONE_PLAYWRIGHT_MODULE||'playwright');
+const browserName=process.env.SCONE_BROWSER_ENGINE||'chromium';
+assert.ok(['chromium','firefox','webkit'].includes(browserName),'Unsupported browser engine');
 let browser;
-before(async()=>{browser=await chromium.launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,args:['--disable-gpu']});});
+before(async()=>{browser=await playwright[browserName].launch({headless:true,executablePath:process.env.SCONE_BROWSER_PATH,...(browserName==='chromium'?{args:['--disable-gpu']}: {})});});
 after(async()=>{await browser?.close();});
+
+async function visitSettled(page,route){
+  // Layout comparisons replace the document only after discovery settles;
+  // lifecycle/cancellation tests below exercise in-flight SPA navigation.
+  await page.waitForLoadState('networkidle');
+  await page.goto(new URL(route,page.url()).href);
+  await page.locator('h1').waitFor();
+  await page.waitForLoadState('networkidle');
+}
 
 for(const mobile of [false,true])test(`product navigation remains readable and shares the workspace surface, mobile=${mobile}`,async t=>{
   const {page}=await fixture(t,{mobile});
-  for(const route of ['/memory','/playground','/conversations','/learn']){
-    await page.goto(new URL(route,page.url()).href);
-    await page.locator('h1').waitFor();
+  for(const route of ['/memory','/playground','/conversations']){
+    await visitSettled(page,route);
     const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
     const surface=await page.locator('.server-strip').evaluate(el=>getComputedStyle(el).backgroundColor);
     assert.equal(await page.locator('.topbar').evaluate(el=>getComputedStyle(el).backgroundColor),surface,'Product navigation must not introduce an unrelated theme.');
@@ -29,9 +39,8 @@ for(const mobile of [false,true])test(`product navigation remains readable and s
 test('workspace pages keep the same title hierarchy and conversation rail alignment',async t=>{
   const {page}=await fixture(t);
   const styles=[];
-  for(const route of ['/memory','/playground','/conversations','/learn']){
-    await page.goto(new URL(route,page.url()).href);
-    await page.locator('h1').waitFor();
+  for(const route of ['/memory','/playground','/conversations']){
+    await visitSettled(page,route);
     styles.push(await page.locator('h1').evaluate(el=>{
       const s=getComputedStyle(el);
       return {size:s.fontSize,weight:s.fontWeight,line:s.lineHeight,color:s.color};
@@ -39,7 +48,7 @@ test('workspace pages keep the same title hierarchy and conversation rail alignm
     if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`frame-${route.slice(1)}.png`),fullPage:true});
   }
   for(const style of styles)assert.deepEqual(style,styles[0],'Page navigation must not change the product title scale.');
-  await page.goto(new URL('/conversations',page.url()).href);
+  await visitSettled(page,'/conversations');
   const rail=await page.locator('.conversation-list').boundingBox();
   const strip=await page.locator('.server-strip').boundingBox();
   const heading=await page.locator('h1').boundingBox();
@@ -48,10 +57,17 @@ test('workspace pages keep the same title hierarchy and conversation rail alignm
   assert.ok(heading.x>rail.x+rail.width,'Heading belongs to the working pane, not above session navigation.');
 });
 
-test('application navigation and connection remain reachable while a long workspace scrolls',async t=>{
+test('public documentation keeps a reachable workspace entry and the workspace keeps its connection controls',async t=>{
   const {page}=await fixture(t);
-  await page.goto(new URL('/learn/graph-memory',page.url()).href);
-  await page.locator('h1').waitFor();
+  await visitSettled(page,'/learn/graph-memory');
+  assert.equal(await page.locator('.server-strip').count(),0,'Public documentation does not present private connection state.');
+  assert.equal(await page.getByRole('button',{name:'Memory connection',exact:true}).count(),0);
+  const entry=page.getByRole('link',{name:'Open workspace',exact:false});
+  await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
+  const entryBox=await entry.boundingBox();
+  assert.ok(entryBox.y>=0&&entryBox.y+entryBox.height<=900,'The documentation header retains a visible route into the workspace.');
+  await entry.click();await page.waitForURL(url=>url.pathname==='/memory');await page.locator('h1').waitFor();
+  await page.locator('main').evaluate(el=>{el.style.minHeight='2200px';});
   await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
   const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
   for(const link of await nav.getByRole('link').all()){
@@ -64,6 +80,23 @@ test('application navigation and connection remain reachable while a long worksp
   await connect.click();
   await page.getByRole('dialog').waitFor();
   assert.match(await page.getByRole('dialog').innerText(),/Memory connection/);
+});
+
+for(const mobile of [false,true])test(`public documentation retains its article hierarchy and usable navigation, mobile=${mobile}`,async t=>{
+  const {page}=await fixture(t,{mobile});
+  await visitSettled(page,'/learn');
+  const header=page.getByRole('banner',{name:'Scone documentation'});
+  assert.equal(await header.evaluate(el=>getComputedStyle(el).backgroundColor),await page.locator('.documentation').evaluate(el=>getComputedStyle(el).backgroundColor));
+  const entry=header.getByRole('link',{name:'Open workspace',exact:false});
+  assert.equal(await entry.evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.ok((await entry.boundingBox()).height>=44);
+  assert.ok(await page.locator('h1').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=32),'Public articles retain their deliberate title scale.');
+  if(mobile)await page.getByRole('button',{name:'Browse documentation',exact:false}).click();
+  const nav=page.getByRole('navigation',{name:'Scone concepts',exact:true});
+  await nav.getByRole('link',{name:'Graph memory',exact:true}).click();
+  await page.waitForURL(/\/learn\/graph-memory$/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(await page.locator('.server-strip').count(),0);
 });
 
 for(const mobile of [false,true])test(`keyboard skip link stays above the application frame, mobile=${mobile}`,async t=>{
@@ -98,6 +131,36 @@ test('conversation frame keeps session controls and evidence usable across viewp
     if(process.env.SCONE_SCREENSHOT_DIR&&[390,1440,1600].includes(width))await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`workspace-conversation-${width}.png`),fullPage:true});
   }
 });
+test('transcript retains readable height with session controls in short and narrow windows',async t=>{
+  const {page}=await fixture(t,{pagination:true,scoped:true,defaultPersona:true});
+  await page.getByRole('link',{name:/previous ended/}).click();
+  await page.getByText('Saved message 123',{exact:true}).waitFor();
+  for(const viewport of [{width:1440,height:720},{width:1440,height:560},{width:1024,height:768},{width:768,height:600},{width:390,height:664}]){
+    await page.setViewportSize(viewport);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const metrics=await page.locator('.conversation-messages').evaluate(el=>({height:el.clientHeight,minimum:15*parseFloat(getComputedStyle(document.documentElement).fontSize),overflow:document.documentElement.scrollWidth>innerWidth}));
+    assert.ok(metrics.height>=metrics.minimum,`Transcript collapsed to ${metrics.height}px at ${JSON.stringify(viewport)}`);
+    assert.equal(metrics.overflow,false);
+    const composer=page.locator('.conversation-composer');
+    await composer.scrollIntoViewIfNeeded();
+    const bounds=await composer.boundingBox();
+    assert.ok(bounds.y>=0&&bounds.y+bounds.height<=viewport.height+1,'Composer remains reachable');
+  }
+  const heightAt=async height=>{
+    await page.setViewportSize({width:1440,height});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    return page.locator('.conversation-messages').evaluate(el=>el.clientHeight);
+  };
+  const shorter=await heightAt(1400),taller=await heightAt(1600);
+  assert.ok(Math.abs(taller-shorter-200)<=2,'Transcript must grow with the actual available viewport');
+  await page.locator('.conversation-workspace').evaluate(el=>{
+    el.style.height='2400px';
+    const notice=document.createElement('div');notice.className='conversation-notice';
+    notice.textContent='Connection restored';el.querySelector('.conversation-layout').before(notice);
+  });
+  await page.waitForFunction(previous=>document.querySelector('.conversation-messages').clientHeight<previous,taller);
+  if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,`conversation-sizing-${browserName}.png`),fullPage:true});
+});
 for(const voiceState of ['created','running','ended'])test(`saved voice session preserves evidence without text controls or microphone acquisition: ${voiceState}`,async t=>{
   const {page,posts}=await fixture(t,{voiceState});
   let microphoneRequests=0;page.on('websocket',()=>{microphoneRequests++;});
@@ -116,9 +179,9 @@ for(const voiceState of ['created','running','ended'])test(`saved voice session 
     assert.equal(await page.getByLabel('Message',{exact:true}).count(),0);
   }
 });
-async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse}={}){
+async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=false,unknown=false,recovered=false,deletion=false,cancellation=false,pagination=false,scoped=false,streaming=false,capStatus=200,listFailure=false,holdCapabilities=false,holdFirstList=false,personaCatalog,personaStatus=200,voiceState,sourceResponse,defaultPersona=false,reducedMotion='reduce',trackMotion=false}={}){
   const html=fs.readFileSync(process.env.SCONE_CONVERSATIONS_HTML||path.resolve(__dirname,'../crates/scone/src/playground.html'),'utf8').replaceAll('__SCONE_TOKEN__','fixture-key');
-  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(recovered?{latest_request_id:'a-newer'}:{})}];
+  const sessions=[{session_id:'previous',space:'alpha',state:unavailable?'running':'ended',revision:4,created_at:'2026-09-06T10:00:00Z',active_request_id:null,...(defaultPersona?{persona:null}:{}),...(recovered?{latest_request_id:'a-newer'}:{})}];
   if(voiceState){sessions[0].mode='voice';sessions[0].state=voiceState;}
   const saved={previous:[{episode_id:2,content:'Earlier conversation.',metadata:{role:'user'}}]};
   if(pagination)saved.previous=Array.from({length:123},(_,i)=>({episode_id:i+1,content:`Saved message ${i+1}`,metadata:{role:i%2?'assistant':'user'}}));
@@ -203,7 +266,17 @@ async function fixture(t,{unavailable=false,mobile=false,uncertain=false,reject=
     res.statusCode=404;res.end('{"error":"not found"}');
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1440,height:1000},reducedMotion:'reduce'});
+  const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1440,height:1000},reducedMotion});
+  if(trackMotion)await page.addInitScript(()=>{
+    window.conversationAnimations=[];
+    const animate=Element.prototype.animate;
+    Element.prototype.animate=function(frames,options){
+      if(this.matches('.conversation-source-transition,.conversation-delivery-transition')){
+        window.conversationAnimations.push({className:this.className,frames,duration:options?.duration??0});
+      }
+      return animate.call(this,frames,options);
+    };
+  });
   page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{releaseCapabilities();releaseList();await page.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));assert.deepEqual(errors,[]);});
   await page.goto(`http://127.0.0.1:${server.address().port}/conversations`);
@@ -252,7 +325,7 @@ for(const status of [404,410,503])test(`source inspector retries a cached ${stat
 });
 
 test('source inspector clears the previous original while another source loads',async t=>{
-  const {page}=await fixture(t);
+  const {page}=await fixture(t,{reducedMotion:'no-preference'});
   await page.route('**/previous/transcript*',route=>route.fulfill({json:{episodes:[{episode_id:2,content:'First message',metadata:{}},{episode_id:7,content:'Second message',metadata:{}}],has_more:false}}));
   await page.getByRole('link',{name:/previous/}).click();
   await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
@@ -272,6 +345,46 @@ test('source inspector clears the previous original while another source loads',
   await evidence.locator('.source-markdown').getByText('Earlier conversation.',{exact:true}).waitFor();
   release();await finished;await cancelled;
   assert.equal(await evidence.locator('.source-markdown').textContent(),'Earlier conversation.');
+});
+
+for(const reducedMotion of ['reduce','no-preference'])test(`conversation motion only fades status and sources without moving the composer: ${reducedMotion}`,async t=>{
+  const {page}=await fixture(t,{reducedMotion,trackMotion:true});
+  await page.route('**/previous/transcript*',route=>route.fulfill({json:{episodes:[{episode_id:2,content:'Earlier conversation.',metadata:{}},{episode_id:7,content:'Second message',metadata:{}}],has_more:false}}));
+  await page.getByRole('link',{name:/previous/}).click();
+  await page.getByText('Earlier conversation.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Inspect message episode 2',exact:true}).click();
+  await page.locator('.conversation-source-text').waitFor();
+  assert.equal(await page.locator('.conversation-source-transition').count(),1,'Source transitions have one current panel');
+  const samples=await page.evaluate(()=>new Promise(resolve=>{
+    const frames=[],started=performance.now();
+    const sample=()=>{
+      const composer=document.querySelector('.conversation-composer').getBoundingClientRect();
+      const transcript=document.querySelector('.conversation-messages').getBoundingClientRect();
+      frames.push({composerY:composer.y,composerHeight:composer.height,transcriptHeight:transcript.height,
+        sourceOpacity:getComputedStyle(document.querySelector('.conversation-source-transition')).opacity});
+      if(performance.now()-started<220)requestAnimationFrame(sample);else resolve(frames);
+    };sample();
+  }));
+  for(const frame of samples){
+    for(const field of ['composerY','composerHeight','transcriptHeight'])assert.ok(Math.abs(frame[field]-samples[0][field])<1,`${field} moved during a fade`);
+    if(reducedMotion==='reduce')assert.equal(frame.sourceOpacity,'1');
+  }
+  const animations=await page.evaluate(()=>window.conversationAnimations.filter(item=>item.duration>0));
+  if(reducedMotion==='reduce')assert.deepEqual(animations,[],'Reduced motion never starts a timed fade');
+  else{
+    for(const className of ['conversation-source-transition','conversation-delivery-transition'])assert.ok(animations.some(item=>item.className===className),`${className} should use Motion`);
+    for(const animation of animations){
+      const properties=Array.isArray(animation.frames)?animation.frames.flatMap(frame=>Object.keys(frame)):Object.keys(animation.frames);
+      assert.ok(properties.every(key=>['opacity','offset','easing','composite'].includes(key)),'Only opacity may animate');
+      assert.ok(animation.duration<=200,'Status transitions stay brief');
+    }
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await page.evaluate(()=>{window.conversationAnimations=[];});
+    await page.getByRole('button',{name:'Inspect message episode 7',exact:true}).click();
+    await page.locator('.conversation-source-text .source-markdown').getByText('Juniper is calibrated with Polaris. <script>not executable</script>',{exact:true}).waitFor();
+    assert.deepEqual(await page.evaluate(()=>window.conversationAnimations.filter(item=>item.duration>0)),[],'A live reduced-motion change disables later source fades');
+    assert.equal(await page.locator('.conversation-source-transition').evaluate(el=>getComputedStyle(el).opacity),'1');
+  }
 });
 
 for(const mobile of [false,true])test(`source inspector retains exact Markdown alongside its formatted original, mobile=${mobile}`,async t=>{
@@ -796,7 +909,9 @@ test('closed session deletion requires confirmation and removes the saved sessio
   await dialog.getByLabel('I understand this cannot be undone').check();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
   if(process.env.SCONE_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCONE_SCREENSHOT_DIR,'scone-delete-mobile.png'),fullPage:true});
+  const discoveryRefresh=page.waitForRequest(request=>new URL(request.url()).pathname==='/v1/capabilities');
   await dialog.getByRole('button',{name:'Permanently delete',exact:true}).click();
+  await discoveryRefresh;
   await page.waitForURL(/\/conversations$/);
   await page.getByText('Conversation deleted.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('link',{name:/previous/}).count(),0);

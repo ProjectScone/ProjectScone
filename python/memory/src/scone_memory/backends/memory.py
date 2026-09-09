@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from itertools import count
-from bisect import insort
+from bisect import bisect_left, insort
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
@@ -20,6 +20,7 @@ from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, 
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
 from .validation import validate_vector
+from ..core.chunk_window import validate_chunk_window
 
 
 class InMemoryDocumentStore:
@@ -28,6 +29,7 @@ class InMemoryDocumentStore:
     def __init__(self) -> None:
         self._episodes: dict[int, Episode] = {}
         self._chunks: dict[int, Chunk] = {}
+        self._chunks_by_episode: dict[tuple[str, int], list[tuple[int, int]]] = defaultdict(list)
         self._facts: dict[int, Fact] = {}
         self._links: dict[int, FactLink] = {}
         self._link_keys: dict[tuple[str, int, int, str], int] = {}
@@ -71,6 +73,8 @@ class InMemoryDocumentStore:
             del self._episodes[episode_id]
         for chunk_id in chunk_ids:
             del self._chunks[chunk_id]
+        for key in [key for key in self._chunks_by_episode if key[0] == space]:
+            del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
         for fact_id in fact_ids:
             del self._facts[fact_id]
@@ -166,11 +170,18 @@ class InMemoryDocumentStore:
         for chunk_id in removed:
             del self._chunks[chunk_id]
             self._bm25[space].remove(chunk_id)
+        self._chunks_by_episode.pop((space, episode_id), None)
         return removed
 
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         found = [c for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
         return sorted(found, key=lambda c: c.ordinal)
+
+    async def page_chunks(self, space: str, episode_id: int, *, start_ordinal: int, limit: int) -> list[Chunk]:
+        validate_chunk_window(episode_id, start_ordinal, limit)
+        ordered = self._chunks_by_episode.get((space, episode_id), [])
+        start = bisect_left(ordered, (start_ordinal, 0))
+        return [self._chunks[key] for _, key in ordered[start:start + limit]]
 
     async def mark_inflight(self, space: str, content_hash: str) -> None:
         self._inflight.add((space, content_hash))
@@ -186,6 +197,7 @@ class InMemoryDocumentStore:
         for n in new:
             chunk = Chunk(chunk_id=next(self._chunk_ids), **n.__dict__)
             self._chunks[chunk.chunk_id] = chunk
+            insort(self._chunks_by_episode[(chunk.space, chunk.episode_id)], (chunk.ordinal, chunk.chunk_id))
             self._bm25[chunk.space].add(chunk.chunk_id, chunk.text)
             out.append(chunk)
         return out

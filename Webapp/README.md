@@ -30,7 +30,9 @@ pnpm check:assets
 Production packaging embeds built JS, CSS and the original Scone mark into both
 native playground distributions and the Python Memory console. Node is not required to run the packaged Rust
 or Python server. `dist/` and `node_modules/` are ignored. The lockfile belongs to
-this app; upstream projects under `../reference/` are ignored reference material.
+this app; CI and the AWS image use pnpm 9.9.0 with `pnpm-lock.yaml` as the primary
+lockfile. Keep the retained npm compatibility lock synchronized when changing
+dependencies. Upstream projects under `../reference/` are ignored reference material.
 
 CI and release workflows rebuild these embedded assets before Rust compilation
 and Python wheel packaging. When building native apps locally from source, run

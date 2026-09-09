@@ -142,7 +142,9 @@ async def speak(port, sid, *, end=True):
         await sock.send(json.dumps({"type": "hello", "key": KEY, "sample_rate": 16000, "channels": 1}))
         assert json.loads(await sock.recv()) == {"type": "ready", "session_id": sid}
         await sock.send(PCM)
-        turn, spoken = parse_frame(await sock.recv())
+        frame = await sock.recv()
+        assert isinstance(frame, bytes), "voice replies must use binary audio frames"
+        turn, spoken = parse_frame(frame)
         assert spoken.pcm == b"\x07\x00" * 320 and len(turn) == 32
         if end:
             await sock.send(json.dumps({"type": "end"}))
@@ -156,7 +158,16 @@ def test_a_launched_serve_composes_memory_catalog_and_voice_over_tcp(composed):
     assert client.get("/v1/capabilities").json()["features"]["conversations"] is True
     ready = client.get("/v1/conversations/capabilities").json()
     assert ready["personas"] == 1 and ready["voice"] is True and ready["text_configured"] is True
-    assert KEY not in client.get("/memory").text
+    # A single-key loopback launch bootstraps the browser connection. This
+    # does not grant unauthenticated API access or trust arbitrary Host values.
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=2, trust_env=False) as browser:
+        page = browser.get("/memory")
+        assert page.status_code == 200 and KEY in page.text
+        assert "__SCONE_TOKEN__" not in page.text
+        assert page.headers["cache-control"] == "no-store"
+        assert browser.get("/v1/status").status_code == 401
+        untrusted = browser.get("/memory", headers={"Host": "untrusted.example"})
+        assert untrusted.status_code == 200 and KEY not in untrusted.text
     listing = client.get("/v1/conversations/personas").json()
     fingerprint = listing["personas"][0]["fingerprint"]
 

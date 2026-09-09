@@ -122,10 +122,11 @@
 .conversation-page .conversation-layout{align-items:start;min-height:0}
 .conversation-saved{display:contents}
 .conversation-messages .conversation-live{margin:0;flex:none}
+.conversation-page .conversation-thread{align-self:start;height:auto;min-height:0;max-height:none;overflow:visible}
+/* Bound the transcript itself: variable-height controls must never consume its space. */
+.conversation-page .conversation-messages{height:max(15rem,var(--transcript-available-height,50dvh));min-height:15rem;max-height:none;flex:0 0 auto;overflow:auto}
 @media(min-width:701px){
-  .conversation-page .conversation-thread{align-self:start;height:calc(100dvh - 330px);min-height:480px;max-height:900px;overflow:hidden}
-  .conversation-page .conversation-evidence{height:calc(100dvh - 330px);min-height:480px;max-height:900px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
-  .conversation-page .conversation-messages{min-height:0;max-height:none;flex:1 1 0;overflow:auto}
+  .conversation-page .conversation-evidence{height:var(--conversation-panel-height,auto);min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
   .conversation-page .conversation-composer{flex:none}
   .conversation-page .conversation-composer textarea{height:58px;min-height:58px}
   .conversation-page .conversation-composer label{margin-bottom:6px}

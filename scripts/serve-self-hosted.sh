@@ -3,9 +3,9 @@
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
-python_path="$project_dir/python/memory/.venv/bin/python"
+python_path=${SCONE_PYTHON:-"$project_dir/python/memory/.venv/bin/python"}
 if [ ! -x "$python_path" ]; then
-    printf '%s\n' 'The Python environment is missing; prepare python/memory/.venv first.' >&2
+    printf '%s\n' 'The Python interpreter is missing; prepare python/memory/.venv or set SCONE_PYTHON.' >&2
     exit 2
 fi
 if [ "${1:-}" = '--check' ]; then
