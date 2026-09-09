@@ -12,6 +12,9 @@ wider candidate pools and CPU reranking, including coverage regressions and cost
 The [retained-source comparison](source-budget-v1.results.md) measures five,
 eight and ten sources within the same context budget, with a separately recorded
 native shutdown failure after all observations were saved.
+Its [paired generation follow-up](source-budget-generation-v1.results.md)
+records 600 new Gemma responses: better evidence coverage did not improve answer
+accuracy, so the source-count default remains unchanged.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
