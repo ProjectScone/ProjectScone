@@ -17,6 +17,7 @@ on an engine instance.
 | `retrieval/reranking.py` | Bounded adapter calls, output validation and fallback ordering |
 | `realtime/context.py` | Pack retrieved evidence into a bounded model context with provenance |
 | `memory/archive.py` | Export original records and import with identity, source and link remapping |
+| `memory/fact_placement.py` | Place temporal claims, preserve restatement identity and close covered intervals |
 | `memory/engine.py` | Coordinate the public API and remaining ingestion and lifecycle operations |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
@@ -65,6 +66,21 @@ preserves session/episode focus, and distinguishes sources omitted for room from
 sources that no longer exist. Retrieval edges retain their lane/rank labels;
 similarity is never promoted to a factual relationship. Graph data structures
 and edge helpers remain separate from storage reads and graph analysis.
+
+Temporal placement receives a `FactPlacementRuntime` containing the current
+document store, clock and bound event/placement/truncation callbacks. Assertion
+and approval retain their engine entry points and relationship or review
+validation. Standalone hosts can bind the component's `place` and `truncate`
+functions directly to a document store. The engine preserves its private
+placement hooks and legacy helper aliases for existing callers.
+
+Placement includes closed ledger intervals when identifying restatements,
+overlaps and successors. Backfilled claims cannot overwrite fresher intervals;
+shortening an interval preserves a person's closure reason. Proposals remain
+outside the held ledger until approval. Source quotes are validated before
+storage, and event payloads and revision ordering are unchanged. This boundary
+does not add transaction isolation between concurrent assertions or a bound on
+the number of rival facts read for a subject and predicate.
 
 These windows bound event reads and additional source hydration, not the number
 of facts scanned or all nodes returned. Fact listing still reads the space's full
