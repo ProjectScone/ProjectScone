@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..agents.evidence_loop import ToolCall, ToolStep
 from ..integrations.read_memory import ReadMemoryArgs
+from ..retrieval.computation import ComputeMemoryArgs, OPERATIONS
 from .tool_chat import SelfHostedToolChat, _decode, _mapping, _step
 from .tool_synthesis import synthesis_history
 
@@ -57,12 +58,12 @@ class _Answer(BaseModel):
 
 
 def _names(tools: list[dict[str, object]]) -> set[str]:
-    if len(tools) > 3:
+    if len(tools) > 4:
         raise ValueError('invalid action tools')
     names: set[str] = set()
     for tool in tools:
         name = _mapping(tool.get('function')).get('name')
-        if tool.get('type') != 'function' or name not in ('search_memory', 'trace_memory', 'read_memory') or name in names:
+        if tool.get('type') != 'function' or name not in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory') or name in names:
             raise ValueError('invalid action tools')
         assert isinstance(name, str)
         names.add(name)
@@ -128,7 +129,7 @@ def _history(messages: list[dict[str, object]]) -> tuple[list[dict[str, str]], s
                     raise ValueError('invalid action history')
                 parsed = ToolCall.model_validate({'id':call.get('id'), 'name':function.get('name'),
                                                   'arguments':_mapping(_decode(arguments))})
-                if parsed.id in used or parsed.name not in ('search_memory', 'trace_memory', 'read_memory'):
+                if parsed.id in used or parsed.name not in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory'):
                     raise ValueError('invalid action history')
                 used.add(parsed.id)
                 pending.add(parsed.id)
@@ -175,6 +176,13 @@ def _schema(names: set[str], facts: set[int], chunks: set[int]) -> dict[str, obj
                       'description':'Earlier neighboring chunks to read. Use 1 for preceding context; 0 adds no earlier context.'},
             'after':{'type':'integer', 'enum':[0,1,2,3,4],
                      'description':'Later neighboring chunks to read. Use 1 for following context; 0 adds no later context.'}}))
+    if 'compute_memory' in names and chunks:
+        quoted = {'type':'object', 'additionalProperties':False, 'required':['chunk_id', 'quote'],
+                  'properties':{'chunk_id':{'type':'integer', 'enum':sorted(chunks)},
+                                'quote':{'type':'string', 'description':'Exact unique quote within this chunk; arithmetic requires a whole ASCII decimal token.'}}}
+        branches.append(_branch('compute_memory', {'operation':{'type':'string', 'enum':list(OPERATIONS)},
+            'left':{'type':'array', 'minItems':1, 'maxItems':16, 'items':quoted},
+            'right':{'type':'array', 'maxItems':16, 'items':quoted}}))
     branches.append(_branch('answer', {'answer':{'type':'string'}}))
     return {'anyOf':branches}
 
@@ -205,6 +213,11 @@ def _action(raw: bytes, names: set[str], facts: set[int], chunks: set[int]) -> T
         if read.chunk_id not in chunks:
             raise ValueError('invalid action chunk')
         arguments = read.model_dump()
+    elif action == 'compute_memory' and action in names:
+        computation = ComputeMemoryArgs.model_validate({key:value for key,value in packet.items() if key != 'action'})
+        if any(row.chunk_id not in chunks for row in computation.left + computation.right):
+            raise ValueError('invalid action chunk')
+        arguments = computation.model_dump()
     else:
         raise ValueError('unavailable action')
     return ToolStep(calls=(ToolCall(id='action-' + uuid4().hex, name=action, arguments=arguments),))
@@ -230,6 +243,15 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
         history, facts, chunks = _history(messages)
         names = _names(tools)
+        if 'compute_memory' in names:
+            history[0]['content'] += (
+                ' compute_memory performs exact arithmetic from unique decimal quotes in returned chunks. '
+                'sum/product/count use left inputs only; difference/ratio/compare require one input on each side. '
+                'Difference is left minus right; ratio is left divided by right. '
+                'count/compare_counts count selected nonoverlapping quote spans, not an entire population. '
+                'Choose operands matching the requested entities, attributes and compatible units. '
+                'Calculations do not verify operand meaning, unit compatibility or list completeness.'
+            )
         if not names:
             return await self._request({'model':self._model, 'messages':synthesis_history(messages),
                 'stream':False, 'temperature':0, 'max_tokens':self._max_tokens, 'tool_choice':'none'},
