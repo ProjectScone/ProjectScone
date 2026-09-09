@@ -8,6 +8,7 @@ import pytest
 
 from scone_memory.providers.tool_chat import SelfHostedToolChat
 from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
+from scone_memory.runtime.diagnostics import DiagnosticFormatter
 
 
 def packet(reason='stop', usage=None):
@@ -29,6 +30,13 @@ def finished(caplog):
     [row] = [row for row in caplog.records if getattr(row, 'event', None) == 'tool_model.finished']
     assert 'PRIVATE' not in caplog.text
     assert 'PRIVATE' not in repr(row.__dict__)
+    serialized = DiagnosticFormatter().format(row)
+    assert 'PRIVATE' not in serialized
+    persisted = json.loads(serialized)
+    for name in ('call_id', 'protocol', 'outcome', 'phase', 'failure_kind', 'elapsed_ms', 'headers_ms',
+                 'http_status', 'request_bytes', 'response_bytes', 'output_token_limit', 'timeout_s',
+                 'finish_reason', 'prompt_tokens', 'completion_tokens', 'total_tokens'):
+        assert persisted.get(name) == getattr(row, name), f'{name} lost by private log formatter'
     return row
 
 
@@ -49,6 +57,10 @@ async def test_success_reports_usage_and_correlates_events_without_changing_requ
     row = finished(caplog)
     [start] = [record for record in caplog.records if getattr(record, 'event', None) == 'tool_model.started']
     assert start.call_id == row.call_id and row.call_id
+    persisted_start = json.loads(DiagnosticFormatter().format(start))
+    assert persisted_start['protocol'] == 'native'
+    assert persisted_start['request_bytes'] == row.request_bytes
+    assert persisted_start['output_token_limit'] == 2048
     assert row.outcome == 'completed' and row.failure_kind is None
     assert row.protocol == 'native' and row.finish_reason == 'stop'
     assert (row.prompt_tokens, row.completion_tokens, row.total_tokens) == (123, 9, 132)
