@@ -447,8 +447,11 @@ if found["ok"] and found["facts"]:
 ```
 
 Tracing returns complete quoted claims with source episode IDs and recorded
-origins, directed stored relations, and ordered paths. Exact object-to-subject
-matches are labeled `subject_object`; they are not inferred semantic links.
+origins, directed stored relations, and ordered paths. Object-to-subject
+matches are labeled `subject_object`. Traversal uses the ledger's subject
+normalization (case folding and collapsed whitespace) and also checks exact
+spelling for directly inserted records, sharing the same work limits. It does
+not infer aliases or join merely similar names.
 Contradictions remain separate evidence, never a path continuation or an
 automatically chosen winner. Quote retention is checked; factual accuracy is
 not certified. Source text remains untrusted data for the receiving model.
@@ -1298,7 +1301,7 @@ stored-link kinds are still handled by the separate graph expansion stage.
 To gather missing connecting facts **before** assessment, pass
 `graph_limits=MultiHopLimits(...)` to `AdaptiveRetriever` (import it from
 `scone_memory.retrieval.multihop`). The host expands verified recall seeds using
-bounded stored-link reads and exact object-to-subject joins, within the same
+bounded stored-link reads and ledger-normalized object-to-subject joins, within the same
 space, source filters, session exclusion, and adaptive deadline. With graph
 expansion enabled, all candidate sources and facts share the engine clock
 boundary; future-created sources are excluded. It verifies expanded source

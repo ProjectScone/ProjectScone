@@ -1,7 +1,9 @@
 """Offline, bounded traversal of retained ledger evidence.
 
 Seeds come from recall or caller-authorized IDs. Stored links preserve their
-kind and direction. Exact object-to-subject joins are labeled as joins, never
+kind and direction. Object-to-subject joins use the ledger's subject normalization
+and retain exact-spelling compatibility for directly inserted records. They are
+labeled as joins, never
 as inferred semantic relationships. No model, embedding, browser or write is
 involved. Capability-free stores return verified seeds with explicit coverage.
 """
@@ -16,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.models import Episode, Fact, FactLink, RecallResult
 from ..core.ports import TextFilter
 from ..core.timeutil import now_rfc3339, parse_rfc3339
-from ..memory.engine import check_space
+from ..memory.engine import check_space, normalise_term
 
 
 class MultiHopDocuments(Protocol):
@@ -289,24 +291,30 @@ class _Walker:
         if not isinstance(self.documents, BoundedSubjectFacts):
             self.incomplete("unsupported_bounded_subjects", truncated=False)
             return
-        limit = self.window()
-        if not limit or not self.call():
+        if not current.object.strip():
             return
-        candidates = await self.documents.facts_by_subject(self.space, current.object, limit)
-        if len(candidates) >= limit:
-            self.incomplete("candidate_window")
-        for candidate in candidates[:limit]:
-            if not self.candidate():
-                break
-            if candidate.space != self.space or candidate.subject != current.object:
-                self.result.counts.rejected += 1
-                continue
-            fact = await self.fact(candidate.fact_id, expected=candidate)
-            if fact is None:
-                continue
-            self.add(fact, parent=current.fact_id, depth=depth + 1,
-                     edge=MultiHopEdge(id=f"chain:{current.fact_id}:{fact.fact_id}", from_fact=current.fact_id,
-                         to_fact=fact.fact_id, kind="subject_object", source_fact_ids=[current.fact_id, fact.fact_id]))
+        subjects = dict.fromkeys((normalise_term(current.object, "subject"), current.object))
+        remaining = self.limits.per_node_limit + 1
+        for subject in subjects:
+            limit = min(self.window(), remaining)
+            if not limit or not self.call():
+                return
+            candidates = await self.documents.facts_by_subject(self.space, subject, limit)
+            if len(candidates) >= limit:
+                self.incomplete("candidate_window")
+            remaining -= min(len(candidates), limit)
+            for candidate in candidates[:limit]:
+                if not self.candidate():
+                    return
+                if candidate.space != self.space or candidate.subject != subject:
+                    self.result.counts.rejected += 1
+                    continue
+                fact = await self.fact(candidate.fact_id, expected=candidate)
+                if fact is None:
+                    continue
+                self.add(fact, parent=current.fact_id, depth=depth + 1,
+                         edge=MultiHopEdge(id=f"chain:{current.fact_id}:{fact.fact_id}", from_fact=current.fact_id,
+                             to_fact=fact.fact_id, kind="subject_object", source_fact_ids=[current.fact_id, fact.fact_id]))
 
     async def revalidate(self) -> None:
         """Fresh bounded ledger/source checks, then prune dependent paths.
