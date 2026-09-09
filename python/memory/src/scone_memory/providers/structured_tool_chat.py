@@ -162,7 +162,8 @@ def _branch(action: str, properties: dict[str, object]) -> dict[str, object]:
     return {'type':'object', 'additionalProperties':False, 'required':list(fields), 'properties':fields}
 
 
-def _schema(names: set[str], facts: set[int], chunks: set[int], *, json_answer: bool = False) -> dict[str, object]:
+def _schema(names: set[str], facts: set[int], chunks: set[int], *, json_answer: bool = False,
+    answer_schema: dict[str, object] | None = None) -> dict[str, object]:
     # Host byte limits remain strict. Large maxLength constraints can explode
     # self-hosted grammar compilers; token/response limits bound generation.
     branches = []
@@ -186,7 +187,8 @@ def _schema(names: set[str], facts: set[int], chunks: set[int], *, json_answer: 
         branches.append(_branch('compute_memory', {'operation':{'type':'string', 'enum':list(OPERATIONS)},
             'left':{'type':'array', 'minItems':1, 'maxItems':16, 'items':quoted},
             'right':{'type':'array', 'maxItems':16, 'items':quoted}}))
-    branches.append(_branch('answer', {'answer':{'type':'object' if json_answer else 'string'}}))
+    branches.append(_branch('answer', {'answer':answer_schema if answer_schema is not None
+                                     else {'type':'object' if json_answer else 'string'}}))
     return {'anyOf':branches}
 
 
@@ -274,6 +276,7 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
         history, facts, chunks = _history(messages)
         names = _names(tools)
         json_answer = requirements is not None and requirements.format == 'json_object'
+        answer_schema = requirements.output_schema if requirements is not None else None
         if json_answer:
             history[0]['content'] += (
                 ' For an answer action, put the requested JSON object in the answer field, not an encoded string.')
@@ -291,10 +294,10 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
                 'stream':False, 'temperature':0, 'max_tokens':self._max_tokens, 'tool_choice':'none'}
             if json_answer:
                 body['response_format'] = {'type':'json_schema', 'json_schema':{'name':'memory_answer',
-                    'strict':True, 'schema':{'type':'object'}}}
+                    'strict':True, 'schema':answer_schema if answer_schema is not None else {'type':'object'}}}
             return await self._request(body, _json_answer if json_answer else _prose, protocol='structured_answer')
         body = {'model':self._model, 'messages':history, 'stream':False, 'temperature':0,
             'max_tokens':self._max_tokens, 'tool_choice':'none',
             'response_format':{'type':'json_schema', 'json_schema':{'name':'memory_action', 'strict':True,
-                                                                  'schema':_schema(names, facts, chunks, json_answer=json_answer)}}}
+                    'schema':_schema(names, facts, chunks, json_answer=json_answer, answer_schema=answer_schema)}}}
         return await self._request(body, lambda raw: _action(raw, names, facts, chunks, json_answer=json_answer), protocol='structured_action')

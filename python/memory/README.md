@@ -578,8 +578,8 @@ limits before `run()` returns. Invalid returned text raises `RuntimeError` with
 `tool answer format rejected`; it is not repaired or retried. The
 loop's own reply limit still applies. Source revalidation remains mandatory.
 The structured adapter's final-writing prompt respects the caller's requested
-format instead of requiring prose or an explanation. `json_object` validates
-JSON object syntax, not a field schema or factual correctness; textual
+format instead of requiring prose or an explanation. By itself, `json_object` validates
+JSON object syntax; textual
 instructions guide the model but are not deterministic semantic checks.
 `SelfHostedStructuredToolChat` uses an object-valued answer branch and a final
 JSON-object response schema when these requirements request `json_object`.
@@ -600,6 +600,42 @@ action schema. TextConversation keeps its separate review/repair boundary.
 The [recorded Gemma format probe](benchmarks/tool-answer-contract-v1.results.md)
 shows both the improvement in JSON syntax and the remaining field-shape and
 latency limitations.
+
+To enforce field names, types and constraints, install
+`scone-memory[structured-output]` and add an application schema:
+
+```python
+requirements = AnswerRequirements(
+    format="json_object", max_bytes=1024, max_lines=1,
+    output_schema={
+        "type": "object",
+        "properties": {"answer": {"type": "string", "minLength": 1}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    },
+)
+```
+
+The structured adapter sends the same compiled schema for early and final
+answers. The host validates the returned object even if a provider ignores
+the schema. Other providers receive it through the requirements capability
+or prompt, with the same host check. Provider support for individual JSON Schema
+keywords varies; unsupported schemas can fail generation without a fallback.
+
+Contracts use Draft 2020-12 validation with an object root. Acyclic local
+JSON Pointer references are inlined before embedding; external references,
+recursive references, identifiers, dynamic references, anchors, custom dialects
+and unknown keywords are rejected during configuration. No schema is fetched.
+`format` remains an annotation, without format assertion. Input and expanded
+schemas each have a 32 KiB limit; JSON trees are limited to 4,096 values and
+32 levels, and schema expansion to 256 nodes and 16 levels. These are bounded
+application configurations, not a sandbox or a hard validation CPU deadline.
+Schema-mode numbers use exact decimal validation, with at most 4,096 coefficient
+digits and an absolute exponent of 4,096. Syntax-only mode keeps its existing
+number behavior. Field validation does not verify an answer's factual accuracy.
+The [recorded application-schema probe](benchmarks/answer-output-schema-v1.results.md)
+improved requested-field compliance from 2/4 to 4/4 on the same four Gemma
+fixtures; three answers still used a full sentence instead of a short entity.
 
 By default the SDK model chooses search queries. `EvidenceToolLoop(...,
 initial_search=True)` first searches the final user message with `limit=5`,
@@ -1547,8 +1583,10 @@ The same requirements guide generation and review. Code enforces nonblank text,
 UTF-8 byte and line limits before publication or assistant capture; a trailing
 line break counts as another line. `format="json_object"` additionally requires
 one strict JSON object without fences, duplicate keys, or NaN/Infinity constants.
-This checks JSON syntax, not application schema, instruction compliance, or
-factual accuracy. Scone never truncates or rewrites an answer to make it pass.
+An optional `output_schema` adds the field validation described above, using
+the same requirements for generation and review. Neither syntax nor schema
+validation establishes instruction compliance or factual accuracy. Scone never
+truncates or rewrites an answer to make it pass.
 
 Requirements work without review and apply to ordinary generation, native tools,
 extractive answers, and abstentions. Output is buffered until checked, including
