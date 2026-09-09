@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..integrations.read_memory import ReadMemoryArgs
+from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 from ..retrieval.computation import ComputeMemoryArgs
 from .tool_evidence import PreparedToolEvidence
 
@@ -45,6 +46,13 @@ class ToolLoopLimits(BaseModel):
 
 class ToolModel(Protocol):
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep: ...
+
+
+class ConstrainedToolModel(ToolModel, Protocol):
+    """Optional provider capability; the host still validates returned text."""
+
+    async def complete_with_requirements(self, messages: list[dict[str, object]],
+        tools: list[dict[str, object]], requirements: AnswerRequirements) -> ToolStep: ...
 
 
 class ToolOutcome(BaseModel):
@@ -131,15 +139,27 @@ class EvidenceToolLoop:
     sent. Unexecuted calls receive explicit denials, preserving protocol pairs.
     The final request has no tools. Tool/call limits count attempts, not just
     successful retrievals. Deadline cancellation is cooperative with adapters.
+    Optional host answer requirements are supplied on every model request and
+    checked before returning text. This checks format, not factual correctness.
     """
 
     def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
-                 initial_search: bool = False) -> None:
+                 initial_search: bool = False, answer_requirements: AnswerRequirements | None = None) -> None:
         if type(initial_search) is not bool:
             raise ValueError('initial_search must be a boolean')
         self._initial_search = initial_search
         self._model, self._tools = model, tools
         self._limits = ToolLoopLimits.model_validate((limits or ToolLoopLimits()).model_dump())
+        self._answer_requirements = validated_requirements(answer_requirements)
+
+    async def _complete(self, transcript: list[dict[str, object]], schemas: list[dict[str, object]]) -> ToolStep:
+        messages, tools = json.loads(_json(transcript)), json.loads(_json(schemas))
+        constrained = getattr(self._model, 'complete_with_requirements', None)
+        if self._answer_requirements is None or not callable(constrained):
+            return await self._model.complete(messages, tools)
+        requirements = validated_requirements(self._answer_requirements)
+        assert requirements is not None
+        return await cast(ConstrainedToolModel, self._model).complete_with_requirements(messages, tools, requirements)
 
     async def run(self, messages: list[dict[str, str]]) -> ToolLoopResult:
         limits = self._limits
@@ -152,6 +172,8 @@ class EvidenceToolLoop:
                 or len(messages[-1]['content'].encode()) > 8000):
             raise ValueError('initial memory query requires a final user message of 1..8000 bytes')
         transcript = cast(list[dict[str, object]], json.loads(_json(messages)))
+        if self._answer_requirements is not None:
+            transcript.insert(0, {'role':'system', 'content':self._answer_requirements.prompt()})
         seen: set[str] = set()
         known_facts: set[int] = set()
         known_chunks: set[int] = set()
@@ -261,7 +283,7 @@ class EvidenceToolLoop:
                 try:
                     # Independent copies stop an adapter from mutating the
                     # authoritative transcript, schemas, or paired call IDs.
-                    step = await asyncio.create_task(self._model.complete(json.loads(_json(transcript)), schemas))
+                    step = await asyncio.create_task(self._complete(transcript, schemas))
                     check_deadline()
                 except (asyncio.CancelledError, TimeoutError):
                     raise
@@ -282,6 +304,8 @@ class EvidenceToolLoop:
                 if not step.calls:
                     if not step.content.strip() or len(step.content.encode()) > limits.max_reply_bytes:
                         raise RuntimeError('tool reply byte limit or empty reply')
+                    if self._answer_requirements is not None and not self._answer_requirements.accepts(step.content):
+                        raise RuntimeError('tool answer format rejected')
                     retained = tuple(prepared)
 
                     async def validate() -> bool:

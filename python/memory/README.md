@@ -556,6 +556,51 @@ print(reply.source_status, reply.evidence_ids)
 packets = reply.evidence_packets
 ```
 
+Standalone tool turns can also apply the same host-owned output requirements
+as text conversations:
+
+```python
+from scone_memory.realtime.answer_requirements import AnswerRequirements
+
+requirements = AnswerRequirements(
+    format="json_object", max_bytes=1024, max_lines=1,
+    instructions="Return an object with the answer in the dependency field.",
+)
+reply = await EvidenceToolLoop(
+    model, box, initial_search=True, answer_requirements=requirements,
+).run([{"role": "user", "content": "What does Juniper depend on?"}])
+```
+
+Requirements are validated and copied at construction, supplied on every model
+request, and included in the transcript byte budget. Both early answers and
+answers after tools are exhausted must satisfy the format, UTF-8 byte and line
+limits before `run()` returns. Invalid returned text raises `RuntimeError` with
+`tool answer format rejected`; it is not repaired or retried. The
+loop's own reply limit still applies. Source revalidation remains mandatory.
+The structured adapter's final-writing prompt respects the caller's requested
+format instead of requiring prose or an explanation. `json_object` validates
+JSON object syntax, not a field schema or factual correctness; textual
+instructions guide the model but are not deterministic semantic checks.
+`SelfHostedStructuredToolChat` uses an object-valued answer branch and a final
+JSON-object response schema when these requirements request `json_object`.
+Valid generated objects are rendered as compact JSON for the text API. Only
+whitespace outside strings is removed; number tokens (including precision and
+exponents), escapes, string contents and key order are preserved. Fenced JSON,
+trailing prose, duplicate keys and wrong value types are rejected by the
+provider, not repaired. Raw response formatting can therefore differ from the
+returned JSON serialization; record both when evaluating this mode.
+
+Custom providers may implement the optional
+`ConstrainedToolModel.complete_with_requirements(messages, tools, requirements)`
+capability to apply generation constraints. They receive independent copies
+of both the messages and requirements. Providers with only `complete()` remain
+supported through prompt guidance and the host's return gate. Omitting
+`answer_requirements` preserves the existing SDK return contract and provider
+action schema. TextConversation keeps its separate review/repair boundary.
+The [recorded Gemma format probe](benchmarks/tool-answer-contract-v1.results.md)
+shows both the improvement in JSON syntax and the remaining field-shape and
+latency limitations.
+
 By default the SDK model chooses search queries. `EvidenceToolLoop(...,
 initial_search=True)` first searches the final user message with `limit=5`,
 before the first model request. This host-initiated search uses the same scope,

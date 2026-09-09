@@ -14,11 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..agents.evidence_loop import ToolCall, ToolStep
 from ..integrations.read_memory import ReadMemoryArgs
 from ..retrieval.computation import ComputeMemoryArgs, OPERATIONS
+from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
+from .structured_answer import object_answer
 from .tool_chat import SelfHostedToolChat, _decode, _mapping, _step
 from .tool_synthesis import synthesis_history
 
 _PROTOCOL = (
-    'Choose exactly one action using the response JSON schema. Put public prose only in the answer field. '
+    'Choose exactly one action using the response JSON schema. Put the final answer in the answer field, '
+    'following its schema and the caller\'s output requirements. '
     'For questions about stored knowledge, search_memory finds quoted passages and facts. '
     'trace_memory follows recorded relationships from a returned fact ID when it is available. '
     'read_memory reads neighboring chunks of a returned passage when surrounding context or exceptions are needed. '
@@ -159,7 +162,7 @@ def _branch(action: str, properties: dict[str, object]) -> dict[str, object]:
     return {'type':'object', 'additionalProperties':False, 'required':list(fields), 'properties':fields}
 
 
-def _schema(names: set[str], facts: set[int], chunks: set[int]) -> dict[str, object]:
+def _schema(names: set[str], facts: set[int], chunks: set[int], *, json_answer: bool = False) -> dict[str, object]:
     # Host byte limits remain strict. Large maxLength constraints can explode
     # self-hosted grammar compilers; token/response limits bound generation.
     branches = []
@@ -183,12 +186,17 @@ def _schema(names: set[str], facts: set[int], chunks: set[int]) -> dict[str, obj
         branches.append(_branch('compute_memory', {'operation':{'type':'string', 'enum':list(OPERATIONS)},
             'left':{'type':'array', 'minItems':1, 'maxItems':16, 'items':quoted},
             'right':{'type':'array', 'maxItems':16, 'items':quoted}}))
-    branches.append(_branch('answer', {'answer':{'type':'string'}}))
+    branches.append(_branch('answer', {'answer':{'type':'object' if json_answer else 'string'}}))
     return {'anyOf':branches}
 
 
-def _action(raw: bytes, names: set[str], facts: set[int], chunks: set[int]) -> ToolStep:
-    packet = _mapping(_decode(_step(raw, False).content))
+def _action(raw: bytes, names: set[str], facts: set[int], chunks: set[int], *, json_answer: bool = False) -> ToolStep:
+    content = _step(raw, False).content
+    if json_answer:
+        answer = object_answer(content, action_envelope=True)
+        if answer is not None:
+            return ToolStep(content=answer)
+    packet = _mapping(_decode(content))
     action = packet.get('action')
     if action == 'answer':
         answer = _Answer.model_validate(packet).answer
@@ -230,19 +238,45 @@ def _prose(raw: bytes) -> ToolStep:
     return result
 
 
+def _json_answer(raw: bytes) -> ToolStep:
+    answer = object_answer(_step(raw, False).content)
+    assert answer is not None
+    return ToolStep(content=answer)
+
+
 class SelfHostedStructuredToolChat(SelfHostedToolChat):
     """ToolModel backed by explicit JSON-schema action decisions.
 
     No native tools are sent to the provider. A validated action is translated
     to one ToolCall for the host's existing scope/retention/budget checks. Once
-    tools are disabled, a separate evidence view supports ordinary prose in the
-    same final request. Early JSON answers still use the action protocol. Neither
-    stage guarantees action usefulness or answer correctness.
+    tools are disabled, a separate evidence view supports the caller's answer
+    format in the same final request. With explicit JSON-object requirements,
+    both stages generate objects and render compact JSON without changing their
+    values. Other early answers use a string. Neither stage guarantees action
+    usefulness or answer correctness.
     """
 
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
+        return await self._complete_turn(messages, tools, None)
+
+    async def complete_with_requirements(self, messages: list[dict[str, object]],
+        tools: list[dict[str, object]], requirements: AnswerRequirements) -> ToolStep:
+        checked = validated_requirements(requirements)
+        if checked is None:
+            raise ValueError('requirements must be AnswerRequirements')
+        prompt: dict[str, object] = {'role':'system', 'content':checked.prompt()}
+        if prompt not in messages:
+            messages = [prompt, *messages]
+        return await self._complete_turn(messages, tools, checked)
+
+    async def _complete_turn(self, messages: list[dict[str, object]], tools: list[dict[str, object]],
+        requirements: AnswerRequirements | None) -> ToolStep:
         history, facts, chunks = _history(messages)
         names = _names(tools)
+        json_answer = requirements is not None and requirements.format == 'json_object'
+        if json_answer:
+            history[0]['content'] += (
+                ' For an answer action, put the requested JSON object in the answer field, not an encoded string.')
         if 'compute_memory' in names:
             history[0]['content'] += (
                 ' compute_memory performs exact arithmetic from unique decimal quotes in returned chunks. '
@@ -253,11 +287,14 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
                 'Calculations do not verify operand meaning, unit compatibility or list completeness.'
             )
         if not names:
-            return await self._request({'model':self._model, 'messages':synthesis_history(messages),
-                'stream':False, 'temperature':0, 'max_tokens':self._max_tokens, 'tool_choice':'none'},
-                _prose, protocol='structured_answer')
-        body: dict[str, object] = {'model':self._model, 'messages':history, 'stream':False, 'temperature':0,
+            body: dict[str, object] = {'model':self._model, 'messages':synthesis_history(messages),
+                'stream':False, 'temperature':0, 'max_tokens':self._max_tokens, 'tool_choice':'none'}
+            if json_answer:
+                body['response_format'] = {'type':'json_schema', 'json_schema':{'name':'memory_answer',
+                    'strict':True, 'schema':{'type':'object'}}}
+            return await self._request(body, _json_answer if json_answer else _prose, protocol='structured_answer')
+        body = {'model':self._model, 'messages':history, 'stream':False, 'temperature':0,
             'max_tokens':self._max_tokens, 'tool_choice':'none',
             'response_format':{'type':'json_schema', 'json_schema':{'name':'memory_action', 'strict':True,
-                                                                  'schema':_schema(names, facts, chunks)}}}
-        return await self._request(body, lambda raw: _action(raw, names, facts, chunks), protocol='structured_action')
+                                                                  'schema':_schema(names, facts, chunks, json_answer=json_answer)}}}
+        return await self._request(body, lambda raw: _action(raw, names, facts, chunks, json_answer=json_answer), protocol='structured_action')
