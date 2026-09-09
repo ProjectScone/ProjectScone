@@ -11,6 +11,7 @@ import math
 
 from ..realtime.evidence_answer import _Claim, _Relation, _Source
 from ..realtime.review_evidence import _paths, _records
+from ..retrieval.computation import validate_computation
 from .tool_chat import _decode, _mapping
 
 Record = dict[str, object]
@@ -40,6 +41,7 @@ def _evidence(messages: list[Record]) -> str:
     relations: dict[int, Record] = {}
     paths: dict[str, Record] = {}
     notices: list[Record] = []
+    computations: list[Record] = []
     for message in messages:
         if message.get('role') != 'tool':
             continue
@@ -73,13 +75,18 @@ def _evidence(messages: list[Record]) -> str:
         _paths(local_paths, local_claims, local_relations)
         for path in local_paths:
             paths[_json(path)] = path
+        local_passages: dict[int, str] = {}
         for raw in _records(packet.get('items', []), 20):
             source = _Source.model_validate({key: value for key, value in raw.items() if key != 'score'}, strict=True)
+            local_passages[source.chunk_id] = source.text
             _put(sources, source.chunk_id, source.model_dump(mode='json', exclude_unset=True))
             if 'score' in raw:
                 score = raw['score']
                 if type(score) not in (int, float) or not isinstance(score, (int, float)) or not math.isfinite(score):
                     raise ValueError('invalid synthesis score')
+
+        if 'computation' in packet:
+            computations.append(validate_computation(packet['computation'], local_passages))
 
     parts: list[str] = []
     size = 0
@@ -116,6 +123,8 @@ def _evidence(messages: list[Record]) -> str:
         append(f"Source {row['episode_id']} / chunk {identifier}: {row['text']}")
         metadata = {key: value for key, value in row.items() if key != 'text'}
         append('Passage metadata: ' + _json(metadata))
+    for computation in computations:
+        append('Exact computation on selected quoted spans (interpretation and completeness unverified): ' + _json(computation))
     if notices:
         append('Retrieval limits and notices: ' + _json(notices))
     if not claims and not sources and not relations:

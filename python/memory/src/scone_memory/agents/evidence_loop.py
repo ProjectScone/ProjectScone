@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..integrations.read_memory import ReadMemoryArgs
+from ..retrieval.computation import ComputeMemoryArgs
 from .tool_evidence import PreparedToolEvidence
 
 
@@ -49,7 +50,7 @@ class ToolModel(Protocol):
 class ToolOutcome(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     call_id: str
-    name: Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool']
+    name: Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool']
     status: Literal['prepared', 'empty', 'unavailable']
     error: str | None
     output_bytes: int
@@ -91,6 +92,18 @@ def _read_key(call: ToolCall) -> tuple[int, int, int] | None:
     except ValueError:
         return None
     return args.chunk_id, args.before, args.after
+
+
+def _computation_denial(call: ToolCall, known_chunks: set[int]) -> str | None:
+    if call.name != 'compute_memory':
+        return None
+    try:
+        args = ComputeMemoryArgs.model_validate(call.arguments)
+    except ValueError:
+        return 'invalid_arguments'
+    if any(row.chunk_id not in known_chunks for row in args.left + args.right):
+        return 'search_for_chunk_first'
+    return None
 
 
 def _covers_same_source(evidence: PreparedToolEvidence, key: tuple[int, int, int]) -> bool:
@@ -168,6 +181,8 @@ class EvidenceToolLoop:
                 elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
                         or call.arguments['chunk_id'] not in known_chunks):
                     payload = _denied('search_for_chunk_first')
+                elif denial := _computation_denial(call, known_chunks):
+                    payload = _denied(denial)
                 else:
                     key = _read_key(call)
                     cached = reads.get(key) if key is not None else None
@@ -209,11 +224,12 @@ class EvidenceToolLoop:
             error = packet.get('error')
             codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                      'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
-                     'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window'}
+                     'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window',
+                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required'}
             # Model-authored IDs/unknown names can contain source text.
             # Keep them only in the transient provider protocol.
-            name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'unknown_tool'],
-                        call.name if call.name in ('search_memory', 'trace_memory', 'read_memory') else 'unknown_tool')
+            name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool'],
+                        call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory') else 'unknown_tool')
             outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                 error=error if isinstance(error, str) and error in codes else None,
                 output_bytes=len(payload.encode()), origin=origin, reused=reused))
@@ -241,7 +257,7 @@ class EvidenceToolLoop:
                 if not known_facts:
                     schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'trace_memory']
                 if not known_chunks:
-                    schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'read_memory']
+                    schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] not in ('read_memory', 'compute_memory')]
                 try:
                     # Independent copies stop an adapter from mutating the
                     # authoritative transcript, schemas, or paired call IDs.

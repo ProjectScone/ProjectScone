@@ -357,6 +357,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "tool_retrieval": {"configured": tool_retrieval is not None,
                     "protocol": tool_retrieval.mode if tool_retrieval is not None else "off",
                     "initial_search": tool_retrieval.initial_search if tool_retrieval is not None else False,
+                    "computation": tool_retrieval.compute if tool_retrieval is not None else False,
                     "available": tool_retrieval is not None and (bare_runtime_available() or bool(catalog and catalog.personas)),
                     "limits": tool_retrieval.limits.model_dump(mode="json") if tool_retrieval is not None else None,
                     "applies_to": "text", "verified_accuracy": False},
