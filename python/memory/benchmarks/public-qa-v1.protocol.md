@@ -87,6 +87,8 @@ run/protocol and must preserve the old observations.
 - Generation timers cover inference only, including model loading and prompt
   processing when incurred. Record MemoryContext preparation separately. Their
   sum is an estimated sequential request cost, not an observed live HTTP latency.
+  p50 is the median; p95 uses nearest rank. Missing timings are excluded from
+  latency aggregates with the observed timing count reported, never from accuracy.
 - Memory collector: Ollama `/api/ps` before and after each20-question model block.
   Save every loaded model's `size` and `size_vram` in bytes, its digest and context.
   These are Ollama-reported loaded-model sizes, not process RSS or peak system
