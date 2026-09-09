@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypedDict, cast
 
-from ..memory.engine import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
+from ..core.validation import KINDS, MAX_SOURCE, normalise_metadata, normalise_time
 from ..core.errors import InvalidInput
 
 

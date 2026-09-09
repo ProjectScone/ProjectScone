@@ -369,3 +369,21 @@ def test_native_tokenizer_fixed_padding_counterexample_is_rejected(model_dir: Pa
     monkeypatch.setitem(sys.modules,"onnxruntime",onnx)
     with pytest.raises(ValueError,match="offline reranking unavailable"):
         OfflineCrossEncoderReranker(model_dir,model_name=NAME)
+
+
+def test_telemetry_disabled_before_runtime_imports(model_dir: Path, runtime: Runtime,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+    import os
+    monkeypatch.setenv('ORT_DISABLE_TELEMETRY', '0')
+    original_import = importlib.import_module
+    imports: list[str] = []
+    def guarded_import(name: str, package: str | None = None) -> ModuleType:
+        if name.split('.')[0] in ('onnxruntime', 'fastembed'):
+            assert os.environ.get('ORT_DISABLE_TELEMETRY') == '1'
+            imports.append(name)
+        return original_import(name, package)
+    monkeypatch.setattr(importlib, 'import_module', guarded_import)
+    OfflineCrossEncoderReranker(model_dir, model_name=NAME)
+    assert 'onnxruntime' in imports and 'fastembed.rerank.cross_encoder' in imports
+    assert runtime.telemetry_disabled

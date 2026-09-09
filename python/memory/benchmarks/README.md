@@ -15,6 +15,9 @@ native shutdown failure after all observations were saved.
 Its [paired generation follow-up](source-budget-generation-v1.results.md)
 records 600 new Gemma responses: better evidence coverage did not improve answer
 accuracy, so the source-count default remains unchanged.
+The [public answer-review comparison](public-answer-review-v1.results.md) tests
+the existing revision gate on all 200 original drafts. Exact match falls from
+64% to 62.5%; the report preserves all adopted and unaccepted proposals.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
