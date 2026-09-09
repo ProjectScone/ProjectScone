@@ -9,6 +9,7 @@ on an engine instance.
 | `core/validation.py` | Shared names, metadata, tags, timestamps and retention rules |
 | `ingestion/records.py` | Batch records, recovery reports and content identity helpers |
 | `ingestion/batch.py` | Chunking, deduplication, embedding, ordered writes, rollback and crash recovery |
+| `ingestion/jobs.py` | Durable batch receipts, progress, request lookup, pagination and cancellation |
 | `retrieval/recall.py` | Lane execution, fusion, source verification, optional reranking and result assembly |
 | `retrieval/fact_recall.py` | Validated indexed fact lookup, scan fallback and historical facts |
 | `retrieval/episode_scope.py` | Final episode scope checks shared by passage and fact retrieval |
@@ -21,7 +22,8 @@ on an engine instance.
 | `memory/fact_placement.py` | Place temporal claims, preserve restatement identity and close covered intervals |
 | `memory/fact_review.py` | Human decisions, historical batch ordering and fact visibility changes |
 | `memory/catalog.py` | Source inventory, fact selection, profiles, metadata aggregates and status reads |
-| `memory/engine.py` | Coordinate the public API and remaining ingestion and lifecycle operations |
+| `memory/retention.py` | Integrity inspection, expiry, forget receipts, tombstones and space deletion |
+| `memory/engine.py` | Coordinate the public API, attachments, replacement and relationship validation |
 
 For each `MemoryEngine.recall` call, the engine constructs a `RecallRuntime` from
 its current document store, vector index, embedder and ranking configuration.
@@ -39,7 +41,7 @@ document/vector stores, an embedder, clock, chunk target and callbacks for
 embedding text and event emission. The internal batch entry point expects the
 engine to check space access first; recovery runs over its configured stores
 during engine startup. The engine retains public remember events,
-attachments, replacement semantics and job coordination. It reexports `Record`,
+attachments and replacement semantics. It reexports `Record`,
 `RecoveryReport`, content identity helpers and the existing batch constant.
 
 All fresh records are embedded before the first document write. Each write's
@@ -48,6 +50,35 @@ vector persistence. Ordinary write errors roll back the partial batch. Recovery
 completes interrupted episodes from their retained content or clears orphan
 markers. This extraction preserves those operations and their ordering; it does
 not add cross-store transactions or change cancellation/recovery semantics.
+
+Ingestion jobs receive a `JobRuntime` with document storage, clock, event and
+bound ingestion/receipt callbacks. Recording and reading capabilities remain
+separate; unsupported operations retain their existing refusals. Searchable
+and consolidated timestamps describe separate milestones. Cancelling a job
+preserves searchable records and completed consolidation receipts. Request IDs
+return recorded jobs without ingesting another batch; this lookup is not a
+transactional reservation across concurrent callers. Page limits use the
+current engine configuration when each call starts.
+
+Retention receives a `RetentionRuntime` with document/vector/blob/event ports,
+a clock and bound source/deletion callbacks. Its functions own read-only
+integrity checks, impact previews, expiry and deletion. The engine retains its
+public entry points and supplies fresh dependency references per call. Stored
+records are not frozen across awaits; bound callbacks remain live.
+
+Expiry compares parsed UTC instants and breaks ties by episode ID before
+applying the batch limit. Timestamp offsets and equivalent textual spellings
+cannot change which oldest source is selected. A dry run reports the due count
+without deleting records. Expiry calls the bound forget method so an existing
+host guard is still honored. Forgetting preserves claims as historical ledger
+entries and records the absence of their evidence through tombstones.
+
+Whole-space deletion releases attachment holds, removes documents and vectors,
+then purges the event trail. Another space's attachment holds keep shared bytes
+available. A durable space-deletion marker prevents later ingestion from
+recreating the space. Deletion still spans independent stores: a failure can
+leave earlier writes applied, propagates to the caller, and is not a
+distributed transaction or an automatic cleanup retry.
 
 Archive import receives an `ArchiveRuntime` with the document store, clock and
 normal ingestion callback. The engine retains space validation and deleted-space
@@ -130,8 +161,8 @@ Existing public engine methods and imports of shared validation helpers remain
 available. Private helper delegation is not a customization interface; hosts
 should supply the documented storage ports and reranker adapters.
 
-The engine decomposition is ongoing. Ingestion job coordination, relationship validation,
-retention/deletion and derivation coordination still need their own
+The engine decomposition is ongoing. Relationship validation, attachment handling,
+replacement and derivation coordination still need their own
 boundaries. Moving those operations must preserve storage ordering, revision
 semantics and the existing public API.
 
@@ -155,3 +186,11 @@ Activity graph tests cover direct port calls, stored capture/source/recall/feedb
 edges, focused sessions, time/space scope, omitted versus missing sources, bounded
 capture hydration and cancellation. The same public graph payload continues to
 feed graph analysis and the HTTP endpoints.
+
+Lifecycle checks combine job cancellation, source retrieval, evidence
+invalidation, preserved claims, tombstones, whole-space deletion and shared
+attachments. The same workflow runs over in-memory, SQLite and embedded Qdrant
+in the focused suite; additional configured backends use the contract fixture.
+Timezone-order regressions exercise bounded expiry with noncanonical clock
+timestamps. This refactor reduces `engine.py` from 1,326 to 1,132 lines while
+retaining its public method signatures and documentation.
