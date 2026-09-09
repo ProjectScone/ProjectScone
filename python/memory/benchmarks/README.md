@@ -5,6 +5,8 @@ The completed [8 September 2026 baseline](public-qa-v1.results.md) records
 The separate [passage continuity comparison](passage-window-v1.results.md)
 measures context coverage with optional neighboring chunks; it does not rescore
 or replace the original model responses.
+The [generation follow-up](passage-window-generation-v1.results.md) records
+200 additional Gemma responses, including exact-match gains and regressions.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
