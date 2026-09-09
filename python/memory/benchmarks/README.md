@@ -23,6 +23,11 @@ the original answer instructions to that reviewer. Exact match falls to 62%:
 preserving output instructions does not fix comparison and entity-role errors.
 The report retains every changed answer and distinguishes fallback preservation
 from successful repair. Review remains optional.
+The [computation-tool comparison](public-compute-v1.results.md) records 400
+structured tool-loop turns: exact match was 57.5% with computation disabled
+and 56.5% enabled. The model never selected the calculator, despite receiving
+its schema, so this measures tool exposure rather than calculation accuracy.
+Both failures, all changed answers, and retrieval-packet differences are retained.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
