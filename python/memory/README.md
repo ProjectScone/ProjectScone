@@ -26,6 +26,9 @@ Elasticsearch. With `SCONE_DOCUMENTS=postgres` or `=elasticsearch` the
 vectors and the evidence log default to the same database through one
 connection.
 
+See [the architecture guide](ARCHITECTURE.md) for the engine's component boundaries,
+storage ports, source-validation rules and lifecycle guarantees.
+
 ## Install
 
 ```sh
