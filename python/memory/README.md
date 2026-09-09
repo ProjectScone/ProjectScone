@@ -661,6 +661,7 @@ SCONE_MODEL_CONNECTIONS=~/.scone-memory/model-connections.json
 SCONE_CONVERSATIONS_JOURNAL=~/.scone-memory/conversations.db
 SCONE_CONVERSATIONS_TOOL_MODE=structured # off (default), native, structured
 SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=1 # default when tool mode is enabled
+SCONE_CONVERSATIONS_TOOL_COMPUTE=0 # opt-in exact arithmetic/counts on quoted inputs
 # SCONE_CONVERSATIONS_TOOL_MAX_CALLS=4
 # SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS=4
 # SCONE_CONVERSATIONS_TOOL_TIMEOUT=120
@@ -671,6 +672,37 @@ and `SCONE_CHAT_MODEL` as connection defaults. Served tool mode performs the
 host-initiated search by default. Set `SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=0`
 to let the model choose whether to search. SDK `TextConversation` exposes the
 same option as `tool_initial_search=True`, with the SDK default remaining false.
+
+Set `SCONE_CONVERSATIONS_TOOL_COMPUTE=1` to offer `compute_memory` after a
+passage has been retrieved in the current turn. SDK callers use
+`TextConversation(..., tool_model_factory=..., tool_compute=True)` or
+`ScopedMemoryTools(..., enable_computation=True)`. The capabilities endpoint
+reports this setting as `tool_retrieval.computation`. It requires an enabled
+tool mode and uses the existing call, time, output and final-source-validation
+budgets; it adds no model or service dependency.
+
+The tool accepts `operation`, `left` and `right`. Each input is
+`{"chunk_id": 123, "quote": "12.5"}` referencing an exact, unique substring of an
+authorized passage. `sum`, `product` and `count` use only `left`;
+`difference`, `ratio` and `compare` require one input on each side;
+`compare_counts` compares the two selected groups. There are at most 16 inputs
+total, with quotes up to 512 characters. Arithmetic accepts whole ASCII decimal
+tokens (up to 30 integer and 18 fractional digits); expressions, exponents and
+thousands separators are rejected. Difference and ratio use left minus/divided
+by right. Results are exact decimals or rational strings such as `1/3`, with
+original quotes and character offsets. Ambiguous quotes, overlapping source
+spans within a group, division by zero, and stale or excluded sources fail
+without returning a partial calculation. Direct SDK tool calls check source
+access; the agent loop additionally requires prior retrieval of every input.
+
+`count` counts selected spans, **not all entities in a document or corpus**.
+Repeated entities in separate mentions are not deduplicated. The model must
+choose the correct entities, attributes and compatible units; no unit conversion,
+list-completeness check or semantic answer verification is performed. A computed
+result still has `verified_accuracy=false`. Structured final writing preserves
+and recomputes calculation receipts alongside the original source passages.
+These are calculation/source-integrity checks, not evidence of improved model
+accuracy on a benchmark.
 
 `native` requires native OpenAI-compatible tool calls; `structured` requires
 JSON-schema responses. There

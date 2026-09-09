@@ -23,11 +23,15 @@ def validate_tool_settings(settings: Settings) -> None:
         raise InvalidInput('SCONE_CONVERSATIONS_TOOL_MODE must be off, native, or structured')
     if type(settings.conversations_tool_initial_search) is not bool:
         raise InvalidInput('SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH must be a boolean')
+    if type(settings.conversations_tool_compute) is not bool:
+        raise InvalidInput("SCONE_CONVERSATIONS_TOOL_COMPUTE must be a boolean")
     try:
         limits = _limits(settings)
     except ValueError:
         raise InvalidInput('conversation tool budgets are outside supported limits') from None
     if settings.conversations_tool_mode == 'off':
+        if settings.conversations_tool_compute:
+            raise InvalidInput('SCONE_CONVERSATIONS_TOOL_COMPUTE requires SCONE_CONVERSATIONS_TOOL_MODE')
         if limits != ToolLoopLimits():
             raise InvalidInput('conversation tool budgets require SCONE_CONVERSATIONS_TOOL_MODE')
         return
@@ -44,10 +48,11 @@ class ConversationTools:
     mode: Literal['native', 'structured']
     limits: ToolLoopLimits
     initial_search: bool = True
+    compute: bool = False
 
     def __post_init__(self) -> None:
         if (self.mode not in ('native', 'structured') or not isinstance(self.limits, ToolLoopLimits)
-                or type(self.initial_search) is not bool):
+                or type(self.initial_search) is not bool or type(self.compute) is not bool):
             raise ValueError('invalid conversation tool configuration')
         object.__setattr__(self, 'limits', ToolLoopLimits.model_validate(self.limits.model_dump()))
 
@@ -69,4 +74,5 @@ def build_conversation_tools(settings: Settings) -> ConversationTools | None:
     if settings.conversations_tool_mode == 'off':
         return None
     mode: Literal['native', 'structured'] = 'native' if settings.conversations_tool_mode == 'native' else 'structured'
-    return ConversationTools(mode, _limits(settings), settings.conversations_tool_initial_search)
+    return ConversationTools(mode, _limits(settings), settings.conversations_tool_initial_search,
+                             settings.conversations_tool_compute)
