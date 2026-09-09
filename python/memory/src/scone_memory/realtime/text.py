@@ -85,6 +85,12 @@ class TextConversation:
     _review_limits: AnswerReviewLimits
     _review_policy: Literal["report", "require_supported"]
     _closed: bool
+    _history: list[dict[str, str]]
+    _max_history: int
+    _max_reply: int
+    _cancel_reusable: bool
+    _evidence_selector: EvidenceSelector | None
+    _evidence_answer_timeout: float
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str,
                  model_factory: Callable[[], TextModel] | None = None, *,
@@ -93,6 +99,7 @@ class TextConversation:
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
+                 neighbor_chunks: int = 0,
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
                  review_policy: Literal["report", "require_supported"] = "report",
                  evidence_selector: EvidenceSelector | None = None, evidence_answer_timeout: float = 20.0,
@@ -118,6 +125,8 @@ class TextConversation:
         if tool_model_factory is not None and any(value is not None for value in
                 (evidence_selector, adaptive_retriever)):
             raise ValueError("tool mode cannot combine independent retrieval or extractive evidence")
+        if tool_model_factory is not None and neighbor_chunks != 0:
+            raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         self._tool_factory = tool_model_factory
         self._tool_initial_search = tool_initial_search
         self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
@@ -158,7 +167,8 @@ class TextConversation:
         scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._scope = scope
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
-                                      adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout)
+                                      adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
+                                      neighbor_chunks=neighbor_chunks)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False

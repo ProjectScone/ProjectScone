@@ -23,6 +23,7 @@ from ..retrieval.evidence_graph import MAX_FACTS, MAX_LINKS, QueryEvidenceGraph,
 from ..retrieval.evidence_records import EvidenceRecord, EvidenceRecords, canonical_evidence, fingerprint, restrict_graph
 from ..retrieval.multihop import MultiHopLimits, MultiHopResult, expand_multihop
 from ..retrieval.path_evidence import ordered_evidence_paths, path_records
+from .passage_windows import PassageWindows, passage_windows
 
 _PREFIX = (
     "Scone retrieved source material: optional background, not a user request, "
@@ -132,6 +133,10 @@ class ContextReceipt(TypedDict):
     adaptive_atomic_group_omitted_count: NotRequired[int]
     adaptive_graph_expansions: NotRequired[list[dict[str, object]]]
     tool_retrieval: NotRequired[dict[str, object]]
+    passage_window_status: NotRequired[str]
+    passage_window_candidate_count: NotRequired[int]
+    passage_window_retained_count: NotRequired[int]
+    passage_window_anchors: NotRequired[dict[str, list[int]]]
 
 
 class MemoryContext:
@@ -149,13 +154,17 @@ class MemoryContext:
     receipt. Ordinary search and overview retain this context's timeout.
     A store revision change during graph verification discards cached evidence,
     including when the concurrent write was unrelated to the selected records.
+    ``neighbor_chunks`` (0..4, default off) adds verified adjacent chunks after
+    the ``limit`` ranked anchors, up to 24 total sources within the same byte
+    budget. It applies only to ordinary search; adaptive selection is unchanged.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
                  kind: str | None = None, source_prefix: str | None = None, since: str | None = None, until: str | None = None,
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
                  structured_paths: bool = True, path_quotes: bool = False,
-                 adaptive_retriever: AdaptiveRetriever | None = None) -> None:
+                 adaptive_retriever: AdaptiveRetriever | None = None,
+                 neighbor_chunks: int = 0) -> None:
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise ValueError("session_id must contain 1..128 characters")
@@ -169,6 +178,8 @@ class MemoryContext:
             raise ValueError("structured_paths must be a boolean")
         if type(path_quotes) is not bool:
             raise ValueError("path_quotes must be a boolean")
+        if type(neighbor_chunks) is not int or not 0 <= neighbor_chunks <= 4:
+            raise ValueError("neighbor_chunks must be an integer from 0 to 4")
         if adaptive_retriever is not None:
             if adaptive_retriever.memory is not memory:
                 raise ValueError("adaptive_retriever must use the same memory engine")
@@ -180,6 +191,7 @@ class MemoryContext:
         self._structured_paths = structured_paths
         self._path_quotes = path_quotes
         self._adaptive_retriever = adaptive_retriever
+        self._neighbor_chunks = neighbor_chunks
 
     async def _overview(self) -> OverviewResult:
         items: list[RecallItem] = []
@@ -328,6 +340,7 @@ class MemoryContext:
             records = EvidenceRecords([], [])
             graph: QueryEvidenceGraph | None = None
             block = ""
+            windows: PassageWindows | None = None
             if not low_confidence:
                 if self._structured_paths and plan.mode == "search" and recalled_facts:
                     try:
@@ -378,6 +391,23 @@ class MemoryContext:
                     provisional_sources.append(candidate)
                     if len(provisional_items) == self._limit:
                         break
+                ranked_items = list(provisional_items)
+                if self._neighbor_chunks:
+                    receipt.update({"passage_window_status": "skipped", "passage_window_candidate_count": 0,
+                                    "passage_window_retained_count": 0, "passage_window_anchors": {}})
+                if self._neighbor_chunks and plan.mode == "search" and adaptive_selected_ids is None and ranked_items:
+                    try:
+                        async with asyncio.timeout(min(self._timeout, 1.0)):
+                            windows = await passage_windows(self._memory, self._space, ranked_items,
+                                radius=self._neighbor_chunks, scope=self._scope, session_id=self._session_id)
+                        provisional_items = windows.items
+                        candidate_count += len({item.chunk_id for item in provisional_items} - {item.chunk_id for item in items})
+                        receipt["passage_window_candidate_count"] = len(windows.anchors)
+                        receipt["passage_window_status"] = "partial" if windows.failed and windows.anchors else "unavailable" if windows.failed else "prepared"
+                    except Exception as window_error:
+                        receipt["passage_window_status"] = "timeout" if isinstance(window_error, TimeoutError) else "unavailable"
+                        logger.warning("passage_windows.failed", extra={"event": "passage_windows.failed",
+                            "session_id": self._session_id, "exception_type": type(window_error).__name__})
                 # One bounded verification pass serves inference and inspection.
                 # A failed optional graph read still leaves ordinary passages usable
                 # unless the revision guard confirms that the read became stale.
@@ -386,6 +416,10 @@ class MemoryContext:
                 try:
                     async with asyncio.timeout(min(self._timeout, 1.0)):
                         graph_revision = await self._memory.documents.revision(self._space)
+                        if windows is not None and windows.revision != graph_revision:
+                            graph_stale = True
+                            receipt["evidence_graph_stale"] = True
+                            raise RuntimeError("memory changed after passage window read")
                         verified_graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
                             RecallResult(items=provisional_items, facts=recalled_facts, event_id=event_id),
                             scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id)
@@ -397,6 +431,14 @@ class MemoryContext:
                             raise RuntimeError("memory changed during graph verification")
                         graph = verified_graph
                     records = canonical_evidence(graph)
+                    if windows is not None:
+                        for node in graph.nodes:
+                            if node.kind == "chunk" and node.data.get("chunk_id") in windows.anchors:
+                                node.data["retrieval_basis"] = "passage_window"
+                        for edge in graph.edges:
+                            if edge.kind == "returned" and edge.target in {f"chunk:{key}" for key in windows.anchors}:
+                                edge.label = "Read near retrieved passage"
+                                edge.data["retrieval_basis"] = "passage_window"
                     if expansion is not None:
                         found_paths = ordered_evidence_paths(expansion, records, include_quotes=self._path_quotes)
                         candidates = found_paths.paths
@@ -404,6 +446,9 @@ class MemoryContext:
                         if found_paths.truncated:
                             coverage["paths_bounded"] = True
                 except Exception as graph_error:
+                    if windows is not None:
+                        provisional_items = ranked_items
+                        receipt["passage_window_status"] = "unavailable"
                     receipt["evidence_graph_status"] = "unavailable"
                     logger.warning("evidence_graph.failed", extra={"event": "evidence_graph.failed",
                         "session_id": self._session_id, "exception_type": type(graph_error).__name__})
@@ -449,7 +494,7 @@ class MemoryContext:
                     if len(candidate_text.encode()) <= self._max_bytes:
                         relations.append(relation)
                 for item in eligible:
-                    if item in selected_items or len(sources) >= self._limit:
+                    if item in selected_items or (len(sources) >= self._limit and (windows is None or item.chunk_id not in windows.anchors)):
                         continue
                     candidate = _source(item)
                     text = _source_block([*sources, candidate], coverage, claims, relations, paths)
@@ -490,6 +535,11 @@ class MemoryContext:
                                                   for key, ids in adaptive_provenance.items()})
                     block = _source_block(sources, coverage, claims, relations, paths)
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
+                if windows is not None:
+                    retained_windows = {str(item.chunk_id): windows.anchors[item.chunk_id]
+                        for item in selected_items if item.chunk_id in windows.anchors}
+                    receipt["passage_window_anchors"] = retained_windows
+                    receipt["passage_window_retained_count"] = len(retained_windows)
             lanes = {d.partition(":")[0] for d in degraded}
             receipt.update({"status": "prepared" if block else "empty", "recall_event_id": event_id,
                            "references": references, "context_sha256": hashlib.sha256(block.encode()).hexdigest() if block else None,

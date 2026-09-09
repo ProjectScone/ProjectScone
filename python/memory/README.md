@@ -893,6 +893,20 @@ facts. That block never enters shared history or captured transcripts. The
 default 8,000-byte budget omits whole passages rather than silently clipping them.
 A low-confidence result supplies no source block.
 
+`MemoryContext(..., neighbor_chunks=1)` and
+`TextConversation(..., neighbor_chunks=1)` optionally read one stored chunk on
+each side of a ranked passage. The radius accepts 0..4 and defaults to 0.
+Ranked anchors keep priority; neighboring chunks use the remaining byte budget,
+with at most 24 total sources. `MemoryContext.limit` still bounds the ranked
+anchors. Every added passage retains its original chunk ID, exact text and
+source fingerprint; the graph labels it as a nearby passage read. Receipts
+include window status, candidate/retained counts and anchor IDs. Window reads
+have a separate deadline of at most one second (or `recall_timeout` when lower).
+A window failure preserves ordinary ranked evidence; stale or invalid added
+evidence is discarded. This option does not expand adaptive selections or
+recent-history overviews. Tool conversations use their bounded `read_memory`
+operation instead. Added context is not proof of relevance or answer accuracy.
+
 Ranked queries with recalled claims can expand bounded relationships inside the
 same scope. With `structured_paths=True` (the default), complete ordered paths
 and their quoted claims enter the same context byte budget; related conflicting
