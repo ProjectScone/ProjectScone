@@ -40,23 +40,43 @@ class QdrantVectorIndex:
         self.dim: Optional[int] = None
 
     async def ensure(self, dim: int) -> None:
+        """Check dimensions and finish any interrupted payload-index setup.
+
+        Existing indexes are preserved; incompatible field types are rejected
+        before missing indexes are created. Collection points are untouched.
+        This does not serialize concurrent external schema changes. Embedded
+        Qdrant implements payload-index creation as a no-op.
+        """
         from qdrant_client import models
 
+        required = (
+            ("space", models.PayloadSchemaType.KEYWORD),
+            ("created_ts", models.PayloadSchemaType.FLOAT),
+            ("tags", models.PayloadSchemaType.KEYWORD),
+        )
+        payload_schema: dict[str, models.PayloadIndexInfo] = {}
         if await self.client.collection_exists(self.collection):
             info = await self.client.get_collection(self.collection)
             existing = info.config.params.vectors.size  # type: ignore[union-attr]
             if existing != dim:
                 raise ValueError(f"collection {self.collection!r} holds {existing}-d vectors, embedder makes {dim}-d")
+            payload_schema = info.payload_schema
         else:
             await self.client.create_collection(
                 self.collection,
                 vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
             )
-            for field, schema in (
-                ("space", models.PayloadSchemaType.KEYWORD),
-                ("created_ts", models.PayloadSchemaType.FLOAT),
-                ("tags", models.PayloadSchemaType.KEYWORD),
-            ):
+        # Validate before any index mutation. A previous initialization may
+        # have created the collection but stopped between payload indexes.
+        for field, schema in required:
+            recorded = payload_schema.get(field)
+            if recorded is not None and recorded.data_type != schema:
+                raise ValueError(
+                    f"collection {self.collection!r} payload index {field!r} "
+                    f"has type {recorded.data_type}, expected {schema}"
+                )
+        for field, schema in required:
+            if field not in payload_schema:
                 await self.client.create_payload_index(self.collection, field, schema)
         self.dim = dim
 
