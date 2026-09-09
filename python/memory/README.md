@@ -597,6 +597,9 @@ of both the messages and requirements. Providers with only `complete()` remain
 supported through prompt guidance and the host's return gate. Omitting
 `answer_requirements` preserves the existing SDK return contract and provider
 action schema. TextConversation keeps its separate review/repair boundary.
+The [recorded Gemma format probe](benchmarks/tool-answer-contract-v1.results.md)
+shows both the improvement in JSON syntax and the remaining field-shape and
+latency limitations.
 
 By default the SDK model chooses search queries. `EvidenceToolLoop(...,
 initial_search=True)` first searches the final user message with `limit=5`,
