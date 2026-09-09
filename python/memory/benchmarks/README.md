@@ -29,6 +29,11 @@ and 56.5% enabled. The model never selected the calculator, despite receiving
 its schema, so this measures tool exposure rather than calculation accuracy.
 Both failures, all changed answers, and retrieval-packet differences are retained.
 
+The [repeated-search compaction comparison](public-search-compaction-v1.results.md)
+records 400 paired tool-loop turns. Exact match stays at 56.5% while offered
+tool-result bytes fall 28.11%; dataset-level gains and regressions keep this
+presentation option disabled by default.
+
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
 adapter using original public questions and source paragraphs. They do not
