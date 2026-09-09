@@ -19,7 +19,7 @@ from ..core.ports import TextFilter
 from ..core.timeutil import parse_rfc3339
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, MAX_LINKS, MAX_SOURCES
-from ..retrieval.multihop import PointFactLinks, _source_matches
+from ..retrieval.multihop import PointFactLinks, _source_matches, matches_subject_object
 from ..retrieval.recall_scope import RecallScope
 from .context import ContextReceipt, _PATH_GUIDANCE, _PREFIX
 
@@ -107,8 +107,7 @@ def _paths(paths: list[dict[str, object]], claims: dict[int, dict[str, object]],
                 raise _Changed()
             if step.get("kind") == "subject_object":
                 if (set(step) != {"from_fact", "to_fact", "kind", "direction"} or direction != "forward"
-                        or not isinstance(claims[source]["object"], str)
-                        or claims[source]["object"] != claims[target]["subject"]):
+                        or not matches_subject_object(claims[source]["object"], claims[target]["subject"])):
                     raise _Changed()
             else:
                 relation = relations.get(_id(step.get("link_id")))

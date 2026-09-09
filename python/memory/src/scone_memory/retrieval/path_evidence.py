@@ -11,7 +11,7 @@ import json
 from pydantic import JsonValue
 
 from .evidence_records import EvidenceRecord, EvidenceRecords
-from .multihop import MultiHopEdge, MultiHopResult
+from .multihop import MultiHopEdge, MultiHopResult, matches_subject_object
 
 
 @dataclass(frozen=True)
@@ -58,8 +58,8 @@ def _verified(edge: MultiHopEdge, claims: dict[int, EvidenceRecord], relations: 
     if edge.from_fact not in claims or edge.to_fact not in claims or edge.kind == "contradicts":
         return False
     if edge.kind == "subject_object":
-        return (edge.link_id is None and claims[edge.from_fact].get("object") == claims[edge.to_fact].get("subject")
-                and isinstance(claims[edge.from_fact].get("object"), str))
+        return (edge.link_id is None and matches_subject_object(
+            claims[edge.from_fact].get("object"), claims[edge.to_fact].get("subject")))
     relation = relations.get(edge.link_id) if edge.link_id is not None else None
     return relation is not None and all(relation.get(key) == value for key, value in (
         ("from_fact", edge.from_fact), ("to_fact", edge.to_fact), ("kind", edge.kind),

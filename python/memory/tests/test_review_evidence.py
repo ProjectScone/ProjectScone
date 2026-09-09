@@ -55,6 +55,23 @@ async def test_capture_delivered_ids_and_validate_without_new_retrieval(memory, 
     assert receipt["evidence_revision"] == await memory.documents.revision("alpha")
 
 
+async def test_ingested_case_normalized_path_survives_packing_and_review(memory):
+    from scone_memory.realtime.review_evidence import prepare_review_evidence
+    facts = []
+    for subject, predicate, obj in [("Morrow", "forwards to", "Nacre"), ("Nacre", "uses", "optical archive")]:
+        quote = f"{subject} {predicate} {obj}."
+        source = await memory.remember("alpha", quote)
+        facts.append(await memory.assert_fact("alpha", subject, predicate, obj,
+            source_episode_id=source.episode_id, quote=quote))
+    request, receipt = await MemoryContext(memory, "alpha", "case-normalized", path_quotes=True).prepare(
+        [{"role": "user", "content": "Morrow Nacre optical archive"}])
+    assert receipt["path_count"] == 1
+    snapshot = await prepare_review_evidence(memory, "alpha", RecallScope.validated(),
+        "case-normalized", request, receipt)
+    assert {f"fact:{fact.fact_id}" for fact in facts} <= set(snapshot.evidence_ids)
+    assert await snapshot.validate() is True
+
+
 async def test_initial_revision_drift_rejects_even_unrelated_write(memory):
     from scone_memory.realtime.review_evidence import prepare_review_evidence
     scope, request, receipt, _, _ = await prepared(memory)

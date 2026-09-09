@@ -21,6 +21,18 @@ from ..core.timeutil import now_rfc3339, parse_rfc3339
 from ..memory.engine import check_space, normalise_term
 
 
+def subject_lookup_keys(value: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ()
+    return tuple(dict.fromkeys((normalise_term(value, "subject"), value)))
+
+
+def matches_subject_object(source_object: object, target_subject: object) -> bool:
+    """Apply the same identity rule during traversal and evidence revalidation."""
+    return (isinstance(source_object, str) and isinstance(target_subject, str)
+            and target_subject in subject_lookup_keys(source_object))
+
+
 class MultiHopDocuments(Protocol):
     async def get_fact(self, space: str, fact_id: int) -> Fact | None: ...
     async def get_episode(self, space: str, episode_id: int) -> Episode | None: ...
@@ -291,9 +303,7 @@ class _Walker:
         if not isinstance(self.documents, BoundedSubjectFacts):
             self.incomplete("unsupported_bounded_subjects", truncated=False)
             return
-        if not current.object.strip():
-            return
-        subjects = dict.fromkeys((normalise_term(current.object, "subject"), current.object))
+        subjects = subject_lookup_keys(current.object)
         remaining = self.limits.per_node_limit + 1
         for subject in subjects:
             limit = min(self.window(), remaining)
