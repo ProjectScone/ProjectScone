@@ -1,4 +1,12 @@
-# Public QA experiments
+# Experiments and measurements
+
+The [Qdrant storage protocol](qdrant-storage-v1.protocol.md) includes reproducible
+payload-index and HNSW-effort runners with retained per-query observations and
+exact references. The [scaling report](../docs/scaling-validation.md) records the
+results alongside S3 request/byte counts and image-parser timings. These storage
+experiments are separate from the real-world answer-quality evaluations below.
+
+## Public QA experiments
 
 The completed [8 September 2026 baseline](public-qa-v1.results.md) records
 600 responses, retrieval coverage, answer scores, latency, and loaded-model sizes.
