@@ -3,16 +3,17 @@
 # Postgres adapters and the hash embedder; pass EXTRAS to add more, e.g.
 #   docker build --build-arg EXTRAS=api,mongo,qdrant,postgres,local-embed .
 # for the on-device bge-small model (adds the ONNX runtime, ~200 MB).
-FROM python:3.12-slim AS build
+FROM python:3.14-slim-bookworm AS build
 ARG EXTRAS=api,mongo,qdrant,postgres
 WORKDIR /src
-COPY pyproject.toml README.md ./
-COPY scone_memory ./scone_memory
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ ./src/
 RUN python -m venv /opt/scone && /opt/scone/bin/pip install --no-cache-dir -q ".[${EXTRAS}]"
 
-FROM python:3.12-slim
+FROM python:3.14-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 scone
+    && useradd --create-home --uid 1000 scone \
+    && mkdir /data && chown 1000:1000 /data
 COPY --from=build /opt/scone /opt/scone
 ENV PATH=/opt/scone/bin:$PATH \
     SCONE_HOST=0.0.0.0 \
