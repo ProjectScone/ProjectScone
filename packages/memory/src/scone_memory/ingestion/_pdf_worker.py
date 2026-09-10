@@ -10,7 +10,7 @@ from ..core.errors import InvalidInput
 from .pdf import ParsedPdf, PdfLimits, PdfPage
 
 
-def extract(data: bytes, limits: PdfLimits) -> ParsedPdf:
+def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metadata_only: bool = False) -> ParsedPdf:
     import pypdf
 
     try:
@@ -24,7 +24,7 @@ def extract(data: bytes, limits: PdfLimits) -> ParsedPdf:
         pages: list[PdfPage] = []
         offset = 0
         for number, page in enumerate(reader.pages, 1):
-            text = page.extract_text(extraction_mode='layout', layout_mode_space_vertically=False,
+            text = '' if metadata_only else page.extract_text(extraction_mode='layout', layout_mode_space_vertically=False,
                                      layout_mode_strip_rotated=False).rstrip()
             if number > 1:
                 offset += 2
@@ -37,9 +37,9 @@ def extract(data: bytes, limits: PdfLimits) -> ParsedPdf:
                 rotation=int(page.rotation) % 360, empty=not text.strip()))
             texts.append(text)
             offset = end
-        if all(page.empty for page in pages):
+        if not allow_empty and all(page.empty for page in pages):
             raise InvalidInput('PDF has no extractable text; OCR may be required and is not enabled')
-        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:layout-v1', pages=tuple(pages))
+        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:' + ('pages-v1' if metadata_only else 'layout-v1'), pages=tuple(pages))
     except InvalidInput:
         raise
     except Exception as error:
@@ -53,7 +53,8 @@ def main() -> None:
         data = sys.stdin.buffer.read(limits.max_input_bytes + 1)
         if len(data) > limits.max_input_bytes:
             raise InvalidInput('PDF input exceeds its byte limit')
-        payload = extract(data, limits).model_dump_json()
+        payload = extract(data, limits, allow_empty='--allow-empty' in sys.argv[2:],
+            metadata_only='--metadata-only' in sys.argv[2:]).model_dump_json()
     except Exception as error:
         message = str(error) if isinstance(error, InvalidInput) else 'PDF parser failed'
         payload = json.dumps({'error': message})

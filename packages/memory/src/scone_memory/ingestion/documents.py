@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import hashlib
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
@@ -18,13 +18,19 @@ if TYPE_CHECKING:
 
 class PdfManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     geometry: Literal['unrotated_media_box_points'] = 'unrotated_media_box_points'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     text_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     parser: str = Field(min_length=1, max_length=128)
     pages: tuple[PdfPage, ...] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode='after')
+    def consistent_version(self) -> PdfManifest:
+        if self.schema_version == 1 and any(page.extraction == 'ocr' for page in self.pages):
+            raise ValueError('OCR provenance requires manifest schema version 2')
+        return self
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,13 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _coverage(pages: tuple[PdfPage, ...]) -> str:
+    if any(page.empty for page in pages):
+        return 'partial'
+    methods = {page.extraction for page in pages}
+    return 'mixed' if len(methods) > 1 else next(iter(methods))
+
+
 async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename: str | None = None,
                      limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None) -> PdfIngested:
     """Parse first, then store original, manifest and searchable derived episode.
@@ -63,9 +76,11 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
         raise InvalidInput('input does not have a PDF header')
     parsed = await (parser or PypdfParser()).parse(data, limits)
     validate_pdf(parsed, limits)
-    manifest = PdfManifest(original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
+    has_ocr = any(page.extraction == 'ocr' for page in parsed.pages)
+    manifest = PdfManifest(schema_version=2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
         parser=parsed.parser, pages=parsed.pages)
-    encoded = manifest.model_dump_json().encode()
+    encoded = manifest.model_dump_json(exclude=None if has_ocr else {
+        'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
     # Include actual output and parser version: new source bytes or new parser
     # output must never inherit another source's deduplicated episode metadata.
     identity = f'pdf-v1:{_sha(data)}:{_sha(encoded)}'
@@ -80,7 +95,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
         dedup_key=identity, attachment_ids=(original.attachment_id, retained.attachment_id),
         metadata={'document_format': 'pdf', 'evidence_origin': 'extracted_text',
             'pdf_original': original.attachment_id, 'pdf_manifest': retained.attachment_id,
-            'pdf_coverage': 'partial' if empty else 'text_layer'})
+            'pdf_coverage': _coverage(parsed.pages)})
     return PdfIngested(added, original, retained, empty)
 
 
