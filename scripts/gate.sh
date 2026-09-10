@@ -6,7 +6,7 @@ ROOT=$PWD
 WANT=$(git rev-parse "${1:-HEAD}^{commit}")
 PY=${SCONE_PYTHON:-$ROOT/packages/memory/.venv/bin/python}
 [[ -x $PY ]] || { print "set SCONE_PYTHON to a test interpreter"; exit 2; }
-(cd "$ROOT/packages/memory" && PYTHONPATH=$ROOT/packages/memory/src "$PY" -m pytest -q tests/test_private_paths.py)
+(cd "$ROOT/packages/memory" && PYTHONPATH=$ROOT/packages/memory/src "$PY" -m pytest -q tests/runtime/test_private_paths.py)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/scone-framework-gate.XXXXXX")
 git archive "$WANT" | tar -x -C "$WORK"
 print "gating $WANT in $WORK"

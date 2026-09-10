@@ -5,6 +5,13 @@ payload so every filter the engine applies runs server-side.
 ``QdrantVectorIndex(":memory:")`` uses the client's embedded implementation
 for offline contract tests. It does not exercise the Qdrant server's indexing,
 networking or performance characteristics.
+
+``metadata_indexes=("document_format", "entity_id")`` explicitly creates keyword
+indexes for frequently filtered metadata fields. The default creates no metadata
+indexes; all metadata equality filters remain supported either way.
+``hnsw_ef=128`` optionally controls search effort; omitted, Qdrant chooses its
+default. Collection creation/build tuning stays with the server defaults or a
+caller-precreated collection. A selective filter may still use an exact scan.
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
+from ..core.validation import MAX_METADATA_KEYS, METADATA_KEY
 from .validation import validate_vector
 
 
@@ -25,7 +33,18 @@ class QdrantVectorIndex:
         collection: str = "scone_chunks",
         api_key: Optional[str] = None,
         client=None,
+        *,
+        metadata_indexes: Sequence[str] = (),
+        hnsw_ef: Optional[int] = None,
     ) -> None:
+        if (isinstance(metadata_indexes, (str, bytes)) or not isinstance(metadata_indexes, Sequence)
+                or len(metadata_indexes) > MAX_METADATA_KEYS
+                or any(not isinstance(key, str) or not METADATA_KEY.fullmatch(key) for key in metadata_indexes)):
+            raise ValueError(f"metadata_indexes must be a sequence of at most {MAX_METADATA_KEYS} valid metadata keys")
+        self.metadata_indexes = tuple(dict.fromkeys(metadata_indexes))
+        if hnsw_ef is not None and (type(hnsw_ef) is not int or hnsw_ef < 1):
+            raise ValueError("hnsw_ef must be a positive integer or None")
+        self.hnsw_ef = hnsw_ef
         try:
             from qdrant_client import AsyncQdrantClient
         except ImportError as e:  # pragma: no cover
@@ -53,11 +72,17 @@ class QdrantVectorIndex:
             ("space", models.PayloadSchemaType.KEYWORD),
             ("created_ts", models.PayloadSchemaType.FLOAT),
             ("tags", models.PayloadSchemaType.KEYWORD),
+            *((f"meta.{key}", models.PayloadSchemaType.KEYWORD) for key in self.metadata_indexes),
         )
         payload_schema: dict[str, models.PayloadIndexInfo] = {}
         if await self.client.collection_exists(self.collection):
             info = await self.client.get_collection(self.collection)
-            existing = info.config.params.vectors.size  # type: ignore[union-attr]
+            vector_config = info.config.params.vectors
+            if not isinstance(vector_config, models.VectorParams):
+                raise ValueError("Qdrant collection must contain one unnamed cosine vector")
+            if vector_config.distance != models.Distance.COSINE:
+                raise ValueError("Qdrant collection must use cosine distance")
+            existing = vector_config.size
             if existing != dim:
                 raise ValueError(f"collection {self.collection!r} holds {existing}-d vectors, embedder makes {dim}-d")
             payload_schema = info.payload_schema
@@ -125,12 +150,14 @@ class QdrantVectorIndex:
             must.append(models.FieldCondition(key="tags", match=models.MatchValue(value=tag)))
         for key, value in (where or {}).items():
             must.append(models.FieldCondition(key=f"meta.{key}", match=models.MatchValue(value=value)))
+        search_options = {} if self.hnsw_ef is None else {"search_params": models.SearchParams(hnsw_ef=self.hnsw_ef)}
         response = await self.client.query_points(
             self.collection,
             query=list(vector),
             query_filter=models.Filter(must=must),
             limit=limit,
             with_payload=False,
+            **search_options,
         )
         ranked = [(int(p.id), float(p.score)) for p in response.points]
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))

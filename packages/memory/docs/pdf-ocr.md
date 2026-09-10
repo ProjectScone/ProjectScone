@@ -105,7 +105,7 @@ not a representative accuracy benchmark or evidence of improvement over Tesserac
 Compare fixed real documents and reference transcriptions before claiming gains.
 
 ```sh
-pytest -q tests/test_ocr_contract.py tests/test_ocr_runtime.py tests/test_pdf_ocr.py tests/test_pdf_ingestion.py
+pytest -q tests/ingestion/test_ocr_contract.py tests/ingestion/test_ocr_runtime.py tests/ingestion/test_pdf_ocr.py tests/ingestion/test_pdf_ingestion.py
 ```
 
 PDF rasterization uses the optional [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)

@@ -126,7 +126,9 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None) 
             await close_engine(engine)
 
     try:
-        asyncio.run(run())
+        from ._signals import termination_unwinds
+        with termination_unwinds():
+            asyncio.run(run())
     except KeyboardInterrupt:
         return 130
     except Exception:

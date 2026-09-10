@@ -13,13 +13,23 @@ uploads; abandoned intents remain durable because a paused uploader can finish
 late. Repeating recovery removes such late orphan bytes without touching any
 published generation. Recovery is an attempt, not proof no paused writer exists.
 
-Bounds: 25 MiB per attachment, 1024 holds per space, 1024 episode references per
-hold, 300 KiB per metadata item, 12 optimistic retries. Listing uses strongly
-consistent partition queries, never table scans. Capacity failures are explicit.
+Bounds: 25 MiB per attachment, 1024 episode references per hold, 300 KiB per
+metadata item, 12 consecutive optimistic conflicts. Space holds have no fixed
+count cap. Catalog queries and release journals page bounded metadata rows.
+Episode lookups use strongly consistent episode partitions after resumable
+legacy migration. Upgrade all writers together; mixed-version writers are not
+supported. See docs/s3-catalog.md for migration, receipts, and retry behavior.
+
+Links verify version-specific S3 SHA-256 checksums without downloading bodies
+when the provider supports them. Legacy objects and providers without checksum
+HEAD support retain full download-and-hash verification. Public reads always
+verify the downloaded bytes. No ETag or user-supplied metadata is trusted as a
+content checksum.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
@@ -28,7 +38,7 @@ import math
 import re
 from threading import Event
 from time import monotonic
-from typing import Generic, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,10 +46,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.errors import InvalidInput, NotFound, SconeError
 from ..core.models import Attachment
 
+if TYPE_CHECKING:
+    from ._aws_blob_catalog import Catalog
+
 MAX_BYTES = 25 * 1024 * 1024
-MAX_HOLDS = 1024
 MAX_ITEM_BYTES = 300 * 1024
 RETRIES = 12
+CHECKSUM_UNSUPPORTED = {"NotImplemented", "InvalidRequest", "InvalidArgument", "501"}
 
 
 class AwsClient(Protocol):
@@ -52,8 +65,15 @@ class _Model(BaseModel):
 
 
 class _Control(_Model):
-    mode: Literal["active", "unlink", "release"] = "active"
-    count: int = Field(default=0, ge=0, le=MAX_HOLDS)
+    mode: Literal["active", "unlink", "release", "migrate"] = "active"
+    count: int = Field(default=0, ge=0)
+    catalog_version: int = Field(default=0, ge=0, le=1)
+    catalog_after: str = ""
+    catalog_offset: int = Field(default=0, ge=0, le=1024)
+    journal_version: int = Field(default=0, ge=0, le=1)
+    release_phase: Literal["holds", "gc"] = "holds"
+    release_cursor: str = ""
+    prior_operation: str = ""
     operation: str = ""
     episode: int = 0
     pending: tuple[str, ...] = ()
@@ -101,6 +121,7 @@ class _Row(Generic[M]):
     sk: str
     revision: int
     data: M
+    payload: str
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -379,32 +400,45 @@ class _Session:
             if sk != data.generation:
                 raise SconeError("AWS blob intent identity is invalid")
             self.object_args(data)
-        return _Row(pk, sk, revision, data)
+        return _Row(pk, sk, revision, data, payload)
 
-    def query(self, pk: str, prefix: str, model: type[M], *, limit: int = MAX_HOLDS) -> list[_Row[M]]:
-        found: list[_Row[M]] = []
-        cursor: object = None
-        for _ in range(limit + 1):
-            options: dict[str, object] = {"TableName": self.store.table, "ConsistentRead": True,
-                "KeyConditionExpression": "pk = :pk",
-                "ExpressionAttributeValues": {":pk": {"S": pk}},
-                "Limit": min(100, limit + 1 - len(found))}
-            if prefix:
-                options["KeyConditionExpression"] = "pk = :pk AND begins_with(sk, :prefix)"
-                options["ExpressionAttributeValues"] = {":pk": {"S": pk}, ":prefix": {"S": prefix}}
-            if cursor is not None:
-                options["ExclusiveStartKey"] = cursor
-            result = self.call(self.ddb, "query", **options)
-            items = result.get("Items", [])
-            if not isinstance(items, list):
-                raise SconeError("AWS blob metadata is invalid")
-            found.extend(self.row(item, model) for item in items)
-            if len(found) > limit:
-                raise SconeError("AWS blob query exceeds capacity")
-            cursor = result.get("LastEvaluatedKey")
-            if not cursor:
-                return found
-        raise SconeError("AWS blob query exceeds capacity")
+    def page(self, pk: str, prefix: str, model: type[M], *, after: str = "", limit: int = 100) -> tuple[list[_Row[M]], str | None]:
+        options: dict[str, object] = {"TableName": self.store.table, "ConsistentRead": True,
+            "KeyConditionExpression": "pk = :pk", "ExpressionAttributeValues": {":pk": {"S": pk}}, "Limit": limit}
+        if prefix:
+            options["KeyConditionExpression"] = "pk = :pk AND begins_with(sk, :prefix)"
+            options["ExpressionAttributeValues"] = {":pk": {"S": pk}, ":prefix": {"S": prefix}}
+        if after:
+            options["ExclusiveStartKey"] = self.key(pk, after)
+        result = self.call(self.ddb, "query", **options)
+        items = result.get("Items", [])
+        if not isinstance(items, list) or len(items) > limit:
+            raise SconeError("AWS blob query page is invalid")
+        rows = [self.row(item, model) for item in items]
+        if any(row.pk != pk or not row.sk.startswith(prefix) or row.sk <= after for row in rows):
+            raise SconeError("AWS blob query identity is invalid")
+        cursor: str | None = None
+        if result.get("LastEvaluatedKey"):
+            key = _mapping(result["LastEvaluatedKey"])
+            cursor = _text(_mapping(key["sk"])["S"])
+            if _mapping(key["pk"]).get("S") != pk or not cursor.startswith(prefix) or cursor <= after:
+                raise SconeError("AWS blob query cursor is invalid")
+        return rows, cursor
+
+    def query(self, pk: str, prefix: str, model: type[M]) -> list[_Row[M]]:
+        rows: list[_Row[M]] = []
+        cursor = ""
+        while True:
+            page, following = self.page(pk, prefix, model, after=cursor)
+            rows.extend(page)
+            if following is None:
+                return rows
+            cursor = following
+
+    def catalog(self) -> Catalog:
+        from ._aws_blob_catalog import Catalog
+
+        return Catalog(self)
 
     def change(self, pk: str, sk: str, old: _Row[M] | None, value: BaseModel | None) -> dict[str, object]:
         body: dict[str, object] = {"TableName": self.store.table}
@@ -416,7 +450,7 @@ class _Session:
             body["ConditionExpression"] = "rev = :revision AND #payload = :payload"
             body["ExpressionAttributeNames"] = {"#payload": "data"}
             body["ExpressionAttributeValues"] = {":revision": {"N": str(old.revision)},
-                                                  ":payload": {"S": old.data.model_dump_json()}}
+                                                  ":payload": {"S": old.payload}}
         if value is None:
             body["Key"] = self.key(pk, sk)
             return {"Delete": body}
@@ -461,6 +495,7 @@ class _Session:
         return self.read("I#" + space, generation, _Intent)
 
     def put(self, space: str, data: bytes, attachment: Attachment) -> Attachment:
+        self.catalog().ensure(space)
         identifier = attachment.attachment_id
         upload: _Row[_Intent] | None = None
         candidate: _Root | None = None
@@ -475,8 +510,6 @@ class _Session:
                 if upload is not None:
                     self.dispose_upload(space, upload)
                 return hold.data.attachment
-            if current.count >= MAX_HOLDS:
-                raise SconeError("AWS blob space exceeds capacity")
             if root is None and candidate is None:
                 generation = uuid4().hex
                 key = self.store.prefix + identifier + "/" + generation
@@ -486,8 +519,15 @@ class _Session:
                 upload = self.intent(space, generation)
                 if upload is None:
                     raise SconeError("AWS blob upload intent is missing")
-                result = self.call(self.s3, "put_object", Bucket=self.store.bucket, Key=key, Body=data,
-                                   ContentType=attachment.media_type, IfNoneMatch="*")
+                args: dict[str, object] = {"Bucket": self.store.bucket, "Key": key, "Body": data,
+                                          "ContentType": attachment.media_type, "IfNoneMatch": "*"}
+                try:
+                    result = self.call(self.s3, "put_object", **args, ChecksumAlgorithm="SHA256",
+                                       ChecksumSHA256=base64.b64encode(bytes.fromhex(identifier)).decode("ascii"))
+                except Exception as error:
+                    if _code(error) not in CHECKSUM_UNSUPPORTED:
+                        raise
+                    result = self.call(self.s3, "put_object", **args)
                 version = result.get("VersionId")
                 if version is not None:
                     version = _text(version)
@@ -526,13 +566,19 @@ class _Session:
             args["VersionId"] = root.version_id
         return args
 
-    def get(self, space: str, identifier: str) -> tuple[Attachment, bytes]:
+    def owned(self, space: str, identifier: str) -> tuple[_Row[_Hold], _Row[_Root]]:
         hold = self.read("S#" + space, "H#" + identifier, _Hold)
         if hold is None:
             raise NotFound("attachment not found in space")
         root = self.read("B#" + identifier, "R", _Root)
         if root is None or hold.data.generation != root.data.generation:
             raise SconeError("AWS blob ownership is inconsistent")
+        if (hold.data.attachment.attachment_id != identifier or root.data.attachment_id != identifier
+                or hold.data.attachment.bytes != root.data.size):
+            raise SconeError("AWS blob bytes failed integrity verification")
+        return hold, root
+
+    def download(self, hold: _Row[_Hold], root: _Row[_Root]) -> bytes:
         try:
             result = self.call(self.s3, "get_object", **self.object_args(root.data))
         except Exception as error:
@@ -548,8 +594,11 @@ class _Session:
             closer()
         self.check()
         if (type(data) is not bytes or len(data) != root.data.size or len(data) != hold.data.attachment.bytes
-                or hashlib.sha256(data).hexdigest() != identifier or hold.data.attachment.attachment_id != identifier):
+                or hashlib.sha256(data).hexdigest() != root.data.attachment_id):
             raise SconeError("AWS blob bytes failed integrity verification")
+        return data
+
+    def recheck_ownership(self, hold: _Row[_Hold], root: _Row[_Root]) -> None:
         current_hold = self.read(hold.pk, hold.sk, _Hold)
         current_root = self.read(root.pk, root.sk, _Root)
         if (current_hold is None or current_root is None
@@ -557,10 +606,45 @@ class _Session:
                 or current_hold.data.generation != hold.data.generation
                 or current_root.data.model_copy(update={"holds": root.data.holds}) != root.data):
             raise SconeError("AWS blob ownership changed during read")
+
+    def get(self, space: str, identifier: str) -> tuple[Attachment, bytes]:
+        hold, root = self.owned(space, identifier)
+        data = self.download(hold, root)
+        self.recheck_ownership(hold, root)
         return hold.data.attachment, data
 
+    def checksum_verified(self, root: _Row[_Root]) -> bool:
+        try:
+            result = self.call(self.s3, "head_object", **self.object_args(root.data), ChecksumMode="ENABLED")
+        except (AttributeError, NotImplementedError):
+            return False
+        except Exception as error:
+            code = _code(error)
+            if code in {"NoSuchKey", "NoSuchVersion", "404"}:
+                raise NotFound("attachment bytes are unavailable") from None
+            # Some compatible providers lack checksum HEAD, and KMS policy can
+            # allow GET while denying checksum HEAD. The fallback still hashes
+            # the entire response and applies the same ownership recheck.
+            if code in CHECKSUM_UNSUPPORTED | {"AccessDenied", "403", "405"}:
+                return False
+            raise
+        if (result.get("ContentLength") != root.data.size
+                or (root.data.version_id is not None and result.get("VersionId") != root.data.version_id)):
+            raise SconeError("AWS blob bytes failed integrity verification")
+        checksum = result.get("ChecksumSHA256")
+        if checksum is None or result.get("ChecksumType") not in (None, "FULL_OBJECT"):
+            return False
+        expected = base64.b64encode(bytes.fromhex(root.data.attachment_id)).decode("ascii")
+        if checksum != expected:
+            raise SconeError("AWS blob bytes failed integrity verification")
+        return True
+
     def link(self, space: str, identifier: str, episode: int) -> None:
-        self.get(space, identifier)
+        self.catalog().ensure(space)
+        verified_hold, root = self.owned(space, identifier)
+        if not self.checksum_verified(root):
+            self.download(verified_hold, root)
+        self.recheck_ownership(verified_hold, root)
         for _ in range(RETRIES):
             control = self.control(space)
             current = self.active(control)
@@ -574,20 +658,16 @@ class _Session:
             sequence = 1 if control is None else control.revision + 1
             value = hold.data.model_copy(update={"links": (*hold.data.links, (episode, sequence))})
             if self.transaction([self.change("S#" + space, "C", control, current),
-                                 self.change(hold.pk, hold.sk, hold, value)]):
+                                 self.change(hold.pk, hold.sk, hold, value),
+                                 self.catalog().link_change(space, episode, hold.data, sequence)]):
                 return
         raise SconeError("AWS blob metadata remained busy")
 
     def for_episode(self, space: str, episode: int) -> list[Attachment]:
-        _, rows = self.snapshot(space)
-        ordered = [(sequence, row.data.attachment) for row in rows for number, sequence in row.data.links if number == episode]
-        return [attachment for _, attachment in sorted(ordered, key=lambda item: item[0])]
+        return self.catalog().for_episode(space, episode)
 
     def released_by(self, space: str, episode: int) -> list[str]:
-        _, rows = self.snapshot(space)
-        ordered = [(sequence, row.data.attachment.attachment_id) for row in rows
-                   for number, sequence in row.data.links if number == episode and len(row.data.links) == 1]
-        return [identifier for _, identifier in sorted(ordered)]
+        return self.catalog().released_by(space, episode)
 
     def preview(self, space: str) -> tuple[list[str], list[str]]:
         for _ in range(RETRIES):
@@ -604,6 +684,13 @@ class _Session:
         raise SconeError("AWS blob metadata remained busy")
 
     def release(self, space: str, episode: int | None) -> tuple[list[str], list[str]]:
+        control = self.control(space)
+        if control is not None and control.data.mode in ("release", "unlink") and control.data.journal_version == 0:
+            return self._release_legacy(space, episode)
+        return self.catalog().release(space, episode)
+
+    def _release_legacy(self, space: str, episode: int | None) -> tuple[list[str], list[str]]:
+        """Resume only pre-catalog journals; new releases use paged result rows."""
         mode: Literal["release", "unlink"] = "release" if episode is None else "unlink"
         for _ in range(RETRIES):
             control, rows = self.snapshot(space)
@@ -624,7 +711,7 @@ class _Session:
                 break
         else:
             raise SconeError("AWS blob metadata remained busy")
-        for _ in range(MAX_HOLDS * RETRIES + RETRIES):
+        for _ in range(1024 * RETRIES + RETRIES):
             control = self.control(space)
             if control is None or control.data.mode != mode or control.data.episode != (episode or 0):
                 raise SconeError("AWS blob release journal changed")
