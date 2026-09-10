@@ -12,12 +12,14 @@ __all__ = [
     "SqliteVectorIndex",
     "MongoDocumentStore",
     "QdrantVectorIndex",
+    "OpenSearchVectorIndex",
     "ChromaVectorIndex",
     "LanceDBVectorIndex",
     "PostgresDocumentStore",
     "PostgresVectorIndex",
     "PostgresEventLog",
     "RedisVectorIndex",
+    "ElastiCacheVectorIndex",
     "MilvusVectorIndex",
     "LangChainVectorIndex",
     "ElasticsearchDocumentStore",
@@ -31,6 +33,10 @@ def __getattr__(name: str):
         from .mongo import MongoDocumentStore
 
         return MongoDocumentStore
+    if name == "OpenSearchVectorIndex":
+        from .opensearch import OpenSearchVectorIndex
+
+        return OpenSearchVectorIndex
     if name == "QdrantVectorIndex":
         from .qdrant import QdrantVectorIndex
 
@@ -43,6 +49,10 @@ def __getattr__(name: str):
         from .lancedb import LanceDBVectorIndex
 
         return LanceDBVectorIndex
+    if name == "ElastiCacheVectorIndex":
+        from .elasticache import ElastiCacheVectorIndex
+
+        return ElastiCacheVectorIndex
     if name == "RedisVectorIndex":
         from .redis import RedisVectorIndex
 

@@ -1,18 +1,27 @@
 """Assemble an engine from environment variables.
 
     SCONE_DOCUMENTS   memory | sqlite | mongo | postgres | elasticsearch   (default memory)
-    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | milvus | postgres | redis | elasticsearch  (default memory)
+    SCONE_VECTORS     memory | sqlite | qdrant | chroma | lancedb | milvus | postgres | redis | elasticsearch | opensearch | elasticache  (default memory)
     SCONE_EMBEDDER    hash | local | remote     (default hash)
 
     SCONE_SQLITE_PATH (default ~/.scone-memory/memory.db; both sqlite stores share it)
     SCONE_MONGO_URL, SCONE_MONGO_DB (default scone)
     SCONE_POSTGRES_URL, SCONE_POSTGRES_SCHEMA (default scone); documents, vectors and events share one pool
     SCONE_QDRANT_URL, SCONE_QDRANT_API_KEY, SCONE_QDRANT_COLLECTION (default scone_chunks)
+    SCONE_QDRANT_METADATA_INDEXES (optional comma-separated metadata keys to index)
+    SCONE_QDRANT_HNSW_EF (optional positive search beam width; unset uses the server default)
     SCONE_CHROMA_PATH (persistent directory) or SCONE_CHROMA_URL (server); neither: in-process, ephemeral
     SCONE_LANCEDB_PATH (database directory, required for lancedb)
     SCONE_REDIS_URL (required for redis; needs the RediSearch module), SCONE_REDIS_PREFIX (default scone_chunks)
+    SCONE_ELASTICACHE_URL (explicit rediss endpoint), *_PREFIX, *_USERNAME, *_PASSWORD
+    SCONE_ELASTICACHE_CLUSTER_MODE (1), *_ALGORITHM (FLAT), *_BATCH_SIZE (64), *_TIMEOUT (30), *_CA_CERTS
     SCONE_MILVUS_URI (a local .db path runs Milvus Lite; http://host:19530 a server), SCONE_MILVUS_TOKEN, SCONE_MILVUS_COLLECTION
     SCONE_ELASTICSEARCH_URL, SCONE_ELASTICSEARCH_API_KEY, SCONE_ELASTICSEARCH_PREFIX (default scone); one client for all three
+    SCONE_OPENSEARCH_URL (explicit self-managed HTTP(S) endpoint), SCONE_OPENSEARCH_INDEX (default scone_vectors)
+    SCONE_OPENSEARCH_USERNAME, SCONE_OPENSEARCH_PASSWORD (optional pair; TLS verification always enabled)
+    SCONE_OPENSEARCH_AWS_REGION, *_AWS_ACCESS_KEY_ID, *_AWS_SECRET_ACCESS_KEY, *_AWS_SESSION_TOKEN
+                                 optional explicit IAM signer for managed domains; no credential discovery
+    SCONE_OPENSEARCH_BATCH_SIZE (256), SCONE_OPENSEARCH_MAX_BATCH_BYTES (5242880), SCONE_OPENSEARCH_TIMEOUT (30)
     SCONE_EMBED_MODEL          local: bge-small-en-v1.5 ; remote: model name
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
     SCONE_EMBED_API_KEY        remote: bearer, optional
@@ -58,7 +67,10 @@ import inspect
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Optional, cast
+from typing import TYPE_CHECKING, Mapping, Optional, cast
+
+if TYPE_CHECKING:
+    from ..providers.aws_auth import AwsSigV4Auth
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
@@ -89,17 +101,39 @@ class Settings:
     qdrant_url: Optional[str] = None
     qdrant_api_key: Optional[str] = None
     qdrant_collection: str = "scone_chunks"
+    qdrant_metadata_indexes: tuple[str, ...] = ()
+    qdrant_hnsw_ef: int | None = None
     chroma_path: Optional[str] = None
     chroma_url: Optional[str] = None
     lancedb_path: Optional[str] = None
     redis_url: Optional[str] = None
     redis_prefix: str = "scone_chunks"
+    elasticache_url: str | None = None
+    elasticache_prefix: str = "scone_vectors"
+    elasticache_username: str | None = None
+    elasticache_password: str | None = field(default=None, repr=False)
+    elasticache_cluster_mode: bool = True
+    elasticache_algorithm: str = "FLAT"
+    elasticache_batch_size: int = 64
+    elasticache_timeout: float = 30.0
+    elasticache_ca_certs: str | None = None
     milvus_uri: Optional[str] = None
     milvus_token: Optional[str] = None
     milvus_collection: str = "scone_chunks"
     elasticsearch_url: Optional[str] = None
     elasticsearch_api_key: Optional[str] = None
     elasticsearch_prefix: str = "scone"
+    opensearch_url: str | None = None
+    opensearch_index: str = "scone_vectors"
+    opensearch_username: str | None = None
+    opensearch_password: str | None = field(default=None, repr=False)
+    opensearch_batch_size: int = 256
+    opensearch_max_batch_bytes: int = 5 * 1024 * 1024
+    opensearch_timeout: float = 30.0
+    opensearch_aws_region: str | None = None
+    opensearch_aws_access_key_id: str | None = field(default=None, repr=False)
+    opensearch_aws_secret_access_key: str | None = field(default=None, repr=False)
+    opensearch_aws_session_token: str | None = field(default=None, repr=False)
     embed_model: Optional[str] = None
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
@@ -186,6 +220,8 @@ class Settings:
         validate_review_settings(self)
         validate_adaptive_settings(self)
         validate_tool_settings(self)
+        if self.qdrant_hnsw_ef is not None and (type(self.qdrant_hnsw_ef) is not int or self.qdrant_hnsw_ef < 1):
+            raise InvalidInput("SCONE_QDRANT_HNSW_EF must be a positive integer")
         if self.blobs not in ("auto", "memory", "file", "s3"):
             raise InvalidInput("SCONE_BLOBS must be auto, memory, file, or s3")
         if self.blobs in ("memory", "s3") and self.blob_dir:
@@ -263,17 +299,40 @@ class Settings:
             qdrant_url=env.get("SCONE_QDRANT_URL"),
             qdrant_api_key=env.get("SCONE_QDRANT_API_KEY"),
             qdrant_collection=env.get("SCONE_QDRANT_COLLECTION", "scone_chunks"),
+            qdrant_metadata_indexes=tuple(key.strip() for key in env.get("SCONE_QDRANT_METADATA_INDEXES", "").split(",") if key.strip()),
+            qdrant_hnsw_ef=(_environment_integer("SCONE_QDRANT_HNSW_EF", env["SCONE_QDRANT_HNSW_EF"])
+                           if env.get("SCONE_QDRANT_HNSW_EF") else None),
             chroma_path=env.get("SCONE_CHROMA_PATH"),
             chroma_url=env.get("SCONE_CHROMA_URL"),
             lancedb_path=env.get("SCONE_LANCEDB_PATH"),
             redis_url=env.get("SCONE_REDIS_URL"),
             redis_prefix=env.get("SCONE_REDIS_PREFIX", "scone_chunks"),
+            elasticache_url=env.get("SCONE_ELASTICACHE_URL"),
+            elasticache_prefix=env.get("SCONE_ELASTICACHE_PREFIX", "scone_vectors"),
+            elasticache_username=env.get("SCONE_ELASTICACHE_USERNAME"),
+            elasticache_password=env.get("SCONE_ELASTICACHE_PASSWORD"),
+            elasticache_cluster_mode=parse_flag("SCONE_ELASTICACHE_CLUSTER_MODE", env.get("SCONE_ELASTICACHE_CLUSTER_MODE", "1")),
+            elasticache_algorithm=env.get("SCONE_ELASTICACHE_ALGORITHM", "FLAT"),
+            elasticache_batch_size=_environment_integer("SCONE_ELASTICACHE_BATCH_SIZE", env.get("SCONE_ELASTICACHE_BATCH_SIZE", "64")),
+            elasticache_timeout=parse_seconds("SCONE_ELASTICACHE_TIMEOUT", env.get("SCONE_ELASTICACHE_TIMEOUT"), 30.0),
+            elasticache_ca_certs=env.get("SCONE_ELASTICACHE_CA_CERTS"),
             milvus_uri=env.get("SCONE_MILVUS_URI"),
             milvus_token=env.get("SCONE_MILVUS_TOKEN"),
             milvus_collection=env.get("SCONE_MILVUS_COLLECTION", "scone_chunks"),
             elasticsearch_url=env.get("SCONE_ELASTICSEARCH_URL"),
             elasticsearch_api_key=env.get("SCONE_ELASTICSEARCH_API_KEY"),
             elasticsearch_prefix=env.get("SCONE_ELASTICSEARCH_PREFIX", "scone"),
+            opensearch_url=env.get("SCONE_OPENSEARCH_URL"),
+            opensearch_index=env.get("SCONE_OPENSEARCH_INDEX", "scone_vectors"),
+            opensearch_username=env.get("SCONE_OPENSEARCH_USERNAME"),
+            opensearch_password=env.get("SCONE_OPENSEARCH_PASSWORD"),
+            opensearch_batch_size=_environment_integer("SCONE_OPENSEARCH_BATCH_SIZE", env.get("SCONE_OPENSEARCH_BATCH_SIZE", "256")),
+            opensearch_max_batch_bytes=_environment_integer("SCONE_OPENSEARCH_MAX_BATCH_BYTES", env.get("SCONE_OPENSEARCH_MAX_BATCH_BYTES", "5242880")),
+            opensearch_timeout=parse_seconds("SCONE_OPENSEARCH_TIMEOUT", env.get("SCONE_OPENSEARCH_TIMEOUT"), 30.0),
+            opensearch_aws_region=env.get("SCONE_OPENSEARCH_AWS_REGION"),
+            opensearch_aws_access_key_id=env.get("SCONE_OPENSEARCH_AWS_ACCESS_KEY_ID"),
+            opensearch_aws_secret_access_key=env.get("SCONE_OPENSEARCH_AWS_SECRET_ACCESS_KEY"),
+            opensearch_aws_session_token=env.get("SCONE_OPENSEARCH_AWS_SESSION_TOKEN"),
             embed_model=env.get("SCONE_EMBED_MODEL"),
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
@@ -434,9 +493,48 @@ def build_documents(settings: Settings):
     raise InvalidInput(f"unknown SCONE_DOCUMENTS {settings.documents!r}")
 
 
+def _opensearch_auth(settings: Settings) -> AwsSigV4Auth | None:
+    region = settings.opensearch_aws_region
+    access_key = settings.opensearch_aws_access_key_id
+    secret_key = settings.opensearch_aws_secret_access_key
+    token = settings.opensearch_aws_session_token
+    if all(value is None for value in (region, access_key, secret_key, token)):
+        return None
+    if region is None or access_key is None or secret_key is None:
+        raise InvalidInput("SCONE_OPENSEARCH_AWS_REGION, SCONE_OPENSEARCH_AWS_ACCESS_KEY_ID, and SCONE_OPENSEARCH_AWS_SECRET_ACCESS_KEY are required together")
+    from ..providers.aws_auth import AwsSigV4Auth
+
+    return AwsSigV4Auth(access_key, secret_key, region=region, session_token=token)
+
+
 def build_vectors(settings: Settings, documents=None):
     """``documents`` lets a Postgres vector index share the document
     store's pool when both live in the same database."""
+    if settings.vectors == "opensearch":
+        from ..backends import OpenSearchVectorIndex
+
+        if not settings.opensearch_url:
+            raise InvalidInput("SCONE_VECTORS=opensearch needs SCONE_OPENSEARCH_URL")
+        try:
+            return OpenSearchVectorIndex(settings.opensearch_url, settings.opensearch_index,
+                username=settings.opensearch_username, password=settings.opensearch_password,
+                batch_size=settings.opensearch_batch_size, max_batch_bytes=settings.opensearch_max_batch_bytes,
+                timeout=settings.opensearch_timeout, auth=_opensearch_auth(settings))
+        except ValueError as error:
+            raise InvalidInput(f"SCONE_OPENSEARCH configuration: {error}") from error
+    if settings.vectors == "elasticache":
+        if not settings.elasticache_url:
+            raise InvalidInput("SCONE_VECTORS=elasticache needs SCONE_ELASTICACHE_URL")
+        from ..backends import ElastiCacheVectorIndex
+
+        try:
+            return ElastiCacheVectorIndex(settings.elasticache_url, prefix=settings.elasticache_prefix,
+                username=settings.elasticache_username, password=settings.elasticache_password,
+                cluster_mode=settings.elasticache_cluster_mode, algorithm=settings.elasticache_algorithm,
+                batch_size=settings.elasticache_batch_size, timeout=settings.elasticache_timeout,
+                ca_certs=settings.elasticache_ca_certs)
+        except ValueError as error:
+            raise InvalidInput(f"SCONE_ELASTICACHE configuration: {error}") from error
     if settings.vectors == "elasticsearch":
         from ..backends import ElasticsearchDocumentStore, ElasticsearchVectorIndex
 
@@ -466,7 +564,8 @@ def build_vectors(settings: Settings, documents=None):
 
         if not settings.qdrant_url:
             raise InvalidInput("SCONE_VECTORS=qdrant needs SCONE_QDRANT_URL")
-        return QdrantVectorIndex(settings.qdrant_url, settings.qdrant_collection, settings.qdrant_api_key)
+        return QdrantVectorIndex(settings.qdrant_url, settings.qdrant_collection, settings.qdrant_api_key,
+                                 metadata_indexes=settings.qdrant_metadata_indexes, hnsw_ef=settings.qdrant_hnsw_ef)
     if settings.vectors == "chroma":
         from ..backends import ChromaVectorIndex
 
