@@ -38,6 +38,8 @@
       "scopes.read": true,
       "status.read": true,
       "episodes.attachments": true,
+      "images.context": true,
+      "images.search": true,
       "episodes.list": true,
       "episodes.read": true,
       "facts.links": true,
