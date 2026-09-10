@@ -2452,6 +2452,14 @@ for the API, limits and coverage labels. The optional `pdf-ocr` extra adds
 [scanned PDF ingestion](docs/pdf-ocr.md) with an explicitly configured Tesseract
 recognizer, retained word regions and no model downloads or generative LLM.
 
+## Image context and entities
+
+Index alt text, captions and attributed metadata beside retained images, with
+explicit entity IDs, aliases and evidence references. Search returns the original
+image reference and its source context without invoking a vision model.
+See [image context and entity retrieval](docs/image-context.md) for the native and
+HTTP APIs, HTML extraction, provenance, and validation limits.
+
 ## Tests
 
 ```sh

@@ -29,6 +29,7 @@ classifiers = [
 dependencies = ["pydantic>=2.5"]
 
 [project.optional-dependencies]
+images = ["Pillow>=10.4"]
 pdf = ["pypdf>=6.8,<7"]
 pdf-ocr = ["scone-memory[pdf]", "pypdfium2>=5.13,<6", "Pillow>=10.4"]
 pdf-test = ["scone-memory[pdf,test]"]

@@ -326,7 +326,7 @@ def create_app(
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
-            "status.read": True, "episodes.attachments": True,
+            "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -345,6 +345,9 @@ def create_app(
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
 
+
+    from .image_context import mount_image_context_routes
+    mount_image_context_routes(app, engine, space_for, ingest_slot)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:
