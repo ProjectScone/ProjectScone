@@ -16,10 +16,10 @@ from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorInde
 from scone_memory.api import create_app
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-#: The HTTP client lives at python/scone-client after the repository
+#: The HTTP client lives at packages/scone-client after the repository
 #: cleanup; the older location is checked second during the move.
 CLIENT_MODEL_PATHS = (
-    REPO / "python" / "scone-client" / "scone" / "models.py",
+    REPO / "packages" / "scone-client" / "scone" / "models.py",
     REPO / "clients" / "python" / "scone" / "models.py",
 )
 

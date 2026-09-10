@@ -21,7 +21,7 @@ SSE, and WebSocket requests. Rust is not a Python installation dependency.
 ## Quickstart
 
 ```sh
-python -m pip install -e './python/memory[api]'
+python -m pip install -e './packages/memory[api]'
 ```
 
 ```python
@@ -48,7 +48,7 @@ asyncio.run(main())
 
 The in-memory stores are ephemeral; `HashEmbedder` is a deterministic test
 baseline. Choose persistent storage and a semantic embedder for real retrieval.
-See the [framework documentation](python/memory/README.md) for SQLite, Qdrant,
+See the [framework documentation](packages/memory/README.md) for SQLite, Qdrant,
 other backend adapters, scoped retrieval, temporal facts, provenance, ingestion,
 conversations, multimodal providers, and framework integrations.
 
@@ -61,14 +61,14 @@ The API listens on port 7437 by default. `/healthz` reports process health;
 A configured model alone does not mount the conversations service: configure
 its separate journal and runtime as described in the framework documentation.
 
-The [Python HTTP client](python/scone-client) uses `from scone import Scone`.
+The [Python HTTP client](packages/scone-client) uses `from scone import Scone`.
 The native async/sync engine uses `scone_memory`; it does not require a server.
 Infrastructure and provider connections are explicitly configured. Nothing in
 this repository provisions or enables a hosted service automatically.
 
 ## Measurement and development
 
-[Public QA results](python/memory/benchmarks/public-qa-v1.results.md) record
+[Public QA results](packages/memory/benchmarks/public-qa-v1.results.md) record
 200 unchanged HotpotQA/SQuAD questions across three self-managed models:
 64% exact match for Gemma E4B, 61% for Llama 3.1 8B, and 59% for Llama 3.2 3B.
 These are recorded development runs, not a benchmark of every current commit

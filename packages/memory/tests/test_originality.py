@@ -97,5 +97,5 @@ def test_sources_walks_only_code_and_skips_caches(tmp_path):
 
 @pytest.mark.skipif(not REFERENCE.exists(), reason="the reference clones are local only")
 def test_what_we_ship_shares_no_long_run_with_the_reference_trees():
-    found = scan(sources(REPO / "python/memory/src"), sources(REFERENCE), window=8)
+    found = scan(sources(REPO / "packages/memory/src"), sources(REFERENCE), window=8)
     assert found == [], "\n".join(f.report() for f in found[:5])

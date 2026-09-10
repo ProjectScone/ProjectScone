@@ -9,7 +9,7 @@ eight consecutive lines of the same working code say everything.
 
 Run it over the tree:
 
-    python -m scone_memory.testing.originality --ours python/memory/src
+    python -m scone_memory.testing.originality --ours packages/memory/src
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="report code we ship that is identical to a reference tree")
-    parser.add_argument("--ours", default="python/memory/src", help="tree to check (default python/memory/src)")
+    parser.add_argument("--ours", default="packages/memory/src", help="tree to check (default packages/memory/src)")
     parser.add_argument("--reference", default="reference", help="tree that was read (default reference)")
     parser.add_argument("--window", type=int, default=8, help="identical code lines that count as a copy (default 8)")
     args = parser.parse_args(argv)

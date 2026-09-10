@@ -3,8 +3,8 @@
 FROM python:3.14-slim-bookworm AS python-build
 ARG EXTRAS=api,agents,remote-embed,aws,qdrant
 WORKDIR /build
-COPY python/memory/pyproject.toml python/memory/README.md python/memory/LICENSE ./
-COPY python/memory/src/ ./src/
+COPY packages/memory/pyproject.toml packages/memory/README.md packages/memory/LICENSE ./
+COPY packages/memory/src/ ./src/
 RUN python -m venv /opt/scone \
     && /opt/scone/bin/pip install --no-cache-dir ".[${EXTRAS}]"
 

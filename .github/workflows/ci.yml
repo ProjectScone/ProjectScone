@@ -62,7 +62,7 @@ jobs:
         python: ["3.9", "3.14"]
     defaults:
       run:
-        working-directory: python/scone-client
+        working-directory: packages/scone-client
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/memory
+        working-directory: packages/memory
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/memory
+        working-directory: packages/memory
     services:
       dynamodb:
         image: amazon/dynamodb-local:3.3.1

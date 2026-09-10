@@ -6,8 +6,8 @@ imports or implicit sibling-directory lookups between them.
 
 ## Layout
 
-- `python/memory`: native async/sync framework, HTTP/MCP, runtime and tests.
-- `python/scone-client`: separately packaged HTTP client.
+- `packages/memory`: native async/sync framework, HTTP/MCP, runtime and tests.
+- `packages/scone-client`: separately packaged HTTP client.
 - `tests/fixtures`: versioned HTTP and prompt contract fixtures.
 - `deploy` and `terraform`: explicitly configured deployment modules.
 
@@ -17,13 +17,13 @@ secrets, generated bundles, environments, model weights, or private datasets.
 ## Python checks
 
 ```sh
-python -m pip install -e './python/memory[test]'
-cd python/memory
+python -m pip install -e './packages/memory[test]'
+cd packages/memory
 PYTHONPATH=src python -m pytest -q
 python -m build
 ```
 
-Run the HTTP client tests separately from `python/scone-client` after installing
+Run the HTTP client tests separately from `packages/scone-client` after installing
 its `[test]` extra. Python 3.14 is the primary runtime; CI also covers supported
 compatibility versions and separately configured storage adapters. Check types
 for changed modules with mypy and record pre-existing errors separately.

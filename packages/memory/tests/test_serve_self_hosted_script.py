@@ -46,7 +46,7 @@ def test_explicit_python_override_is_one_quoted_executable(tmp_path: Path, argum
 @pytest.mark.parametrize("override", [None, ""])
 def test_default_python_path_is_preserved(tmp_path: Path, override: str | None) -> None:
     root = project(tmp_path)
-    selected = root / "python/memory/.venv/bin/python"
+    selected = root / "packages/memory/.venv/bin/python"
     interpreter(selected)
     capture = root / "arguments.txt"
     env = {key: value for key, value in os.environ.items() if key != "SCONE_PYTHON"}

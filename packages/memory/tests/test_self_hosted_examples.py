@@ -48,7 +48,7 @@ def test_packaged_and_compatibility_cli_help_need_no_model(entrypoint):
 def test_legacy_launcher_forwards_exactly_to_canonical_without_launching_service(tmp_path, arguments):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    interpreter = tmp_path / "python/memory/.venv/bin/python"
+    interpreter = tmp_path / "packages/memory/.venv/bin/python"
     interpreter.parent.mkdir(parents=True)
     interpreter.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$SCONE_TEST_CAPTURE"\n')
     interpreter.chmod(0o755)

@@ -57,7 +57,7 @@ both files against the frozen v1 SHA256 values. Preserve the datasets' original
 attribution and terms; downloaded files and experiment outputs are not committed.
 
 ```sh
-export PYTHONPATH=python/memory/src
+export PYTHONPATH=packages/memory/src
 python -m scone_memory.testing.public_qa_run export bench-runs/public-qa-2026-09-08
 python -m scone_memory.testing.public_qa_run prepare bench-runs/public-qa-2026-09-08 \
   --qdrant-url http://127.0.0.1:53410

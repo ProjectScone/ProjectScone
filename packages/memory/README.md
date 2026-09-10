@@ -2004,7 +2004,7 @@ provider-internal queues, network buffers or physical playback.
 Run the native regressions in the ordinary project environment:
 
 ```sh
-python/memory/.venv/bin/python -m pytest python/memory/tests/test_voice.py -q
+packages/memory/.venv/bin/python -m pytest packages/memory/tests/test_voice.py -q
 ```
 
 Tests use scripted protocol adapters and real isolated Scone memory, not live

@@ -20,7 +20,7 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
 
-#: Anchored at the repository root, so `python/memory` is untouched by the
+#: Anchored at the repository root, so `packages/memory` is untouched by the
 #: rule that hides `memory`.
 PRIVATE = (
     "memory",          # the knowledge base: decisions, experiments, mailboxes

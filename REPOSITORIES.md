@@ -15,6 +15,10 @@ Rust owns Cargo packages, native fixtures and Rust release workflows.
 
 ## Migration
 
+The former `python/` directory is now `packages/`, with `packages/memory`
+and `packages/scone-client`. Package names and Python imports are unchanged.
+CI, Docker build contexts, helper scripts and test paths use the new location.
+
 Python `create_app`, `create_conversation_app` and the conversation launcher
 no longer accept browser hosting arguments (`console`, `console_key`,
 `local_console_key`, `reload_pages`). `--console`, `SCONE_UI_DEV` and

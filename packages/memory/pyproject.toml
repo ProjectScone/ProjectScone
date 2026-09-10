@@ -61,7 +61,7 @@ scone-memory-mcp = "scone_memory.runtime.mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/ProjectScone/ProjectScone"
-Source = "https://github.com/ProjectScone/ProjectScone/tree/main/python/memory"
+Source = "https://github.com/ProjectScone/ProjectScone/tree/main/packages/memory"
 Issues = "https://github.com/ProjectScone/ProjectScone/issues"
 
 [tool.setuptools.packages.find]

@@ -275,7 +275,8 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
     params = stdio.StdioServerParameters(
         command=sys.executable,
         args=["-m", "scone_memory.runtime.mcp", "--space", "smoke"],
-        env={"SCONE_SQLITE_PATH": str(tmp_path / "memory.db")},
+        env={"SCONE_SQLITE_PATH": str(tmp_path / "memory.db"),
+             "PYTHONPATH": str(PACKAGE_DIR / "src")},
         cwd=str(PACKAGE_DIR),
     )
     async with client_module.Client(params) as client:

@@ -9,7 +9,7 @@
 #   prove-test.sh <file> <needle> <replacement> <test runner args...>
 #
 # The runner defaults to `python -m pytest`; set PROVE_RUNNER to prove a test
-# in another stack, e.g. PROVE_RUNNER="pytest -q" for python/memory.
+# in another stack, e.g. PROVE_RUNNER="pytest -q" for packages/memory.
 #
 set -o pipefail
 RUNNER=(${=PROVE_RUNNER:-python -m pytest})

@@ -34,15 +34,15 @@ docs/
 bench-data/
 bench-runs/
 # Python packages (native engine and HTTP client)
-python/*/.venv/
-python/**/__pycache__/
-python/*/*.egg-info/
-python/*/build/
-python/*/dist/
-python/*/.pytest_cache/
+packages/*/.venv/
+packages/**/__pycache__/
+packages/*/*.egg-info/
+packages/*/build/
+packages/*/dist/
+packages/*/.pytest_cache/
 # Codex keeps the capability ledger; it is not part of the published tree.
 CAPABILITIES.md
-python/*/src/*.egg-info/
-python/memory/examples
+packages/*/src/*.egg-info/
+packages/memory/examples
 
 **/__pycache__/
