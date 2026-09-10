@@ -29,6 +29,12 @@ connection.
 See [the architecture guide](ARCHITECTURE.md) for the engine's component boundaries,
 storage ports, source-validation rules and lifecycle guarantees.
 
+[Document duplicate review](docs/document-deduplication.md) detects copied
+passages and optional embedding-based paraphrases using existing memory indexes.
+Reports include source spans, review notifications, and explicit search projections
+for keeping content, suppressing copied passages, or excluding a document while
+retaining its original. Semantic inspection defaults on and can be disabled.
+
 ## Install
 
 ```sh
