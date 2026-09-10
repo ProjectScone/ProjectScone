@@ -14,11 +14,14 @@ client is synchronous, so calls run in a worker thread.
 from __future__ import annotations
 
 import asyncio
-from typing import Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
 from .validation import validate_vector
+
+if TYPE_CHECKING:
+    from lancedb.table import Table
 
 
 def quote(value: str) -> str:
@@ -36,7 +39,7 @@ class LanceDBVectorIndex:
             raise ImportError("LanceDBVectorIndex needs lancedb: pip install 'scone-memory[lancedb]'") from e
         self.db = connection if connection is not None else lancedb.connect(path)
         self.table_name = table
-        self.table = None
+        self.table: Table | None = None
         self.dim: Optional[int] = None
 
     async def ensure(self, dim: int) -> None:
@@ -46,27 +49,33 @@ class LanceDBVectorIndex:
             listed = self.db.list_tables()
             return list(getattr(listed, "tables", listed))  # a response object in 0.38, a plain list before
 
-        def _ensure():
+        def _ensure() -> Table:
             if self.table_name in _existing_tables():
                 table = self.db.open_table(self.table_name)
                 existing = table.schema.field("vector").type.list_size
                 if existing != dim:
                     raise ValueError(f"table {self.table_name!r} holds {existing}-d vectors, embedder makes {dim}-d")
                 return table
-            schema = pa.schema([
-                pa.field("chunk_id", pa.int64()),
-                pa.field("space", pa.string()),
-                pa.field("episode_id", pa.int64()),
-                pa.field("created_at", pa.string()),
-                pa.field("created_ts", pa.float64()),
-                pa.field("tags", pa.list_(pa.string())),
-                pa.field("meta", pa.list_(pa.string())),
-                pa.field("vector", pa.list_(pa.float32(), dim)),
-            ])
+            columns: dict[str, pa.DataType] = {
+                "chunk_id": pa.int64(),
+                "space": pa.string(),
+                "episode_id": pa.int64(),
+                "created_at": pa.string(),
+                "created_ts": pa.float64(),
+                "tags": pa.list_(pa.string()),
+                "meta": pa.list_(pa.string()),
+                "vector": pa.list_(pa.float32(), dim),
+            }
+            schema = pa.schema(columns)
             return self.db.create_table(self.table_name, schema=schema)
 
         self.table = await asyncio.to_thread(_ensure)
         self.dim = dim
+
+    def _ready_table(self) -> Table:
+        if self.table is None:
+            raise RuntimeError("LanceDB table has not been initialized; call ensure first")
+        return self.table
 
     async def upsert(self, points: Sequence[VectorPoint]) -> None:
         if not points:
@@ -88,7 +97,7 @@ class LanceDBVectorIndex:
         ]
 
         def _upsert():
-            self.table.merge_insert("chunk_id").when_matched_update_all().when_not_matched_insert_all().execute(rows)
+            self._ready_table().merge_insert("chunk_id").when_matched_update_all().when_not_matched_insert_all().execute(rows)
 
         await asyncio.to_thread(_upsert)
 
@@ -111,7 +120,7 @@ class LanceDBVectorIndex:
             predicates.append(f"array_has(meta, {quote(f'{key}={value}')})")
 
         def _search():
-            query = self.table.search(list(map(float, vector))).metric("cosine").where(" AND ".join(predicates), prefilter=True)
+            query = self._ready_table().search(list(map(float, vector))).metric("cosine").where(" AND ".join(predicates), prefilter=True)
             return query.limit(limit).to_list()
 
         rows = await asyncio.to_thread(_search)
@@ -124,7 +133,7 @@ class LanceDBVectorIndex:
         if not chunk_ids:
             return
         ids = ", ".join(str(int(c)) for c in chunk_ids)
-        await asyncio.to_thread(self.table.delete, f"chunk_id IN ({ids})")
+        await asyncio.to_thread(self._ready_table().delete, f"chunk_id IN ({ids})")
 
     async def drop(self) -> None:
         await asyncio.to_thread(self.db.drop_table, self.table_name)

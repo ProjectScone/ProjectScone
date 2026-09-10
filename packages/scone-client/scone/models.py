@@ -9,7 +9,7 @@ break a client that has not learned about it yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 __all__ = ["Fact", "Memory", "Profile", "Status", "Tag", "Recall", "Added"]
 
@@ -88,7 +88,7 @@ class Recall:
     space_bytes: int = 0
     context_reduction: float = 0.0
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Memory]:
         """Iterate the recalled memories, so ``for m in client.recall(...)`` reads well."""
         return iter(self.items)
 

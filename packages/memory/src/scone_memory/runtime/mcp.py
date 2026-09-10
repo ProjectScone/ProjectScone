@@ -32,6 +32,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field
 
 from .. import __version__
+from ..core.errors import InvalidInput
 from .cli import settings_for_cli
 from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
@@ -211,7 +212,7 @@ async def fact_ids_by_status(engine: MemoryEngine, space: str) -> dict[int, str]
     on purpose: a parked fact is not in the ledger, but it did land, and
     counting it as deduplicated would tell an agent its claim was already
     known when nobody has looked at it yet."""
-    found = {f.fact_id: f.status for f in await engine.facts(space, include_closed=True)}
+    found: dict[int, str] = {f.fact_id: f.status for f in await engine.facts(space, include_closed=True)}
     found.update({f.fact_id: f.status for f in await engine.facts(space, status="proposed")})
     return found
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import platform
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Coroutine, Callable, Iterable, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, Record
 from ..core.models import RecallItem
@@ -240,7 +241,7 @@ def nearest_rank(values: Sequence[float], q: float) -> Optional[float]:
 
 
 async def run(
-    make_engine: Callable[[], "asyncio.Future[MemoryEngine] | MemoryEngine"],
+    make_engine: Callable[[], "asyncio.Future[MemoryEngine] | Coroutine[object, object, MemoryEngine] | MemoryEngine"],
     items: Iterable[BenchItem],
     ks: Sequence[int] = (5, 10, 15),
     limit: Optional[int] = None,

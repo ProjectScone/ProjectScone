@@ -769,7 +769,7 @@ def create_app(
             return {"events": [], "evidence": "none: no event log attached"}
         limit = max(1, min(limit, 1000))
         events = await engine.events.query(space, kind=kind, since=since, limit=limit, after_id=after_id)
-        body = {
+        body: dict[str, object] = {
             "events": [event_json(e) for e in events],
             "evidence": engine.events.name,
             "queries_recorded": "text" if engine.record_queries else "hash",

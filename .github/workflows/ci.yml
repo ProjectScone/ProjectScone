@@ -6,6 +6,21 @@ on:
   pull_request:
 
 jobs:
+  framework-types:
+    name: Framework type checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install framework typing dependencies
+        run: python -m pip install -e './packages/memory[typing]' -e ./packages/scone-client types-requests
+      - name: Check every framework module
+        run: python -m mypy --config-file packages/memory/mypy.ini packages/memory/src/scone_memory
+      - name: Check the HTTP client in strict mode
+        run: python -m mypy --strict packages/scone-client/scone
+
   terraform:
     name: Terraform configuration and recovery guards
     runs-on: ubuntu-latest

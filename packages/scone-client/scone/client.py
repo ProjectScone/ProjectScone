@@ -242,7 +242,8 @@ def _error_message(response: requests.Response) -> str:
         payload = response.json()
     except ValueError:
         payload = None
-    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
-        return payload["error"]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, str):
+        return error
     text = (response.text or "").strip()
     return text or f"HTTP {response.status_code}"

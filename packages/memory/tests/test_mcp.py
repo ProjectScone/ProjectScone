@@ -424,3 +424,12 @@ async def test_no_gate_in_the_environment_leaves_the_server_ungated(monkeypatch)
                                           "SCONE_EMBEDDER": "hash"}), "alpha")
 
     assert seen == {"propose_below": None}
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan")])
+def test_invalid_proposal_threshold_raises_domain_error(threshold):
+    from scone_memory.core.errors import InvalidInput
+
+    engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder())
+    with pytest.raises(InvalidInput, match="confidence"):
+        create_server(engine, propose_below=threshold)
