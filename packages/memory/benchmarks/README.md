@@ -6,6 +6,12 @@ exact references. The [scaling report](../docs/scaling-validation.md) records th
 results alongside S3 request/byte counts and image-parser timings. These storage
 experiments are separate from the real-world answer-quality evaluations below.
 
+The [knowledge lifecycle run](knowledge-lifecycle-v1.results.md) exercises a real
+CLI server over HTTP with PDF/image ingestion, Qdrant, persistent source evidence,
+two restarts and deletion. It records the initial SIGTERM cleanup failure and
+the subsequent 54-check successful run; its hash embeddings are an operational
+fixture, not an answer-quality benchmark.
+
 ## Public QA experiments
 
 The completed [8 September 2026 baseline](public-qa-v1.results.md) records
