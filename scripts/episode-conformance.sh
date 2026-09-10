@@ -53,7 +53,7 @@ PROBE=${SCONE_TEST_RUST_ROUNDTRIP:-}
 
 print "exchanging exports over $LABEL"
 OUT=$(cd packages/memory && SCONE_TEST_RUST_ROUNDTRIP=$PROBE $PY -m pytest -q -p no:warnings -rs \
-  tests/test_cross_language.py $BOUND 2>&1)
+  tests/integrations/test_cross_language.py $BOUND 2>&1)
 STATUS=$?
 print $OUT | tail -20
 

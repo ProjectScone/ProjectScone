@@ -110,7 +110,7 @@ attachment download and episode/recall APIs expose retained records as usual.
 
 ```sh
 pip install -e '.[pdf-test]'
-pytest -q tests/test_pdf_ingestion.py tests/test_attachments.py tests/test_ingestion_component.py
+pytest -q tests/ingestion/test_pdf_ingestion.py tests/memory/test_attachments.py tests/ingestion/test_ingestion_component.py
 ```
 
 Tests construct real PDFs with text, multiple pages, rotation, encryption and
