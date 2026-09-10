@@ -101,10 +101,37 @@ and parser output reuses the episode and retries its links. Durable parsing jobs
 work ownership, automatic retries and cleanup of abandoned attachments remain
 follow-on work.
 
-This slice is a native Python API. It does not add an HTTP upload/ingestion route,
-document layout models or a UI capability claim. For opt-in scanned-page rendering
-and OCR with source regions, see [scanned PDF ingestion](pdf-ocr.md). Existing
-attachment download and episode/recall APIs expose retained records as usual.
+## HTTP ingestion and page evidence
+
+With the `api,pdf` extras installed, `scone-memory serve` exposes:
+
+1. `POST /v1/attachments` with raw PDF bytes and `Content-Type: application/pdf`.
+2. `POST /v1/documents/pdf` with `{"attachment_id":"<returned SHA-256>"}`.
+3. `GET /v1/recall?q=...` to search the extracted text.
+4. `GET /v1/episodes/{episode_id}/pdf?chunk_id={chunk_id}` to resolve a returned
+   chunk to its source pages. Omit `chunk_id` for all nonempty pages.
+
+All requests require bearer authentication. Ingestion requires a write/full key;
+page evidence and the returned relative `download_path` allow read keys in the
+same space. Forgotten sources stop resolving. The ingest response contains
+`added`, `original`, `manifest`, and `empty_pages`, matching the Python result.
+Retrying identical bytes and parser output reuses the episode.
+
+`documents.pdf` in `/v1/capabilities` reflects parser dependency availability.
+Missing dependencies return 501; malformed PDFs or files needing OCR return 422,
+without declaring the memory service unavailable. `documents.pdf.provenance`
+exposes retained evidence inspection independently of parser installation.
+
+The JSON request is limited to 4 KiB and accepts only `attachment_id`. HTTP uses
+the fixed default `PdfLimits` above and shares the server's ingestion admission
+limit with episode and image writes. Saturated admission returns 429 with
+`Retry-After: 1`. Uploading alone does not parse or index a PDF. Failed parsing
+can leave the previously uploaded attachment, but creates no searchable episode.
+
+This HTTP slice extracts text layers only. For explicitly configured scanned-page
+rendering and OCR with source regions through Python, see
+[scanned PDF ingestion](pdf-ocr.md). Document layout models and Webapp integration
+remain separate capabilities.
 
 ## Validation and upstream dependency
 

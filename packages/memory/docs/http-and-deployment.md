@@ -28,6 +28,7 @@ the same rule, including the audio socket's hello.
 
 | Route | What |
 |---|---|
+| `POST /v1/documents/pdf` · `GET /v1/episodes/{id}/pdf?chunk_id=...` | Parse an uploaded PDF text layer and inspect retained page evidence; see [PDF ingestion](pdf-ingestion.md) for dependency capabilities and bounds |
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |
 | `GET /v1/spaces/{space}/impact` · `DELETE /v1/spaces/{space}?confirm={space}` | delete a whole space (`scone-memory delete-space --confirm <space>`, `--dry-run` for the preview): the preview says what would go, the deed removes it, in order, attachment holds (bytes only when no other space holds them), vectors, chunks, episodes, links, claims, events, tombstones and the revision; it needs the `full` role and the name repeated, and afterwards the key answers 404 on every route, so a key left in config cannot re-create what was erased |

@@ -57,7 +57,9 @@ def test_no_key_or_wrong_key_is_401(client):
 
 
 def test_capabilities_are_authenticated_explicit_and_read_only(client):
+    from importlib.util import find_spec
     expected = json.loads((REPO / "tests/fixtures/http-capabilities.json").read_text())["python"]
+    expected['features']['documents.pdf'] = find_spec('pypdf') is not None
     assert client.get("/v1/capabilities").status_code == 401
     assert client.get("/v1/capabilities", headers=auth("wrong")).status_code == 401
     before = client.get("/v1/status", headers=auth()).json()
