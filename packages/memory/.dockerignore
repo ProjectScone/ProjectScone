@@ -1,0 +1,11 @@
+# Send only package build inputs to the Docker daemon.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!src/**
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+**/.env*

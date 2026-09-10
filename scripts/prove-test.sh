@@ -8,15 +8,11 @@
 #
 #   prove-test.sh <file> <needle> <replacement> <test runner args...>
 #
-# The runner defaults to `cargo test`; set PROVE_RUNNER to prove a test
-# in another stack, e.g. PROVE_RUNNER="pytest -q" for python/memory.
+# The runner defaults to `python -m pytest`; set PROVE_RUNNER to prove a test
+# in another stack, e.g. PROVE_RUNNER="pytest -q" for packages/memory.
 #
-# Example:
-#   prove-test.sh crates/scone-core/src/recall.rs \
-#     'relative_window(query, &anchor)' 'None' \
-#     -p scone-core --test relative_recall
 set -o pipefail
-RUNNER=(${=PROVE_RUNNER:-cargo test})
+RUNNER=(${=PROVE_RUNNER:-python -m pytest})
 # Python caches bytecode by source mtime and size. A same-length mutation
 # inside one second would leave the "restored" run executing the broken
 # build, so the proof never writes bytecode.

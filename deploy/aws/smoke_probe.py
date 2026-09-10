@@ -45,9 +45,8 @@ def main() -> None:
             raise RuntimeError("container did not become healthy")
         time.sleep(0.2)
     status, page = fetch("/memory")
-    assert status == 200 and b"<script type=\"module\">" in page, "built UI is missing"
-    assert b'/assets/' not in page.split(b"</head>")[0], "UI has an external build dependency"
-    assert os.environ["SCONE_API_KEY"].encode() not in page, "public UI must not disclose the server key"
+    assert status == 404, "framework must not bundle browser pages"
+    assert os.environ["SCONE_API_KEY"].encode() not in page, "missing routes must not disclose keys"
     assert fetch("/v1/capabilities")[0] == 401, "memory API must require authentication"
     assert fetch("/v1/capabilities", authenticated=True)[0] == 200
     content = "Synthetic container smoke: amber otter carries the cobalt lantern."

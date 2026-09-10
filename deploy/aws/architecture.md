@@ -10,7 +10,7 @@ and a metadata transaction fence concurrent acquisition and release. S3 and
 DynamoDB cannot share a transaction, so an interrupted upload or cleanup must
 remain recoverable through durable intent records.
 
-The package ports are in `python/memory/src/scone_memory/core/ports.py`; the
+The package ports are in `packages/memory/src/scone_memory/core/ports.py`; the
 attachment port is in `backends/blobs.py`. `runtime/config.py` composes concrete
 adapters into `memory/engine.py`. AWS types and SDK configuration should stay in
 the adapter and composition layer; domain authorization, provenance and evidence

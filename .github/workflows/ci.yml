@@ -50,47 +50,6 @@ jobs:
           terraform -chdir=terraform/modules/compute validate
           terraform -chdir=terraform/modules/compute test
 
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/build-webapp
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Embedding model cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.scone/models--Xenova--bge-small-en-v1.5
-          key: embed-model-bge-small-en-v1.5
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests
-        run: cargo test --workspace
-
-  episode-conformance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build deterministic Rust probe and run shared fixtures
-        # No model download: this profile uses HashEmbedder in both runtimes.
-        run: |
-          cargo test --locked -p scone-core --no-default-features --test shared_contract
-          cargo build --locked -p scone-core --no-default-features --example episode_roundtrip
-      - name: Install Python conformance dependencies
-        run: python -m pip install -e './python/memory[test]'
-      - name: Exchange real exports in both directions
-        working-directory: python/memory
-        env:
-          SCONE_TEST_RUST_ROUNDTRIP: ${{ github.workspace }}/target/debug/examples/episode_roundtrip
-        run: python -m pytest -q tests/test_cross_language.py -k 'memory or sqlite or probe'
-
   client:
     # The HTTP client is published separately and claims Python 3.9, so it
     # is built and tested on the oldest version it claims as well as 3.14.
@@ -103,7 +62,7 @@ jobs:
         python: ["3.9", "3.14"]
     defaults:
       run:
-        working-directory: python/scone-client
+        working-directory: packages/scone-client
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -124,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/memory
+        working-directory: packages/memory
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -163,7 +122,6 @@ jobs:
           --health-retries 30
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/build-webapp
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -190,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: python/memory
+        working-directory: packages/memory
     services:
       dynamodb:
         image: amazon/dynamodb-local:3.3.1
@@ -220,4 +178,4 @@ jobs:
           SCONE_TEST_DYNAMODB_URL: http://127.0.0.1:8000
         run: python -m pytest -q -p no:warnings
       - name: Check new AWS backend types
-        run: python -m mypy --follow-imports=silent --strict src/scone_memory/backends/aws_blobs.py src/scone_memory/api/page_access.py
+        run: python -m mypy --follow-imports=silent --strict src/scone_memory/backends/aws_blobs.py

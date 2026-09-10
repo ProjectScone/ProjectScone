@@ -1,0 +1,235 @@
+"""Exercise an explicitly configured SCONE_TEST_RUST_BINARY over real HTTP."""
+
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+from typing import Optional
+
+import pytest
+
+from scone import Scone, SconeError
+
+API_KEY = "sk-integration-test"
+SPACE = "default"
+STARTUP_TIMEOUT = 60
+
+
+def _free_port() -> int:
+    """Ask the OS for an unused loopback port and hand it back."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _accepts_connections(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.25)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+@pytest.fixture(scope="module")
+def scone_binary() -> Path:
+    configured = os.environ.get("SCONE_TEST_RUST_BINARY")
+    if not configured:
+        pytest.skip("set SCONE_TEST_RUST_BINARY to test the independent Rust server")
+    binary = Path(configured).expanduser().resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        pytest.fail(f"SCONE_TEST_RUST_BINARY is not executable: {binary}")
+    return binary
+
+
+@pytest.fixture(scope="module")
+def live_server(scone_binary: Path, tmp_path_factory) -> str:
+    """Run `scone serve` on a free port for the module and return its URL."""
+    data_dir = tmp_path_factory.mktemp("scone-data")
+    port = _free_port()
+    (data_dir / "config.toml").write_text(
+        "[server]\n"
+        f'listen = "127.0.0.1:{port}"\n'
+        "\n"
+        "[[server.keys]]\n"
+        f'key = "{API_KEY}"\n'
+        f'space = "{SPACE}"\n',
+        encoding="utf-8",
+    )
+
+    log = open(data_dir / "serve.log", "w+", encoding="utf-8")
+    process: Optional[subprocess.Popen] = subprocess.Popen(
+        [
+            str(scone_binary),
+            "--data-dir", str(data_dir),
+            # The deterministic hash embedder keeps the test off the network:
+            # the default local embedder downloads an ONNX model on first use.
+            "--embedder", "hash",
+            "serve",
+            "--listen", f"127.0.0.1:{port}",
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.time() + STARTUP_TIMEOUT
+        while time.time() < deadline:
+            if process.poll() is not None:
+                log.seek(0)
+                pytest.fail(f"scone serve exited early:\n{log.read()}")
+            if _accepts_connections(port):
+                break
+            time.sleep(0.1)
+        else:
+            log.seek(0)
+            pytest.fail(f"scone serve never accepted connections:\n{log.read()}")
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        log.close()
+
+
+@pytest.fixture
+def client(live_server: str):
+    with Scone(live_server, API_KEY) as c:
+        yield c
+
+
+@pytest.mark.integration
+def test_round_trip_against_a_live_server(client: Scone):
+    """add -> recall -> tags -> status -> facts, all against a real engine."""
+
+    # -- add ----------------------------------------------------------
+    stored = client.add("the deploy checklist lives in the wiki", tags=["ops"])
+    assert stored.episode_id >= 1
+    assert stored.deduplicated is False
+    assert stored.chunks is not None and stored.chunks >= 1
+
+    other = client.add("the checklist for baking bread")
+    assert other.episode_id != stored.episode_id
+
+    # Storing the same text again deduplicates onto the same episode.
+    again = client.add("the deploy checklist lives in the wiki")
+    assert again.deduplicated is True
+    assert again.episode_id == stored.episode_id
+
+    # -- recall -------------------------------------------------------
+    pack = client.recall("checklist")
+    assert len(pack) >= 2, pack
+    assert any("wiki" in memory.text for memory in pack)
+    for memory in pack:
+        assert memory.episode_id >= 1
+        assert memory.created_at, "the server must date every recalled chunk"
+        assert memory.day == memory.created_at.split("T")[0]
+    assert pack.space_bytes > 0
+    assert 0.0 <= pack.context_reduction <= 1.0
+
+    # The tag filter narrows to the tagged episode only.
+    tagged = client.recall("checklist", tags=["ops"])
+    assert len(tagged) == 1, tagged
+    assert "wiki" in tagged.items[0].text
+
+    # limit is honored.
+    assert len(client.recall("checklist", limit=1)) == 1
+
+    # as_of is accepted and does not error.
+    client.recall("checklist", as_of="2030-01-01T00:00:00Z")
+
+    # -- tags ---------------------------------------------------------
+    tags = client.tags()
+    assert [t.name for t in tags] == ["ops"], tags
+    assert tags[0].count == 1
+
+    # -- status -------------------------------------------------------
+    status = client.status()
+    assert status.space == SPACE
+    assert status.episodes == 2, "two distinct episodes, the third deduplicated"
+    assert status.chunks >= 2
+    assert status.revision >= 1
+    # No LLM is configured, so the semantic lane is paused.
+    assert status.semantic_lane == "paused"
+    assert status.semantic_lane_active is False
+
+    # -- facts --------------------------------------------------------
+    # The lane is paused, so nothing has been distilled: the list is empty
+    # but the endpoint must still answer with a well-formed body.
+    assert client.facts() == []
+    assert client.facts(include_closed=True) == []
+
+    # -- profile ------------------------------------------------------
+    profile = client.profile()
+    assert any("wiki" in line for line in profile.dynamic), profile.dynamic
+
+
+@pytest.mark.integration
+def test_a_wrong_key_is_refused_by_the_live_server(live_server: str):
+    with Scone(live_server, "sk-not-a-real-key") as impostor:
+        with pytest.raises(SconeError) as excinfo:
+            impostor.status()
+    assert excinfo.value.status == 401
+    assert excinfo.value.message == "unknown key"
+
+
+@pytest.mark.integration
+def test_the_live_server_enforces_its_bounds(client: Scone):
+    # Bypass the client's own guard to prove the server's 422 shape.
+    with pytest.raises(SconeError) as excinfo:
+        client._request("POST", "/v1/episodes", json={"content": ""})
+    assert excinfo.value.status == 422
+    assert "content must be" in excinfo.value.message
+
+
+@pytest.mark.integration
+def test_closing_an_absent_fact_reports_404(client: Scone):
+    """A fact that was never there is a 404, not a server failure."""
+    with pytest.raises(SconeError) as excinfo:
+        client.close_fact(4242, "no such fact")
+    assert excinfo.value.status == 404, "a missing fact is the caller's mistake, not ours"
+    assert "4242" in excinfo.value.message
+
+
+@pytest.mark.integration
+def test_a_blank_query_is_refused_by_client_and_server_alike(client: Scone):
+    """The server trims before its length guard, so a blank q is a 422."""
+    with pytest.raises(SconeError) as excinfo:
+        client._request("GET", "/v1/recall", params={"q": "   "})
+    assert excinfo.value.status == 422
+
+    # The client stops it locally, before a request exists.
+    with pytest.raises(SconeError) as local:
+        client.recall("   ")
+    assert local.value.status is None
+
+
+@pytest.mark.integration
+def test_axum_rejections_arrive_as_plain_text_and_still_parse(client: Scone):
+    with pytest.raises(SconeError) as missing_q:
+        client._request("GET", "/v1/recall")
+    assert missing_q.value.status == 400
+    assert "missing field `q`" in missing_q.value.message
+
+    with pytest.raises(SconeError) as unknown_route:
+        client._request("GET", "/v1/nope")
+    assert unknown_route.value.status == 404
+    assert unknown_route.value.message == "HTTP 404", "404 has an empty body"
+
+
+@pytest.mark.integration
+def test_source_and_event_date_survive_the_round_trip(client: Scone):
+    """Provenance and event time are the point of a memory store; if the
+    API drops them, everything ingested over HTTP is anonymous and undated."""
+    client.add(
+        "the zeppelin inspection ledger was archived in Trondheim",
+        source="https://example.com/decision",
+        created_at="2023-03-01T09:00:00.000Z",
+    )
+    hits = client.recall("zeppelin inspection ledger Trondheim").items
+    assert hits, "the note must come back"
+    stored = next(h for h in hits if "zeppelin" in h.text)
+    assert stored.source == "https://example.com/decision"
+    assert stored.created_at.startswith("2023-03-01")

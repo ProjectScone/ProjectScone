@@ -29,7 +29,7 @@ fi
 # The project venv when there is one, and whatever python is otherwise:
 # this has to run from a worktree, which has no venv of its own, and on a
 # machine that installed the package rather than building a venv.
-PY=$PWD/python/memory/.venv/bin/python
+PY=$PWD/packages/memory/.venv/bin/python
 if [[ ! -x $PY ]]; then
   PY=${SCONE_PYTHON:-$(command -v python3)}
   [[ -n $PY ]] || { print "no python found; set SCONE_PYTHON"; exit 2 }
@@ -37,22 +37,22 @@ fi
 # Test the tree this script lives in. Without this the project venv's
 # editable install wins and a worktree silently checks the main checkout,
 # which is how a gate passes on code that was never committed.
-export PYTHONPATH=$PWD/python/memory/src${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=$PWD/packages/memory/src${PYTHONPATH:+:$PYTHONPATH}
 $PY -c "import scone_memory" 2>/dev/null || {
   print "scone_memory will not import for $PY; install its dependencies or set SCONE_PYTHON"
   exit 2
 }
-print "using $PY against $PWD/python/memory/src"
+print "using $PY against $PWD/packages/memory/src"
 
-# The same profile CI builds: HashEmbedder in both runtimes, so the
-# comparison is of the episode contract and not of two embedders.
-print "building the Rust probe (no default features)"
-cargo build --locked -p scone-core --no-default-features --example episode_roundtrip || exit 1
-PROBE=$PWD/target/debug/examples/episode_roundtrip
-[[ -f $PROBE ]] || { print "the probe did not appear at $PROBE"; exit 1 }
+# Build the probe in the independent Rust repository, then provide its path.
+PROBE=${SCONE_TEST_RUST_ROUNDTRIP:-}
+[[ -n $PROBE && -x $PROBE ]] || {
+  print "set SCONE_TEST_RUST_ROUNDTRIP to the independent Rust episode_roundtrip executable"
+  exit 2
+}
 
 print "exchanging exports over $LABEL"
-OUT=$(cd python/memory && SCONE_TEST_RUST_ROUNDTRIP=$PROBE $PY -m pytest -q -p no:warnings -rs \
+OUT=$(cd packages/memory && SCONE_TEST_RUST_ROUNDTRIP=$PROBE $PY -m pytest -q -p no:warnings -rs \
   tests/test_cross_language.py $BOUND 2>&1)
 STATUS=$?
 print $OUT | tail -20
