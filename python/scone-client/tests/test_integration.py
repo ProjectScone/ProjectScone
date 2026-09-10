@@ -1,15 +1,8 @@
-"""Integration test: the client against a real `scone serve` process.
-
-Builds the release binary, writes a config.toml with one [[server.keys]]
-entry into a temp data dir, starts the server on a free port, and drives a
-full round trip through it. Skipped when cargo cannot produce the binary,
-so a checkout without a Rust toolchain still runs the unit tests.
-"""
+"""Exercise an explicitly configured SCONE_TEST_RUST_BINARY over real HTTP."""
 
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 import subprocess
 import time
@@ -20,17 +13,9 @@ import pytest
 
 from scone import Scone, SconeError
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 API_KEY = "sk-integration-test"
 SPACE = "default"
-BUILD_TIMEOUT = 900
 STARTUP_TIMEOUT = 60
-
-
-def _target_dir() -> Path:
-    """Where cargo puts its artifacts, honoring CARGO_TARGET_DIR."""
-    override = os.environ.get("CARGO_TARGET_DIR")
-    return Path(override) if override else REPO_ROOT / "target"
 
 
 def _free_port() -> int:
@@ -48,19 +33,12 @@ def _accepts_connections(port: int) -> bool:
 
 @pytest.fixture(scope="module")
 def scone_binary() -> Path:
-    """Build `scone-cli` in release mode and return the binary's path."""
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is not on PATH; cannot build the scone binary")
-    build = subprocess.run(
-        ["cargo", "build", "--release", "-p", "scone-cli"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=BUILD_TIMEOUT,
-    )
-    binary = _target_dir() / "release" / "scone"
-    if build.returncode != 0 or not binary.exists():
-        pytest.skip(f"cargo build --release -p scone-cli failed:\n{build.stderr[-2000:]}")
+    configured = os.environ.get("SCONE_TEST_RUST_BINARY")
+    if not configured:
+        pytest.skip("set SCONE_TEST_RUST_BINARY to test the independent Rust server")
+    binary = Path(configured).expanduser().resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        pytest.fail(f"SCONE_TEST_RUST_BINARY is not executable: {binary}")
     return binary
 
 

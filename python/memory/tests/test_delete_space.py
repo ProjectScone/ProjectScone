@@ -27,7 +27,7 @@ def bearer(key):
 
 def test_a_space_is_deleted_by_its_own_full_key_after_a_preview_and_confirmation():
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, KEYS, console=False, roles=ROLES)) as c:
+    with TestClient(create_app(engine, KEYS, roles=ROLES)) as c:
         for text in ("first note in alpha", "second note in alpha"):
             assert c.post("/v1/episodes", json={"content": text}, headers=bearer("alpha-full")).status_code == 200
         assert c.post("/v1/episodes", json={"content": "beta keeps this"}, headers=bearer("beta")).status_code == 200

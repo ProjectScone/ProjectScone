@@ -42,7 +42,7 @@ async def client_for(app):
 async def test_a_full_ingest_lane_answers_429_with_retry_after_and_reads_go_on():
     embedder = SlowEmbedder()
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
-    app = create_app(engine, {"k": "default"}, console=False, ingest_concurrency=1)
+    app = create_app(engine, {"k": "default"}, ingest_concurrency=1)
     async with client_for(app) as client:
         first = asyncio.create_task(client.post("/v1/episodes", json={"content": "the one being embedded"}))
         async with asyncio.timeout(5):

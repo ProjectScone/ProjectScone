@@ -88,7 +88,7 @@ async def test_the_worker_runs_retention_without_a_model_and_status_says_so():
     assert report.expired == 1 and report.error is None and report.episodes == 0
     with pytest.raises(Gone):
         await engine.episode("default", old_chat.episode_id)
-    with TestClient(create_app(engine, {"k": "default"}, console=False, worker=worker)) as c:
+    with TestClient(create_app(engine, {"k": "default"}, worker=worker)) as c:
         status = c.get("/v1/status", headers={"Authorization": "Bearer k"}).json()
         assert status["semantic_lane"] == "manual", "no model, so no consolidation lane, whatever else the worker does"
         assert status["retention"] == {"conversation": 30.0}

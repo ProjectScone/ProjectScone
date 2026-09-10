@@ -25,7 +25,7 @@ def bearer(key):
 @pytest.fixture
 def client():
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, KEYS, console=False, roles=ROLES)) as c:
+    with TestClient(create_app(engine, KEYS, roles=ROLES)) as c:
         yield c
 
 

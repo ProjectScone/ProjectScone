@@ -21,7 +21,7 @@ AUTH = {"Authorization": "Bearer k"}
 
 def test_recent_activity_carries_its_episode_and_matches_dynamic():
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"k": "default"}, console=False)) as c:
+    with TestClient(create_app(engine, {"k": "default"})) as c:
         older = c.post("/v1/episodes", json={"content": "older note", "created_at": "2024-01-01T00:00:00Z"}, headers=AUTH).json()["episode_id"]
         newer = c.post("/v1/episodes", json={"content": "n" * 300, "created_at": "2024-02-01T00:00:00Z"}, headers=AUTH).json()["episode_id"]
         body = c.get("/v1/profile", headers=AUTH).json()

@@ -171,7 +171,6 @@ def build_parser() -> argparse.ArgumentParser:
     runtime = p.add_mutually_exclusive_group(required=True)
     runtime.add_argument("--model-factory", help="trusted module:callable returning a fresh native TextModel adapter")
     runtime.add_argument("--history-only", action="store_true", help="inspect saved conversations without a model")
-    p.add_argument("--console", action="store_true", help="serve the packaged React workspace (no keys embedded)")
     p = sub.add_parser("distill", help="one consolidation pass: read pending episodes through the configured model")
     p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("derive", help="one derivation pass: propose claims that follow from the claims held, with their premises")
@@ -765,7 +764,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
             return 2
 
         return serve_conversations(settings, journal=args.journal,
-                                   model_factory=args.model_factory, console=args.console)
+                                   model_factory=args.model_factory)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from ..api.__main__ import main as serve

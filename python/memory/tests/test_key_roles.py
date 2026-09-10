@@ -38,7 +38,7 @@ def test_roles_are_parsed_from_the_keys_setting_and_default_to_full():
 
 def test_each_role_can_do_what_it_says_and_nothing_more():
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, KEYS, console=False, roles=ROLES)) as c:
+    with TestClient(create_app(engine, KEYS, roles=ROLES)) as c:
         episode = c.post("/v1/episodes", json={"content": "written by the writer"}, headers=bearer("writer"))
         assert episode.status_code == 200
         proposed = c.post("/v1/facts", json={"subject": "mark", "predicate": "likes", "object": "tea", "proposed": True}, headers=bearer("writer")).json()
@@ -58,7 +58,7 @@ def test_each_role_can_do_what_it_says_and_nothing_more():
         assert c.post("/v1/episodes", json={"content": "the boss writes"}, headers=bearer("boss")).status_code == 200
         assert c.post(f"/v1/facts/{proposed['fact_id']}/close", json={"reason": "done"}, headers=bearer("boss")).status_code == 200
         assert c.get("/v1/status", headers=bearer("nobody")).status_code == 401, "an unknown key is still unknown, not a role problem"
-    with TestClient(create_app(engine, {"k": "default"}, console=False)) as c:
+    with TestClient(create_app(engine, {"k": "default"})) as c:
         assert c.post("/v1/episodes", json={"content": "no roles given means full"}, headers=bearer("k")).status_code == 200
 
 

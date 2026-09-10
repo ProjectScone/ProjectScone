@@ -17,8 +17,8 @@ dependencies = ["requests>=2.25"]
 test = ["pytest>=7"]
 
 [project.urls]
-Homepage = "https://github.com/DrDrewCain/ProjectScone"
-Source = "https://github.com/DrDrewCain/ProjectScone"
+Homepage = "https://github.com/ProjectScone/ProjectScone"
+Source = "https://github.com/ProjectScone/ProjectScone"
 
 [tool.setuptools]
 packages = ["scone"]

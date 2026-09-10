@@ -74,7 +74,7 @@ def test_status_counts_pending_groups_and_consolidate_runs_the_pass_over_http():
     # by-hand route should spend the scripted reply.
     worker = ConsolidationWorker(engine, None, [], interval_s=999, deriver=Deriver(engine, FakeChat([INFERENCE])))
     keys, roles = {"k": "default", "r": "default"}, {"r": "read"}
-    with TestClient(create_app(engine, keys, console=False, worker=worker, roles=roles)) as c:
+    with TestClient(create_app(engine, keys, worker=worker, roles=roles)) as c:
         features = c.get("/v1/capabilities", headers=bearer("k")).json()["features"]
         assert features.get("processing.distill", False) is False
         assert features.get("processing.derive", False) is False
@@ -87,7 +87,7 @@ def test_status_counts_pending_groups_and_consolidate_runs_the_pass_over_http():
         assert c.get("/v1/status", headers=bearer("k")).json()["pending_derivation"] == 0
         by_hand = c.post("/v1/consolidate", json={"scope": "distill"}, headers=bearer("k"))
         assert by_hand.status_code == 200 and by_hand.json()["scope"] == "distill" and by_hand.json()["derived_sent"] == 0
-    with TestClient(create_app(asyncio.run(seeded()), {"k": "default"}, console=False)) as c:
+    with TestClient(create_app(asyncio.run(seeded()), {"k": "default"})) as c:
         features = c.get("/v1/capabilities", headers=bearer("k")).json()["features"]
         assert features.get("processing.distill", False) is False
         assert features.get("processing.derive", False) is False

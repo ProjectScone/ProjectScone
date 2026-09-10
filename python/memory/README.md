@@ -2055,10 +2055,10 @@ The CLI can launch that service without a custom ASGI entry point:
 ```sh
 # Uses the existing SCONE_API_KEY / SCONE_API_KEYS and native store settings.
 # Create the journal's parent directory first; never use the native memory DB.
-scone-memory serve-conversations --journal ./conversation-sessions.db --history-only --console
+scone-memory serve-conversations --journal ./conversation-sessions.db --history-only
 
 # Explicit model opt-in, from a trusted Python module on your import path:
-scone-memory serve-conversations --journal ./conversation-sessions.db --model-factory my_models:create --console
+scone-memory serve-conversations --journal ./conversation-sessions.db --model-factory my_models:create
 ```
 
 The same service can ride the memory server instead of a second port. Naming
@@ -2121,8 +2121,7 @@ still perform their normal network access at startup or during memory requests.
 
 `--history-only` does not import a model adapter or accept new text sessions. It permits
 inspection of saved conversations and retains the authenticated native memory
-routes; it is **not a read-only memory server**. `--console` opts into the packaged
-React pages, with no keys embedded. The CLI uses SQLite persistence by default,
+routes; it is **not a read-only memory server**. Browser pages are hosted by the independent ProjectScone-Webapp repository. The CLI uses SQLite persistence by default,
 and the same host/port environment settings as `serve`. Stop the other server or
 choose a different `SCONE_PORT` before launching. This command does not start a
 consolidation worker. It builds and serves native memory on one event loop and
@@ -2139,7 +2138,6 @@ from scone_memory.realtime.text import TextConversation
 app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
     lambda space, sid: TextConversation(memory, space, sid, model_factory),
-    console=True,  # optional same-origin packaged React workspace; no keys embedded
     public_text_streaming=True,  # known-compatible native runtime; default is False
 )
 ```
@@ -2206,7 +2204,6 @@ app = create_conversation_app(
     scoped_runtime_factory=lambda space, sid, scope: TextConversation(
         memory, space, sid, model_factory, **scope.kwargs()
     ),
-    console=True,
 )
 ```
 
@@ -2234,14 +2231,10 @@ uses that capability to offer memory selection at session creation and display
 the persisted filters afterward. Older deployed bundles need a separate rebuild
 and deployment; backend capability alone does not update the browser UI.
 
-With `console=True`, the service serves `/memory`, `/playground`,
-`/conversations` and `/conversations/{session_id}` directly, including browser
-refreshes. `/` opens the same application. Pages contain no configured keys:
-enter a Scone space key in the connection dialog; it stays in tab memory and
-must be supplied again after a full reload. Provider credentials stay in server
-configuration. Hosting defaults to off; enabling pages does not configure a
-model, launch a server or enable voice/video. Use a freshly packaged Webapp
-build and HTTPS when deploying beyond loopback.
+The independent [Webapp repository](https://github.com/ProjectScone/ProjectScone-Webapp)
+hosts `/memory`, `/playground`, and conversation pages, and proxies the API.
+This service provides JSON, SSE, and WebSocket routes only. Configure provider
+credentials on the server and use HTTPS beyond loopback.
 
 Bearer keys determine the space. Provider credentials never belong in request
 bodies or query strings. Send `POST /v1/conversations` with a stable `request_id`

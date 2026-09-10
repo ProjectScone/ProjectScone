@@ -26,10 +26,10 @@ def env_for(tmp_path):
 
 def test_parser_requires_journal_and_an_explicit_model_or_history_choice():
     parser = build_parser()
-    args = parser.parse_args(["serve-conversations", "--journal", "sessions.db", "--history-only", "--console"])
-    assert args.history_only is True and args.console is True
+    args = parser.parse_args(["serve-conversations", "--journal", "sessions.db", "--history-only"])
+    assert args.history_only is True
     args = parser.parse_args(["serve-conversations", "--journal", "sessions.db", "--model-factory", "local_model:create"])
-    assert args.model_factory == "local_model:create" and args.console is False
+    assert args.model_factory == "local_model:create"
     for arguments in [["--history-only"], ["--journal", "sessions.db"],
                       ["--journal", "sessions.db", "--history-only", "--model-factory", "local_model:create"]]:
         with pytest.raises(SystemExit) as error:
@@ -206,11 +206,11 @@ def test_history_only_launch_has_real_memory_and_opt_in_pages(launched):
         assert client.get("/v1/episodes/" + str(added.json()["episode_id"]), headers={"Authorization": "Bearer launcher-beta"}).status_code == 404
 
 
-def test_configured_launcher_runs_native_scone_and_serves_keyless_pages(launched):
-    client, _ = launched("--model-factory", "test_text_conversation:ScriptedModel", "--console")
+def test_configured_launcher_runs_native_scone_without_browser_pages(launched):
+    client, _ = launched("--model-factory", "test_text_conversation:ScriptedModel")
     with closing(client):
         page = client.get("/conversations")
-        assert page.status_code == 200 and "launcher-alpha" not in page.text
+        assert page.status_code == 404 and "launcher-alpha" not in page.text
         assert client.get("/v1/conversations/capabilities").json()["recall_scope"] is True
         assert client.get("/v1/conversations/capabilities").json()["streaming"] is True
         session = client.post("/v1/conversations", json={"request_id": "new", "capture": True, "recall_scope": {"kind": "file"}}).json()

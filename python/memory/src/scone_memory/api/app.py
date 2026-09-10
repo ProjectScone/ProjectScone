@@ -13,16 +13,14 @@ from dataclasses import asdict
 
 import asyncio
 import json
-from html import escape
 
 import re
 
-from pathlib import Path
 from typing import Literal, Mapping, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from contextlib import asynccontextmanager
@@ -32,7 +30,6 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
-from .page_access import permits_local_bootstrap
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -197,55 +194,28 @@ class FeedbackBody(BaseModel):
 
 
 #: The public concept pages the packaged workspace renders without a key.
-LEARN_PAGES = (
-    "/learn", "/learn/quickstart", "/learn/how-it-works", "/learn/graph-memory",
-    "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
-    "/learn/conversations", "/learn/spaces", "/learn/api",
-)
-CONSOLE = Path(__file__).with_name("console.html")
-PLAYGROUND = Path(__file__).with_name("playground.html")
-MARK = Path(__file__).with_name("scone-mark.png")
 
 
-def mark_data_uri() -> str:
-    """The Scone mark, embedded so the page loads nothing external. The
-    packaged playground carries its own copy; the console shares the file."""
-    import base64
-
-    if not MARK.exists():
-        return ""
-    return "data:image/png;base64," + base64.b64encode(MARK.read_bytes()).decode()
 
 
 def create_app(
     engine: MemoryEngine,
     keys: Mapping[str, str],
-    console: bool = True,
-    console_key: Optional[str] = None,
     worker=None,
-    reload_pages: bool = False,
     conversations: bool = False,
     ingest_concurrency: int = 4,
     roles: Optional[Mapping[str, str]] = None,
     model_connections_available: bool = False,
     vision_available=None,
 ) -> FastAPI:
-    """``console_key`` enables single-key browser bootstrap for loopback
-    clients with a loopback Host header. Other requests get a keyless page.
-    Only enable this on a loopback listener; the launcher enforces that.
-    ``worker`` is a ConsolidationWorker started with the app and stopped
-    with it; None means no distiller runs on this server. ``reload_pages``
-    re-reads the console and playground files on every request, for
-    editing them with the server running; off in normal use. ``conversations``
-    says this app is mounted under a conversation service on the same
-    origin, so the capability manifest may advertise it. ``ingest_concurrency``
-    is how many writes may be embedding at once; one more is answered 429
-    with Retry-After instead of queued without limit. Reads are not gated.
-    ``roles`` maps a key to read | write | review | full (see ``permitted``);
-    a key not in it is full."""
+    """Serve the authenticated memory API; the caller owns engine lifecycle.
 
-    if console_key is not None and (len(keys) != 1 or console_key not in keys):
-        raise ValueError("console_key requires the sole configured space key")
+    ``worker`` starts and stops with this app. ``conversations`` advertises a
+    composed conversation service. ``ingest_concurrency`` bounds simultaneous
+    writes and answers excess admissions with 429 and Retry-After. ``roles``
+    maps keys to read, write, review or full permissions; unspecified keys have
+    full permission. The independently installed Webapp owns browser pages.
+    """
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -375,79 +345,6 @@ def create_app(
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
 
-    if console:
-        def render_console() -> str:
-            return CONSOLE.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
-
-        def render_playground() -> str:
-            return PLAYGROUND.read_text(encoding="utf-8")
-
-        def bootstrap(body: str, request: Request) -> str:
-            if console_key is None or not permits_local_bootstrap(request):
-                return body
-            # The packaged app carries a JSON string; the older inline page
-            # used an HTML attribute. Encode for the actual carrier context.
-            encoded = json.dumps(console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-            attribute = escape(console_key, quote=True)
-            if 'data-token="__SCONE_TOKEN__"' in body:
-                return body.replace('data-token="__SCONE_TOKEN__"', f'data-token="{attribute}"')
-            if '"__SCONE_TOKEN__"' in body:
-                return body.replace('"__SCONE_TOKEN__"', encoded)
-            if "__SCONE_TOKEN__" in body:
-                return body.replace("__SCONE_TOKEN__", attribute)
-            return body.replace('data-token=""', "", 1).replace("<script>", f'<script data-token="{attribute}">', 1)
-
-        console_html = None if reload_pages else render_console()
-        playground_html = None if (reload_pages or not PLAYGROUND.exists()) else render_playground()
-
-        def revision(path: Path) -> str:
-            # File identity only (mtime and size): says "changed", carries no content or key.
-            st = path.stat()
-            return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
-
-        def page_response(body: str, path: Path, request: Request | None = None) -> Response:
-            headers = {"ETag": revision(path), "X-Content-Type-Options": "nosniff"}
-            if reload_pages or console_key is not None:
-                headers["Cache-Control"] = "no-store"
-            return HTMLResponse(bootstrap(body, request) if request is not None else body, headers=headers)
-
-        # /memory is the canonical address of the memory console (the
-        # playground lives at /playground); / stays as a compatible alias.
-        @app.api_route("/memory", methods=["GET", "HEAD"])
-        @app.api_route("/", methods=["GET", "HEAD"])
-        async def console_page(request: Request) -> Response:
-            return page_response(console_html if console_html is not None else render_console(), CONSOLE, request)
-
-        # The packaged workspace also owns the conversation addresses, so a
-        # refresh or a shared link lands on the page even on a host with no
-        # conversation service mounted; the page reads
-        # /v1/conversations/capabilities (a JSON 404 here) and says so itself.
-        # Each address is named: there is no catch-all that would turn a
-        # mistyped /v1 path into HTML.
-        for path in ("/conversations", "/conversations/{sid}", "/memory/sources/{episode_id}"):
-            app.add_api_route(path, console_page, methods=["GET", "HEAD"], include_in_schema=False)
-
-        def render_guide() -> str:
-            # The concept pages are public: the same bundle, with no key put
-            # into it, so anyone may read them and nothing configured leaks.
-            source = PLAYGROUND if PLAYGROUND.exists() else CONSOLE
-            return source.read_text(encoding="utf-8").replace("__SCONE_MARK__", mark_data_uri())
-
-        guide_html = None if reload_pages else render_guide()
-
-        async def guide_page() -> Response:
-            return page_response(guide_html if guide_html is not None else render_guide(), PLAYGROUND if PLAYGROUND.exists() else CONSOLE)
-
-        for path in LEARN_PAGES:
-            app.add_api_route(path, guide_page, methods=["GET", "HEAD"], include_in_schema=False)
-
-        if PLAYGROUND.exists():
-            # GET and HEAD: the console probes with HEAD to decide whether to
-            # show its Playground link; in development the page polls HEAD
-            # and reloads when the ETag changes.
-            @app.api_route("/playground", methods=["GET", "HEAD"])
-            async def playground_page(request: Request) -> Response:
-                return page_response(playground_html if playground_html is not None else render_playground(), PLAYGROUND, request)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:

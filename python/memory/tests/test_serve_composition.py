@@ -52,7 +52,7 @@ def test_serve_without_a_journal_is_the_memory_only_app(tmp_path):
         miss = c.get("/v1/conversations/capabilities", headers=AUTH)
         assert miss.status_code == 404 and miss.headers["content-type"].startswith("application/json")
         assert "conversations" not in c.get("/v1/capabilities", headers=AUTH).json()["features"]
-        assert "solo" in c.get("/memory").text, "a single key is still baked into the memory-only console"
+        assert c.get("/memory").status_code == 404
     assert not (tmp_path / "sessions.db").exists()
 
 
@@ -66,22 +66,22 @@ def test_a_journal_composes_the_conversation_service_on_the_memory_origin(tmp_pa
         assert c.get("/healthz").status_code == 200
         for path in ("/", "/memory", "/playground", "/conversations", "/conversations/session-one"):
             page = c.get(path)
-            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
-            assert "solo" not in page.text, "a composed host never bakes a key into its shell"
+            assert page.status_code == 404 and page.headers["content-type"].startswith("application/json"), path
+            assert "solo" not in page.text, "the framework never exposes a key in missing-page responses"
         assert c.get("/v1/conversations", headers=AUTH).status_code == 200
     assert (tmp_path / "sessions.db").exists(), "the service owned its journal for the app's life"
 
 
 @pytest.mark.parametrize("composed", [False, True])
 @pytest.mark.parametrize("path", ["/memory", "/playground", "/conversations", "/conversations/session-one"])
-def test_local_single_key_host_connects_on_page_load(tmp_path, path, composed):
+def test_loopback_pages_do_not_expose_api_credentials(tmp_path, path, composed):
     env = {"SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db")} if composed else {}
     settings = settings_for(tmp_path, **env)
     with TestClient(serve.build_app(settings, engine_for()), base_url="http://127.0.0.1",
                     client=("127.0.0.1", 50000)) as client:
         page = client.get(path)
-        assert "solo" in page.text
-        assert page.headers["cache-control"] == "no-store"
+        assert page.status_code == 404
+        assert "solo" not in page.text
         assert client.get("/v1/status").status_code == 401, "API authentication remains required"
 
 
@@ -92,7 +92,7 @@ def test_local_single_key_host_connects_on_page_load(tmp_path, path, composed):
     ("127.0.0.1", "127.0.0.1", "http://untrusted.example", False),
     ("127.0.0.1", "127.0.0.1", "http://127.0.0.1", True),
 ])
-def test_auto_connection_is_only_for_local_single_key_access(tmp_path, host, client_host, base_url, multiple, composed):
+def test_page_requests_never_disclose_keys_for_any_listener(tmp_path, host, client_host, base_url, multiple, composed):
     env = {"SCONE_HOST": host}
     if composed:
         env["SCONE_CONVERSATIONS_JOURNAL"] = str(tmp_path / "sessions.db")
@@ -161,15 +161,6 @@ def test_composed_conversations_use_the_configured_model_deadline(tmp_path, monk
         assert received[0]["turn_timeout"] == 73
 
 
-def test_reloading_pages_re_reads_the_composed_shell(tmp_path, monkeypatch):
-    shell = tmp_path / "shell.html"
-    shell.write_text('<div id="root">first</div>')
-    monkeypatch.setattr("scone_memory.api.conversations.PLAYGROUND", shell)
-    settings = settings_for(tmp_path, SCONE_CONVERSATIONS_JOURNAL=str(tmp_path / "sessions.db"), SCONE_UI_DEV="1")
-    with TestClient(serve.build_app(settings, engine_for())) as c:
-        assert "first" in c.get("/conversations").text
-        shell.write_text('<div id="root">second</div>')
-        assert "second" in c.get("/conversations").text
 
 
 def test_a_journal_that_is_the_memory_database_is_refused_before_serving(tmp_path, monkeypatch, capsys):

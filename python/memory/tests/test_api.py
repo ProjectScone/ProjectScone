@@ -135,19 +135,6 @@ def test_where_filter_over_http(client):
     assert client.get("/v1/recall", params={"q": "seat", "where": "user_id"}, headers=auth()).status_code == 422
 
 
-def test_console_is_served_with_the_key_baked_in():
-    """Whichever page generation is packaged, one configured key reaches the
-    page and several keys do not; the exact carrier is tested separately."""
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        page = c.get("/")
-        assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
-        assert "solo" in page.text and "__SCONE_TOKEN__" not in page.text
-    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
-        text = c.get("/").text
-        assert "x" not in text.split("<body>")[-1][:0] and 'data-token="x"' not in text and 'const KEY="x"' not in text
-    with TestClient(create_app(engine, {"a": "x"}, console=False)) as c:
-        assert c.get("/").status_code == 404
 
 
 def test_review_and_exclusion_over_http(client):
@@ -183,174 +170,23 @@ def test_an_episode_can_be_read_back_verbatim(client):
     assert client.get(f"/v1/episodes/{added['episode_id']}", headers=auth("key-b")).status_code == 404
 
 
-def test_playground_is_served_with_the_same_key_handling():
-    import scone_memory.api.app as app_module
-
-    if not app_module.PLAYGROUND.exists():
-        pytest.skip("playground asset not packaged in this checkout; the Webapp build emits it")
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        page = c.get("/playground")
-        assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
-        assert "__SCONE_TOKEN__" not in page.text and "solo" in page.text
-    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
-        assert "__SCONE_TOKEN__" in c.get("/playground").text  # several keys: the page asks
-        assert c.head("/playground").status_code == 200, "the console probes with HEAD"
-
-
-def test_reload_pages_serves_edits_without_a_restart(tmp_path, monkeypatch):
-    import scone_memory.api.app as app_module
-
-    fake = tmp_path / "playground.html"
-    fake.write_text("<html>v1 __SCONE_TOKEN__</html>", encoding="utf-8")
-    monkeypatch.setattr(app_module, "PLAYGROUND", fake)
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo", reload_pages=True), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        first = c.get("/playground")
-        assert first.text == "<html>v1 solo</html>"
-        assert first.headers["cache-control"] == "no-store" and first.headers["etag"].startswith('"')
-        assert c.head("/playground").headers["etag"] == first.headers["etag"]
-        import os, time
-        fake.write_text("<html>v2 __SCONE_TOKEN__</html>", encoding="utf-8")
-        os.utime(fake, ns=(time.time_ns(), time.time_ns() + 5_000_000))  # a distinct mtime even on a coarse clock
-        second = c.get("/playground")
-        assert second.text == "<html>v2 solo</html>", "development mode re-reads the file"
-        assert second.headers["etag"] != first.headers["etag"], "HEAD pollers see a new revision"
-        assert "solo" not in second.headers["etag"], "the revision carries no key"
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        fake.write_text("<html>v3 __SCONE_TOKEN__</html>", encoding="utf-8")
-        assert c.get("/playground").text == "<html>v2 solo</html>", "normal mode reads once at startup"
-
-
-def test_memory_is_the_canonical_console_address_and_root_still_works():
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        a, b = c.get("/memory"), c.get("/")
-        assert a.status_code == b.status_code == 200 and a.text == b.text
-        assert c.head("/memory").status_code == 200
-        assert "__SCONE_MARK__" not in a.text, "the mark placeholder is always substituted"
-
-
-def test_source_pages_reload_without_turning_api_misses_into_html():
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        page = c.get("/memory/sources/42?space=default")
-        assert page.status_code == 200
-        assert page.text == c.get("/memory").text
-        assert c.head("/memory/sources/42").status_code == 200
-        assert c.get("/memory/sources/42/not-a-page").status_code == 404
-        miss = c.get("/v1/episodes/42", headers={"Authorization": "Bearer solo"})
-        assert miss.status_code == 404 and miss.headers["content-type"].startswith("application/json")
-    with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
-        assert c.get("/memory/sources/42").status_code == 404
-
-
-def test_memory_only_server_serves_workspace_deep_links_without_advertising_conversations():
-    """A refresh on /conversations must not 404 on a memory-only host: the
-    packaged workspace owns that address and shows its own readiness state.
-    Catches the missing deep link, HTML leaking into a /v1 miss, and the
-    capability list claiming a service that is not mounted."""
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        canonical = c.get("/memory")
-        for path in ("/learn", "/learn/how-it-works", "/learn/graph-memory", "/learn/quickstart",
-                     "/learn/sources", "/learn/search", "/learn/review", "/learn/profiles",
-                     "/learn/conversations", "/learn/spaces", "/learn/api"):
-            page = c.get(path)
-            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
-            assert "solo" not in page.text and 'id="root"' in page.text, "a public page carries no configured key"
-            assert c.head(path).status_code == 200
-        for path in ("/conversations", "/conversations/session-one"):
-            page = c.get(path)
-            assert page.status_code == 200 and page.headers["content-type"].startswith("text/html"), path
-            assert page.text == canonical.text, path
-            head = c.head(path)
-            assert head.status_code == 200 and head.content == b""
-            assert head.headers["content-length"] == page.headers["content-length"]
-        assert c.get("/conversations/session-one/not-a-route").status_code == 404
-        assert c.post("/conversations").status_code in {404, 405}
-        miss = c.get("/v1/conversations/capabilities", headers={"Authorization": "Bearer solo"})
-        assert miss.status_code == 404 and miss.headers["content-type"].startswith("application/json")
-        features = c.get("/v1/capabilities", headers={"Authorization": "Bearer solo"}).json()["features"]
-        assert not [name for name in features if name.startswith("conversations")], features
-    with TestClient(create_app(engine, {"solo": "default"}, console=False)) as c:
-        for path in ("/conversations", "/conversations/session-one", "/learn", "/learn/how-it-works", "/learn/graph-memory"):
-            assert c.get(path).status_code == 404, path
-        assert c.get("/learn/anything-else").status_code == 404, "no catch-all"
-
-
-def test_console_key_reaches_either_page_generation(tmp_path, monkeypatch):
-    import scone_memory.api.app as app_module
-
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    react = tmp_path / "console.html"
-    react.write_text('<html><script type="module">const KEY="__SCONE_TOKEN__";</script></html>', encoding="utf-8")
-    monkeypatch.setattr(app_module, "CONSOLE", react)
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        text = c.get("/memory").text
-        assert 'const KEY="solo"' in text and "__SCONE_TOKEN__" not in text and "data-token" not in text
-    with TestClient(create_app(engine, {"a": "x", "b": "y"})) as c:
-        assert "__SCONE_TOKEN__" in c.get("/memory").text, "several keys: the page asks"
-    legacy = tmp_path / "legacy.html"
-    legacy.write_text("<html><script>const TOKEN = document.currentScript.dataset.token;</script></html>", encoding="utf-8")
-    monkeypatch.setattr(app_module, "CONSOLE", legacy)
-    with TestClient(create_app(engine, {"solo": "default"}, console_key="solo"), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as c:
-        assert '<script data-token="solo">' in c.get("/memory").text
-
-
-@pytest.mark.parametrize("reload_pages", [False, True])
-def test_console_bootstrap_is_encoded_and_never_cached_between_request_hosts(tmp_path, monkeypatch, reload_pages):
-    import json
-    import scone_memory.api.app as app_module
-
-    key = 'synthetic-"</script><script>unsafe&\\key'
-    asset = tmp_path / "console.html"
-    asset.write_text('<html><script type="application/json">{"key":"__SCONE_TOKEN__"}</script></html>', encoding="utf-8")
-    monkeypatch.setattr(app_module, "CONSOLE", asset)
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with TestClient(create_app(engine, {key: "default"}, console_key=key, reload_pages=reload_pages),
-                    base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
-        for _ in range(2):
-            local = client.get("/memory")
-            assert local.text.count("<script") == 1
-            payload = local.text.split('type="application/json">')[1].split("</script>")[0]
-            assert json.loads(payload)["key"] == key
-            public = client.get("/memory", headers={"Host": "untrusted.example", "X-Forwarded-Host": "localhost"})
-            assert "synthetic-" not in public.text and "__SCONE_TOKEN__" in public.text
-            for response in (local, public):
-                assert response.headers["cache-control"] == "no-store"
-                assert response.headers["x-content-type-options"] == "nosniff"
-            assert client.get("/v1/status").status_code == 401
 
 
 
-def test_legacy_attribute_bootstrap_escapes_the_html_carrier(tmp_path, monkeypatch):
-    from html.parser import HTMLParser
-    import scone_memory.api.app as app_module
-
-    key = 'synthetic-"<script>&'
-    asset = tmp_path / "legacy.html"
-    asset.write_text('<html><script data-token="__SCONE_TOKEN__">run()</script></html>', encoding="utf-8")
-    monkeypatch.setattr(app_module, "CONSOLE", asset)
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    attributes = []
-
-    class Parser(HTMLParser):
-        def handle_starttag(self, tag, attrs):
-            if tag == "script":
-                attributes.append(dict(attrs))
-
-    with TestClient(create_app(engine, {key: "default"}, console_key=key),
-                    base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
-        Parser().feed(client.get("/memory").text)
-        assert attributes == [{"data-token": key}]
 
 
-@pytest.mark.parametrize("keys,key", [({"one": "alpha", "two": "beta"}, "one"), ({"one": "alpha"}, "absent")])
-def test_console_bootstrap_requires_the_sole_configured_key(keys, key):
-    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
-    with pytest.raises(ValueError, match="sole configured"):
-        create_app(engine, keys, console_key=key)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_history_is_opt_in_over_http(client):

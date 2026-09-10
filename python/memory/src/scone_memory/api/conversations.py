@@ -25,7 +25,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from starlette.websockets import WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
@@ -40,8 +40,7 @@ from ..realtime.session_journal import SessionJournal
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, build_query_evidence_graph
 from ..retrieval.evidence_records import canonical_evidence, fingerprint, restrict_graph
-from .app import LEARN_PAGES, PLAYGROUND, create_app, episode_json, permitted
-from .page_access import permits_local_bootstrap
+from .app import create_app, episode_json, permitted
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -100,18 +99,15 @@ def _without_cached_graph(result):
 
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
-                            max_sessions=100, max_turns=100, console=False, public_text_streaming=False,
-                            worker=None, reload_pages=False, catalog=None, ingest_concurrency=4, roles=None,
-                            local_console_key=None, runtime_available=None, model_connections_available=False,
+                            max_sessions=100, max_turns=100, public_text_streaming=False,
+                            worker=None, catalog=None, ingest_concurrency=4, roles=None,
+                            runtime_available=None, model_connections_available=False,
                             vision_available=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
     advertises unavailable text. Do not use non-cooperative/untrusted runtimes:
     cancellation and cleanup use cooperative asyncio, not process termination.
-    console=True serves the packaged React workspace and session deep links.
-    Pages require a space key unless the loopback host opts into local_console_key.
-    That bootstrap is restricted to loopback clients and hosts with one space key.
     scoped_runtime_factory(space, sid, scope) explicitly opts into fixed recall
     constraints. It receives an immutable RecallScope; pass scope.kwargs() to
     the native runtime. When configured it takes precedence for every new session.
@@ -119,7 +115,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     reply keyword delivering public chunks. Defaults off for custom runtimes.
     worker is a ConsolidationWorker started once the journal is owned and
     stopped with the service; a mounted memory app's own lifespan never runs,
-    so the service must carry it. reload_pages re-reads the shell per request.
+    so the service must carry it. The independent Webapp serves browser pages.
     catalog is a bound PersonaCatalog: sessions may name one of its personas at
     creation and then run that persona's native text runtime. A host with a
     catalog and no bare runtime requires the choice; nothing is chosen for it.
@@ -137,8 +133,6 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
         raise ValueError("configure nonempty bearer keys")
-    if local_console_key is not None and (len(keys) != 1 or local_console_key not in keys):
-        raise ValueError("local console connection requires the host's single configured key")
     for space in keys.values():
         check_space(space)
     for limit in (max_sessions, max_turns):
@@ -1036,27 +1030,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         journal.transition(space, sid, "end:" + uuid4().hex, "end", revision)
         return True
 
-    if console:
-        # Shared/public access stays keyless; the local preview can bootstrap its
-        # existing space key without changing API authentication or browser storage.
-        workspace_html = PLAYGROUND.read_text(encoding="utf-8")
-
-        async def workspace_page(request: Request):
-            body = PLAYGROUND.read_text(encoding="utf-8") if reload_pages else workspace_html
-            if (local_console_key is not None and permits_local_bootstrap(request)
-                    and request.url.path not in LEARN_PAGES):
-                encoded = json.dumps(local_console_key).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-                body = body.replace('"__SCONE_TOKEN__"', encoded)
-            return HTMLResponse(body, headers={
-                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-            })
-
-        for path in ("/", "/memory", "/memory/sources/{episode_id}", "/playground", "/conversations", "/conversations/{sid}", *LEARN_PAGES):
-            app.add_api_route(path, workspace_page, methods=["GET", "HEAD"], include_in_schema=False)
 
     # The mounted app answers /v1/status, so it must know the worker; its own
     # lifespan never runs under a mount, so ownership stays with this one.
-    memory_app = create_app(engine, keys, console=False, conversations=True, worker=worker,
+    memory_app = create_app(engine, keys, conversations=True, worker=worker,
                             ingest_concurrency=ingest_concurrency, roles=roles,
                             model_connections_available=model_connections_available, vision_available=vision_available)
     app.state.memory_app = memory_app

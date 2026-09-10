@@ -44,12 +44,12 @@ $PY -c "import scone_memory" 2>/dev/null || {
 }
 print "using $PY against $PWD/python/memory/src"
 
-# The same profile CI builds: HashEmbedder in both runtimes, so the
-# comparison is of the episode contract and not of two embedders.
-print "building the Rust probe (no default features)"
-cargo build --locked -p scone-core --no-default-features --example episode_roundtrip || exit 1
-PROBE=$PWD/target/debug/examples/episode_roundtrip
-[[ -f $PROBE ]] || { print "the probe did not appear at $PROBE"; exit 1 }
+# Build the probe in the independent Rust repository, then provide its path.
+PROBE=${SCONE_TEST_RUST_ROUNDTRIP:-}
+[[ -n $PROBE && -x $PROBE ]] || {
+  print "set SCONE_TEST_RUST_ROUNDTRIP to the independent Rust episode_roundtrip executable"
+  exit 2
+}
 
 print "exchanging exports over $LABEL"
 OUT=$(cd python/memory && SCONE_TEST_RUST_ROUNDTRIP=$PROBE $PY -m pytest -q -p no:warnings -rs \

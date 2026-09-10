@@ -36,7 +36,7 @@ def main() -> None:
     finally:
         subprocess.run(["docker", "rm", "--force", container], check=True,
                        stdout=subprocess.DEVNULL, timeout=30, env=env)
-    print("PASS: Python 3.14, AWS/Qdrant imports, nonroot, isolated network, health, bundled UI, auth, synthetic SQLite write and recall")
+    print("PASS: Python 3.14, AWS/Qdrant imports, nonroot, isolated network, health, API-only routes, auth, synthetic SQLite write and recall")
 
 
 if __name__ == "__main__":

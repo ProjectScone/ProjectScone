@@ -74,8 +74,7 @@ def create_server(app, *, host: str, port: int):
                                             timeout_graceful_shutdown=5))
 
 
-def main(settings: Settings, *, journal: str, model_factory: str | None = None,
-         console: bool = False) -> int:
+def main(settings: Settings, *, journal: str, model_factory: str | None = None) -> int:
     if not settings.keys or any(not isinstance(key, str) or not key.strip() for key in settings.keys):
         print("refusing to serve without a key: set SCONE_API_KEY or SCONE_API_KEYS", file=sys.stderr)
         return 2
@@ -117,7 +116,7 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None,
                 def scoped(space, sid, scope):
                     return runtime_type(engine, space, sid, factory, **scope.kwargs())
             app = create_conversation_app(engine, settings.keys, path, None,
-                                          scoped_runtime_factory=scoped, console=console,
+                                          scoped_runtime_factory=scoped,
                                           public_text_streaming=scoped is not None)
             server = create_server(app, host=settings.host, port=settings.port)
             await server.serve()

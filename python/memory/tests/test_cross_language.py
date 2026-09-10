@@ -16,7 +16,7 @@ import pytest
 from scone_memory import Record
 
 ROOT = Path(__file__).resolve().parents[3]
-CORPUS = json.loads((ROOT / "crates/scone-core/tests/fixtures/episodes-v1.json").read_text(encoding="utf-8"))
+CORPUS = json.loads((Path(__file__).with_name("fixtures") / "episodes-v1.json").read_text(encoding="utf-8"))
 FIELDS = ("type", "kind", "content", "source", "created_at")
 
 

@@ -19,7 +19,7 @@ OTHER = {"Authorization": "Bearer key-b"}
 @pytest.fixture
 def client():
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog()).open())
-    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"}, console=False)) as c:
+    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"})) as c:
         yield c
 
 

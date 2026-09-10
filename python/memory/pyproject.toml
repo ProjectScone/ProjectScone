@@ -60,9 +60,9 @@ scone-memory = "scone_memory.runtime.cli:main"
 scone-memory-mcp = "scone_memory.runtime.mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/DrDrewCain/ProjectScone"
-Source = "https://github.com/DrDrewCain/ProjectScone/tree/main/python/memory"
-Issues = "https://github.com/DrDrewCain/ProjectScone/issues"
+Homepage = "https://github.com/ProjectScone/ProjectScone"
+Source = "https://github.com/ProjectScone/ProjectScone/tree/main/python/memory"
+Issues = "https://github.com/ProjectScone/ProjectScone/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -70,7 +70,6 @@ include = ["scone_memory*"]
 
 [tool.setuptools.package-data]
 "scone_memory" = ["py.typed"]
-"scone_memory.api" = ["console.html", "playground.html", "scone-mark.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

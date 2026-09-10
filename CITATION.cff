@@ -8,8 +8,8 @@ message: >-
 title: ProjectScone
 authors:
   - name: ProjectScone contributors
-repository-code: "https://github.com/DrDrewCain/ProjectScone"
-url: "https://github.com/DrDrewCain/ProjectScone"
+repository-code: "https://github.com/ProjectScone/ProjectScone"
+url: "https://github.com/ProjectScone/ProjectScone"
 preferred-citation:
   type: software
   title: ProjectScone
@@ -18,7 +18,7 @@ preferred-citation:
   year: 2026
   publisher:
     name: JudgeHuman
-  url: "https://github.com/DrDrewCain/ProjectScone"
+  url: "https://github.com/ProjectScone/ProjectScone"
 keywords:
   - retrieval-augmented generation
   - memory

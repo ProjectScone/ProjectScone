@@ -48,8 +48,6 @@
                                                read | write | review | full (the default)
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
     SCONE_HOST, SCONE_PORT                       (default 127.0.0.1:7437)
-    SCONE_RELOAD_PAGES=1 (alias SCONE_UI_DEV=1)  re-read console.html and playground.html per request, ETag from
-                                                 file mtime and size, Cache-Control no-store (development)
 """
 
 from __future__ import annotations
@@ -140,7 +138,6 @@ class Settings:
     roles: Mapping[str, str] = field(default_factory=dict)
     host: str = "127.0.0.1"
     port: int = 7437
-    reload_pages: bool = False
     #: Writes embedding at once over HTTP; one more is told to come back.
     ingest_concurrency: int = 4
     #: Episode kinds to the days they are kept; empty means nothing expires.
@@ -316,7 +313,6 @@ class Settings:
             roles=parse_key_roles(env.get("SCONE_API_KEYS"), env.get("SCONE_API_KEY"))[1],
             host=env.get("SCONE_HOST", "127.0.0.1"),
             port=int(env.get("SCONE_PORT", "7437")),
-            reload_pages=env.get("SCONE_RELOAD_PAGES") == "1" or env.get("SCONE_UI_DEV") == "1",
             ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
             retention=parse_retention(env.get("SCONE_RETAIN", "")),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,

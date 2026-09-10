@@ -1,6 +1,6 @@
 # AWS container and storage foundation
 
-The image combines the Python API with the current built web console. Build it
+The image contains the Python API. Build the Webapp image in its separate repository. Build it
 from the repository root:
 
 ```sh
@@ -9,10 +9,7 @@ python3 deploy/aws/smoke.py scone-aws:local
 ```
 
 The build defaults to `linux/amd64`; set `SCONE_BUILD_PLATFORM=linux/arm64` for an
-ARM deployment or local Apple Silicon smoke. Node and pnpm exist only in the web
-build stage. Like CI, that stage uses pnpm 9.9.0 and installs directly from
-`Webapp/pnpm-lock.yaml` with `--frozen-lockfile`; no lock or generated web
-artifact is rewritten in the workspace. The runtime is Python
+ARM deployment or local Apple Silicon smoke. The runtime is Python
 3.14, UID/GID 10001, and includes `api,agents,remote-embed,aws,qdrant` extras. No model weights
 are downloaded or bundled. The Dockerfile-specific context allowlist excludes
 Terraform files, state, credentials, local datasets and model caches.
@@ -20,8 +17,8 @@ Terraform files, state, credentials, local datasets and model caches.
 The smoke runner uses an existing local image (`--pull=never`), generates a
 temporary test key, disables container networking, drops Linux capabilities,
 makes the image filesystem read-only and supplies disposable tmpfs storage. It
-checks Python 3.14 and AWS/Qdrant client imports, health, the built UI,
-authentication, absence of the key from public HTML,
+checks Python 3.14 and AWS/Qdrant client imports, health, API-only routing,
+authentication, absence of keys from missing-page responses,
 and a synthetic SQLite write/recall. It removes its own container afterward.
 It does not call AWS, start a model, push an image or exercise cloud storage.
 
@@ -45,8 +42,7 @@ The image starts `scone-memory serve` on port 7437. Inject `SCONE_API_KEY` or
 `SCONE_API_KEYS` at runtime through the deployment's secret mechanism; never bake
 keys into the image or Terraform variables/state. `/healthz` is process liveness,
 not a model or backend readiness guarantee. Terminate HTTPS at the operator's
-ingress and restrict direct container access. The public console asks for an API
-key; memory routes require it.
+ingress and restrict direct container access. Memory routes require an API key. The Webapp is hosted separately.
 
 Defaults use SQLite at `/data/memory.db` for documents, vectors and events. Mount
 durable storage owned by UID 10001 for a single-instance deployment, or select

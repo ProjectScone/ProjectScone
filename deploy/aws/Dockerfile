@@ -1,23 +1,10 @@
 # syntax=docker/dockerfile:1
 # Build from the repository root; this file's allowlist excludes private infra.
-FROM node:24-bookworm-slim AS web
-ARG PNPM_VERSION=9.9.0
-RUN npm install --global "pnpm@${PNPM_VERSION}"
-WORKDIR /build/Webapp
-COPY Webapp/package.json Webapp/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY Webapp/ ./
-COPY scripts/python-layout.cjs /build/scripts/python-layout.cjs
-RUN pnpm exec tsc --noEmit && pnpm exec vite build \
-    && node scripts/package.mjs --output /build/console.html
-
 FROM python:3.14-slim-bookworm AS python-build
 ARG EXTRAS=api,agents,remote-embed,aws,qdrant
 WORKDIR /build
 COPY python/memory/pyproject.toml python/memory/README.md python/memory/LICENSE ./
 COPY python/memory/src/ ./src/
-COPY --from=web /build/console.html ./src/scone_memory/api/console.html
-COPY --from=web /build/console.html ./src/scone_memory/api/playground.html
 RUN python -m venv /opt/scone \
     && /opt/scone/bin/pip install --no-cache-dir ".[${EXTRAS}]"
 

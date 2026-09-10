@@ -103,7 +103,7 @@ async def test_http_surfaces_the_verdict():
 
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), similarity_floor=0.5).open()
     await engine.remember("default", TEXT)
-    with TestClient(create_app(engine, {"k": "default"}, console=False)) as client:
+    with TestClient(create_app(engine, {"k": "default"})) as client:
         h = {"authorization": "Bearer k"}
         weak = client.get("/v1/recall", params={"q": "zebra quartz umbrella"}, headers=h).json()
         assert weak["low_confidence"] is True and isinstance(weak["top_similarity"], float) and weak["top_similarity"] < 0.5

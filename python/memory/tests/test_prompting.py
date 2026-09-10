@@ -124,7 +124,7 @@ def test_hook_stdout_for_empty_prompt_is_empty_object():
     assert json.loads(out.getvalue()) == {}
 
 
-RUST_PREVIEW = pathlib.Path.home() / ".local" / "share" / "scone-preview" / "bin" / "scone"
+
 
 
 def test_rust_and_python_compilers_agree_as_json_on_fixture_and_edge_cases():
@@ -133,12 +133,17 @@ def test_rust_and_python_compilers_agree_as_json_on_fixture_and_edge_cases():
 
     import pytest
 
-    if not RUST_PREVIEW.exists():
-        pytest.skip("installed Rust scone preview not present")
+    import os
+
+    configured = os.environ.get("SCONE_TEST_RUST_BINARY")
+    if not configured:
+        pytest.skip("set SCONE_TEST_RUST_BINARY for cross-repository conformance")
+    binary = pathlib.Path(configured).expanduser().resolve()
+    assert binary.is_file() and os.access(binary, os.X_OK), "configured Rust binary must be executable"
     cases = [c["input"] for c in load()["cases"]] + ["   \n", "x" * 60_000, "🥐" * 15_001, "  hello  "]
     for inp in cases:
         stdin = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s", "user_input": inp})
-        r = subprocess.run([str(RUST_PREVIEW), "prompt-hook"], input=stdin, capture_output=True, text=True, timeout=10)
+        r = subprocess.run([str(binary), "prompt-hook"], input=stdin, capture_output=True, text=True, timeout=10)
         rust = json.loads(r.stdout or "{}")
         py = json.loads(json.dumps(hook_output(inp)))
         # additionalContext is prefix + JSON: compare the JSON as JSON.
