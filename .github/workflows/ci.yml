@@ -142,7 +142,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: |
-          python -m pip install -q -e '.[test,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents,pipecat]'
+          python -m pip install -q -e '.[test,pdf,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents,pipecat]'
           python -m pip install -q faiss-cpu langchain-community  # a real third-party store for the LangChain bridge's contract run
       - name: Tests
         env:
@@ -186,7 +186,7 @@ jobs:
         with:
           python-version: "3.14"
       - name: Install runtime and emulator test dependencies
-        run: python -m pip install -q -e '.[test,aws-test,qdrant,mongo,vision]' mypy
+        run: python -m pip install -q -e '.[test,pdf,aws-test,qdrant,mongo,vision]' mypy
       - name: Test with disposable MongoDB and AWS emulators
         env:
           SCONE_TEST_MONGO_URL: mongodb://localhost:27017
@@ -194,3 +194,6 @@ jobs:
         run: python -m pytest -q -p no:warnings
       - name: Check new AWS backend types
         run: python -m mypy --follow-imports=silent --strict src/scone_memory/backends/aws_blobs.py
+
+      - name: Check PDF ingestion types
+        run: python -m mypy --follow-imports=silent --strict src/scone_memory/ingestion/pdf.py src/scone_memory/ingestion/_pdf_worker.py src/scone_memory/ingestion/documents.py
