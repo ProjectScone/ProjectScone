@@ -169,12 +169,13 @@ def main(settings: Optional[Settings] = None) -> None:
         finally:
             await engine.close()
 
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        # uvicorn hands the interrupt back once it has stopped gracefully;
-        # that is a server's normal end, not a failure to print.
-        sys.exit(130)
+    from ._signals import termination_unwinds
+    with termination_unwinds():
+        try:
+            asyncio.run(run())
+        except KeyboardInterrupt:
+            # Uvicorn hands the interrupt back once it has stopped gracefully.
+            sys.exit(130)
 
 
 if __name__ == "__main__":
