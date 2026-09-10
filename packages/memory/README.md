@@ -2448,7 +2448,9 @@ model cache.
 
 The optional `pdf` extra adds native text-layer PDF ingestion, retained originals,
 and page provenance for search spans. See [PDF ingestion](docs/pdf-ingestion.md)
-for the API, limits, coverage labels and OCR limitations.
+for the API, limits and coverage labels. The optional `pdf-ocr` extra adds
+[scanned PDF ingestion](docs/pdf-ocr.md) with an explicitly configured Tesseract
+recognizer, retained word regions and no model downloads or generative LLM.
 
 ## Tests
 

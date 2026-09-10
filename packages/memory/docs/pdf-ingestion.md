@@ -102,7 +102,8 @@ work ownership, automatic retries and cleanup of abandoned attachments remain
 follow-on work.
 
 This slice is a native Python API. It does not add an HTTP upload/ingestion route,
-OCR, rendering, document layout models or a UI capability claim. Existing
+document layout models or a UI capability claim. For opt-in scanned-page rendering
+and OCR with source regions, see [scanned PDF ingestion](pdf-ocr.md). Existing
 attachment download and episode/recall APIs expose retained records as usual.
 
 ## Validation and upstream dependency
