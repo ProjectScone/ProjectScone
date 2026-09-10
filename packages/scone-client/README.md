@@ -1,6 +1,6 @@
 # scone-client
 
-A thin Python client for the [Scone](https://github.com/DrDrewCain/ProjectScone)
+A thin Python client for the [Scone](https://github.com/ProjectScone/ProjectScone)
 HTTP API. One class, `requests` for transport, dataclasses instead of dicts.
 
 ## Quickstart
