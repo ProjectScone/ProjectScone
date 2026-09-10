@@ -2449,3 +2449,11 @@ SCONE_TEST_MONGO_URL=mongodb://localhost:27017 SCONE_TEST_QDRANT_URL=http://loca
 Behavioural tests are proven to fail before they are trusted:
 `PROVE_RUNNER=".venv/bin/pytest -q" ../../scripts/prove-test.sh <file> <needle> <replacement> <test>`
 breaks the code, requires red, restores, requires green.
+
+
+## Contributing and citation
+
+See the framework [contribution guide](../../CONTRIBUTING.md),
+[citation formats](../../CITING.md), and [citation metadata](../../CITATION.cff).
+Research and academic use must credit ProjectScone contributors, JudgeHuman and ProjectScone
+as required by the included [license](LICENSE).

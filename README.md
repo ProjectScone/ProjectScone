@@ -102,6 +102,8 @@ generated using EasyBib or BibTeX are accepted. Exact versions, commit hashes,
 and individual file references are **not required**. See [LICENSE](LICENSE)
 for the complete condition.
 
+Full citation guidance is in [CITING.md](CITING.md).
+
 Citation metadata is available in [CITATION.cff](CITATION.cff), which GitHub uses
 for its **Cite this repository** action. Ready-to-copy examples follow.
 

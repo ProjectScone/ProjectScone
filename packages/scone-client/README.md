@@ -70,3 +70,11 @@ they skip themselves when `cargo` is unavailable or the build fails. Set
 ```sh
 python -m pytest -m "not integration"   # unit tests only
 ```
+
+
+## Contributing and citation
+
+See the framework [contribution guide](../../CONTRIBUTING.md),
+[citation formats](../../CITING.md), and [citation metadata](../../CITATION.cff).
+Research and academic use must credit ProjectScone contributors, JudgeHuman and ProjectScone
+as required by the included [license](LICENSE).

@@ -46,3 +46,25 @@ are not proof of full archive or database compatibility.
 Keep questions and source data unchanged. Record dataset revisions, model and
 sampling settings, failures, exclusions, retrieval coverage, answer metrics,
 latency, and resource use. Byte reduction is not token reduction or accuracy.
+
+## Review and compatibility
+
+Keep changes scoped to a feature branch. Describe the concrete behavior change,
+validation and remaining limits in the pull request. Preserve individual commits
+when merging. HTTP clients, Webapp and Rust releases are independent: describe
+wire-contract changes and coordinate versioned fixtures rather than depending on
+another repository's checkout or generated output.
+
+Use typed public interfaces, validate input at API boundaries, preserve scope
+checks and source provenance, and test meaningful failure and cancellation
+paths. New provider integrations must remain explicitly configured. Tests use
+synthetic fixtures or appropriately attributed public data; never include private
+conversations, credentials, model weights or operator environment files.
+
+## Attribution and licensing
+
+Contributions use this repository's [LICENSE](LICENSE). Preserve third-party
+notices and identify the provenance of reused material. Do not present code
+from another project as original work. See [CITING.md](CITING.md) for MLA,
+APA, Chicago and BibTeX examples and [CITATION.cff](CITATION.cff) for metadata.
+The project credit is ProjectScone contributors, JudgeHuman, ProjectScone.
