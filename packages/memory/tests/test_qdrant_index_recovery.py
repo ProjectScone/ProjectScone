@@ -142,7 +142,8 @@ def test_invalid_metadata_index_configuration_fails_without_client_requests(keys
 
 @pytest.mark.qdrant
 @pytest.mark.parametrize('metadata_indexes', [(), ('document_format', 'entity_id')])
-async def test_real_server_repairs_partial_schema_and_preserves_points(metadata_indexes):
+@pytest.mark.parametrize('dim', [3, 3584])
+async def test_real_server_repairs_partial_schema_and_preserves_points(metadata_indexes, dim):
     import os
     from uuid import uuid4
     from qdrant_client import AsyncQdrantClient
@@ -151,30 +152,31 @@ async def test_real_server_repairs_partial_schema_and_preserves_points(metadata_
         pytest.skip('SCONE_TEST_QDRANT_URL is not configured')
     client = AsyncQdrantClient(url=url)
     collection = 'scone_index_recovery_' + uuid4().hex
+    vector = [1.] + [0.] * (dim - 1)
     try:
         await client.create_collection(collection,
-            vectors_config=models.VectorParams(size=3, distance=models.Distance.COSINE))
+            vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE))
         await client.create_payload_index(collection, 'space', models.PayloadSchemaType.KEYWORD)
-        await client.upsert(collection, points=[models.PointStruct(id=7, vector=[1.,0.,0.],
+        await client.upsert(collection, points=[models.PointStruct(id=7, vector=vector,
             payload={'space':'alpha', 'tags':['public'], 'created_ts':0.,
                      'meta': {'document_format': 'image', 'entity_id': 'entity7'}})])
         before = await client.get_collection(collection)
         assert set(before.payload_schema) == {'space'}
         index = QdrantVectorIndex(collection=collection, client=client, metadata_indexes=metadata_indexes,
                                   hnsw_ef=128 if metadata_indexes else None)
-        await index.ensure(3)
+        await index.ensure(dim)
         after = await client.get_collection(collection)
         assert after.config.hnsw_config == before.config.hnsw_config
         assert after.config.optimizer_config == before.config.optimizer_config
         assert {name: info.data_type for name,info in after.payload_schema.items()} == {
             **EXPECTED, **{f'meta.{key}': models.PayloadSchemaType.KEYWORD for key in metadata_indexes}}
         assert (await client.count(collection, exact=True)).count == 1
-        result = await index.search('alpha', [1.,0.,0.], 1, tags=('public',),
+        result = await index.search('alpha', vector, 1, tags=('public',),
                                     where={'document_format': 'image', 'entity_id': 'entity7'})
         assert len(result) == 1 and result[0][0] == 7
-        assert await index.search('alpha', [1.,0.,0.], 1, where={'entity_id': 'other'}) == []
-        assert await index.search('beta', [1.,0.,0.], 1) == []
-        await index.ensure(3)
+        assert await index.search('alpha', vector, 1, where={'entity_id': 'other'}) == []
+        assert await index.search('beta', vector, 1) == []
+        await index.ensure(dim)
         assert (await client.count(collection, exact=True)).count == 1
     finally:
         if await client.collection_exists(collection):
