@@ -16,10 +16,17 @@ published generation. Recovery is an attempt, not proof no paused writer exists.
 Bounds: 25 MiB per attachment, 1024 holds per space, 1024 episode references per
 hold, 300 KiB per metadata item, 12 optimistic retries. Listing uses strongly
 consistent partition queries, never table scans. Capacity failures are explicit.
+
+Links verify version-specific S3 SHA-256 checksums without downloading bodies
+when the provider supports them. Legacy objects and providers without checksum
+HEAD support retain full download-and-hash verification. Public reads always
+verify the downloaded bytes. No ETag or user-supplied metadata is trusted as a
+content checksum.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
@@ -40,6 +47,7 @@ MAX_BYTES = 25 * 1024 * 1024
 MAX_HOLDS = 1024
 MAX_ITEM_BYTES = 300 * 1024
 RETRIES = 12
+CHECKSUM_UNSUPPORTED = {"NotImplemented", "InvalidRequest", "InvalidArgument", "501"}
 
 
 class AwsClient(Protocol):
@@ -486,8 +494,15 @@ class _Session:
                 upload = self.intent(space, generation)
                 if upload is None:
                     raise SconeError("AWS blob upload intent is missing")
-                result = self.call(self.s3, "put_object", Bucket=self.store.bucket, Key=key, Body=data,
-                                   ContentType=attachment.media_type, IfNoneMatch="*")
+                args: dict[str, object] = {"Bucket": self.store.bucket, "Key": key, "Body": data,
+                                          "ContentType": attachment.media_type, "IfNoneMatch": "*"}
+                try:
+                    result = self.call(self.s3, "put_object", **args, ChecksumAlgorithm="SHA256",
+                                       ChecksumSHA256=base64.b64encode(bytes.fromhex(identifier)).decode("ascii"))
+                except Exception as error:
+                    if _code(error) not in CHECKSUM_UNSUPPORTED:
+                        raise
+                    result = self.call(self.s3, "put_object", **args)
                 version = result.get("VersionId")
                 if version is not None:
                     version = _text(version)
@@ -526,13 +541,19 @@ class _Session:
             args["VersionId"] = root.version_id
         return args
 
-    def get(self, space: str, identifier: str) -> tuple[Attachment, bytes]:
+    def owned(self, space: str, identifier: str) -> tuple[_Row[_Hold], _Row[_Root]]:
         hold = self.read("S#" + space, "H#" + identifier, _Hold)
         if hold is None:
             raise NotFound("attachment not found in space")
         root = self.read("B#" + identifier, "R", _Root)
         if root is None or hold.data.generation != root.data.generation:
             raise SconeError("AWS blob ownership is inconsistent")
+        if (hold.data.attachment.attachment_id != identifier or root.data.attachment_id != identifier
+                or hold.data.attachment.bytes != root.data.size):
+            raise SconeError("AWS blob bytes failed integrity verification")
+        return hold, root
+
+    def download(self, hold: _Row[_Hold], root: _Row[_Root]) -> bytes:
         try:
             result = self.call(self.s3, "get_object", **self.object_args(root.data))
         except Exception as error:
@@ -548,8 +569,11 @@ class _Session:
             closer()
         self.check()
         if (type(data) is not bytes or len(data) != root.data.size or len(data) != hold.data.attachment.bytes
-                or hashlib.sha256(data).hexdigest() != identifier or hold.data.attachment.attachment_id != identifier):
+                or hashlib.sha256(data).hexdigest() != root.data.attachment_id):
             raise SconeError("AWS blob bytes failed integrity verification")
+        return data
+
+    def recheck_ownership(self, hold: _Row[_Hold], root: _Row[_Root]) -> None:
         current_hold = self.read(hold.pk, hold.sk, _Hold)
         current_root = self.read(root.pk, root.sk, _Root)
         if (current_hold is None or current_root is None
@@ -557,10 +581,44 @@ class _Session:
                 or current_hold.data.generation != hold.data.generation
                 or current_root.data.model_copy(update={"holds": root.data.holds}) != root.data):
             raise SconeError("AWS blob ownership changed during read")
+
+    def get(self, space: str, identifier: str) -> tuple[Attachment, bytes]:
+        hold, root = self.owned(space, identifier)
+        data = self.download(hold, root)
+        self.recheck_ownership(hold, root)
         return hold.data.attachment, data
 
+    def checksum_verified(self, root: _Row[_Root]) -> bool:
+        try:
+            result = self.call(self.s3, "head_object", **self.object_args(root.data), ChecksumMode="ENABLED")
+        except (AttributeError, NotImplementedError):
+            return False
+        except Exception as error:
+            code = _code(error)
+            if code in {"NoSuchKey", "NoSuchVersion", "404"}:
+                raise NotFound("attachment bytes are unavailable") from None
+            # Some compatible providers lack checksum HEAD, and KMS policy can
+            # allow GET while denying checksum HEAD. The fallback still hashes
+            # the entire response and applies the same ownership recheck.
+            if code in CHECKSUM_UNSUPPORTED | {"AccessDenied", "403", "405"}:
+                return False
+            raise
+        if (result.get("ContentLength") != root.data.size
+                or (root.data.version_id is not None and result.get("VersionId") != root.data.version_id)):
+            raise SconeError("AWS blob bytes failed integrity verification")
+        checksum = result.get("ChecksumSHA256")
+        if checksum is None or result.get("ChecksumType") not in (None, "FULL_OBJECT"):
+            return False
+        expected = base64.b64encode(bytes.fromhex(root.data.attachment_id)).decode("ascii")
+        if checksum != expected:
+            raise SconeError("AWS blob bytes failed integrity verification")
+        return True
+
     def link(self, space: str, identifier: str, episode: int) -> None:
-        self.get(space, identifier)
+        verified_hold, root = self.owned(space, identifier)
+        if not self.checksum_verified(root):
+            self.download(verified_hold, root)
+        self.recheck_ownership(verified_hold, root)
         for _ in range(RETRIES):
             control = self.control(space)
             current = self.active(control)
