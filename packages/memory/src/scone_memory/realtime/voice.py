@@ -68,7 +68,7 @@ class VoiceSession:
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
         if capture is not True:
             raise ValueError("capture=True is required for public transcript retention")
-        factories = (transport_factory, stt_factory, model_factory, tts_factory)
+        factories: tuple[Callable[[], object], ...] = (transport_factory, stt_factory, model_factory, tts_factory)
         if activity_factory is not None:
             factories += (activity_factory,)
         if any(not callable(factory) for factory in factories):
@@ -93,7 +93,8 @@ class VoiceSession:
         self._session_timeout, self._turn_timeout = session_timeout, turn_timeout
         self._queue_size, self._max_audio = audio_queue_size, max_audio_bytes
         self._max_history, self._max_reply = max_history_bytes, max_reply_bytes
-        self._active = self._reply = None
+        self._active: asyncio.Task[None] | None = None
+        self._reply: asyncio.Task[None] | None = None
         self._generation = 0
         self._output_turn = None
         self._capture_id = uuid4().hex

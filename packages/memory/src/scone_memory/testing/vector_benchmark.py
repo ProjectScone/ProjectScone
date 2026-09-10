@@ -12,10 +12,22 @@ import math
 import platform
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Mapping, Sequence
+from typing import Awaitable, Callable, Mapping, Sequence, TypedDict
 
 from ..core.ports import VectorIndex
 from ..core.timeutil import now_rfc3339
+
+
+class SearchSample(TypedDict):
+    case: str
+    repeat: int
+    limit: int
+    expected_count: int
+    returned_ids: list[int]
+    recall_at_k: float | None
+    latency_ms: float
+    error_category: str | None
+    empty_result_correct: bool | None
 
 
 @dataclass(frozen=True)
@@ -30,7 +42,7 @@ class SearchCase:
     where: Mapping[str, str] = field(default_factory=dict)
 
 
-def _latencies(samples: list[dict]) -> dict:
+def _latencies(samples: Sequence[SearchSample]) -> dict:
     """Nearest-rank quantiles: sorted samples[ceil(p*n)-1]; ms, no estimates."""
     values = sorted(sample["latency_ms"] for sample in samples)
     return {"n": len(values), "p50": values[math.ceil(.50 * len(values)) - 1] if values else None,
@@ -84,7 +96,7 @@ async def measure_search(
                 observer_failures += 1
 
     await notify("running", 0)
-    samples = []
+    samples: list[SearchSample] = []
     for repeat in range(repeats):
         for case in cases:
             returned_ids = []

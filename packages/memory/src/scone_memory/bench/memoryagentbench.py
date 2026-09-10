@@ -26,13 +26,14 @@ and the same k are stated beside them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Coroutine, Callable, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, Record
 from ..providers.llm import ChatModel
@@ -209,7 +210,7 @@ def correct_answer(answer: str, answers: Sequence[str]) -> bool:
 
 
 async def run_conflict_resolution(
-    make_engine: Callable[[], "MemoryEngine"],
+    make_engine: Callable[[], "asyncio.Future[MemoryEngine] | Coroutine[object, object, MemoryEngine] | MemoryEngine"],
     item: ConflictItem,
     reader: Optional[ChatModel] = None,
     reader_name: Optional[str] = None,

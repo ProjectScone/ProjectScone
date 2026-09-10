@@ -59,7 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--space", default=argparse.SUPPRESS)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    sub = parser.add_subparsers(dest="command", required=True, parser_class=lambda **kw: argparse.ArgumentParser(parents=[common], **kw))
+    class CommandParser(argparse.ArgumentParser):
+        def __init__(self, **kwargs):
+            super().__init__(parents=[common], **kwargs)
+
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=CommandParser)
 
     p = sub.add_parser("remember", help="store text from a file or stdin")
     p.add_argument("file", nargs="?", default="-", help="path, or - for stdin (default)")
@@ -493,13 +497,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         episode = await engine.episode(space, args.episode_id)
         if args.json:
             emit({"space": space, "episode_id": episode.episode_id,
-                  "attachments": [item.model_dump() for item in episode.attachments]})
+                  "attachments": [attachment.model_dump() for attachment in episode.attachments]})
         else:
             print(f"episode {episode.episode_id} in {space}: {len(episode.attachments)} attachment(s)", file=out)
-            for item in episode.attachments:
+            for attachment in episode.attachments:
                 # Quote untrusted filenames so terminal control characters stay inert.
-                name = json.dumps(item.filename, ensure_ascii=True) if item.filename is not None else "(unnamed)"
-                print(f"{item.attachment_id}  {item.media_type}  {item.bytes} bytes  {name}", file=out)
+                name = json.dumps(attachment.filename, ensure_ascii=True) if attachment.filename is not None else "(unnamed)"
+                print(f"{attachment.attachment_id}  {attachment.media_type}  {attachment.bytes} bytes  {name}", file=out)
             if not episode.attachments:
                 print("no attachments", file=out)
         return 0
@@ -535,11 +539,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "forget":
         if args.dry_run:
-            receipt = await engine.impact(space, args.episode_id)
-            emit(receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(receipt)}", file=out)
+            forget_receipt = await engine.impact(space, args.episode_id)
+            emit(forget_receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
             return 0
-        receipt = await engine.forget(space, args.episode_id)
-        emit({"forgotten": args.episode_id, **receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(receipt)}", file=out)
+        forget_receipt = await engine.forget(space, args.episode_id)
+        emit({"forgotten": args.episode_id, **forget_receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
         return 0
 
     if args.command == "facts":
@@ -587,13 +591,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "expire":
         from .config import parse_retention
 
-        report = await engine.expire(space, parse_retention(",".join(args.keep)), limit=args.limit, dry_run=args.dry_run)
+        expiry = await engine.expire(space, parse_retention(",".join(args.keep)), limit=args.limit, dry_run=args.dry_run)
         if args.json:
-            emit(report.model_dump())
+            emit(expiry.model_dump())
         elif args.dry_run:
-            print(f"would forget {report.remaining} episode(s) under {report.policy}", file=out)
+            print(f"would forget {expiry.remaining} episode(s) under {expiry.policy}", file=out)
         else:
-            print(f"forgot {len(report.forgotten)} episode(s) under {report.policy}; {report.remaining} left for the next pass", file=out)
+            print(f"forgot {len(expiry.forgotten)} episode(s) under {expiry.policy}; {expiry.remaining} left for the next pass", file=out)
         return 0
 
     if args.command == "links":
@@ -611,8 +615,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
         from ..observability.audit import audit_grounding
 
-        found = await audit_grounding(engine, space, statuses=tuple(args.status or ("active",)))
-        shown = [f for f in found if f.flagged] if args.flagged_only else found
+        findings = await audit_grounding(engine, space, statuses=tuple(args.status or ("active",)))
+        shown = [f for f in findings if f.flagged] if args.flagged_only else findings
         if args.json:
             for finding in shown:
                 emit(asdict(finding))
@@ -623,10 +627,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                   f"  {finding.verdict}", file=out)
             if finding.evidence:
                 print(f"    source says: {finding.evidence.strip()}", file=out)
-        flagged = sum(1 for f in found if f.flagged)
+        flagged = sum(1 for f in findings if f.flagged)
         counted = "claim needs" if flagged == 1 else "claims need"
-        print(f"{flagged} of {len(found)} {counted} a person" if flagged
-              else f"nothing flagged in {len(found)} extracted claims", file=out)
+        print(f"{flagged} of {len(findings)} {counted} a person" if flagged
+              else f"nothing flagged in {len(findings)} extracted claims", file=out)
         return 0
 
     if args.command == "review":

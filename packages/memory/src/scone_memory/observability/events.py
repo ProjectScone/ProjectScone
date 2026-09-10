@@ -152,7 +152,10 @@ class SqliteEventLog:
         self._appends += 1
         if self.max_age_days is not None and self._appends % self.SWEEP_EVERY == 0:
             self.sweep()
-        return Event(event_id=cur.lastrowid, **new.__dict__)
+        event_id = cur.lastrowid
+        if event_id is None:
+            raise RuntimeError("event INSERT did not return its row identity")
+        return Event(event_id=event_id, **new.__dict__)
 
     def sweep(self) -> int:
         """Delete events older than max_age_days; returns how many."""
@@ -248,6 +251,8 @@ class MongoEventLog:
         doc = await self.counters.find_one_and_update(
             {"_id": "events"}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
         )
+        if doc is None:
+            raise RuntimeError("event counter update did not return its identity")
         event_id = int(doc["seq"])
         record = {
             "_id": event_id, "ts": new.ts, "ts_date": parse_rfc3339(new.ts), "space": new.space,

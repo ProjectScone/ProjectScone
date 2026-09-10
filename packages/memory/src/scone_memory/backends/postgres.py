@@ -235,8 +235,14 @@ class PostgresDocumentStore:
         rows = await self._rows(sql, params)
         return rows[0] if rows else None
 
+    async def _required_row(self, sql: str, params: Sequence = ()) -> dict:
+        row = await self._row(sql, params)
+        if row is None:
+            raise RuntimeError("PostgreSQL operation did not return its expected row")
+        return row
+
     async def insert_episode(self, new: NewEpisode) -> Episode:
-        row = await self._row(
+        row = await self._required_row(
             f"INSERT INTO {self.schema}.episodes (space, kind, content, content_hash, source, tags, metadata, created_at, ingested_at)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
             (new.space, new.kind, new.content, new.content_hash, new.source, _json(list(new.tags)), _json(dict(new.metadata)),
@@ -285,7 +291,7 @@ class PostgresDocumentStore:
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
         out = []
         for n in new:
-            row = await self._row(
+            row = await self._required_row(
                 f"INSERT INTO {self.schema}.chunks (episode_id, space, ordinal, start_off, end_off, text, created_at)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
@@ -375,11 +381,11 @@ class PostgresDocumentStore:
 
     async def counts(self, space: str) -> SpaceCounts:
         counts = SpaceCounts()
-        row = await self._row(
+        row = await self._required_row(
             f"SELECT COUNT(*) AS n, COALESCE(SUM(octet_length(content)), 0) AS b FROM {self.schema}.episodes WHERE space = %s", (space,)
         )
         counts.episodes, counts.bytes = int(row["n"]), int(row["b"])
-        counts.chunks = int((await self._row(f"SELECT COUNT(*) AS n FROM {self.schema}.chunks WHERE space = %s", (space,)))["n"])
+        counts.chunks = int((await self._required_row(f"SELECT COUNT(*) AS n FROM {self.schema}.chunks WHERE space = %s", (space,)))["n"])
         for r in await self._rows(
             f"SELECT t AS tag, COUNT(*) AS n FROM {self.schema}.episodes, jsonb_array_elements_text(tags) t WHERE space = %s GROUP BY t",
             (space,),
@@ -388,7 +394,7 @@ class PostgresDocumentStore:
         return counts
 
     async def insert_fact(self, new: NewFact) -> Fact:
-        row = await self._row(
+        row = await self._required_row(
             f"INSERT INTO {self.schema}.facts (space, subject, predicate, object, confidence, valid_from, valid_until, status,"
             " closed_reason, source_episode_id, origin, superseded_by, excluded_reason, quote)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
@@ -447,7 +453,7 @@ class PostgresDocumentStore:
             " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (space, episode_id) DO NOTHING RETURNING space",
             (new.space, new.episode_id, new.content_hash, new.forgotten_at, new.reason),
         )
-        row = await self._row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (new.space, new.episode_id))
+        row = await self._required_row(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s AND episode_id = %s", (new.space, new.episode_id))
         return _tombstone(row)
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
@@ -472,7 +478,7 @@ class PostgresDocumentStore:
             (new.space, new.from_fact, new.to_fact, new.kind, new.created_at, new.source_episode_id, new.quote),
         )
         if row is None:
-            row = await self._row(
+            row = await self._required_row(
                 f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = %s AND to_fact = %s AND kind = %s",
                 (new.space, new.from_fact, new.to_fact, new.kind),
             )
@@ -499,7 +505,7 @@ class PostgresDocumentStore:
         return _fact_link(row) if row is not None else None
 
     async def bump_revision(self, space: str) -> int:
-        row = await self._row(
+        row = await self._required_row(
             f"INSERT INTO {self.schema}.revisions (space, revision) VALUES (%s, 1)"
             f" ON CONFLICT (space) DO UPDATE SET revision = {self.schema}.revisions.revision + 1 RETURNING revision",
             (space,),

@@ -25,8 +25,18 @@ python -m build
 
 Run the HTTP client tests separately from `packages/scone-client` after installing
 its `[test]` extra. Python 3.14 is the primary runtime; CI also covers supported
-compatibility versions and separately configured storage adapters. Check types
-for changed modules with mypy and record pre-existing errors separately.
+compatibility versions and separately configured storage adapters. Run the full
+framework type check from the repository root; CI requires it to pass:
+
+```sh
+python -m pip install -e './packages/memory[typing]' -e ./packages/scone-client types-requests
+python -m mypy --config-file packages/memory/mypy.ini packages/memory/src/scone_memory
+python -m mypy --strict packages/scone-client/scone
+```
+
+The typing extra installs optional SDKs for analysis; it does not connect to any
+service. Two invalid generated PyMilvus protobuf stubs are isolated in
+`packages/memory/mypy.ini`; framework modules and the public SDK remain checked.
 
 ## Cross-repository checks
 

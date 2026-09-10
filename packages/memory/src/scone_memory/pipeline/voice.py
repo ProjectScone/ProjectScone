@@ -21,18 +21,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from dataclasses import dataclass
-from typing import Optional
+from typing import AsyncIterator, Optional, TypeVar
 
 from ..realtime.audio import (AudioChunk, AudioTransport, Reply, SpeechRecognizer, SpeechStarted,
                               SpeechSynthesizer, Transcript, VoiceModel, check_audio, is_question,
                               sentences)
 from ..realtime.events import ReplyCompleted, TextDelta
-from .core import Interrupted
+from .core import Feed, Interrupted
 from .memory import Prompt
 
 #: What the assistant is told it is, when nothing else says.
 PERSONA = "You are a helpful voice assistant. Answer in one or two short sentences."
+
+
+_StreamItem = TypeVar('_StreamItem')
+
+
+@contextlib.asynccontextmanager
+async def _closing_stream(stream: AsyncIterator[_StreamItem]) -> AsyncIterator[AsyncIterator[_StreamItem]]:
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if not callable(close):
+            raise TypeError("voice provider streams must implement aclose")
+        result = close()
+        if not inspect.isawaitable(result):
+            raise TypeError("voice provider aclose must return an awaitable")
+        await result
 
 
 @dataclass(frozen=True)
@@ -58,10 +76,10 @@ class CallerStage:
     def __init__(self, transport: AudioTransport, *, max_bytes: int = 64000) -> None:
         self.transport = transport
         self.max_bytes = max_bytes
-        self._feed = None
+        self._feed: Feed | None = None
         self._task: Optional[asyncio.Task] = None
 
-    async def attach(self, feed) -> None:
+    async def attach(self, feed: Feed) -> None:
         self._feed = feed
 
     async def start(self) -> None:
@@ -76,14 +94,17 @@ class CallerStage:
             await task
 
     async def _listen(self) -> None:
+        feed = self._feed
+        if feed is None:
+            raise RuntimeError("caller stage must be attached before starting")
         try:
-            async with contextlib.aclosing(self.transport.receive()) as incoming:
+            async with _closing_stream(self.transport.receive()) as incoming:
                 async for chunk in incoming:
-                    await self._feed(check_audio(chunk, self.max_bytes))
+                    await feed(check_audio(chunk, self.max_bytes))
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a dead line ends the call, it does not raise into nothing
-            await self._feed.fail(error)
+            await feed.fail(error)
 
     async def handle(self, frame: object, emit) -> None:
         if isinstance(frame, Spoken):
@@ -111,10 +132,10 @@ class RecognizerStage:
         # in front of this one before its own turn to start has somewhere
         # to wait. Whether that happens is the other stage's business.
         self._audio: asyncio.Queue = asyncio.Queue(backlog)
-        self._feed = None
+        self._feed: Feed | None = None
         self._task: Optional[asyncio.Task] = None
 
-    async def attach(self, feed) -> None:
+    async def attach(self, feed: Feed) -> None:
         self._feed = feed
 
     async def start(self) -> None:
@@ -136,25 +157,31 @@ class RecognizerStage:
             yield await self._audio.get()
 
     async def _read(self) -> None:
+        feed = self._feed
+        if feed is None:
+            raise RuntimeError("recognizer stage must be attached before starting")
         try:
-            async with contextlib.aclosing(self.recognizer.transcribe(self._chunks())) as events:
+            async with _closing_stream(self.recognizer.transcribe(self._chunks())) as events:
                 async for event in events:
                     await self._heard(event)
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - the same path a raise on a frame takes
-            await self._feed.fail(error)
+            await feed.fail(error)
 
     async def _heard(self, event: object) -> None:
+        feed = self._feed
+        if feed is None:
+            raise RuntimeError("recognizer stage must be attached before receiving events")
         if isinstance(event, SpeechStarted):
-            await self._feed.interrupt()
+            await feed.interrupt()
             return
         if not is_question(event):
             return
         # A finished question ends whatever was being said: answering the
         # last one over the top of the new one helps nobody.
-        await self._feed.interrupt()
-        await self._feed(event)
+        await feed.interrupt()
+        await feed(event)
 
     async def handle(self, frame: object, emit) -> None:
         # Only what the person said. Audio going the other way is Spoken,
@@ -198,7 +225,7 @@ class ModelStage:
         # Read to the end of the stream rather than stopping at the
         # ending it declares: what a provider says afterwards is the
         # thing worth catching, and it can only be seen by looking.
-        async with contextlib.aclosing(self.model.respond(messages)) as stream:
+        async with _closing_stream(self.model.respond(messages)) as stream:
             async for event in stream:
                 if emit.cut_off:
                     return
@@ -245,7 +272,7 @@ class SynthesizerStage:
     async def _say(self, text: str, emit) -> None:
         if emit.cut_off:
             return
-        async with contextlib.aclosing(self.synthesizer.synthesize(text.strip())) as audio:
+        async with _closing_stream(self.synthesizer.synthesize(text.strip())) as audio:
             async for chunk in audio:
                 if emit.cut_off:
                     return

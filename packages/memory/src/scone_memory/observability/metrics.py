@@ -22,6 +22,7 @@ from typing import Iterable, Optional, Sequence
 
 from ..core.ports import Event
 from ..core.timeutil import parse_rfc3339
+from .payload import mapping, sequence, items, number, integer
 
 
 @dataclass
@@ -117,24 +118,24 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
     out: list[Metric] = []
     out.append(Metric("recall.count", len(recalls), len(recalls), "successful recalls", "recalls",
                       "Recall events without an error field in the window."))
-    totals = sorted(float(e.payload["latency_ms"]["total"]) for e in recalls
-                    if isinstance(e.payload.get("latency_ms"), dict) and "total" in e.payload["latency_ms"])
+    totals = sorted(number(mapping(e.payload["latency_ms"])["total"]) for e in recalls
+                    if isinstance(e.payload.get("latency_ms"), dict) and "total" in mapping(e.payload["latency_ms"]))
     for q, name in ((0.5, "p50"), (0.95, "p95")):
         out.append(Metric(f"recall.latency_ms.{name}", nearest_rank(totals, q), len(totals), "successful recalls with a measured total",
                           "ms", f"Nearest-rank {name} of latency_ms.total measured by perf_counter around the whole recall.",
                           "Operational timing on this machine; says nothing about answer quality."))
     for lane in ("embed", "vector", "text"):
-        vals = sorted(float(e.payload["latency_ms"][lane]) for e in recalls
-                      if isinstance(e.payload.get("latency_ms"), dict) and lane in e.payload["latency_ms"])
+        vals = sorted(number(mapping(e.payload["latency_ms"])[lane]) for e in recalls
+                      if isinstance(e.payload.get("latency_ms"), dict) and lane in mapping(e.payload["latency_ms"]))
         out.append(Metric(f"recall.latency_ms.{lane}.p50", nearest_rank(vals, 0.5), len(vals),
                           f"successful recalls where the {lane} step ran", "ms",
                           f"Nearest-rank median of latency_ms.{lane}."))
 
     nonempty = [e for e in recalls if e.payload.get("items")]
-    tops = [e.payload["items"][0] for e in nonempty]
-    both = sum(1 for t in tops if set((t.get("lanes") or {}).keys()) >= {"vector", "text"})
-    vonly = sum(1 for t in tops if set((t.get("lanes") or {}).keys()) == {"vector"})
-    tonly = sum(1 for t in tops if set((t.get("lanes") or {}).keys()) == {"text"})
+    tops = [items(e.payload["items"])[0] for e in nonempty]
+    both = sum(1 for t in tops if set(mapping(t.get("lanes") or {}).keys()) >= {"vector", "text"})
+    vonly = sum(1 for t in tops if set(mapping(t.get("lanes") or {}).keys()) == {"vector"})
+    tonly = sum(1 for t in tops if set(mapping(t.get("lanes") or {}).keys()) == {"text"})
     n = len(nonempty)
     for name, count in (("both_lanes", both), ("vector_only", vonly), ("text_only", tonly)):
         out.append(Metric(f"recall.top_item.{name}_share", _share(count, n), n, "successful recalls that returned at least one item",
@@ -143,9 +144,9 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
 
     by_embedder: dict[str, list[float]] = defaultdict(list)
     for e in nonempty:
-        sim = e.payload["items"][0].get("similarity")
+        sim = items(e.payload["items"])[0].get("similarity")
         if sim is not None and e.payload.get("embedder"):
-            by_embedder[str(e.payload["embedder"])].append(float(sim))
+            by_embedder[str(e.payload["embedder"])].append(number(sim))
     for embedder, sims in sorted(by_embedder.items()):
         sims.sort()
         out.append(Metric(f"recall.top_similarity.{embedder}", {"p10": nearest_rank(sims, 0.1), "median": nearest_rank(sims, 0.5),
@@ -154,8 +155,8 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
                           "Nearest-rank p10/median/p90 of the top item's cosine similarity, grouped by full embedder id.",
                           "Uncalibrated: no confidence or quality class is derived from it. Hash embedders measure word overlap, not meaning."))
 
-    reductions = sorted(1.0 - float(e.payload["returned_bytes"]) / float(e.payload["space_bytes"])
-                        for e in recalls if float(e.payload.get("space_bytes") or 0) > 0)
+    reductions = sorted(1.0 - number(e.payload["returned_bytes"]) / number(e.payload["space_bytes"])
+                        for e in recalls if number(e.payload.get("space_bytes") or 0) > 0)
     out.append(Metric("recall.byte_context_reduction.median", nearest_rank(reductions, 0.5), len(reductions),
                       "successful recalls in a non-empty space", "share of bytes",
                       "Median of 1 - returned_bytes / space_bytes, where space_bytes is every stored byte in the space.",
@@ -165,7 +166,7 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
                       "Recalls that answered with one lane after the other failed."))
     judged = [e for e in recalls if e.payload.get("low_confidence") is not None]
     flagged = sum(1 for e in judged if e.payload["low_confidence"])
-    floors = sorted({float(e.payload["similarity_floor"]) for e in judged if e.payload.get("similarity_floor") is not None})
+    floors = sorted({number(e.payload["similarity_floor"]) for e in judged if e.payload.get("similarity_floor") is not None})
     out.append(Metric("recall.low_confidence_share", _share(flagged, len(judged)), len(judged),
                       "successful recalls judged against a similarity floor", "share",
                       "Recalls flagged low_confidence (best vector hit below the engine's floor, or nothing found) over recalls that had "
@@ -176,8 +177,8 @@ def recall_metrics(recalls: list[Event]) -> list[Metric]:
 
 
 def ingest_metrics(remembers: list[Event]) -> list[Metric]:
-    fresh = sum(int(e.payload.get("fresh", 0)) for e in remembers)
-    dedup = sum(int(e.payload.get("deduplicated", 0)) for e in remembers)
+    fresh = sum(integer(e.payload.get("fresh", 0)) for e in remembers)
+    dedup = sum(integer(e.payload.get("deduplicated", 0)) for e in remembers)
     records = fresh + dedup
     return [
         Metric("ingest.calls", len(remembers), len(remembers), "successful remember calls", "calls",
@@ -187,17 +188,17 @@ def ingest_metrics(remembers: list[Event]) -> list[Metric]:
                "Records identical to an episode already in the space (or earlier in the batch); nothing stored."),
         Metric("ingest.dedup_fraction", _share(dedup, records), records, "records offered", "share",
                "deduplicated / (fresh + deduplicated)."),
-        Metric("ingest.stored_bytes", sum(int(e.payload.get("bytes", 0)) for e in remembers), records, "records offered", "bytes",
+        Metric("ingest.stored_bytes", sum(integer(e.payload.get("bytes", 0)) for e in remembers), records, "records offered", "bytes",
                "Bytes of newly stored episode content (deduplicated records contribute none).",
                "Input bytes offered are not recorded separately yet."),
-        Metric("ingest.chunks", sum(int(e.payload.get("chunks", 0)) for e in remembers), fresh, "fresh episodes", "chunks",
+        Metric("ingest.chunks", sum(integer(e.payload.get("chunks", 0)) for e in remembers), fresh, "fresh episodes", "chunks",
                "Chunks created for fresh episodes."),
     ]
 
 
 def ledger_metrics(asserts: list[Event], closes: list[Event]) -> list[Metric]:
     outcomes = Counter(str(e.payload.get("outcome")) for e in asserts)
-    superseded = sum(len(e.payload.get("superseded") or []) for e in asserts)
+    superseded = sum(len(sequence(e.payload.get("superseded") or [])) for e in asserts)
     n = len(asserts)
     return [
         Metric("ledger.asserted", outcomes["new_active"] + outcomes["new_closed"], n, "assert_fact calls", "facts",
@@ -217,10 +218,10 @@ def ledger_metrics(asserts: list[Event], closes: list[Event]) -> list[Metric]:
 def feedback_metrics(recalls: list[Event], feedback: list[Event]) -> list[Metric]:
     latest: dict[tuple[int, int], bool] = {}
     for e in feedback:  # events arrive oldest first, so the last write wins
-        latest[(int(e.payload["recall_event_id"]), int(e.payload["chunk_id"]))] = bool(e.payload["useful"])
+        latest[(integer(e.payload["recall_event_id"]), integer(e.payload["chunk_id"]))] = bool(e.payload["useful"])
     judged = len(latest)
     useful = sum(1 for v in latest.values() if v)
-    returned = sum(len(e.payload.get("items") or []) for e in recalls)
+    returned = sum(len(sequence(e.payload.get("items") or [])) for e in recalls)
     return [
         Metric("feedback.judged_items", judged, returned, "items returned by recalls in the window", "items",
                "Distinct (recall, chunk) pairs with at least one judgement; the latest judgement per pair is kept.",
@@ -236,7 +237,7 @@ def feedback_metrics(recalls: list[Event], feedback: list[Event]) -> list[Metric
 def scope_metrics(recalls: list[Event]) -> list[Metric]:
     counts: dict[str, Counter] = defaultdict(Counter)
     for e in recalls:
-        for key, value in (e.payload.get("where") or {}).items():
+        for key, value in mapping(e.payload.get("where") or {}).items():
             counts[key][str(value)] += 1
     top = {key: dict(c.most_common(5)) for key, c in sorted(counts.items())}
     return [

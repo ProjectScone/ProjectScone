@@ -14,11 +14,15 @@ client is synchronous, so calls run in a worker thread.
 from __future__ import annotations
 
 import asyncio
-from typing import Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
 from .validation import validate_vector
+
+if TYPE_CHECKING:
+    from chromadb.api.models.Collection import Collection
+    from chromadb.api.types import Metadatas, PyEmbeddings
 
 
 class ChromaVectorIndex:
@@ -47,11 +51,11 @@ class ChromaVectorIndex:
         else:
             self.client = chromadb.EphemeralClient()
         self.collection_name = collection
-        self.collection = None
+        self.collection: Collection | None = None
         self.dim: Optional[int] = None
 
     async def ensure(self, dim: int) -> None:
-        def _ensure():
+        def _ensure() -> Collection:
             # Chroma fixes a collection's width only once data arrives; the
             # width is recorded in the collection metadata at creation so an
             # empty or reopened collection still refuses another embedder.
@@ -66,23 +70,29 @@ class ChromaVectorIndex:
         self.collection = await asyncio.to_thread(_ensure)
         self.dim = dim
 
+    def _ready_collection(self) -> Collection:
+        if self.collection is None:
+            raise RuntimeError("Chroma collection has not been initialized; call ensure first")
+        return self.collection
+
     async def upsert(self, points: Sequence[VectorPoint]) -> None:
         if not points:
             return
         for point in points:
             validate_vector(point.vector, self.dim)
-        metadatas = []
+        metadatas: Metadatas = []
         for p in points:
-            meta: dict = {"space": p.space, "episode_id": p.episode_id, "created_at": p.created_at, "created_ts": epoch_seconds(p.created_at)}
+            meta: dict[str, str | int | float | bool | list[str | int | float | bool] | None] = {"space": p.space, "episode_id": p.episode_id, "created_at": p.created_at, "created_ts": epoch_seconds(p.created_at)}
             if p.tags:
                 meta["tags"] = list(p.tags)
             for key, value in p.metadata.items():
                 meta[f"meta_{key}"] = value
             metadatas.append(meta)
+        embeddings: PyEmbeddings = [list(map(float, p.vector)) for p in points]
         await asyncio.to_thread(
-            self.collection.upsert,
+            self._ready_collection().upsert,
             ids=[str(p.chunk_id) for p in points],
-            embeddings=[list(map(float, p.vector)) for p in points],
+            embeddings=embeddings,
             metadatas=metadatas,
         )
 
@@ -104,16 +114,20 @@ class ChromaVectorIndex:
         for key, value in (where or {}).items():
             clauses.append({f"meta_{key}": {"$eq": value}})
         condition = clauses[0] if len(clauses) == 1 else {"$and": clauses}
-        if await asyncio.to_thread(self.collection.count) == 0:
+        if await asyncio.to_thread(self._ready_collection().count) == 0:
             return []  # Chroma refuses to query an empty collection
+        query_embeddings: PyEmbeddings = [list(map(float, vector))]
         response = await asyncio.to_thread(
-            self.collection.query,
-            query_embeddings=[list(map(float, vector))],
+            self._ready_collection().query,
+            query_embeddings=query_embeddings,
             n_results=limit,
             where=condition,
             include=["distances"],
         )
-        ids, distances = response["ids"][0], response["distances"][0]
+        distance_batches = response["distances"]
+        if distance_batches is None:
+            raise RuntimeError("Chroma query omitted the requested distances")
+        ids, distances = response["ids"][0], distance_batches[0]
         # Chroma reports cosine distance, 1 - cos; the port speaks similarity.
         ranked = [(int(i), 1.0 - float(d)) for i, d in zip(ids, distances)]
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
@@ -122,7 +136,7 @@ class ChromaVectorIndex:
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         if not chunk_ids:
             return
-        await asyncio.to_thread(self.collection.delete, ids=[str(int(c)) for c in chunk_ids])
+        await asyncio.to_thread(self._ready_collection().delete, ids=[str(int(c)) for c in chunk_ids])
 
     async def drop(self) -> None:
         await asyncio.to_thread(self.client.delete_collection, self.collection_name)

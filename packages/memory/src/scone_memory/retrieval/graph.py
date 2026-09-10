@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from ..core.ports import Event
+from ..observability.payload import mapping, items, integer
 
 
 @dataclass
@@ -89,17 +90,17 @@ def add_agent_event(g: Graph, e: Event) -> None:
         g.add(node)
         g.link(session, node.id, "has")
     if p.get("episode_id") is not None:
-        g.link(node.id, f"episode:{int(p['episode_id'])}", "captured_as")
+        g.link(node.id, f"episode:{integer(p['episode_id'])}", "captured_as")
 
 
 def add_recall_event(g: Graph, e: Event) -> None:
     p = e.payload
     rid = f"recall:{e.event_id}"
     g.add(Node(rid, "recall", "recall" if p.get("query_hashed") else str(p.get("query", "recall"))[:60], e.ts,
-               {"query_hashed": p.get("query_hashed"), "items": len(p.get("items") or []), "latency_ms": (p.get("latency_ms") or {}).get("total")}))
-    for item in p.get("items") or []:
+               {"query_hashed": p.get("query_hashed"), "items": len(items(p.get("items") or [])), "latency_ms": mapping(p.get("latency_ms") or {}).get("total")}))
+    for item in items(p.get("items") or []):
         cid = f"chunk:{item['chunk_id']}"
-        lanes = item.get("lanes") or {}
+        lanes = mapping(item.get("lanes") or {})
         label = "retrieval evidence: " + ", ".join(f"{lane} rank {rank}" for lane, rank in sorted(lanes.items()))
         g.link(rid, cid, "returned", label, similarity=item.get("similarity"), score=item.get("score"), lanes=lanes)
 

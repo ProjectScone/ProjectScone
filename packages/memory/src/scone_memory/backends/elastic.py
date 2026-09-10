@@ -50,8 +50,8 @@ def _client(url: str, api_key: Optional[str], client):
         raise ImportError("Elasticsearch stores need elasticsearch>=8: pip install 'scone-memory[elasticsearch]'") from e
     # A refresh per write on a small node can take a moment; wait for it
     # and retry a timed-out request rather than fail the operation.
-    options = {"request_timeout": 30, "retry_on_timeout": True, "max_retries": 3}
-    return AsyncElasticsearch(url, api_key=api_key, **options) if api_key else AsyncElasticsearch(url, **options)
+    return AsyncElasticsearch(url, api_key=api_key or None,
+                              request_timeout=30, retry_on_timeout=True, max_retries=3)
 
 
 def _same_payload(a, b) -> bool:
@@ -494,7 +494,10 @@ class ElasticsearchDocumentStore:
                                     op_type="create", refresh=self.shared.refresh)
         except ConflictError:
             pass
-        return _tombstone(await self._doc("tombstones", doc_id))
+        doc = await self._doc("tombstones", doc_id)
+        if doc is None:
+            raise RuntimeError("Elasticsearch tombstone disappeared after its write")
+        return _tombstone(doc)
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self._doc("tombstones", f"{space}|{episode_id}")
@@ -525,6 +528,8 @@ class ElasticsearchDocumentStore:
                 return _fact_link(doc)
             except ConflictError:
                 existing = await self._doc("fact_links", doc_id)
+        if existing is None:
+            raise RuntimeError("Elasticsearch fact link disappeared after a conflicting write")
         return _fact_link(existing)
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:

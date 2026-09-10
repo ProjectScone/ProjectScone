@@ -25,7 +25,7 @@ test rather than being compared as letters.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -89,12 +89,15 @@ class Condition:
         if self.test == "is":
             return found == self.value
         if self.test == "has":
+            assert isinstance(self.value, str)
             return self.value in found
         if self.test == "in":
+            assert isinstance(self.value, Collection)
             return found in self.value
         number = _stored_number(found)
         if number is None:
             return False
+        assert isinstance(self.value, (int, float))
         if self.test == "above":
             return number > self.value
         if self.test == "below":
@@ -138,6 +141,7 @@ class Condition:
         if self.test == "has":
             return self._exists(column, " AND instr(f.value, ?) > 0", [self.value])
         if self.test == "in":
+            assert isinstance(self.value, Collection)
             slots = ", ".join("?" for _ in self.value)
             return self._exists(column, f" AND f.value IN ({slots})", list(self.value))
         return self._exists(

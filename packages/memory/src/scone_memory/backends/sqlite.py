@@ -236,7 +236,7 @@ def apply_step(conn: sqlite3.Connection, version: int, path: "str | Path | None"
             conn.execute("ROLLBACK")
         raise
     finally:
-        conn.isolation_level = ""  # back to the module's default (implicit transactions)
+        conn.isolation_level = "DEFERRED"  # explicit equivalent of sqlite3's default ""
 
 
 class SchemaMismatch(SconeError):
