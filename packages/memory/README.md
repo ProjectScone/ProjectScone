@@ -2438,6 +2438,12 @@ The image refuses to start without `SCONE_API_KEY`. Its `/data` volume
 holds the SQLite file when no database is configured, and the embedder's
 model cache.
 
+## PDF ingestion
+
+The optional `pdf` extra adds native text-layer PDF ingestion, retained originals,
+and page provenance for search spans. See [PDF ingestion](docs/pdf-ingestion.md)
+for the API, limits, coverage labels and OCR limitations.
+
 ## Tests
 
 ```sh
