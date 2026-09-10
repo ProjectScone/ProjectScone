@@ -41,7 +41,17 @@ class AtomicDynamoEmulator:
 
         def request(*args: object, **kwargs: object) -> dict[str, object]:
             with self.lock:
-                return method(*args, **kwargs)
+                try:
+                    return method(*args, **kwargs)
+                finally:
+                    # Moto's dashboard trackers retain every transaction's
+                    # deep-copied table and item until mock teardown. Backend
+                    # tables own live state; drop only dashboard references.
+                    from moto.dynamodb.models.dynamo_type import Item
+                    from moto.dynamodb.models.table import Table
+
+                    for model in (Table, Item):
+                        cast(list[object], getattr(model, "instances_tracked")).clear()
 
         return request
 
@@ -63,6 +73,43 @@ def aws() -> Iterator[tuple[AwsClient, AwsClient]]:
 
 def store(aws: tuple[AwsClient, AwsClient]) -> S3BlobStore:
     return S3BlobStore("scone-test-blobs", "scone-test-blobs", region_name="us-east-1", s3_client=aws[0], dynamodb_client=aws[1])
+
+
+def test_emulator_releases_dashboard_snapshots_and_preserves_transaction_rollback(
+    aws: tuple[AwsClient, AwsClient],
+) -> None:
+    from botocore.exceptions import ClientError
+    from moto.dynamodb.models.dynamo_type import Item
+    from moto.dynamodb.models.table import Table
+
+    ddb = aws[1]
+    table = "scone-test-blobs"
+
+    def key(number: int) -> dict[str, dict[str, str]]:
+        return {"pk": {"S": str(number)}, "sk": {"S": "R"}}
+
+    def put(number: int, value: str) -> dict[str, object]:
+        return {"Put": {"TableName": table, "Item": {**key(number), "value": {"S": value}}}}
+
+    def value(number: int) -> dict[str, str]:
+        response = ddb.get_item(TableName=table, Key=key(number))
+        return cast(dict[str, dict[str, str]], response["Item"])["value"]
+
+    for number in range(3):
+        ddb.put_item(TableName=table, Item={**key(number), "value": {"S": "old"}})
+    ddb.transact_write_items(TransactItems=[put(0, "committed"), put(1, "committed")])
+    for model in (Table, Item):
+        assert not getattr(model, "instances_tracked")
+    assert value(0) == {"S": "committed"}
+
+    with pytest.raises(ClientError) as failed:
+        ddb.transact_write_items(TransactItems=[put(0, "rolled back"), {"ConditionCheck": {
+            "TableName": table, "Key": key(2), "ConditionExpression": "attribute_not_exists(pk)"}}])
+    assert failed.value.response["Error"]["Code"] == "TransactionCanceledException"
+    for model in (Table, Item):
+        assert not getattr(model, "instances_tracked")
+    assert value(0) == {"S": "committed"}
+    assert ddb.scan(TableName=table)["Count"] == 3
 
 
 async def test_shared_holds_links_restart_and_final_release(aws: tuple[AwsClient, AwsClient]) -> None:
