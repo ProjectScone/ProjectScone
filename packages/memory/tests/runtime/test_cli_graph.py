@@ -182,3 +182,17 @@ async def test_schema_prints_the_kinds_and_predicates_as_json(engine):
     assert code == 0 and {entry["predicate"] for entry in body["predicates"]} == {"works_at", "based_in", "knows"}
     code, text = await graph(engine, "schema", "--limit", "1")
     assert code == 0 and json.loads(text)["truncated"] is True
+
+
+def test_export_offers_every_format_the_library_writes():
+    from scone_memory.entities.export import EXPORT_FORMATS
+
+    graph_parser = next(action for action in build_parser()._subparsers._group_actions[0].choices["graph"]._actions
+                        if action.dest == "graph_command")
+    export = graph_parser.choices["export"]
+    assert next(action.choices for action in export._actions if action.dest == "format") == list(EXPORT_FORMATS)
+
+
+async def test_export_writes_a_timeline_graph(engine):
+    code, text = await graph(engine, "export", "--format", "gexf")
+    assert code == 0 and 'mode="dynamic"' in text and 'timeformat="dateTime"' in text

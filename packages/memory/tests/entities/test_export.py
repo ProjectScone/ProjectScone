@@ -42,7 +42,7 @@ def projection():
 
 
 def test_every_format_is_offered():
-    assert set(EXPORT_FORMATS) == {"json", "graphml", "cypher", "csv", "jsonld", "obsidian"}
+    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -140,7 +140,7 @@ def text_of(body: bytes) -> str:
     return "\n".join(bundle.read(name).decode() for name in bundle.namelist())
 
 
-@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
 def test_every_format_keeps_every_value_and_its_facts(projection, format):
     text = text_of(export_graph(projection, format).body)
     assert "May 2021" in text and "joined_on" in text
@@ -227,7 +227,7 @@ def test_cypher_and_markdown_write_control_characters_as_escapes():
     assert "\x01" not in notes and "␁" in notes
 
 
-@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
 def test_every_format_writes_whatever_the_ledger_holds(format):
     """The ledger accepts NUL and lone surrogates. No export may fail on
     them or write a file its own parser rejects."""
@@ -238,7 +238,7 @@ def test_every_format_writes_whatever_the_ledger_holds(format):
     if format in ("json", "jsonld"):
         keys = {json.dumps(item) for item in json.loads(body).get("nodes", json.loads(body).get("@graph"))}
         assert all(any(json.dumps(name.casefold())[1:-1] in key for key in keys) for name in names)
-    elif format == "graphml":
+    elif format in ("graphml", "gexf"):
         ElementTree.fromstring(body)
     elif format == "csv":
         cells = zipfile.ZipFile(io.BytesIO(body)).read("entities.csv").decode()
@@ -314,3 +314,61 @@ def test_json_ld_puts_every_statement_in_the_default_graph(projection):
     assert set(data) == {"@context", "@graph"}
     record = next(item for item in data["@graph"] if item.get("@type") == "Export")
     assert record["digest"] == projection.digest and "about" in record
+
+
+GEXF = {"g": "http://www.gexf.net/1.2draft"}
+
+
+def timed(number, subject, predicate, object_, valid_from, valid_until=None):
+    return Fact(fact_id=number, space="alpha", subject=subject, predicate=predicate, object=object_,
+                valid_from=valid_from, valid_until=valid_until, status="closed" if valid_until else "active")
+
+
+def gexf_items(projection):
+    root = ElementTree.fromstring(export_graph(projection, "gexf").body)
+    graph = root.find("g:graph", GEXF)
+    names = {attribute.get("id"): attribute.get("title") for attribute in graph.iterfind("g:attributes/g:attribute", GEXF)}
+
+    def item(element):
+        values = {names[value.get("for")]: value.get("value") for value in element.iterfind("g:attvalues/g:attvalue", GEXF)}
+        return {"label": element.get("label"), "start": element.get("start"), "end": element.get("end"), **values}
+
+    nodes = {node.get("id"): item(node) for node in graph.iterfind("g:nodes/g:node", GEXF)}
+    edges = {edge.get("id"): {**item(edge), "source": edge.get("source"), "target": edge.get("target")}
+             for edge in graph.iterfind("g:edges/g:edge", GEXF)}
+    return root, graph, nodes, edges
+
+
+def test_gexf_is_a_dynamic_graph_where_each_relation_holds_for_its_valid_time():
+    """Alice worked at Acme from 2020 until 2023, then at Beta: on Gephi's
+    timeline the Acme edge ends where the Beta edge begins, Alice stays."""
+    projection = project_entities("alpha", [
+        timed(1, "alice", "works_at", "Acme", "2020-01-01T00:00:00Z", "2023-01-01T00:00:00Z"),
+        timed(2, "alice", "works_at", "Beta", "2023-01-01T00:00:00Z"),
+        timed(3, "alice", "age", "34", "2021-06-01T00:00:00Z")], revision=1)
+    root, graph, nodes, edges = gexf_items(projection)
+    assert root.get("version") == "1.2"
+    assert (graph.get("mode"), graph.get("timeformat"), graph.get("defaultedgetype")) == ("dynamic", "dateTime", "directed")
+    by_label = {node["label"]: node for node in nodes.values()}
+    assert by_label["alice"]["start"] == "2020-01-01T00:00:00.000Z" and by_label["alice"]["end"] is None
+    assert by_label["Acme"]["end"] == "2023-01-01T00:00:00.000Z" and by_label["Beta"]["start"] == "2023-01-01T00:00:00.000Z"
+    assert by_label["34"]["type"] == "value" and by_label["34"]["start"] == "2021-06-01T00:00:00.000Z"
+    spans = {(nodes[edge["target"]]["label"], edge["start"], edge["end"]) for edge in edges.values()
+             if edge["predicate"] == "works_at"}
+    assert spans == {("Acme", "2020-01-01T00:00:00.000Z", "2023-01-01T00:00:00.000Z"),
+                     ("Beta", "2023-01-01T00:00:00.000Z", None)}
+    assert {(edge["link"], edge["fact_ids"]) for edge in edges.values()} == {("relation", "1"), ("relation", "2"),
+                                                                             ("value", "3")}
+
+
+def test_gexf_keeps_hostile_names_as_text_and_what_xml_cannot_hold_exactly(projection):
+    root, _, nodes, _ = gexf_items(projection)
+    assert HOSTILE in {node["label"] for node in nodes.values()}
+    described = json.loads(root.find("g:meta/g:description", GEXF).text)
+    assert described["digest"] == projection.digest and described["about"] == {}
+    assert export_graph(projection, "gexf").media_type == "application/gexf+xml"
+    odd = project_entities("alpha", [fact(1, "nul\x00here\rline", "knows", "Bob")], revision=1)
+    _, _, nodes, _ = gexf_items(odd)
+    shown = next(node for node in nodes.values() if node["label"].startswith("nul"))
+    assert shown["label"] == "nul\u2400here\rline" and shown["key"] == "nul\u2400here line"
+    assert json.loads(shown["exact"]) == {"label": "nul\x00here\rline", "key": "nul\x00here line"}

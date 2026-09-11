@@ -308,6 +308,9 @@ def test_an_export_holds_what_its_view_counts_and_says_what_it_read(seeded):
     assert about["status"] == "current" and about["as_of"]
     assert about["coverage"]["truncated"] is False and about["coverage"]["facts_counted"] >= 3
     assert client.get("/v1/graph/export", params={"format": "pdf"}, headers=auth()).status_code == 422
+    timeline = client.get("/v1/graph/export", params={"format": "gexf"}, headers=auth())
+    assert timeline.status_code == 200 and timeline.headers["content-type"].startswith("application/gexf+xml")
+    assert 'filename="graph.gexf"' in timeline.headers["content-disposition"] and b'mode="dynamic"' in timeline.content
     assert client.get("/v1/graph/export").status_code == 401
     assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.export"] is True
 

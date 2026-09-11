@@ -3,6 +3,9 @@
 - ``json``: node-link JSON (nodes, links, graph metadata) as graph libraries
   and d3 read it, with each node's values and degree for layout.
 - ``graphml``: GraphML XML for Gephi, yEd and NetworkX.
+- ``gexf``: a dynamic GEXF 1.2 graph for Gephi's timeline. Every entity,
+  value and relation carries the valid time it holds for, so scrubbing the
+  timeline shows the graph as the ledger says it stood.
 - ``cypher``: MERGE statements to load the graph into Neo4j or Memgraph,
   one per line. Relations are ``RELATES`` edges carrying their predicate as
   a property, so no predicate becomes query syntax.
@@ -35,8 +38,8 @@ import zipfile
 from .markdown import literal
 from .project import Entity, EntityProjection
 
-ExportFormat = Literal["json", "graphml", "cypher", "csv", "jsonld", "obsidian"]
-EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "cypher", "csv", "jsonld", "obsidian")
+ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"]
+EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -173,6 +176,90 @@ def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     # survives. The serializer writes CR only inside text, never in markup.
     body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
     return Export(body, "application/graphml+xml", "graph.graphml")
+
+
+def _held(projection: EntityProjection) -> dict[str, tuple[str, str | None]]:
+    """When each entity and value holds: from its earliest fact's start to
+    its latest fact's end, and open (None) while any of its facts still
+    holds. Instants are the projection's own, already in one format."""
+    spans: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+    value_of = {fact_id: attribute.attribute_id for attribute in projection.attributes for fact_id in attribute.fact_ids}
+    for role in projection.roles:
+        for item in (role.subject_id, role.object_id, value_of.get(role.fact_id)):
+            if item is not None:
+                spans[item].append((role.valid_from, role.valid_until))
+    held: dict[str, tuple[str, str | None]] = {}
+    for item, found in spans.items():
+        ends = [end for _, end in found]
+        held[item] = (min(start for start, _ in found), None if None in ends else max(e for e in ends if e))
+    return held
+
+
+def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """A dynamic graph: nodes and edges carry ``start`` and, once they
+    stopped holding, ``end``. Like GraphML, entities and values are both
+    nodes (``type``), a value hangs off its entity by an edge (``link``),
+    and text XML cannot hold is shown with a stand-in beside an ``exact``
+    JSON copy. The default namespace is written as a plain attribute, so
+    no parser-wide prefix is registered."""
+    held = _held(projection)
+    root = ElementTree.Element("gexf", {"xmlns": "http://www.gexf.net/1.2draft", "version": "1.2"})
+    meta = ElementTree.SubElement(root, "meta")
+    ElementTree.SubElement(meta, "creator").text = "scone"
+    ElementTree.SubElement(meta, "description").text = _NOT_XML.sub(
+        lambda match: _visible(match.group()), json.dumps({**_meta(projection), "about": dict(about)},
+                                                          ensure_ascii=False, sort_keys=True))
+    graph = ElementTree.SubElement(root, "graph", {"mode": "dynamic", "defaultedgetype": "directed",
+                                                   "timeformat": "dateTime"})
+    for target, titles in (("node", ("type", "key", "kind", "literal_kind", "exact")),
+                           ("edge", ("link", "predicate", "fact_ids", "exact"))):
+        declared = ElementTree.SubElement(graph, "attributes", {"class": target, "mode": "static"})
+        for title in titles:
+            ElementTree.SubElement(declared, "attribute", {"id": f"{target}-{title}", "title": title, "type": "string"})
+
+    def item(parent: ElementTree.Element, tag: str, ident: str, label: str, span: tuple[str, str | None],
+             values: tuple[tuple[str, str], ...], extra: dict[str, str] | None = None) -> None:
+        exact: dict[str, str] = {}
+
+        def shown(key: str, text: str) -> str:
+            safe = _NOT_XML.sub(lambda match: _visible(match.group()), text)
+            if safe != text:
+                exact[key] = text
+            return safe
+
+        timing = {"start": span[0], **({"end": span[1]} if span[1] is not None else {})}
+        element = ElementTree.SubElement(parent, tag, {"id": ident, **(extra or {}), "label": shown("label", label),
+                                                       **timing})
+        attvalues = ElementTree.SubElement(element, "attvalues")
+        for key, value in values:
+            ElementTree.SubElement(attvalues, "attvalue", {"for": f"{tag}-{key}", "value": shown(key, value)})
+        if exact:
+            ElementTree.SubElement(attvalues, "attvalue", {"for": f"{tag}-exact",
+                                                           "value": json.dumps(exact, sort_keys=True)})
+
+    unknown = ("", None)
+    nodes, edges = ElementTree.SubElement(graph, "nodes"), ElementTree.SubElement(graph, "edges")
+    for entity in projection.entities:
+        item(nodes, "node", entity.entity_id, entity.label, held.get(entity.entity_id, unknown),
+             (("type", "entity"), ("key", entity.key), ("kind", entity.kind or "")))
+    for attribute in projection.attributes:
+        item(nodes, "node", attribute.attribute_id, attribute.value, held.get(attribute.attribute_id, unknown),
+             (("type", "value"), ("literal_kind", attribute.literal_kind or "")))
+    for relation in projection.relations:
+        item(edges, "edge", relation.relation_id, relation.predicate,
+             (relation.first_valid_from, relation.last_valid_until),
+             (("link", "relation"), ("predicate", relation.predicate),
+              ("fact_ids", " ".join(map(str, relation.fact_ids)))),
+             {"source": relation.subject_id, "target": relation.object_id})
+    for attribute in projection.attributes:
+        item(edges, "edge", f"{attribute.attribute_id}:has", attribute.predicate,
+             held.get(attribute.attribute_id, unknown),
+             (("link", "value"), ("predicate", attribute.predicate),
+              ("fact_ids", " ".join(map(str, attribute.fact_ids)))),
+             {"source": attribute.entity_id, "target": attribute.attribute_id})
+    # All text is in attributes, where the serializer writes CR as &#13;.
+    return Export(ElementTree.tostring(root, encoding="utf-8", xml_declaration=True), "application/gexf+xml",
+                  "graph.gexf")
 
 
 def _cypher_text(value: object) -> str:
@@ -366,7 +453,8 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
 
 
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
-    "json": _node_link, "graphml": _graphml, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld, "obsidian": _obsidian,
+    "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
+    "obsidian": _obsidian,
 }
 
 

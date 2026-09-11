@@ -568,6 +568,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | --- | --- | --- |
 | `json` (default) | node-link JSON: `nodes`, `links`, `graph` | NetworkX, d3, custom tools |
 | `graphml` | GraphML XML | Gephi, yEd, NetworkX |
+| `gexf` | dynamic GEXF 1.2: every node and edge carries the valid time it holds for | Gephi's timeline |
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
@@ -596,6 +597,14 @@ How each format places values and escapes its own syntax:
   accepts (U+0001, U+FFFE, a lone surrogate). Text shows a control as its
   Control Pictures symbol (U+0001 as ␁) and anything else as U+FFFD, and
   that element gains an `exact` field holding its original values as JSON.
+- **GEXF** is a dynamic graph (`mode="dynamic"`, `timeformat="dateTime"`).
+  Each relation's edge starts where its first fact begins and ends where
+  its last fact stopped holding. The end is absent while any fact still
+  holds. Each entity and value spans the facts it takes part in. On
+  Gephi's timeline, a person who changed employer keeps their node, the
+  old employer's edge ends and the new one begins. Nodes, values and
+  escaping are laid out as in GraphML, and the file's description holds
+  the projection digest and `about`.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
   `[:HAS_VALUE]`, with the predicate a property, never query syntax.
   Strings escape quotes and backslashes, and write controls, line
