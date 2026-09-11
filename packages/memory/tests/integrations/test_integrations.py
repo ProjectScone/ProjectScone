@@ -222,3 +222,24 @@ async def test_openai_agents_session_keeps_the_runner_contract():
     assert items and all(i.metadata["user_id"] == "mark" for i in items) and sum(i.text == "ok" for i in items) == 2
     await session.clear_session()
     assert await session.get_items() == [] and (await engine.status("default")).episodes == 0
+
+
+LONG_QUERY = "Here is my draft itinerary for the team offsite, please read it carefully. " * 14 + "When does the Zanzibar ferry leave?"
+
+
+@langchain
+async def test_langchain_retriever_answers_a_query_longer_than_recall_accepts():
+    from scone_memory.integrations.langchain import SconeRetriever
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.remember("default", "The Zanzibar ferry leaves at 07:30 on weekdays.")
+    docs = await SconeRetriever(memory=engine, space="default").ainvoke(LONG_QUERY)
+    assert any("07:30" in doc.page_content for doc in docs)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("llama_index") is None, reason="llama-index-core not installed")
+async def test_llamaindex_retriever_answers_a_query_longer_than_recall_accepts():
+    from scone_memory.integrations.llamaindex import SconeRetriever
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.remember("default", "The Zanzibar ferry leaves at 07:30 on weekdays.")
+    found = await SconeRetriever(engine, "default").aretrieve(LONG_QUERY)
+    assert any("07:30" in node.node.get_content() for node in found)

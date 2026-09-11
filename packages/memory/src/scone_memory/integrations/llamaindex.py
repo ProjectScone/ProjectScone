@@ -15,6 +15,7 @@ from ..core.models import RecallResult
 from ..memory.sync import SyncMemoryEngine
 from .turns import item_metadata
 from ..core.errors import InvalidInput
+from ..retrieval.query_formulation import formulate_query
 from ..retrieval.reranking import validate_candidate_limit
 
 
@@ -60,11 +61,11 @@ class SconeRetriever(BaseRetriever):
     def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         if not isinstance(self.memory, SyncMemoryEngine):
             raise TypeError("retrieve() needs a SyncMemoryEngine; use aretrieve() with an async engine")
-        return nodes(self.memory.recall(self.space, query_bundle.query_str, **self._kwargs()))
+        return nodes(self.memory.recall(self.space, formulate_query(query_bundle.query_str).text, **self._kwargs()))
 
     async def _aretrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         engine = self.memory.engine if isinstance(self.memory, SyncMemoryEngine) else self.memory
-        return nodes(await engine.recall(self.space, query_bundle.query_str, **self._kwargs()))
+        return nodes(await engine.recall(self.space, formulate_query(query_bundle.query_str).text, **self._kwargs()))
 
 
 __all__ = ["SconeRetriever", "nodes"]
