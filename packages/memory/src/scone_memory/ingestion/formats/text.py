@@ -16,6 +16,7 @@ from typing import cast
 from xml.etree.ElementTree import Element
 
 from ...core.errors import InvalidInput
+from .bounded_xml import parse_xml
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 TEXT_EXTENSIONS = frozenset({
@@ -153,6 +154,8 @@ def _json(text: str, out: _Collector, prefix: str = '') -> None:
 
 def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int) -> None:
     out.check(depth)
+    if len(prefix) + 1 + len(pointer) > 4096:
+        raise InvalidInput('document source locator exceeds its limit')
     if isinstance(value, dict) and value:
         for key, child in cast(dict[str, object], value).items():
             escaped = key.replace('~', '~0').replace('/', '~1')
@@ -282,14 +285,7 @@ def _html(text: str, out: _Collector, prefix: str = '') -> str:
 
 
 def _xml(text: str, out: _Collector) -> None:
-    try:
-        from defusedxml.ElementTree import fromstring
-    except ImportError:
-        raise InvalidInput('XML documents require scone-memory[documents]') from None
-    try:
-        root: Element = fromstring(text, forbid_dtd=True)
-    except Exception:
-        raise InvalidInput('document contains malformed or unsafe XML') from None
+    root = parse_xml(text)
     _xml_element(root, f'/{root.tag}[1]', out, 0)
 
 

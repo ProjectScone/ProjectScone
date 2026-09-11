@@ -158,14 +158,17 @@ HTTP indexing is synchronous and does not automatically create a durable
 workflow journal.
 
 Parsers enforce input, extracted-text, segment, archive and execution limits.
-Office/ODF/EPUB ZIP members must use stored or deflated compression. Each XML
-member is limited to 16 MiB, 200,000 elements and nesting depth 128; the tree
+Office/ODF/EPUB ZIP members must use stored or deflated compression. Standalone
+XML and each XML archive member use the same construction limits: 16 MiB of XML,
+200,000 elements and nesting depth 128; the tree
 builder also bounds expanded names, attributes and text to 32 MiB. A raw-name
 pass limits names and namespace URIs to 1,024 bytes and attributes to 256 per
 element before namespace expansion. EPUB chapter doctypes are
 accepted without fetching external DTDs. Standard HTML entity names resolve
 locally; internal DTD subsets, custom entity declarations and external entities
 remain forbidden.
+JSON source paths are checked before descending into nested values, so oversized
+keys cannot accumulate every longer path prefix before the final locator check.
 Manifest byte size is checked before direct ingestion retains an original.
 Storage failure can still leave retained attachments; this is not an atomic
 transaction across independent stores. Python workers use isolated startup
