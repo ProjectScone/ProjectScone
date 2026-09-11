@@ -6,10 +6,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ...core.errors import InvalidInput
-from ...ocr.types import OcrRegion
+from ...ocr.types import OrderedOcrRegion
+from ...ocr.layout import ReadingOrderReceipt, validate_reading_order
 
 
-class DocumentTextRegion(OcrRegion):
+class DocumentTextRegion(OrderedOcrRegion):
     """Recognized geometry with half-open, segment-relative UTF-8 byte spans."""
     start: int = Field(ge=0, le=2_000_000)
     end: int = Field(ge=0, le=2_000_000)
@@ -59,6 +60,12 @@ def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
 
 
 def _regions(segment: DocumentSegment) -> None:
+    try:
+        raw = segment.metadata.get('ocr_reading_order')
+        receipt = ReadingOrderReceipt.model_validate_json(raw) if raw is not None else None
+        validate_reading_order(segment.regions, receipt)
+    except ValueError as error:
+        raise InvalidInput('document OCR reading order is invalid') from error
     if not segment.regions:
         return
     if len(segment.regions) > 50_000:

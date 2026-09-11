@@ -36,7 +36,7 @@ FILE_MEDIA_TYPES = {
 
 class DocumentManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
@@ -44,13 +44,24 @@ class DocumentManifest(BaseModel):
 
     @model_validator(mode='after')
     def validate_version(self) -> Self:
-        if self.schema_version == 1 and any(segment.regions for segment in self.parsed.segments):
-            raise ValueError('document regions require manifest version two')
+        _validate_manifest_version(self)
         return self
+
+
+def _validate_manifest_version(manifest: DocumentManifest) -> None:
+    if manifest.schema_version == 1 and any(segment.regions for segment in manifest.parsed.segments):
+        raise ValueError('document regions require manifest version two')
+    if manifest.schema_version < 3 and any('ocr_reading_order' in segment.metadata
+            or any(r.provider_index is not None for r in segment.regions) for segment in manifest.parsed.segments):
+        raise ValueError('document OCR reading order requires manifest version three')
 
 
 def encode_manifest(manifest: DocumentManifest) -> bytes:
     """Preserve legacy attachment and dedup identities for documents without regions."""
+    try:
+        _validate_manifest_version(manifest)
+    except ValueError as error:
+        raise InvalidInput(str(error)) from error
     if manifest.schema_version == 1:
         if any(segment.regions for segment in manifest.parsed.segments):
             raise InvalidInput('document regions require manifest version two')
@@ -101,7 +112,8 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
     except asyncio.TimeoutError:
         raise InvalidInput('document parser exceeded its wall time limit') from None
     validate_document(parsed, limits)
-    return DocumentManifest(schema_version=2 if any(s.regions for s in parsed.segments) else 1,
+    has_order = any('ocr_reading_order' in s.metadata for s in parsed.segments)
+    return DocumentManifest(schema_version=3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
                             original_sha256=digest(data), filename=filename, parsed=parsed)
 
 

@@ -6,10 +6,11 @@ from importlib.util import find_spec
 import json
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from ..core.errors import InvalidInput
-from ..ocr.types import OcrRegion
+from ..ocr.types import OrderedOcrRegion
+from ..ocr.layout import ReadingOrderReceipt, validate_reading_order
 from ..ocr.process import python_worker, run_bounded
 
 
@@ -22,7 +23,7 @@ class PdfLimits(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=120, allow_inf_nan=False)
 
 
-class PdfTextRegion(OcrRegion):
+class PdfTextRegion(OrderedOcrRegion):
     """Recognized text with absolute extracted UTF-8 offsets and raster geometry."""
     start: int = Field(ge=0, le=2_000_000)
     end: int = Field(ge=0, le=2_000_000)
@@ -46,6 +47,14 @@ class PdfPage(BaseModel):
     region_geometry: Literal['normalized_displayed_page_top_left'] = 'normalized_displayed_page_top_left'
     regions: tuple[PdfTextRegion, ...] = Field(default=(), max_length=50_000)
     ocr_engine: str | None = Field(default=None, min_length=1, max_length=96)
+    reading_order: ReadingOrderReceipt | None = None
+
+    @model_serializer(mode='wrap')
+    def preserve_legacy(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.reading_order is None:
+            value.pop('reading_order', None)
+        return value
 
 
 class ParsedPdf(BaseModel):
@@ -111,7 +120,7 @@ def validate_pdf(parsed: ParsedPdf, limits: PdfLimits, *, allow_empty: bool = Fa
             raise InvalidInput('PDF page span splits a UTF-8 character') from error
         if page.empty != (not page_text.strip()):
             raise InvalidInput('PDF page coverage does not match the extracted text')
-        if page.extraction == 'text_layer' and (page.regions or page.ocr_engine):
+        if page.extraction == 'text_layer' and (page.regions or page.ocr_engine or page.reading_order):
             raise InvalidInput('PDF text-layer page cannot contain OCR regions')
         if page.extraction == 'ocr' and (not page.ocr_engine or (not page.empty and not page.regions)):
             raise InvalidInput('PDF OCR page must identify its engine and recognized regions')
@@ -124,6 +133,10 @@ def validate_pdf(parsed: ParsedPdf, limits: PdfLimits, *, allow_empty: bool = Fa
             region_end = region.end
         if page.extraction == 'ocr' and encoded[region_end:page.end].strip():
             raise InvalidInput('PDF OCR regions do not cover the extracted text')
+        try:
+            validate_reading_order(page.regions, page.reading_order)
+        except ValueError as error:
+            raise InvalidInput(str(error)) from error
         previous_end = page.end
     if previous_end != len(encoded):
         raise InvalidInput('PDF page spans do not cover the extracted text')

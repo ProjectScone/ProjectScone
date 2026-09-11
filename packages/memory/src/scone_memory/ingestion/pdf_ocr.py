@@ -9,12 +9,13 @@ import logging
 import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, ValidationError, model_serializer
 
 from ..core.errors import InvalidInput
 from ..ocr.process import python_worker, run_bounded
 from ..ocr.tesseract import png_dimensions
 from ..ocr.types import OcrEngine, OcrResult
+from ..ocr.layout import ReadingMode, OrderedRegions, order_columns
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfTextRegion, PypdfParser, validate_pdf
 
 
@@ -34,28 +35,48 @@ class OcrPdfOptions(BaseModel):
     dpi: int = Field(default=150, ge=72, le=300)
     max_pixels: int = Field(default=20_000_000, ge=1, le=20_000_000)
     max_regions: int = Field(default=10_000, ge=1, le=50_000)
+    reading_order: ReadingMode = 'provider'
+
+    @model_serializer(mode='wrap')
+    def preserve_legacy(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.reading_order == 'provider':
+            value.pop('reading_order', None)
+        return value
 
 
-def _page_text(result: OcrResult, offset: int, max_bytes: int) -> tuple[str, tuple[PdfTextRegion, ...]]:
+def _page_text(result: OcrResult, offset: int, max_bytes: int,
+               order: OrderedRegions | None = None) -> tuple[str, tuple[PdfTextRegion, ...]]:
     parts: list[str] = []
     regions: list[PdfTextRegion] = []
     previous: tuple[int, int] | None = None
-    for region in result.regions:
+    indices = range(len(result.regions)) if order is None else order.indices
+    previous_column: int | None = None
+    for position, index in enumerate(indices):
+        region = result.regions[index]
+        column = order.columns[position] if order else None
         key = (region.block, region.line)
         separator = '' if previous is None else (' ' if previous == key else '\n')
+        if previous is not None and column != previous_column:
+            separator = '\n'
         offset += len(separator)
         end = offset + len(region.text.encode('utf-8'))
         if end > max_bytes:
             raise InvalidInput('PDF OCR text exceeds its byte limit')
         parts.extend((separator, region.text))
-        regions.append(PdfTextRegion(**region.model_dump(), start=offset, end=end))
+        regions.append(PdfTextRegion(**region.model_dump(), start=offset, end=end,
+            provider_index=index if order else None, reading_column=column))
         offset = end
         previous = key
+        previous_column = column
     return ''.join(parts), tuple(regions)
 
 
-def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], limits: PdfLimits) -> ParsedPdf:
+def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], limits: PdfLimits, *,
+                     reading_order: ReadingMode = 'provider') -> ParsedPdf:
     """Rebuild absolute UTF-8 spans from native text and validated page results."""
+    if reading_order not in ('provider', 'columns_ltr', 'columns_rtl'):
+        raise InvalidInput('unsupported OCR reading order')
     encoded = parsed.text.encode('utf-8')
     pages: list[PdfPage] = []
     texts: list[str] = []
@@ -67,15 +88,19 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
         updates: dict[str, object] = {}
         if page.number in recognized:
             result = recognized[page.number]
-            text, regions = _page_text(result, offset, limits.max_text_bytes)
-            updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions}
+            order = None if reading_order == 'provider' else order_columns(result.regions,
+                direction='rtl' if reading_order == 'columns_rtl' else 'ltr')
+            text, regions = _page_text(result, offset, limits.max_text_bytes, order)
+            updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions,
+                       'reading_order': order.receipt if order else None}
         end = offset + len(text.encode('utf-8'))
         if end > limits.max_text_bytes:
             raise InvalidInput('PDF OCR text exceeds its byte limit')
         pages.append(page.model_copy(update={**updates, 'start': offset, 'end': end, 'empty': not text.strip()}))
         texts.append(text)
         offset = end
-    output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v1', pages=tuple(pages))
+    suffix = '' if reading_order == 'provider' else f'+{reading_order}-v1'
+    output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v1{suffix}', pages=tuple(pages))
     validate_pdf(output, limits)
     return output
 
@@ -108,7 +133,9 @@ class OcrPdfParser:
                 if text_bytes > limits.max_text_bytes:
                     raise InvalidInput('PDF OCR text exceeds its byte limit')
                 recognized[page.number] = result
-        return assemble_ocr_pdf(parsed, recognized, limits)
+        output = assemble_ocr_pdf(parsed, recognized, limits, reading_order=self.options.reading_order)
+        _remaining(deadline)
+        return output
 
     async def inspect(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
         """Read native page geometry/text without recognizing missing pages."""

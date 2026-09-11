@@ -50,9 +50,11 @@ class BuiltinDocumentParser:
                     metadata={'page': str(p.number), 'extraction': p.extraction,
                               'width_points': str(p.width_points), 'height_points': str(p.height_points),
                               'rotation': str(p.rotation),
+                              **({'ocr_reading_order': p.reading_order.model_dump_json()} if p.reading_order else {}),
                               **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
                         block=r.block, line=r.line, start=r.start - p.start, end=r.end - p.start,
+                        provider_index=r.provider_index, reading_column=r.reading_column,
                         coordinate_space=p.region_geometry) for r in p.regions))
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty)})

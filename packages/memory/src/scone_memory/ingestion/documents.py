@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 class PdfManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     geometry: Literal['unrotated_media_box_points'] = 'unrotated_media_box_points'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
@@ -31,6 +31,8 @@ class PdfManifest(BaseModel):
     def consistent_version(self) -> PdfManifest:
         if self.schema_version == 1 and any(page.extraction == 'ocr' for page in self.pages):
             raise ValueError('OCR provenance requires manifest schema version 2')
+        if self.schema_version < 3 and any(page.reading_order is not None for page in self.pages):
+            raise ValueError('OCR reading order requires manifest schema version 3')
         return self
 
 
@@ -79,7 +81,8 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     parsed = await (parser or PypdfParser()).parse(data, limits)
     validate_pdf(parsed, limits)
     has_ocr = any(page.extraction == 'ocr' for page in parsed.pages)
-    manifest = PdfManifest(schema_version=2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
+    has_order = any(page.reading_order is not None for page in parsed.pages)
+    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
         parser=parsed.parser, pages=parsed.pages)
     encoded = manifest.model_dump_json(exclude=None if has_ocr else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()

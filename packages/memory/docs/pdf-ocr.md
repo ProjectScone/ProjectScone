@@ -49,7 +49,7 @@ native pages keep their text. The parser identity records when this fallback
 was needed. Encrypted/corrupt document structure, invalid page geometry and
 resource-limit violations still fail; OCR does not bypass those checks.
 
-OCR regions retain the recognizer's block and line order. Their half-open `start`
+By default OCR regions retain the recognizer's block and line order. Their half-open `start`
 and `end` offsets index UTF-8 bytes in the searchable document, including preceding
 pages. Boxes are `(left, top, right, bottom)`, normalized to `[0, 1]` in the
 **displayed, rendered page with a top-left origin**. This coordinate frame includes
@@ -66,7 +66,8 @@ not express the probability that a claim is true or that transcription is exact.
 Coverage labels are `text_layer`, `ocr`, `mixed`, or `partial` when pages remain
 empty. Blank pages and failed recognition cannot be distinguished solely by empty
 output. An entirely empty result fails before storage. Original PDF bytes remain
-unchanged. OCR uses manifest schema v2; native-text v1 manifest serialization and
+unchanged. Provider-order OCR uses manifest schema v2; inferred column order uses
+v3. Native-text v1 manifest serialization and
 deduplication identity remain unchanged. Existing v1 manifests stay readable.
 
 ## Runtime boundaries
@@ -96,6 +97,43 @@ deduplication identity remain unchanged. Existing v1 manifests stay readable.
 - Debug logging records page number, configured engine, region count and elapsed
   recognition time; it does not log document text or images. Process failures are
   ingestion errors, not memory-store outage signals.
+
+## Estimate column reading order
+
+Select `OcrPdfOptions(reading_order="columns_ltr")` for left-to-right columns or
+`"columns_rtl"` for right-to-left columns. The default `"provider"` preserves
+the recognizer's order and existing manifest/checkpoint identities.
+
+The original whitespace algorithm groups adjacent words on observed lines,
+then looks for column gutters at least six percent of the displayed page width.
+Both sides must contain at least three non-overlapping text rows and overlap
+vertically. Spanning text may precede or follow the columns; a crossing region
+inside their body prevents that split. Within each recovered column, words
+retain provider order. Column direction does not reverse letters or words.
+
+The source manifest records `reading_order` with the strategy, direction,
+column count and notes. Each output region keeps its unchanged text, box and
+recognizer score, plus `provider_index` (zero-based original position) and
+`reading_column` (one-based inferred column, or zero for spanning/unassigned
+text). UTF-8 offsets describe the reordered searchable text. PDF manifests and
+generic PDF-document manifests use version three for these observations;
+existing versions one and two remain readable and byte-stable by default.
+Generic document citations carry the receipt in `metadata.ocr_reading_order`;
+filtered citations preserve original provider indices, without renumbering.
+
+`geometry_inferred` marks an estimate. `no_separating_gutter` means the provider
+order was retained. The search considers up to 32 candidate gaps per partition
+and at most eight columns; `candidate_limit` and `column_limit` disclose those
+bounds. This does not identify tables, captions, sidebars or semantic headings.
+Tables and mixed layouts can resemble columns, so select this strategy only
+for appropriate documents and inspect the recorded geometry. Dense pages,
+rotated text, narrow gutters and mixed column bands may need another layout
+implementation. No models are downloaded or invoked by this ordering step.
+
+The selected strategy is part of OCR workflow binding. Changing it requires a
+new run id; extraction/indexing retries preserve the chosen order and source
+mapping. Page OCR checkpoints retain the original recognizer observations,
+then deterministically rebuild the ordered text on resume.
 
 ## Resume completed pages after interruption
 

@@ -208,7 +208,7 @@ class PdfOcrWorkflow:
                 recognized[page.number] = result
                 if receipt.reused_steps:
                     reused.append(page.number)
-            complete = assemble_ocr_pdf(parsed, recognized, self._limits)
+            complete = assemble_ocr_pdf(parsed, recognized, self._limits, reading_order=self._parser.options.reading_order)
             self._prepared = _PreparedParser(attachment_id, complete)
             receipt = await self._index.run(index_key, space=space, scope=self._scope,
                 inputs={'original': attachment_id, 'parsed': hashlib.sha256(complete.model_dump_json().encode()).hexdigest()})

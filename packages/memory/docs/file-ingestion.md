@@ -42,7 +42,12 @@ displaying it. Recognition scores are not factual confidence.
 Chunk citations return whole overlapping source segments and only regions
 that overlap the chunk. Region spans remain relative to the full segment,
 including after empty PDF pages are omitted. New manifests containing regions
-use schema version 2. Documents without regions retain version 1 and their
+use schema version 2, or version 3 when a PDF's optional inferred column order
+is recorded. Those regions also retain `provider_index` and `reading_column`;
+the segment's `metadata.ocr_reading_order` describes the whole page strategy,
+column count and limitations even when chunk citations return fewer regions.
+See [column reading order](pdf-ocr.md#estimate-column-reading-order).
+Documents without regions retain version 1 and their
 existing serialized attachment identities; existing version 1 evidence stays
 readable. Re-extract an old OCR document to obtain typed regions. When using a
 workflow, change its `parser_revision` and use a new run for that re-extraction.
