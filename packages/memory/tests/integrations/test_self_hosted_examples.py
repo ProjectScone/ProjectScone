@@ -56,11 +56,14 @@ def test_legacy_launcher_forwards_exactly_to_canonical_without_launching_service
     interpreter.chmod(0o755)
     for name in ("serve-self-hosted.sh", "serve-local.sh"):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    # The launchers prefer SCONE_PYTHON over the checkout's interpreter, and
+    # the gate exports it, so an inherited value would bypass the stub.
+    environment = {key: value for key, value in os.environ.items() if key != "SCONE_PYTHON"}
     outputs = []
     for name in ("serve-self-hosted.sh", "serve-local.sh"):
         capture = tmp_path / f"{name}.txt"
         subprocess.run([str(scripts / name), *arguments], check=True,
-                       env={**os.environ, "SCONE_TEST_CAPTURE": str(capture)}, capture_output=True)
+                       env={**environment, "SCONE_TEST_CAPTURE": str(capture)}, capture_output=True)
         outputs.append(capture.read_text().splitlines())
     assert outputs[0] == outputs[1]
     assert outputs[0][:3] == [str(scripts / "local_env.py"), "--env-file", str(tmp_path / ".env.local")]
