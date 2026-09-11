@@ -29,8 +29,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Sequence
 
 from ..core.timeutil import format_rfc3339, parse_rfc3339
+from ..core.validation import entity_key
 from .context import _cited, _Evidence, _fit, _reasons, one_line
-from .project import Entity, Relation
+from .classify import join_block_reason
+from .project import Entity, EntityProjection
 from .read import load_projection, read_record
 
 if TYPE_CHECKING:
@@ -74,17 +76,44 @@ def _moment(value: str, name: str) -> str:
 
 
 @dataclass(frozen=True)
+class _Claim:
+    """One claim as it held: its object as the graph draws it, an entity or
+    a value's text, and the facts behind it."""
+
+    entity: str | None
+    value: str | None
+    fact_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class _Found:
-    """One change before it is re-read: what changed, and the facts behind
-    each side of it, each to be re-read at its own moment."""
+    """One change before it is re-read: the claims under one subject and
+    predicate that held before and after it."""
 
     kind: Literal["moved", "began", "ended", "value"]
     subject: str
     predicate: str
-    #: An entity id for a relation's object; a value's texts, sorted.
-    before: str | list[str] | None
-    after: str | list[str] | None
+    before: tuple[_Claim, ...]
+    after: tuple[_Claim, ...]
+    #: The facts behind it, each side to be re-read at its own moment.
     sides: list[tuple[Literal["before", "after"], Sequence[int]]]
+
+
+def _claims(projection: EntityProjection) -> dict[tuple[str, str], dict[tuple[str, str], _Claim]]:
+    """Every claim of the projection by subject and predicate, then by its
+    object's key: an entity's key, or a value's by the one join rule. A
+    value a later fact made into an entity keeps its key, so a claim drawn
+    once as a value and once as a relation is one claim, unchanged."""
+    keys = {entity.entity_id: entity.key for entity in projection.entities}
+    claims: dict[tuple[str, str], dict[tuple[str, str], _Claim]] = defaultdict(dict)
+    for relation in projection.relations:
+        claims[(relation.subject_id, relation.predicate)][("key", keys[relation.object_id])] = _Claim(
+            relation.object_id, None, relation.fact_ids)
+    for attribute in projection.attributes:
+        key = ("key", entity_key(attribute.value)) if join_block_reason(attribute.value) is None \
+            else ("text", attribute.value)
+        claims[(attribute.entity_id, attribute.predicate)][key] = _Claim(None, attribute.value, attribute.fact_ids)
+    return claims
 
 
 def _entity(entity: Entity) -> dict[str, object]:
@@ -143,45 +172,41 @@ async def _compare(engine: "MemoryEngine", space: str, start: str, end: str, lim
     now = {entity.entity_id: entity for entity in after.entities}
     entity = {**was, **now}
 
-    # Relations present at one moment only, a single ended and began under
-    # one subject and predicate paired as a move.
-    old = {relation.relation_id: relation for relation in before.relations}
-    new = {relation.relation_id: relation for relation in after.relations}
-    ended = [relation for relation_id, relation in old.items() if relation_id not in new]
-    began = [relation for relation_id, relation in new.items() if relation_id not in old]
-    by_claim: dict[tuple[str, str], tuple[list[Relation], list[Relation]]] = defaultdict(lambda: ([], []))
-    for relation in ended:
-        by_claim[(relation.subject_id, relation.predicate)][0].append(relation)
-    for relation in began:
-        by_claim[(relation.subject_id, relation.predicate)][1].append(relation)
+    # Claims holding at one moment only, under each subject and predicate:
+    # one gone and one come is a move, values only a changed value, and
+    # the rest began and ended. What needs a read that was cut is left to
+    # what the whole read can confirm.
+    then_claims, now_claims = _claims(before), _claims(after)
     found: list[_Found] = []
-    for (subject_id, predicate), (gone, came) in by_claim.items():
-        if len(gone) == 1 and len(came) == 1 and told["moved"]:
-            found.append(_Found("moved", subject_id, predicate, gone[0].object_id, came[0].object_id,
-                                [("before", gone[0].fact_ids), ("after", came[0].fact_ids)]))
+    for subject_id, predicate in sorted(then_claims.keys() | now_claims.keys()):
+        then = then_claims.get((subject_id, predicate), {})
+        now_held = now_claims.get((subject_id, predicate), {})
+        gone = tuple(claim for key, claim in sorted(then.items()) if key not in now_held)
+        came = tuple(claim for key, claim in sorted(now_held.items()) if key not in then)
+        if not gone and not came:
             continue
-        if told["ended"]:
-            found += [_Found("ended", r.subject_id, r.predicate, r.object_id, None, [("before", r.fact_ids)])
-                      for r in gone]
-        if told["began"]:
-            found += [_Found("began", r.subject_id, r.predicate, None, r.object_id, [("after", r.fact_ids)])
-                      for r in came]
+        sides: list[tuple[Literal["before", "after"], Sequence[int]]] = [("before", c.fact_ids) for c in gone]
+        sides += [("after", c.fact_ids) for c in came]
+        if all(claim.value is not None for claim in gone + came) and told["value"]:
+            found.append(_Found("value", subject_id, predicate,
+                                tuple(c for _, c in sorted(then.items()) if c.value is not None),
+                                tuple(c for _, c in sorted(now_held.items()) if c.value is not None), sides))
+        elif len(gone) == 1 and len(came) == 1 and told["moved"]:
+            found.append(_Found("moved", subject_id, predicate, gone, came, sides))
+        else:
+            if told["ended"]:
+                found += [_Found("ended", subject_id, predicate, (c,), (), [("before", c.fact_ids)]) for c in gone]
+            if told["began"]:
+                found += [_Found("began", subject_id, predicate, (), (c,), [("after", c.fact_ids)]) for c in came]
 
-    # Values under one entity and predicate that were not what they are.
-    values: dict[tuple[str, str], tuple[dict[str, Sequence[int]], dict[str, Sequence[int]]]] = defaultdict(
-        lambda: ({}, {}))
-    for attribute in before.attributes:
-        values[(attribute.entity_id, attribute.predicate)][0][attribute.value] = attribute.fact_ids
-    for attribute in after.attributes:
-        values[(attribute.entity_id, attribute.predicate)][1][attribute.value] = attribute.fact_ids
-    for (entity_id, predicate), (then, since_now) in values.items():
-        if told["value"] and set(then) != set(since_now):
-            sides: list[tuple[Literal["before", "after"], Sequence[int]]] = [
-                ("before", fact_ids) for fact_ids in then.values()]
-            sides += [("after", fact_ids) for fact_ids in since_now.values()]
-            found.append(_Found("value", entity_id, predicate, sorted(then), sorted(since_now), sides))
+    def shown_object(claim: _Claim) -> str:
+        return one_line(entity[claim.entity].label) if claim.entity is not None else f'"{one_line(claim.value)}"'
+
+    def recorded(claim: _Claim) -> dict[str, object]:
+        return _entity(entity[claim.entity]) if claim.entity is not None else {"value": claim.value}
+
     found.sort(key=lambda item: (_ORDER[item.kind], entity[item.subject].label.casefold(), item.predicate,
-                                 str(item.after or item.before or "")))
+                                 [shown_object(claim) for claim in item.after or item.before]))
     then_evidence = _Evidence(engine, space, "current", parse_rfc3339(start), MAX_REREADS)
     now_evidence = _Evidence(engine, space, "current", parse_rfc3339(end), MAX_REREADS)
     shown: list[dict[str, object]] = []
@@ -208,18 +233,16 @@ async def _compare(engine: "MemoryEngine", space: str, start: str, end: str, lim
                                      "fact_ids": facts_cited}
         predicate = one_line(item.predicate, 60)
         if item.kind == "value":
-            record.update({"before": item.before, "after": item.after})
-            said = [", ".join(one_line(value) for value in texts) or "nothing"
-                    for texts in (item.before, item.after) if isinstance(texts, list)]
+            record.update({"before": [str(c.value) for c in item.before], "after": [str(c.value) for c in item.after]})
+            said = [", ".join(one_line(c.value) for c in claims) or "nothing" for claims in (item.before, item.after)]
             line = f"value: {_shown(subject)} {predicate} {said[0]} → {said[1]}"
         elif item.kind == "moved":
-            was_object, is_object = entity[str(item.before)], entity[str(item.after)]
-            record.update({"before": _entity(was_object), "after": _entity(is_object)})
-            line = f"moved: {_shown(subject)} {predicate} {_shown(was_object)} → {_shown(is_object)}"
+            record.update({"before": recorded(item.before[0]), "after": recorded(item.after[0])})
+            line = f"moved: {_shown(subject)} {predicate} {shown_object(item.before[0])} → {shown_object(item.after[0])}"
         else:
-            target = entity[str(item.before if item.kind == "ended" else item.after)]
-            record["object"] = _entity(target)
-            line = f"{item.kind}: {_shown(subject)} {predicate} {_shown(target)}"
+            [claim] = item.before or item.after
+            record["object"] = recorded(claim)
+            line = f"{item.kind}: {_shown(subject)} {predicate} {shown_object(claim)}"
         shown.append(record)
         lines.append(f"{line} [{_cited(facts_cited)}]")
     if stale:

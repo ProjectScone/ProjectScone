@@ -265,3 +265,36 @@ async def test_bounds_are_refused_before_anything_is_read(options, message):
     engine = await history()
     with pytest.raises(ChangesError, match=message):
         await graph_changes(engine, "alpha", **{"until": UNTIL, **options})
+
+
+async def test_a_claim_that_only_became_an_entity_has_not_changed():
+    """Alice has liked jazz since 2020. In 2023 a fact about jazz itself
+    made it an entity, so the same claim is drawn as a relation where it
+    was a value. That is how the graph shows it, not a change in it."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-01-01T00:00:00.000Z")).open()
+    await engine.assert_fact("alpha", "alice chen", "likes", "jazz", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "jazz", "genre_of", "music", valid_from="2023-01-01T00:00:00Z")
+    found = await graph_changes(engine, "alpha", since="2021-01-01T00:00:00Z", until="2024-01-01T00:00:00Z")
+    assert [(c["kind"], c["subject"]["key"], c["predicate"]) for c in found.changes] == [("value", "jazz", "genre_of")]
+
+
+async def test_a_move_from_a_value_to_an_entity_is_one_change():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-01-01T00:00:00.000Z")).open()
+    await engine.assert_fact("alpha", "alice chen", "lives_in", "n/a", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice chen", "lives_in", "Lisbon", valid_from="2023-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon", valid_from="2019-01-01T00:00:00Z")
+    found = await graph_changes(engine, "alpha", since="2021-01-01T00:00:00Z", until="2024-01-01T00:00:00Z")
+    [moved] = found.changes
+    assert moved["kind"] == "moved" and moved["before"] == {"value": "n/a"} and moved["after"]["key"] == "lisbon"
+    assert lines(found.text, "moved: ") == ['moved: alice chen lives_in "n/a" → Lisbon [facts 1, 2]']
+
+
+async def test_a_value_whose_case_carries_meaning_changes_with_its_case():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-01-01T00:00:00.000Z")).open()
+    await engine.assert_fact("alpha", "laptop", "memory", "512 MB", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "laptop", "memory", "512 mb", valid_from="2023-01-01T00:00:00Z")
+    found = await graph_changes(engine, "alpha", since="2021-01-01T00:00:00Z", until="2024-01-01T00:00:00Z")
+    assert lines(found.text, "value: ") == ["value: laptop memory 512 MB → 512 mb [facts 1, 2]"]

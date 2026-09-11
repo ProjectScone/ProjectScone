@@ -754,6 +754,13 @@ holding at `until`:
   - `began` and `ended`: relations holding at one moment and not the
     other;
   - `value`: what an entity's values under one predicate were, and are.
+- **A claim is compared as a claim,** by its subject, predicate and its
+  object's key (an entity's key, or a value's by the one join rule). The
+  graph may draw an object as a value at one moment and as an entity at
+  the next, once a fact is about it. A claim drawn both ways held
+  throughout and is no change. A move can pass between a value and an
+  entity, as in `moved: alice chen lives_in "n/a" → Lisbon`. A value
+  whose case carries meaning ("512 MB") changes when its case does.
 - **Entities.** Those that appeared and those that are gone are counted, and
   the first 50 of each are named.
 - **Citations.** Every change cites the facts behind each side, re-read at
