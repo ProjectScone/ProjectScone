@@ -620,6 +620,7 @@ class MemoryEngine:
         conditions: Mapping[str, object] | None = None,
         candidate_limit: int | None = None,
         rerank: bool = True,
+        graph_boost: bool = False,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -643,9 +644,24 @@ class MemoryEngine:
         It sees only verified retained scoped passages within separate count,
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
-        ``rerank=False`` explicitly disables the configured adapter."""
+        ``rerank=False`` explicitly disables the configured adapter.
+
+        ``graph_boost`` adds the entity lane: passages naming the question's
+        entities or their neighbours in the knowledge graph. The projection
+        is built for it within the graph budget (and kept); if it is not
+        ready in time the other lanes answer and ``degraded`` says so."""
         if self.vector_identity is not None:
             await self.check_vectors()
+        projection = None
+        unavailable = None
+        if graph_boost:
+            from ..entities.read import load_projection
+            from ..entities.service import ProjectionBuilding
+
+            try:
+                projection, _ = await load_projection(self, space, mode="current", as_of=as_of)
+            except ProjectionBuilding:
+                unavailable = "projection_building"
         runtime = RecallRuntime(
             documents=self.documents, vectors=self.vectors, embedder=self.embedder,
             clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
@@ -656,7 +672,8 @@ class MemoryEngine:
             vector_block=self.vector_block,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
-                            kind, source_prefix, since, until, conditions, candidate_limit, rerank)
+                            kind, source_prefix, since, until, conditions, candidate_limit, rerank,
+                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its

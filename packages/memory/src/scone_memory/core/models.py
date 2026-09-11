@@ -336,6 +336,19 @@ class RerankTrace(BaseModel):
     duration_ms: float
 
 
+class QueryEntity(BaseModel):
+    """An entity the entity lane searched for, and why."""
+
+    model_config = ConfigDict(frozen=True)
+    entity_id: str
+    key: str
+    label: str
+    role: Literal["seed", "neighbour"]
+    #: For a seed, the name the question used; for a neighbour, the
+    #: predicate relating it to its seed.
+    matched: str
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -357,6 +370,8 @@ class RecallResult(BaseModel):
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)
+    #: With ``graph_boost``: the entities the entity lane searched for.
+    entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
 

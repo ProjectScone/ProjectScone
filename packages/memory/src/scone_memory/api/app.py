@@ -334,7 +334,7 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "recall.graph_boost": True,
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
@@ -562,6 +562,8 @@ def create_app(
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
                                           description="Byte budget per enabled expansion stage."),
+        graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
+                                                              "entities or their neighbours in the knowledge graph."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -569,7 +571,7 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
-            candidate_limit=candidate_limit, rerank=rerank,
+            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
         response: dict[str, object] = {
             "event_id": result.event_id,
@@ -585,6 +587,8 @@ def create_app(
         }
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
+        if graph_boost:
+            response["entities"] = [entity.model_dump(mode="json") for entity in result.entities]
         if evidence_graph or graph_analysis or structural_context or multi_hop:
             from ..core.ports import TextFilter
             from ..memory.engine import normalise_metadata, normalise_tags, normalise_time

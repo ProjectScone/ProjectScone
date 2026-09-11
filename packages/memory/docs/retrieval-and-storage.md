@@ -27,6 +27,37 @@ would wrongly withhold, and that sweep is where a floor comes from.
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
 
+`graph_boost=true` adds a third lane, the entity lane, for questions whose
+answer sits one relation away. "Which city is Ana Alves's employer in?"
+is answered by a passage about her employer that names neither her nor
+any word of the question. The lane works in four steps:
+
+1. It finds the entities the question names, the longest name first.
+   Common words never count.
+2. It adds up to three neighbours of each: those the most facts relate
+   to it. At most 12 entities are used.
+3. It makes one extra lexical search for passages naming any of them,
+   under the same filters as the other lanes.
+4. It keeps a passage only if the passage really names one of them as a
+   whole word or phrase.
+
+Passages naming a neighbour but none of the question's entities rank
+first, because the other lanes cannot reach them. The lane is fused at
+weight 2 beside the others' 1. Its items carry `lanes.entity`, and the
+response lists the entities searched under `entities`.
+
+The projection is built for it within the graph budget and then kept. If
+it is not ready in time, `degraded` says `entity: projection_building`
+and the other lanes answer. The lane is off by default; with it off,
+recall is unchanged. Advertised as `recall.graph_boost`.
+
+On the synthetic bridge set (`bridge-v1`: 20 people, their employers and
+where those are based, with distractors repeating the question's words),
+the second-hop passage reaches the top five for none of the questions
+with the lane off and for all 20 with it on. A single synthetic set
+shows the mechanism works; whether it helps on real questions is for
+the retrieval benchmarks to show before the default changes.
+
 ## What survives a crash
 
 A `remember` marks the episode's identity in the document store before
