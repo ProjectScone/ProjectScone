@@ -8,10 +8,10 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same eleven contracts: `search_memory`, `add_memory`, `read_profile`,
-`trace_memory`, and the seven entity-graph reads `graph_context`,
+render the same twelve contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, and the eight entity-graph reads `graph_context`,
 `explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
-`graph_overview` and `graph_changes`. Hosts can
+`graph_overview`, `graph_changes` and `find_duplicates`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -39,7 +39,8 @@ not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
-`memory_graph_match`, `memory_graph_overview` and `memory_graph_changes`:
+`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes` and
+`memory_entity_duplicates`:
 
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. `max_bytes` (512 to
@@ -74,6 +75,9 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   that changed and entities that came and went, each citing its facts. It
   is the `/v1/graph/changes` JSON; ask it at the start of a session with
   the last one's time.
+- `find_duplicates` suggests pairs of entities that may be one thing under
+  two names, each saying why and citing the neighbours they share. It is
+  the `/v1/entities/duplicates` JSON. It merges nothing.
 
 Each reads the current projection of the box's space at one instant. The
 first three answer with the JSON that `/v1/graph/context` returns: the

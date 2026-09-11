@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, match, "
-                                     "overview, changes, export")
+                                     "overview, changes, duplicates, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -247,6 +247,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--since", required=True, help="RFC 3339 moment to compare from")
     g.add_argument("--until", help="RFC 3339 moment to compare to (default: now)")
     g.add_argument("--limit", type=int, default=50, help="changes to list (1 to 500)")
+    g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
+    g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
+    g.add_argument("--min-score", type=float, default=0.5, help="suggest only pairs at least this likely (0 to 1)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
@@ -589,6 +593,18 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         else:
             print(matched.text, file=out)
         return 0 if matched.status == "matched" else 1
+    if command == "duplicates":
+        from ..entities.duplicates import DuplicatesError, likely_duplicates
+
+        when = engine.clock()
+        try:
+            found_pairs = await likely_duplicates(engine, space, limit=args.limit, min_score=args.min_score, as_of=when,
+                                                  max_bytes=args.max_bytes)
+        except DuplicatesError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
+              else found_pairs.text, file=out)
+        return 0
     if command == "changes":
         from ..entities.changes import ChangesError, graph_changes
 

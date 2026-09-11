@@ -42,6 +42,8 @@ from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
 from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
+from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
+                                    DuplicatesError, likely_duplicates)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, OverviewError, graph_overview)
@@ -545,6 +547,31 @@ def create_server(engine: MemoryEngine, space: str = "default",
                                         limit=limit if limit is not None else DEFAULT_CHANGES,
                                         max_bytes=max_bytes if max_bytes is not None else CHANGES_BYTES)
         except ChangesError as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
+    @tool(server, "memory_entity_duplicates")
+    async def memory_entity_duplicates(
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Pairs to suggest (1..={MAX_PAIRS}); defaults to {DEFAULT_PAIRS}")
+        ] = None,
+        min_score: Annotated[
+            Optional[float], Field(description="Suggest only pairs at least this likely (0..=1); defaults to 0.5")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """Pairs of entities in the graph that may be one thing under two names
+        ("Dr. Alice Chen" and "alice chen"), each saying why and citing the
+        neighbours they share. Suggestions only: nothing is merged."""
+        try:
+            found = await likely_duplicates(engine, space or default_space,
+                                            limit=limit if limit is not None else DEFAULT_PAIRS,
+                                            min_score=min_score if min_score is not None else DEFAULT_MIN_SCORE,
+                                            max_bytes=max_bytes if max_bytes is not None else DUPLICATES_BYTES)
+        except DuplicatesError as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 

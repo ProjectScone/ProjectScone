@@ -31,9 +31,9 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-7:] == ["graph_context", "explain_entity", "connect_entities",
+    assert [tool.name for tool in MEMORY_TOOLS][-8:] == ["graph_context", "explain_entity", "connect_entities",
                                                          "graph_schema", "graph_match", "graph_overview",
-                                                         "graph_changes"]
+                                                         "graph_changes", "find_duplicates"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -186,3 +186,12 @@ async def test_graph_changes_answers_with_the_routes_changes(box):
     assert refused["ok"] is False and "before" in refused["error"]
     missing = await box.run("graph_changes", {})
     assert missing["ok"] is False and "since" in missing["error"]
+
+
+async def test_find_duplicates_answers_with_the_routes_pairs(box):
+    await box.engine.assert_fact("alpha", "dr. alice chen", "leads", "Robotics Lab", valid_from=DAY)
+    result = await box.run("find_duplicates", {"limit": 5})
+    assert result["ok"] is True and result["status"] == "found" and result["space"] == "alpha"
+    assert result["filters"] == {"status": "current", "as_of": NOW}
+    refused = await box.run("find_duplicates", {"min_score": 1.5})
+    assert refused["ok"] is False and "min_score" in refused["error"]

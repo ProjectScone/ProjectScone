@@ -305,3 +305,13 @@ async def test_changes_prints_what_changed_and_json_on_request(engine):
     assert code == 1 and json.loads(text)["status"] == "unchanged"
     with pytest.raises(InvalidInput, match="before"):
         await graph(engine, "changes", "--since", "2030-01-01T00:00:00Z")
+
+
+async def test_duplicates_prints_the_pairs_and_json_on_request(engine):
+    await engine.assert_fact("default", "dr. alice chen", "leads", "Robotics Lab", valid_from=DAY)
+    code, text = await graph(engine, "duplicates")
+    assert code == 0 and "pair: alice chen" in text
+    code, text = await graph(engine, "duplicates", "--json", "--min-score", "0.99", "--limit", "3")
+    assert code == 0 and json.loads(text)["pairs"][0]["score"] == 1.0
+    with pytest.raises(InvalidInput, match="min_score"):
+        await graph(engine, "duplicates", "--min-score", "2")

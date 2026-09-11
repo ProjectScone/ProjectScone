@@ -27,6 +27,8 @@ from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits,
 from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
+from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
+                                    likely_duplicates)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, graph_overview)
@@ -503,6 +505,22 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
             return LedgerJSONResponse(status_code=409, content=ambiguous.record(entity))
         except TimelineEntityMissing as missing:
             return LedgerJSONResponse(status_code=404, content=missing.record(entity))
+
+    @app.get("/v1/entities/duplicates")
+    async def get_duplicates(
+        limit: int = Query(default=DEFAULT_PAIRS, ge=1, le=MAX_PAIRS),
+        min_score: float = Query(default=DEFAULT_MIN_SCORE, ge=0, le=1),
+        max_bytes: int = Query(default=DUPLICATES_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """Pairs of entities that may be one thing under two names, most likely
+        first, each saying why: the same name once titles are set aside,
+        shared words or letters, initials, neighbours in common. Suggestions
+        only; nothing is merged."""
+        when = _moment(engine, as_of)
+        found = await likely_duplicates(engine, space, limit=limit, min_score=min_score, status=status, as_of=when,
+                                        max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(

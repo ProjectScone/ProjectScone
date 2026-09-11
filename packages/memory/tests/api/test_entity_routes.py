@@ -867,3 +867,20 @@ def test_the_graph_says_what_changed_between_two_moments(seeded):
     for params in ({}, {"since": "soon"}, {"since": "2024-06-01T00:00:00Z", "until": "2023-01-01T00:00:00Z"},
                    {"since": "2023-01-01T00:00:00Z", "limit": 0}, {"since": "2023-01-01T00:00:00Z", "max_bytes": 1}):
         assert client.get("/v1/graph/changes", params=params, headers=auth()).status_code == 422, params
+
+
+def test_likely_duplicates_are_suggested_with_their_reasons():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    asyncio.run(engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z"))
+    asyncio.run(engine.assert_fact("alpha", "dr. alice chen", "leads", "Robotics Lab", valid_from="2024-01-01T00:00:00Z"))
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        found = client.get("/v1/entities/duplicates", headers=auth())
+        proposals = client.get("/v1/entities/duplicates", params={"status": "proposed"}, headers=auth()).json()
+        refused = [client.get("/v1/entities/duplicates", params=params, headers=auth()).status_code
+                   for params in ({"limit": 0}, {"min_score": 2}, {"max_bytes": 1})]
+        features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    body = found.json()
+    assert found.status_code == 200 and body["status"] == "found"
+    assert (body["pairs"][0]["a"]["key"], body["pairs"][0]["b"]["key"]) == ("alice chen", "dr. alice chen")
+    assert refused == [422, 422, 422] and features["entities.duplicates"] is True
+    assert proposals["status"] == "none", "the status asked for is the one read"

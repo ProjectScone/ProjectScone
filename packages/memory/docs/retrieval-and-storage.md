@@ -509,6 +509,42 @@ found, but never claim that something is absent. Each response carries
 - an entity page adds `fact_limit` to its coverage reasons, since its
   incoming relations may be missing.
 
+#### `GET /v1/entities/duplicates`
+
+Entities that may be one thing under two names, suggested with why. The
+graph joins names by the one identity rule alone (case and spacing
+aside), because deciding that "Dr. Alice Chen" and "alice chen" are one
+person is a decision with evidence behind it. This finds the pairs worth
+that decision. Nothing is merged.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 50 (1–500) | Most pairs suggested; more are counted as `pairs_cut N` |
+| `min_score` | 0.5 (0–1) | Suggest only pairs at least this likely |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+- **Why a pair is suggested**, each reason named on the pair:
+  - the same name once titles and punctuation are set aside, which scores 1;
+  - the names share words, or are alike by their letters (three-letter
+    runs), which catches a misspelling such as "Welington";
+  - one name is the initials of the other ("IBM");
+  - neighbours in common, cited by their facts, which raise the likelihood.
+- **What keeps a pair out.** Two entities of different known kinds are never
+  suggested. Two related to each other are halved, since a thing rarely
+  points at itself under another name, and the relation is named.
+- **Candidates** come from names sharing a word, short names sharing three
+  letters, or initials. A word or letter run shared by more than 200
+  entities is too common to compare by, and is counted as
+  `blocks_skipped N`.
+- Each pair puts the likelier canonical name first: the more connected,
+  then the earlier.
+- On the graph benchmark's fixture it suggests exactly its one non-case
+  alias ("dr. alice chen") and nothing else.
+- Advertised as `entities.duplicates`. MCP `memory_entity_duplicates`, the
+  ToolBox `find_duplicates` and `scone graph duplicates` take the same
+  bounds.
+
 #### `GET /v1/graph/context`
 
 A graph context packet for a model: what the graph records around some
@@ -1026,6 +1062,7 @@ store:
 | `scone graph match --pattern S P O [--pattern …] [--returns ?X] [--status S] [--as-of T] [--apart] [--limit N]` | the rows answering a structured question, one `row:` line each; quote the `?` variables in a shell |
 | `scone graph overview [--question Q] [--limit N] [--facts N] [--resolution R]` | each community digested with cited facts |
 | `scone graph changes --since T [--until T] [--limit N]` | what changed between two moments, one line per change; exits 1 when nothing did |
+| `scone graph duplicates [--limit N] [--min-score S]` | entities that may be one thing under two names, and why; nothing is merged |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it

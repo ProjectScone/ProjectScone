@@ -29,6 +29,7 @@ from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
 from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
 from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
 from ..entities.changes import DEFAULT_CHANGES, MAX_CHANGES  # noqa: E402
+from ..entities.duplicates import DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_PAIRS  # noqa: E402
 from ..entities.view import STATUS_MODES  # noqa: E402
 
 
@@ -204,10 +205,23 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
         }, ["since"]),
     ),
+    ToolSpec(
+        name="find_duplicates",
+        summary=("Pairs of entities in the graph that may be one thing under two names, most likely first, "
+                 "each saying why and citing the neighbours they share. Suggestions only: nothing is merged."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_PAIRS,
+                      "description": f"Pairs to suggest, 1 to {MAX_PAIRS}. Defaults to {DEFAULT_PAIRS}."},
+            "min_score": {"type": "number", "minimum": 0, "maximum": 1,
+                          "description": "Suggest only pairs at least this likely, 0 to 1. Defaults to 0.5."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, []),
+    ),
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes"})
+                          "graph_overview", "graph_changes", "find_duplicates"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -355,6 +369,15 @@ class ToolBox:
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+        if name == "find_duplicates":
+            from ..entities.duplicates import MAX_BYTES as DUPLICATES_BYTES, likely_duplicates
+
+            # The schema bounds every argument as the finder does.
+            suggested = await likely_duplicates(self.engine, self.space, as_of=when,
+                                                limit=arguments.get("limit", DEFAULT_PAIRS),
+                                                min_score=arguments.get("min_score", DEFAULT_MIN_SCORE),
+                                                max_bytes=arguments.get("max_bytes", DUPLICATES_BYTES))
+            return suggested.record(self.space, status="current", as_of=when)
         if name == "graph_changes":
             from ..entities.changes import MAX_BYTES as CHANGES_BYTES, ChangesError, graph_changes
 

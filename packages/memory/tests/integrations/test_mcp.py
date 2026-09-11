@@ -37,6 +37,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_match": {"where", "returns", "limit", "status", "as_of", "together", "max_bytes", "space"},
     "memory_graph_overview": {"question", "limit", "facts", "max_bytes", "space"},
     "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
+    "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -508,6 +509,16 @@ async def test_the_changes_tool_says_what_changed_since_a_moment(server):
     assert any(line.startswith("began: alice chen works_at Acme Robotics [fact ") for line in text.splitlines())
     error, text = await call(server, "memory_graph_changes", since="soon")
     assert error and "RFC 3339" in text
+
+
+async def test_the_duplicates_tool_suggests_pairs_with_reasons(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Dr. Alice Chen leads the lab.", "dr. alice chen", "leads", "Robotics Lab")
+    error, text = await call(server, "memory_entity_duplicates")
+    assert not error and any(line.startswith("pair: alice chen") and " ~ dr. alice chen" in line
+                             for line in text.splitlines())
+    error, text = await call(server, "memory_entity_duplicates", min_score=2.0)
+    assert error and "min_score" in text
 
 
 async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(server):
