@@ -93,16 +93,17 @@ def writer_of(engine: "MemoryEngine") -> str:
 
 
 def recording(vectors: object) -> RecordsVectorWriter | None:
-    needed = ("written_by", "holds_vectors", "swap_writer", "upsert_as", "spaces_with_vectors", "ids")
+    needed = ("written_by", "holds_vectors", "swap_writer", "upsert_as", "search_as", "spaces_with_vectors", "ids")
     return cast(RecordsVectorWriter, vectors) if all(callable(getattr(vectors, name, None)) for name in needed) else None
 
 
 class GuardedVectors:
-    """A vector index whose every write goes through its writer check.
+    """A vector index whose every write and search goes through its writer check.
 
-    Everything but ``upsert`` passes straight through. Ingestion, recovery
-    and rebuilds all write through here, so none of them can put one
-    embedder's vectors under another's name.
+    Ingestion, recovery and rebuilds write through here, so none of them can
+    put one embedder's vectors under another's name. Searches check the
+    record in the same snapshot as the comparison, so a write that lands
+    while a query is being embedded cannot slip mixed vectors into it.
     """
 
     def __init__(self, inner: VectorIndex, writer: Callable[[], str]) -> None:
@@ -122,7 +123,8 @@ class GuardedVectors:
 
     async def search(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                      tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None) -> list[tuple[int, float]]:
-        return await self._inner.search(space, vector, limit, as_of, tags, where)
+        return await cast(RecordsVectorWriter, self._inner).search_as(
+            space, vector, limit, as_of, tags, where, writer=self._writer())
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         await self._inner.delete(chunk_ids)
@@ -227,16 +229,35 @@ async def rebuild(engine: "MemoryEngine") -> ReembedReport:
                                     created_at=episode.created_at, vector=vector, tags=episode.tags,
                                     metadata=episode.metadata)
                         for chunk, vector in zip(batch, embedded)], writer)
+                    # Forgetting deletes chunks before vectors. A forget that
+                    # ran while this batch was embedded has already deleted its
+                    # vectors, so the write above just put them back: take them
+                    # out again now that the chunks are gone.
+                    written = [chunk.chunk_id for chunk in batch]
+                    vanished = set(written) - await _live(engine, space, written)
+                    if vanished:
+                        await engine.vectors.delete(sorted(vanished))
                 rebuilt.update(chunk.chunk_id for chunk in stored)
                 chunks += len(stored)
             before = episodes[-1].episode_id
-        stale = [chunk_id for chunk_id in await index.ids(space) if chunk_id not in rebuilt]
+        # Vectors this rebuild did not write belong to chunks it never saw.
+        # Only those whose chunk is gone are orphans; a record added while the
+        # rebuild ran keeps its vector.
+        unseen = [chunk_id for chunk_id in await index.ids(space) if chunk_id not in rebuilt]
+        stale = sorted(set(unseen) - await _live(engine, space, unseen))
         if stale:
             await engine.vectors.delete(stale)
             orphans += len(stale)
     if not await index.swap_writer(marker, (writer, "written")):
         raise VectorWriterChanged("another embedder wrote vectors during the rebuild; run the rebuild again")
     return ReembedReport(spaces, chunks, orphans)
+
+
+async def _live(engine: "MemoryEngine", space: str, chunk_ids: Sequence[int]) -> set[int]:
+    live: set[int] = set()
+    for start in range(0, len(chunk_ids), _PAGE):
+        live.update(chunk.chunk_id for chunk in await engine.documents.get_chunks(space, chunk_ids[start:start + _PAGE]))
+    return live
 
 
 async def declare(engine: "MemoryEngine") -> VectorIdentity:

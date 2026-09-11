@@ -24,7 +24,7 @@ from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
-from ..core.vector_writers import after_write
+from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 
@@ -768,6 +768,8 @@ class SqliteVectorIndex:
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:
             raise ValueError(f"index holds {self.dim}-d vectors, embedder makes {dim}-d")
+        if self.dim == dim:
+            return  # already recorded; opening is not a write
         self.dim = dim
         self.conn.execute("INSERT OR REPLACE INTO vector_meta (key, value) VALUES ('dim', ?)", (str(dim),))
         self.conn.commit()
@@ -798,6 +800,31 @@ class SqliteVectorIndex:
         where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
+        return self._scored(space, vector, limit, as_of, tags, where)
+
+    async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                        tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
+                        writer: str) -> list[tuple[int, float]]:
+        """Search only if the record vouches for ``writer``, in one read snapshot.
+
+        WAL gives a read transaction one consistent view, so a write that
+        lands after the check cannot change what the search compares.
+        """
+        validate_vector(vector, self.dim)
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN")
+        try:
+            record = self._writer()
+            if not vouches(record, writer, self._holds_vectors()):
+                raise VectorsNotComparable(
+                    f"stored vectors are recorded as {record[0] if record else 'unrecorded'}, not {writer}")
+            return self._scored(space, vector, limit, as_of, tags, where)
+        finally:
+            self.conn.commit()
+
+    def _scored(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str],
+                tags: tuple[str, ...], where: Mapping[str, str] | None) -> list[tuple[int, float]]:
         sql = "SELECT chunk_id, tags, metadata, vector FROM vectors WHERE space = ?"
         params: list[object] = [space]
         if as_of:

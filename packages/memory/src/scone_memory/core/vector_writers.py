@@ -39,3 +39,14 @@ def after_write(current: Writer | None, writer: str, holds_vectors: bool) -> Wri
     if basis == "rebuilding" and name.startswith(f"rebuilding:{writer}:"):
         return current
     return MIXED
+
+
+class VectorsNotComparable(ValueError):
+    """The index's record does not vouch that its vectors are this writer's."""
+
+
+def vouches(current: Writer | None, writer: str, holds_vectors: bool) -> bool:
+    """True when every stored vector can be compared with ``writer``'s."""
+    if current is None:
+        return not holds_vectors
+    return current[0] == writer and current[1] in ("written", "declared")

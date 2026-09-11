@@ -19,7 +19,7 @@ from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
-from ..core.vector_writers import after_write
+from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
@@ -435,11 +435,19 @@ class InMemoryVectorIndex:
         return True
 
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
-        for point in points:
-            validate_vector(point.vector, self.dim)
-        self._writer = after_write(self._writer, writer, bool(self._points))
-        for point in points:
-            self._points[point.chunk_id] = point
+        settled = after_write(self._writer, writer, bool(self._points))
+        # Through upsert, so a subclass that changes writing still decides it;
+        # the record changes only once the write has happened.
+        await self.upsert(points)
+        self._writer = settled
+
+    async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                        tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
+                        writer: str) -> list[tuple[int, float]]:
+        if not vouches(self._writer, writer, bool(self._points)):
+            raise VectorsNotComparable(f"stored vectors are recorded as "
+                                       f"{self._writer[0] if self._writer else 'unrecorded'}, not {writer}")
+        return await self.search(space, vector, limit, as_of, tags, where)
 
     async def spaces_with_vectors(self) -> list[str]:
         return sorted({p.space for p in self._points.values()})

@@ -436,3 +436,78 @@ async def test_semantic_duplicate_search_rereads_the_writer_before_comparing(tmp
     finally:
         await rebuilder.close()
         await stale.close()
+
+
+async def test_a_foreign_write_between_the_check_and_the_search_is_caught(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    reader = await open_sqlite(path, Model("model-a"))
+    await reader.remember("space", "The Lisbon office opens in May")
+    intruder = await open_sqlite(path, Rotated("model-b"))
+
+    class WritesWhileEmbeddingTheQuery(Model):
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            vectors = await super().embed(texts)
+            if texts == ["Lisbon office"]:
+                await intruder.remember("space", "The Porto office opens in June")
+            return vectors
+
+    reader.embedder = WritesWhileEmbeddingTheQuery("model-a")
+    try:
+        result = await reader.recall("space", "Lisbon office")
+        assert any(reason.startswith("vectors:") for reason in result.degraded)
+    finally:
+        await intruder.close()
+        await reader.close()
+
+
+async def test_a_record_added_during_a_rebuild_keeps_its_vector(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    await first.remember("space", "The Lisbon office opens in May")
+    await first.remember("space", "The Porto office opens in June")
+    await first.close()
+    other = await open_sqlite(path, Rotated("model-b"))
+    added: list[int] = []
+
+    class AddsMidway(Rotated):
+        calls = 0
+
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            AddsMidway.calls += 1
+            if AddsMidway.calls == 1:
+                added.append((await other.remember("space", "The Faro office opens in July")).episode_id)
+            return await super().embed(texts)
+
+    rebuilder = await open_sqlite(path, AddsMidway("model-b"))
+    try:
+        report = await rebuilder.reembed_vectors()
+        chunks = await rebuilder.documents.chunks_of("space", added[0])
+        assert report.orphans_removed == 0
+        assert {chunk.chunk_id for chunk in chunks} <= set(await rebuilder.vectors.ids("space"))
+    finally:
+        await rebuilder.close()
+        await other.close()
+
+
+async def test_a_record_forgotten_during_a_rebuild_does_not_come_back(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    doomed = await first.remember("space", "The Lisbon office opens in May")
+    doomed_chunks = [chunk.chunk_id for chunk in await first.documents.chunks_of("space", doomed.episode_id)]
+    await first.close()
+    other = await open_sqlite(path, Model("model-a"))
+
+    class ForgetsWhileEmbedding(Rotated):
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            vectors = await super().embed(texts)
+            if texts == ["The Lisbon office opens in May"]:
+                await other.forget("space", doomed.episode_id)
+            return vectors
+
+    rebuilder = await open_sqlite(path, ForgetsWhileEmbedding("model-b"))
+    try:
+        await rebuilder.reembed_vectors()
+        assert not set(doomed_chunks) & set(await rebuilder.vectors.ids("space"))
+    finally:
+        await rebuilder.close()
+        await other.close()
