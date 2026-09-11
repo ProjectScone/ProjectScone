@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
     from .view import StatusMode
 
-_LONGEST_NAME = 6  # words
 _MAX_PAIRS = 6
 
 
@@ -121,10 +120,11 @@ def mentioned(projection: EntityProjection, question: str, *, limit: int) -> lis
     entity's name, at each position, case and punctuation aside."""
     index = name_index(projection)
     words = name_words(question)
+    longest = max((len(name.split()) for name in index), default=1)
     found: list[Entity] = []
     position = 0
     while position < len(words) and len(found) < limit:
-        for size in range(min(_LONGEST_NAME, len(words) - position), 0, -1):
+        for size in range(min(longest, len(words) - position), 0, -1):
             matches = index.get(" ".join(words[position:position + size]))
             if matches:
                 found.extend(entity for entity in matches if entity not in found)

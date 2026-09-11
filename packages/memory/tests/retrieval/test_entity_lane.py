@@ -201,3 +201,16 @@ def test_a_name_is_matched_as_whole_words_of_the_name_tokenizer():
     assert "chen" in text_phrases("Jose\u0338 mentions Chen.") and "alice chen" in text_phrases("(Alice Chen) said")
     assert "c++" in text_phrases("We write C++ daily")
 
+
+
+async def test_a_name_longer_than_six_words_is_still_matched():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
+    long_name = "Royal Society for the Protection of Birds"
+    await engine.assert_fact("alpha", "alice chen", "works_at", long_name, valid_from=DAY)
+    await engine.assert_fact("alpha", long_name.casefold(), "based_in", "Sandy", valid_from=DAY)  # a subject: a thing
+    passage = await engine.remember("alpha", f"The {long_name} opened a new wetland reserve.")
+    result = await engine.recall("alpha", "Where does Alice Chen work?", limit=5, graph_boost=True)
+    assert {entity.key for entity in result.entities} >= {"alice chen", long_name.casefold()}
+    assert any(item.episode_id == passage.episode_id and "entity" in dict(item.lanes) for item in result.items)
+    asked = await engine.recall("alpha", f"What does the {long_name} do?", limit=5, graph_boost=True)
+    assert long_name.casefold() in {entity.key for entity in asked.entities if entity.role == "seed"}

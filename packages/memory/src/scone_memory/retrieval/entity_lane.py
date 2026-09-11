@@ -70,22 +70,19 @@ def lane_entities(projection: EntityProjection, query: str) -> list[QueryEntity]
     return chosen
 
 
-_LONGEST_NAME = 6  # words
-
-
 def name_phrases(entity: Entity) -> set[str]:
     """Every spelling of an entity as its words, the way names are matched."""
     return {phrase for phrase in (" ".join(name_words(spelling)) for spelling in
                                   (entity.key, entity.label, *(form.text for form in entity.surface_forms))) if phrase}
 
 
-def text_phrases(text: str) -> set[str]:
-    """Every run of up to six words in a passage, read with the same words
-    as names and questions: a combining mark stays with its letter and a
-    symbol inside a word (C++, R&D) stays part of it."""
+def text_phrases(text: str, longest: int = 6) -> set[str]:
+    """Every run of up to ``longest`` words in a passage, read with the same
+    words as names and questions: a combining mark stays with its letter
+    and a symbol inside a word (C++, R&D) stays part of it."""
     words = name_words(text)
     return {" ".join(words[start:start + size]) for start in range(len(words))
-            for size in range(1, min(_LONGEST_NAME, len(words) - start) + 1)}
+            for size in range(1, min(longest, len(words) - start) + 1)}
 
 
 async def entity_lane(documents: DocumentStore, projection: EntityProjection, space: str, query: str, depth: int,
@@ -104,7 +101,8 @@ async def entity_lane(documents: DocumentStore, projection: EntityProjection, sp
     hits = await documents.search_text(space, lane_query, depth, scope)
     if not hits:
         return [], chosen
-    texts = {chunk.chunk_id: text_phrases(chunk.text)
+    longest = max((len(phrase.split()) for phrase in seeds | neighbours), default=1)
+    texts = {chunk.chunk_id: text_phrases(chunk.text, longest)
              for chunk in await documents.get_chunks(space, [cid for cid, _ in hits])}
     second_hop, first_hop = [], []
     for chunk_id, score in hits:
