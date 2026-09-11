@@ -69,6 +69,15 @@ history and `office:change-info` metadata are omitted. Current text, including
 tracked insertions, remains in its document order. Revision history is not
 emitted as a separate searchable view.
 
+DOCX extraction likewise omits deleted content and old move locations before
+numbering paragraphs and tables. Current insertions and move destinations remain.
+Directly hidden runs (`w:vanish`) are omitted; inherited style visibility is not
+resolved. Formatting properties do not supply text or tabs. Word ruby and Excel
+phonetic hints are omitted while their base text remains. Word nonbreaking
+hyphens and position tabs remain in extracted text. This is a text view, not a
+rendered preview; comments, footnotes and other separate DOCX parts are not yet
+extracted.
+
 Use `document_formats()` or authenticated `GET /v1/documents/formats` to
 inspect default-reader dependencies on the running installation. Availability
 does not guarantee that every valid variant of a format is supported.

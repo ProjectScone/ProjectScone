@@ -25,6 +25,20 @@ _ODF_REVISION_METADATA = frozenset({
     '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
     '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
 })
+_WORD_NAMESPACES = (
+    'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+    'http://purl.oclc.org/ooxml/wordprocessingml/main',
+)
+_RUN_METADATA = frozenset(
+    f'{{{namespace}}}{name}'
+    for namespace in _WORD_NAMESPACES
+    for name in ('del', 'moveFrom', 'pPr', 'rPr', 'rt')
+) | frozenset({
+    '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}rPh',
+    '{http://purl.oclc.org/ooxml/spreadsheetml/main}rPh',
+})
+_WORD_RUNS = frozenset(f'{{{namespace}}}r' for namespace in _WORD_NAMESPACES)
+_RUN_CHARACTERS = {'tab': '\t', 'ptab': '\t', 'br': '\n', 'cr': '\n', 'noBreakHyphen': '\u2011'}
 
 
 def _local(tag: str) -> str:
@@ -126,10 +140,34 @@ def _blocks(root: Element, names: set[str]) -> Iterator[Element]:
             stack.append(iter(child))
 
 
+def _hidden_run(element: Element) -> bool:
+    if element.tag not in _WORD_RUNS:
+        return False
+    namespace = element.tag.rsplit('}', 1)[0] + '}'
+    properties = element.find(namespace + 'rPr')
+    hidden = None if properties is None else properties.find(namespace + 'vanish')
+    return hidden is not None and hidden.get(namespace + 'val', 'true') not in {'0', 'false', 'off'}
+
+
+def _prune_run_metadata(root: Element, output: _Output) -> None:
+    stack = [root]
+    while stack:
+        output.check()
+        parent = stack.pop()
+        children = []
+        for child in parent:
+            output.check()
+            if child.tag not in _RUN_METADATA and not _hidden_run(child):
+                children.append(child)
+        parent[:] = children
+        stack.extend(children)
+
+
 def _run_text(root: Element, output: _Output) -> str:
+    _prune_run_metadata(root, output)
     return output.join(
-        (element.text or '') if _local(element.tag) == 't' else '\t' if _local(element.tag) == 'tab' else '\n'
-        for element in root.iter() if _local(element.tag) in {'t', 'tab', 'br', 'cr'}
+        (element.text or '') if _local(element.tag) == 't' else _RUN_CHARACTERS[_local(element.tag)]
+        for element in root.iter() if _local(element.tag) == 't' or _local(element.tag) in _RUN_CHARACTERS
     )
 
 
@@ -144,6 +182,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     body = _child(root, 'body')
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
+    _prune_run_metadata(body, output)
     paragraphs = tables = 0
     for block in _blocks(body, {'p', 'tbl'}):
         if _local(block.tag) == 'tbl':
