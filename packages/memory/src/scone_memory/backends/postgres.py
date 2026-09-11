@@ -180,6 +180,9 @@ class PostgresDocumentStore:
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, fact_id BIGINT NOT NULL, valid_from TEXT NOT NULL,
         recorded_at TEXT NOT NULL, confidence DOUBLE PRECISION NOT NULL, source_episode_id BIGINT,
         origin TEXT NOT NULL, quote TEXT, links TEXT NOT NULL DEFAULT '[]', UNIQUE (space, fact_id, valid_from));
+    -- A schema from the build that first kept affirmations, before they
+    -- carried links: each it holds has none.
+    ALTER TABLE {s}.fact_affirmations ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';
     CREATE TABLE IF NOT EXISTS {s}.tombstones (
         space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
         reason TEXT, PRIMARY KEY (space, episode_id));

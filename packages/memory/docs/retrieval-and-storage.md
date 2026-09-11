@@ -862,7 +862,10 @@ premise missing from the archive is dropped and counted in
 `links_skipped`. Importing an affirmation the store already keeps counts
 it in `affirmations_skipped`, and an import that adds any moves the
 revision. SQLite adds the table without changing the shared schema
-version, so older readers ignore it. On SQLite and PostgreSQL, a
+version, so older readers ignore it. A SQLite file or PostgreSQL schema
+from the build that first kept affirmations, before they carried their
+premises, gains the column when it opens, and each affirmation it holds
+has none. On SQLite and PostgreSQL, a
 placement's writes commit together or not at all. The other stores
 write them in turn, as before. The Rust core does not keep affirmations
 yet.

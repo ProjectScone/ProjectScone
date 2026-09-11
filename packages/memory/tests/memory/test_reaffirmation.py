@@ -413,3 +413,71 @@ async def test_an_archived_premise_that_cannot_be_named_is_dropped_and_counted()
     assert (summary.affirmations, summary.links_skipped) == (1, 2)
     [kept] = await target.documents.space_affirmations("alpha")
     assert kept.links == []
+
+
+OLD_AFFIRMATIONS = """
+CREATE TABLE kept AS SELECT id, space, fact_id, valid_from, recorded_at, confidence, source_episode_id, origin, quote
+  FROM fact_affirmations;
+DROP TABLE fact_affirmations;
+CREATE TABLE fact_affirmations (
+  id INTEGER PRIMARY KEY, space TEXT NOT NULL, fact_id INTEGER NOT NULL, valid_from TEXT NOT NULL,
+  recorded_at TEXT NOT NULL, confidence REAL NOT NULL, source_episode_id INTEGER, origin TEXT NOT NULL,
+  quote TEXT, UNIQUE(space, fact_id, valid_from));
+INSERT INTO fact_affirmations SELECT * FROM kept;
+DROP TABLE kept;
+"""
+
+
+async def test_a_sqlite_file_that_kept_affirmations_without_links_opens_and_keeps_them(tmp_path):
+    """A file written by the build that first kept affirmations, before
+    they carried links, opens: each old one has none, new ones keep theirs."""
+    import sqlite3
+
+    from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
+
+    path = tmp_path / "m.db"
+
+    async def opened() -> MemoryEngine:
+        return await MemoryEngine(SqliteDocumentStore(path), SqliteVectorIndex(path), HashEmbedder(),
+                                  clock=Clock()).open()
+
+    engine = await opened()
+    payroll = await engine.assert_fact("alpha", "alice", "on_payroll_of", "Acme", valid_from=day(2019))
+    acme = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from=day(2020))
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from=day(2023))
+    await engine.close()
+    with sqlite3.connect(path) as raw:
+        raw.executescript(OLD_AFFIRMATIONS)
+    engine = await opened()
+    assert [a.links for a in await engine.documents.affirmations("alpha", acme.fact_id)] == [[]]
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from=day(2027), derived_from=[payroll.fact_id])
+    await engine.assert_fact("alpha", "alice", "works_at", "Globex", valid_from=day(2021))
+    assert await intervals(engine) == [("Acme", "2019", None), ("Acme", "2020", "2021"), ("Acme", "2023", None),
+                                       ("Globex", "2021", "2023")]
+    resumed = next(fact for fact in await engine.documents.facts_for("alpha", "alice", "works_at")
+                   if fact.in_ledger and fact.valid_from.startswith("2023"))
+    [later] = await engine.documents.affirmations("alpha", resumed.fact_id)
+    assert later.links == [("derived_from", payroll.fact_id)]
+    await engine.close()
+
+
+async def test_a_postgres_schema_that_kept_affirmations_without_links_gains_them(ledger_engine):
+    documents = ledger_engine.documents
+    if type(documents).__name__ != "PostgresDocumentStore":
+        pytest.skip("the column is added when a PostgreSQL schema opens")
+    acme = await ledger_engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from=day(2020))
+    await ledger_engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from=day(2023))
+    async with documents.pool.connection() as conn:
+        await conn.execute(f"ALTER TABLE {documents.schema}.fact_affirmations DROP COLUMN links")
+    await documents.open()
+    assert [a.links for a in await documents.affirmations("alpha", acme.fact_id)] == [[]]
+
+
+@pytest.mark.parametrize("store, id_field", [("mongo", "_id"), ("elastic", "affirmation_id")])
+def test_a_document_kept_before_affirmations_carried_links_reads_with_none(store, id_field):
+    import importlib
+
+    decode = importlib.import_module(f"scone_memory.backends.{store}")._affirmation
+    kept = decode({id_field: 7, "space": "alpha", "fact_id": 3, "valid_from": "2023-01-01T00:00:00.000Z",
+                   "recorded_at": "2025-01-01T00:00:00.000Z"})
+    assert (kept.affirmation_id, kept.links) == (7, [])

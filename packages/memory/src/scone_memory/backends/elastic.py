@@ -115,7 +115,7 @@ def _affirmation(doc: Mapping) -> Affirmation:
     return Affirmation(affirmation_id=int(doc["affirmation_id"]), space=doc["space"], fact_id=int(doc["fact_id"]),
                        valid_from=doc["valid_from"], recorded_at=doc["recorded_at"],
                        confidence=float(doc.get("confidence", 1.0)), source_episode_id=doc.get("source_episode_id"),
-                       origin=doc.get("origin", "stated"), quote=doc.get("quote"), links=read_links(doc["links"]))
+                       origin=doc.get("origin", "stated"), quote=doc.get("quote"), links=read_links(doc.get("links", [])))
 
 
 def _fact_link(doc: Mapping) -> FactLink:

@@ -149,7 +149,18 @@ CREATE TRIGGER fact_writes_delete AFTER DELETE ON facts BEGIN
   ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
 COMMIT;""")
     initialize_fact_search(conn)
+    keep_affirmation_links(conn)
     return conn
+
+
+def keep_affirmation_links(conn: sqlite3.Connection) -> None:
+    """A file from the build that first kept affirmations, before they
+    carried links, gains the column; each affirmation it holds has none.
+    Checked under the write lock, so openers racing each other add it once."""
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        if "links" not in {row["name"] for row in conn.execute("PRAGMA table_info(fact_affirmations)")}:
+            conn.execute("ALTER TABLE fact_affirmations ADD COLUMN links TEXT NOT NULL DEFAULT '[]'")
 
 
 def enable_wal(conn: sqlite3.Connection, attempts: int = 100, pause_s: float = 0.02) -> None:
