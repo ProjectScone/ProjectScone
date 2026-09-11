@@ -824,3 +824,16 @@ def test_a_reader_key_may_ask_structured_questions():
     with TestClient(create_app(engine, {"reader": "default"}, roles={"reader": "read"})) as client:
         asked = client.get("/v1/graph/match", params={"where": where}, headers=auth("reader"))
     assert asked.status_code == 200 and asked.json()["status"] == "matched"
+
+
+def test_the_overview_digests_each_community_for_a_global_question(seeded):
+    client, works = seeded
+    answered = client.get("/v1/graph/overview", params={"q": "who works where?", "limit": 5}, headers=auth())
+    assert answered.status_code == 200
+    body = answered.json()
+    assert body["status"] == "prepared" and body["filters"]["question"] == "who works where?"
+    assert works.fact_id in body["communities"][0]["fact_ids"] and body["communities"][0]["matched"] == ["works"]
+    assert body["text"].splitlines()[0].startswith("overview: space alpha, current facts as of ")
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.overview"] is True
+    for params in ({"limit": 0}, {"facts": 11}, {"resolution": 0}, {"max_bytes": 100}, {"q": "q" * 2001}):
+        assert client.get("/v1/graph/overview", params=params, headers=auth()).status_code == 422, params

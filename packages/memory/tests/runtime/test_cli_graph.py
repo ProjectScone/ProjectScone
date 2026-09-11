@@ -285,3 +285,13 @@ async def test_match_answers_json_with_the_routes_record(engine):
 async def test_a_malformed_match_is_refused_before_anything_is_read(engine, arguments, complaint):
     with pytest.raises(InvalidInput, match=complaint.replace("?", r"\?")):
         await graph(engine, "match", *arguments)
+
+
+async def test_overview_prints_the_digests_and_json_on_request(engine):
+    code, text = await graph(engine, "overview", "--question", "who works where?")
+    assert code == 0 and text.startswith("overview: space default, ") and 'matched "works"' in text
+    code, text = await graph(engine, "overview", "--json", "--limit", "1", "--facts", "0")
+    body = json.loads(text)
+    assert code == 0 and len(body["communities"]) == 1 and body["communities"][0]["fact_ids"] == []
+    with pytest.raises(InvalidInput, match="limit"):
+        await graph(engine, "overview", "--limit", "0")

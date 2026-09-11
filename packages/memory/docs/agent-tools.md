@@ -8,9 +8,10 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same nine contracts: `search_memory`, `add_memory`, `read_profile`,
-`trace_memory`, and the five entity-graph reads `graph_context`,
-`explain_entity`, `connect_entities`, `graph_schema` and `graph_match`. Hosts can
+render the same ten contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, and the six entity-graph reads `graph_context`,
+`explain_entity`, `connect_entities`, `graph_schema`, `graph_match` and
+`graph_overview`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -37,8 +38,8 @@ automatically chosen winner. Quote retention is checked; factual accuracy is
 not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
-`memory_entity`, `memory_connections`, `memory_graph_schema` and
-`memory_graph_match`:
+`memory_entity`, `memory_connections`, `memory_graph_schema`,
+`memory_graph_match` and `memory_graph_overview`:
 
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. `max_bytes` (512 to
@@ -64,6 +65,10 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   as candidates. With `status: "history"`, only facts that held at one
   moment are joined unless `together` is false. `returns`, `limit`
   (1 to 100), `as_of` and `max_bytes` bound it, as the route does.
+- `graph_overview` answers a question about the whole graph: each
+  community's size, kinds, predicates, central entities and up to `facts`
+  of its facts, cited and re-read now, with the communities a `question`
+  concerns first. It is the `/v1/graph/overview` JSON.
 
 Each reads the current projection of the box's space at one instant. The
 first three answer with the JSON that `/v1/graph/context` returns: the

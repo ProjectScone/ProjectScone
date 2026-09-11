@@ -27,6 +27,8 @@ from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits,
 from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
+from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
+                                  MAX_COMMUNITIES, MAX_FACTS_EACH, graph_overview)
 from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_ROWS, MIN_BYTES, MAX_WHERE, MatchQueryError, graph_match
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
@@ -437,6 +439,24 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         except MatchQueryError as refused:
             raise InvalidInput(str(refused)) from None
         return result.record(space, status=status, as_of=when, together=together, limit=limit)
+
+    @app.get("/v1/graph/overview")
+    async def get_overview(
+        q: Optional[str] = Query(default=None, min_length=1, max_length=MAX_QUESTION),
+        limit: int = Query(default=DEFAULT_COMMUNITIES, ge=1, le=MAX_COMMUNITIES),
+        facts: int = Query(default=DEFAULT_FACTS_EACH, ge=0, le=MAX_FACTS_EACH),
+        resolution: float = Query(default=1.0, gt=0, le=10),
+        max_bytes: int = Query(default=OVERVIEW_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The graph at a glance, for a question about the whole of it: each
+        community's size, kinds, predicates, central entities and a few of
+        its facts, cited and re-read now. With ``q``, the communities it
+        concerns come first, each saying what it matched."""
+        when = _moment(engine, as_of)
+        found = await graph_overview(engine, space, question=q, limit=limit, facts_each=facts, status=status,
+                                     as_of=when, resolution=resolution, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when, question=q)
 
     @app.get("/v1/graph/sources")
     async def get_sources(

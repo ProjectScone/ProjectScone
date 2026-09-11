@@ -31,8 +31,8 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-5:] == ["graph_context", "explain_entity", "connect_entities",
-                                                         "graph_schema", "graph_match"]
+    assert [tool.name for tool in MEMORY_TOOLS][-6:] == ["graph_context", "explain_entity", "connect_entities",
+                                                         "graph_schema", "graph_match", "graph_overview"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -164,3 +164,14 @@ async def test_a_malformed_structured_question_is_a_result_the_model_can_read(bo
 async def test_graph_match_reads_its_own_space_only(box):
     result = await box.run("graph_match", {"where": [{"subject": "zed", "predicate": "works_at", "object": "?org"}]})
     assert result["ok"] is True and result["status"] == "not_found"
+
+
+async def test_graph_overview_answers_with_the_routes_digests(box):
+    result = await box.run("graph_overview", {"question": "where is acme robotics based?", "facts": 1})
+    assert result["ok"] is True and result["status"] == "prepared" and result["space"] == "alpha"
+    assert result["filters"] == {"status": "current", "as_of": NOW, "question": "where is acme robotics based?"}
+    assert "acme robotics" in result["communities"][0]["matched"]
+    refused = await box.run("graph_overview", {"facts": 11})
+    assert refused["ok"] is False and "facts" in refused["error"]
+    long = await box.run("graph_overview", {"question": "q" * 2001})
+    assert long["ok"] is False and "question must be 1 to 2000 characters" in long["error"]

@@ -27,6 +27,7 @@ MAX_ITEMS = 20
 #: The graph tools' bounds, shared with the HTTP routes, MCP and the CLI.
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
 from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
+from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
 from ..entities.view import STATUS_MODES  # noqa: E402
 
 
@@ -173,9 +174,25 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
         }, ["where"]),
     ),
+    ToolSpec(
+        name="graph_overview",
+        summary=("The entity graph at a glance, for a question about the whole of it: each community's "
+                 "size, kinds, predicates, central entities and a few of its facts, cited and re-read now. "
+                 "A question puts the communities it concerns first and says what each matched."),
+        parameters=_schema({
+            "question": {"type": "string", "description": "A question about the whole graph, if there is one."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_COMMUNITIES,
+                      "description": f"Communities to digest, 1 to {MAX_COMMUNITIES}. Defaults to {DEFAULT_COMMUNITIES}."},
+            "facts": {"type": "integer", "minimum": 0, "maximum": MAX_FACTS_EACH,
+                      "description": f"Facts cited for each, 0 to {MAX_FACTS_EACH}. Defaults to {DEFAULT_FACTS_EACH}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, []),
+    ),
 )
 
-_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match"})
+_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
+                          "graph_overview"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -323,6 +340,18 @@ class ToolBox:
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+        if name == "graph_overview":
+            from ..entities.overview import MAX_BYTES as OVERVIEW_BYTES, OverviewError, graph_overview
+
+            question = arguments.get("question")
+            try:
+                overview = await graph_overview(self.engine, self.space, question=question, as_of=when,
+                                                limit=arguments.get("limit", DEFAULT_COMMUNITIES),
+                                                facts_each=arguments.get("facts", DEFAULT_FACTS_EACH),
+                                                max_bytes=arguments.get("max_bytes", OVERVIEW_BYTES))
+            except OverviewError as refused:
+                raise InvalidInput(str(refused)) from None
+            return overview.record(self.space, status="current", as_of=when, question=question)
         if name == "graph_schema":
             return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200),
                                        max_bytes=arguments.get("max_bytes", 16_000))

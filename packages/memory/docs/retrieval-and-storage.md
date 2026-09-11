@@ -682,6 +682,42 @@ GET /v1/graph/match?where=[{"subject":"?who","predicate":"works_at","object":"?o
   `graph.match`. MCP `memory_graph_match`, the ToolBox `graph_match` and
   `scone graph match` take the same query and bounds.
 
+#### `GET /v1/graph/overview`
+
+The graph at a glance, for a question about the whole of it ("what are
+the main groups here?"), which names nothing a walk could start from.
+GraphRAG answers such global questions from summaries of each community
+that a model writes in advance and must rewrite on every change. Here
+each community is digested from the graph as it is now, with every line
+traceable to a fact, and the caller's model reads the digests.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `q` | none | A question (1–2,000 characters); the communities it concerns come first |
+| `limit` | 12 (1–50) | Communities digested; more are counted as `communities_cut N` |
+| `facts` | 3 (0–10) | Facts cited for each community |
+| `resolution` | 1 (above 0, at most 10) | How fine the communities are, as for the report |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+- **Each community** says its size and kinds, its most used predicates,
+  its cohesion, how many links leave it, and its five most central
+  entities.
+- **Its facts** are its own relations: those touching a central entity
+  first, then those with a quote behind them, then the best supported.
+  Each is re-read before it is cited, and one that stopped counting is
+  left out and counted as `stale_evidence`.
+- **A question** ranks a community by the entities it names in it (three
+  times) and the words it shares with the community's names, kinds and
+  predicates. Each community says what it `matched`. A question that
+  concerns none keeps them by size, and the text says so.
+- **Entities in no community** (no relation to another) are counted.
+- The analysis is kept per projection digest and resolution, so asking
+  again of an unchanged graph costs only the re-reads.
+- Advertised as `graph.overview`. MCP `memory_graph_overview`, the
+  ToolBox `graph_overview` and `scone graph overview` take the same
+  bounds.
+
 #### `GET /v1/graph/sources`
 
 One source followed through (`episode=`, an episode id):
@@ -871,6 +907,7 @@ store:
 | `scone graph walk NAMES… [--direction in\|out\|both] [--hops N] [--limit N]` | the entities reached from the names, each with its hop, as JSON |
 | `scone graph schema [--limit N] [--max-bytes N]` | the kinds and predicates the graph holds, as JSON |
 | `scone graph match --pattern S P O [--pattern …] [--returns ?X] [--status S] [--as-of T] [--apart] [--limit N]` | the rows answering a structured question, one `row:` line each; quote the `?` variables in a shell |
+| `scone graph overview [--question Q] [--limit N] [--facts N] [--resolution R]` | each community digested with cited facts |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
