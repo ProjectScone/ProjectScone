@@ -398,6 +398,11 @@ as it is rather than declared ahead of the facts. Advertised as
 | `limit` | 200 (1–1000) | Most predicates listed, most used first |
 | `max_bytes` | 64,000 (1,024–1,000,000) | Most bytes the listed predicates may take as JSON |
 
+Each predicate says its `cardinality`: `one` value at a time, or `many`
+held side by side where the engine was configured for it. The lines mark
+only the many-valued, since one at a time is what a predicate does
+unless someone says otherwise.
+
 The answer has four parts:
 
 - `kinds`: each entity kind with its `status` and how many entities
@@ -1284,11 +1289,13 @@ With 20,000 facts on SQLite, a view costs:
   "Acme Corp" each keep a word the other lacks, so they are not suggested,
   and nor are spellings two edits apart ("Mohammed" and "Muhammad") or in
   different scripts.
-- Every predicate is single-valued in the ledger. A new object under the
-  same subject and predicate closes the one before it, so "alice knows
-  Carol" from 2021 ends "alice knows Bob" from 2020. A graph of many-valued
-  relations (knowing, owning, attending) needs a cardinality per
-  predicate.
+- How many values a predicate holds is configured, never guessed, and a
+  predicate nobody configured holds one at a time. A predicate not named
+  in `SCONE_MANY_VALUED` (or `MemoryEngine(many_valued=...)`) closes its
+  previous value when a new one arrives, so "alice knows Carol" from 2021
+  ends "alice knows Bob" from 2020. Configuration applies to what is
+  written after it: values closed before a predicate was named stay
+  closed.
 - The drawings show at most 200 entities and 600 relations, and say what
   they left out.
 

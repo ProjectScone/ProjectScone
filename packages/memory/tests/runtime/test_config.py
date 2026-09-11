@@ -120,3 +120,16 @@ def test_a_wait_that_is_not_a_length_of_time_is_refused(value):
     with pytest.raises(InvalidInput, match="SCONE_CHAT_TIMEOUT"):
         Settings.from_env({"SCONE_CHAT_URL": "http://x/v1", "SCONE_CHAT_MODEL": "m",
                       "SCONE_CHAT_TIMEOUT": value})
+
+
+async def test_many_valued_predicates_are_configured_by_name_and_reach_every_engine():
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+    from scone_memory import HashEmbedder
+
+    settings = Settings.from_env({"SCONE_MANY_VALUED": " knows, Owns ,"})
+    assert settings.many_valued == ("knows", "Owns")
+    engine = await build_engine(settings)
+    assert engine.many_valued == frozenset({"knows", "owns"})
+    assert Settings.from_env({}).many_valued == () and (await build_engine(Settings.from_env({}))).many_valued == frozenset()
+    assert "many_valued" in ENGINE_SETTINGS
+    assert (await build_in_process_engine(settings, HashEmbedder())).many_valued == frozenset({"knows", "owns"})

@@ -57,10 +57,10 @@ def test_a_contested_kind_is_its_own_row_and_its_own_end_of_a_join():
 def test_each_predicate_says_which_kinds_it_joins_and_which_values_it_takes():
     by_name = {entry["predicate"]: entry for entry in graph_schema(projected())["predicates"]}
     assert by_name["works_at"] == {
-        "predicate": "works_at", "facts": 2, "relations": 2, "attributes": 0,
+        "predicate": "works_at", "cardinality": "one", "facts": 2, "relations": 2, "attributes": 0,
         "joins": [{"subject": "person", "object": "organisation", "relations": 2, "facts": 2}], "values": []}
     assert by_name["age"] == {
-        "predicate": "age", "facts": 2, "relations": 0, "attributes": 2, "joins": [],
+        "predicate": "age", "cardinality": "one", "facts": 2, "relations": 0, "attributes": 2, "joins": [],
         "values": [{"subject": "person", "kind": "quantity", "attributes": 2, "facts": 2}]}
     assert by_name["knows"]["joins"] == [{"subject": "person", "object": "person", "relations": 1, "facts": 1}]
     assert by_name["status"]["values"] == [{"subject": None, "kind": "value", "attributes": 1, "facts": 1}]
@@ -146,3 +146,29 @@ def test_a_byte_budget_bounds_the_listed_predicates_and_says_it_cut():
     assert sum(len(json.dumps(entry, ensure_ascii=False).encode()) + 1 for entry in listed) <= 2_000
     assert graph_schema(projected(rows), limit=3)["truncated_by"] == ["limit"]
     assert graph_schema(projected())["truncated_by"] == []
+
+
+def test_each_predicate_says_how_many_values_it_holds_at_once():
+    """One at a time unless its owner configured it to hold many; the text
+    names only the many, since one at a time is what a predicate does."""
+    from scone_memory.entities.schema import schema_lines
+
+    schema = graph_schema(projected(), many_valued=frozenset({"knows"}))
+    by_name = {entry["predicate"]: entry for entry in schema["predicates"]}
+    assert by_name["knows"]["cardinality"] == "many" and by_name["works_at"]["cardinality"] == "one"
+    lines = schema_lines(schema, header="schema", reasons=[]).splitlines()
+    assert "predicate: knows, many values at once, 1 fact: (person) -> (person) x1" in lines
+    assert "predicate: works_at, 2 facts: (person) -> (organisation) x2" in lines
+
+
+async def test_the_schema_a_surface_reads_carries_the_engines_configuration():
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.entities.schema import schema_record
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                many_valued=["knows"]).open()
+    await engine.assert_fact("alpha", "bob stone", "knows", "Alice Chen", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Porto", valid_from="2024-01-01T00:00:00Z")
+    record = await schema_record(engine, "alpha")
+    assert {entry["predicate"]: entry["cardinality"] for entry in record["predicates"]} == {
+        "knows": "many", "lives_in": "one"}

@@ -42,13 +42,15 @@ class Placement:
 
 @dataclass(frozen=True)
 class FactPlacementRuntime:
-    """Storage snapshot plus the host's clock and live placement/event hooks."""
+    """Storage snapshot plus the host's clock and live placement/event hooks,
+    and the predicates configured to hold many values at once."""
 
     documents: DocumentStore
     clock: Callable[[], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[object]]
     place: Callable[[str, str, str, str, str], Awaitable[Placement]]
     truncate: Callable[[list[Fact], str, int], Awaitable[None]]
+    many_valued: frozenset[str] = frozenset()
 
 
 async def assert_placed(
@@ -80,8 +82,11 @@ async def assert_placed(
     (inferred). ``proposed`` parks the fact for a person to approve;
     until then it is outside the ledger and answers nothing.
 
-    Every ledger fact with the same subject and predicate takes part,
-    whatever its status, so the ledger stays a partition of time:
+    Every ledger fact holding the same slot takes part, whatever its
+    status, so each slot stays a partition of time. A slot is the subject
+    and predicate, one value at a time; for a predicate configured as
+    many-valued it is the subject, predicate and object, so each value
+    holds beside the others. Nothing else decides which a predicate is:
 
     - a fact with the same object whose interval covers the start is a
       restatement and is returned unchanged;
@@ -102,6 +107,7 @@ async def assert_placed(
     check_space(space)
     subject = normalise_term(subject, "subject")
     predicate = normalise_term(predicate, "predicate")
+    cardinality = "many" if predicate in runtime.many_valued else "one"
     object = object.strip()
     if not object:
         raise InvalidInput("object must not be empty")
@@ -133,8 +139,8 @@ async def assert_placed(
         )
         await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_assert", {
-            "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
-            "outcome": "proposed", "superseded": [], "source_episode_id": source_episode_id,
+            "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "cardinality": cardinality,
+            "origin": origin, "outcome": "proposed", "superseded": [], "source_episode_id": source_episode_id,
             "grounded": fact.grounded, "latency_ms": _ms(started),
         })
         return fact
@@ -148,8 +154,9 @@ async def assert_placed(
             if affirmed:
                 await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_assert", {
-            "fact_id": placement.restates.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
-            "outcome": "restated", "affirmed": affirmed, "superseded": [], "latency_ms": _ms(started),
+            "fact_id": placement.restates.fact_id, "subject": subject, "predicate": predicate,
+            "cardinality": cardinality, "origin": origin, "outcome": "restated", "affirmed": affirmed,
+            "superseded": [], "latency_ms": _ms(started),
         })
         return placement.restates
     # The continuation, the new fact, the cut and the revision commit
@@ -168,8 +175,8 @@ async def assert_placed(
         await runtime.truncate(placement.covering, start, fact.fact_id)
         await runtime.documents.bump_revision(space)
     await runtime.emit(space, "fact_assert", {
-        "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
-        "outcome": "new_closed" if placement.bound else "new_active",
+        "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "cardinality": cardinality,
+        "origin": origin, "outcome": "new_closed" if placement.bound else "new_active",
         "superseded": [r.fact_id for r in placement.covering],
         "source_episode_id": source_episode_id,
         "latency_ms": _ms(started),
@@ -177,13 +184,15 @@ async def assert_placed(
     return fact
 
 
-async def place(documents: DocumentStore, space: str, subject: str, predicate: str, object: str, start: str, exclude_id: Optional[int] = None) -> "Placement":
+async def place(documents: DocumentStore, space: str, subject: str, predicate: str, object: str, start: str,
+                exclude_id: Optional[int] = None, *, many_valued: bool = False) -> "Placement":
     """Where a fact starting at ``start`` sits among the ledger facts
-    (active or closed) with the same subject and predicate."""
+    (active or closed) holding its slot: the same subject and predicate,
+    and for a many-valued predicate the same object too."""
     start_dt = parse_rfc3339(start)
     rivals = [
         r for r in await documents.facts_for(space, subject, predicate)
-        if r.in_ledger and r.fact_id != exclude_id
+        if r.in_ledger and r.fact_id != exclude_id and (not many_valued or r.object == object)
     ]
     covering = [r for r in rivals if _covers(r, start_dt)]
     restates = next((r for r in covering if r.object == object), None)

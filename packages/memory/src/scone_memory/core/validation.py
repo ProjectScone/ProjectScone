@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from .errors import InvalidInput
 from .timeutil import format_rfc3339, parse_rfc3339
@@ -89,6 +89,19 @@ def normalise_term(value: str, what: str) -> str:
     if not clean:
         raise InvalidInput(f"{what} must not be empty")
     return clean
+
+def many_valued_predicates(predicates: Iterable[str]) -> frozenset[str]:
+    """The predicates configured to hold many values at once, as the ledger
+    stores predicates. A lone string is refused: it would read as letters."""
+    if isinstance(predicates, (str, bytes)):
+        raise InvalidInput("many_valued takes a collection of predicates, not one string")
+    chosen = set()
+    for predicate in predicates:
+        if not isinstance(predicate, str):
+            raise InvalidInput(f"a many-valued predicate must be text, not {type(predicate).__name__}")
+        chosen.add(normalise_term(predicate, "predicate"))
+    return frozenset(chosen)
+
 
 def normalise_time(value: str) -> str:
     try:

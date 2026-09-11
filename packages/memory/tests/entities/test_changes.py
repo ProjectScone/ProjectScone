@@ -298,3 +298,15 @@ async def test_a_value_whose_case_carries_meaning_changes_with_its_case():
     await engine.assert_fact("alpha", "laptop", "memory", "512 mb", valid_from="2023-01-01T00:00:00Z")
     found = await graph_changes(engine, "alpha", since="2021-01-01T00:00:00Z", until="2024-01-01T00:00:00Z")
     assert lines(found.text, "value: ") == ["value: laptop memory 512 MB → 512 mb [facts 1, 2]"]
+
+
+async def test_a_new_value_of_a_many_valued_predicate_begins_rather_than_moves():
+    """Nothing moved: Alice knew Bob before and knows Carol as well now, so
+    the change is one that began, and Bob's claim is not reported at all."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-01-01T00:00:00.000Z"), many_valued=["knows"]).open()
+    await engine.assert_fact("alpha", "alice chen", "knows", "Bob Stone", valid_from=JAN)
+    await engine.assert_fact("alpha", "alice chen", "knows", "Carol Diaz", valid_from=MAR)
+    found = await graph_changes(engine, "alpha", since=SINCE, until=UNTIL)
+    assert [(change["kind"], change["predicate"]) for change in found.changes] == [("began", "knows")]
+    assert "began: alice chen knows Carol Diaz" in found.text

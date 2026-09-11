@@ -37,6 +37,7 @@ from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_r
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core.validation import (
     entity_key as entity_key,
+    many_valued_predicates,
     ORIGINS as ORIGINS,
     STATUSES as STATUSES,
     SPACE_NAME as SPACE_NAME,
@@ -149,6 +150,7 @@ class MemoryEngine:
         rerank_limit: int = 32,
         rerank_max_bytes: int = 64000,
         rerank_timeout: float = 1.0,
+        many_valued: Iterable[str] = (),
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
@@ -157,6 +159,9 @@ class MemoryEngine:
         if reranker is not None and not callable(getattr(reranker, "rerank", None)):
             raise InvalidInput("reranker must provide an async rerank method")
         self.reranker = reranker
+        #: Predicates configured to hold many values at once; every other
+        #: predicate holds one value at a time. Named, never inferred.
+        self.many_valued = many_valued_predicates(many_valued)
         self.rerank_limit = rerank_limit
         self.rerank_max_bytes = rerank_max_bytes
         self.rerank_timeout = rerank_timeout
@@ -888,7 +893,7 @@ class MemoryEngine:
 
     def _placement_runtime(self) -> fact_placement.FactPlacementRuntime:
         return fact_placement.FactPlacementRuntime(self.documents, self.clock, self._emit,
-            self._place, self._truncate)
+            self._place, self._truncate, self.many_valued)
 
     async def _assert_placed(
         self,
@@ -910,7 +915,8 @@ class MemoryEngine:
             origin=origin, proposed=proposed, quote=quote, links=links)
 
     async def _place(self, space: str, subject: str, predicate: str, object: str, start: str, exclude_id: Optional[int] = None) -> "_Placement":
-        return await fact_placement.place(self.documents, space, subject, predicate, object, start, exclude_id)
+        return await fact_placement.place(self.documents, space, subject, predicate, object, start, exclude_id,
+                                          many_valued=predicate in self.many_valued)
 
     async def _truncate(self, covering: list[Fact], start: str, by_fact_id: int) -> None:
         await fact_placement.truncate(self.documents, covering, start, by_fact_id)

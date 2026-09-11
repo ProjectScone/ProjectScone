@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
-from typing import TYPE_CHECKING, Iterable, cast
+from typing import TYPE_CHECKING, Collection, Iterable, cast
 
 from .context import one_line
 from .project import EntityProjection
@@ -73,11 +73,14 @@ def _size(entry: dict[str, object]) -> int:
     return len(json.dumps(entry, ensure_ascii=False).encode("utf-8", "backslashreplace")) + 1
 
 
-def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: int = MAX_BYTES) -> dict[str, object]:
+def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: int = MAX_BYTES,
+                 many_valued: Collection[str] = frozenset()) -> dict[str, object]:
     """The projection's kinds, predicates and the kinds each predicate joins,
-    most used first. Predicates are listed while there are fewer than
-    ``limit`` and their JSON fits ``max_bytes``; the rest are counted, and
-    ``truncated_by`` says which bound cut the list."""
+    most used first, each predicate saying whether it holds one value at a
+    time or, as configured in ``many_valued``, many. Predicates are listed
+    while there are fewer than ``limit`` and their JSON fits ``max_bytes``;
+    the rest are counted, and ``truncated_by`` says which bound cut the
+    list."""
     if not 1 <= limit <= MAX_PREDICATES:
         raise ValueError(f"limit must be from 1 to {MAX_PREDICATES}")
     if not 1_024 <= max_bytes <= MAX_BYTES_LIMIT:
@@ -98,7 +101,8 @@ def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: i
     entries: list[dict[str, object]] = []
     for predicate in joins.keys() | values.keys():
         joined, valued = joins.get(predicate, []), values.get(predicate, [])
-        entries.append({**_term(predicate), "facts": sum(item[2] for item in joined + valued),
+        entries.append({**_term(predicate), "cardinality": "many" if predicate in many_valued else "one",
+                        "facts": sum(item[2] for item in joined + valued),
                         "relations": len(joined), "attributes": len(valued),
                         "joins": _pairs(joined, "object", "relations"),
                         "values": _pairs(valued, "kind", "attributes")})
@@ -156,7 +160,8 @@ def schema_lines(schema: dict[str, object], *, header: str, reasons: Iterable[st
                   for join in cast(list[dict[str, object]], entry["joins"])]
         shapes += [f"{_end(value['subject'], True)} -> {_end(value['kind'], False)} x{value['attributes']}"
                    for value in cast(list[dict[str, object]], entry["values"])]
-        lines.append(f"predicate: {one_line(entry['predicate'])}, {_plural(_facts(entry), 'fact')}: "
+        many = ", many values at once" if entry.get("cardinality") == "many" else ""
+        lines.append(f"predicate: {one_line(entry['predicate'])}{many}, {_plural(_facts(entry), 'fact')}: "
                      + "; ".join(shapes))
     left = cast(int, schema["predicates_total"]) - len(cast(list[object], schema["predicates"]))
     if left:
@@ -171,7 +176,7 @@ async def schema_record(engine: "MemoryEngine", space: str, *, status: "StatusMo
     when = as_of if as_of is not None else engine.clock()
     projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
     complete, read = read_record(coverage)
-    schema = graph_schema(projection, limit=limit, max_bytes=max_bytes)
+    schema = graph_schema(projection, limit=limit, max_bytes=max_bytes, many_valued=engine.many_valued)
     # A capped read counts only the predicates it saw: the list is partial.
     cuts = (["read"] if not complete else []) + cast(list[str], schema["truncated_by"])
     return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
