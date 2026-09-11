@@ -15,6 +15,8 @@ import math
 import sqlite3
 import time
 from array import array
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -22,6 +24,7 @@ from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.vector_writers import after_write
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 
@@ -826,18 +829,65 @@ class SqliteVectorIndex:
         """Every chunk id with a vector in the space; for doctor."""
         return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
 
-    async def written_by(self) -> tuple[str, str] | None:
-        """The recorded writer of these vectors and how it came to be known."""
+    def _writer(self) -> tuple[str, str] | None:
         rows = dict(self.conn.execute(
             "SELECT key, value FROM vector_meta WHERE key IN ('embedder', 'embedder_basis')").fetchall())
         if "embedder" not in rows:
             return None
         return str(rows["embedder"]), str(rows.get("embedder_basis", "written"))
 
-    async def record_writer(self, writer: str, basis: str) -> None:
+    def _set_writer(self, record: tuple[str, str]) -> None:
         self.conn.executemany("INSERT OR REPLACE INTO vector_meta (key, value) VALUES (?, ?)",
-                              [("embedder", writer), ("embedder_basis", basis)])
+                              [("embedder", record[0]), ("embedder_basis", record[1])])
+
+    def _holds_vectors(self) -> bool:
+        return self.conn.execute("SELECT 1 FROM vectors LIMIT 1").fetchone() is not None
+
+    @contextmanager
+    def _immediate(self) -> Iterator[None]:
+        # Take the write lock before reading the record, so another process
+        # cannot write between the check and the write it guards.
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.conn.rollback()
+            raise
         self.conn.commit()
+
+    async def written_by(self) -> tuple[str, str] | None:
+        """The recorded writer of these vectors; see core.vector_writers."""
+        return self._writer()
+
+    async def holds_vectors(self) -> bool:
+        return self._holds_vectors()
+
+    async def swap_writer(self, expected: tuple[str, str] | None, record: tuple[str, str], *,
+                          require_empty: bool = False) -> bool:
+        """Replace the record only if it still reads ``expected``."""
+        with self._immediate():
+            if self._writer() != expected or (require_empty and self._holds_vectors()):
+                return False
+            self._set_writer(record)
+            return True
+
+    async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
+        """Write vectors, changing the record in the same transaction if the
+        write breaks what it claims."""
+        for point in points:
+            validate_vector(point.vector, self.dim)
+        with self._immediate():
+            current = self._writer()
+            settled = after_write(current, writer, self._holds_vectors())
+            if settled != current:
+                self._set_writer(settled)
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO vectors (chunk_id, space, episode_id, created_at, tags, metadata, vector)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(p.chunk_id, p.space, p.episode_id, p.created_at, json.dumps(list(p.tags)),
+                  json.dumps(dict(p.metadata)), array("f", p.vector).tobytes()) for p in points])
 
     async def spaces_with_vectors(self) -> list[str]:
         return [r[0] for r in self.conn.execute("SELECT DISTINCT space FROM vectors ORDER BY space")]

@@ -159,7 +159,8 @@ class MemoryEngine:
         self.rerank_max_bytes = rerank_max_bytes
         self.rerank_timeout = rerank_timeout
         self.documents = documents
-        self.vectors = vectors
+        #: Every write goes through the index's writer check when it keeps one.
+        self.vectors = vector_identity.guard(vectors, lambda: vector_identity.writer_of(self))
         self.embedder = embedder
         #: Where an attachment's bytes live. In memory unless a store is
         #: given, so an engine with no configured blob directory keeps
@@ -223,13 +224,24 @@ class MemoryEngine:
 
     @property
     def vector_block(self) -> str | None:
-        """Why stored vectors must not be compared with this engine's, or None."""
+        """Why stored vectors must not be compared with this engine's, as of the
+        last check, or None."""
         return None if self.vector_identity is None else self.vector_identity.blocked
+
+    async def check_vectors(self) -> vector_identity.VectorIdentity:
+        """Read who wrote the stored vectors now. Another process may have
+        rebuilt or written them since this engine opened."""
+        self.vector_identity = await vector_identity.observe(self)
+        return self.vector_identity
 
     async def reembed_vectors(self) -> vector_identity.ReembedReport:
         """Re-embed every stored chunk with this engine's embedder and record it
         as the writer, which turns a disabled vector lane back on."""
-        report = await vector_identity.rebuild(self)
+        try:
+            report = await vector_identity.rebuild(self)
+        except BaseException:
+            await self.check_vectors()
+            raise
         self.vector_identity = vector_identity.VectorIdentity(
             "rebuilt", vector_identity.writer_of(self), vector_identity.writer_of(self))
         return report
@@ -237,8 +249,7 @@ class MemoryEngine:
     async def adopt_vector_identity(self) -> vector_identity.VectorIdentity:
         """Vouch that vectors stored before writers were recorded came from this
         engine's embedder and settings. The declaration is recorded as such."""
-        current = self.vector_identity or await vector_identity.settle(self)
-        self.vector_identity = await vector_identity.declare(self, current)
+        self.vector_identity = await vector_identity.declare(self)
         return self.vector_identity
 
     async def close(self) -> None:
@@ -625,6 +636,8 @@ class MemoryEngine:
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
         ``rerank=False`` explicitly disables the configured adapter."""
+        if self.vector_identity is not None:
+            await self.check_vectors()
         runtime = RecallRuntime(
             documents=self.documents, vectors=self.vectors, embedder=self.embedder,
             clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,

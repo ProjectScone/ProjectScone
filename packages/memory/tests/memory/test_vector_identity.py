@@ -243,12 +243,14 @@ async def test_a_rebuild_refuses_an_embedder_that_returns_the_wrong_number_of_ve
     try:
         with pytest.raises(ValueError, match="1 texts"):
             await second.reembed_vectors()
-        assert second.vector_identity.state == "mismatch"
+        # The rebuild marked the index before its first write, so the failed
+        # attempt leaves nothing trusted, for either writer.
+        assert second.vector_identity.state == "interrupted"
     finally:
         await second.close()
     third = await open_sqlite(path, Model("model-b"))
     try:
-        assert third.vector_identity.state == "mismatch"
+        assert third.vector_identity.state == "interrupted"
     finally:
         await third.close()
 
@@ -292,3 +294,145 @@ async def test_a_rebuild_drops_vectors_whose_chunk_is_gone(tmp_path: Path) -> No
         assert 999_999 not in await second.vectors.ids("space")
     finally:
         await second.close()
+
+
+class Rotated(Model):
+    """A model whose vectors differ from Model's, so mixing shows in scores."""
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        return [vector[1:] + vector[:1] for vector in await super().embed(texts)]
+
+
+BLOCKED = {"mismatch", "unknown", "mixed", "interrupted"}
+
+
+async def test_writing_under_a_mismatch_marks_the_index_mixed(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    await first.remember("space", "The Lisbon office opens in May")
+    await first.close()
+    second = await open_sqlite(path, Rotated("model-b"))
+    try:
+        assert second.vector_identity.state == "mismatch"
+        await second.remember("space", "The Porto office opens in June")
+    finally:
+        await second.close()
+    back = await open_sqlite(path, Model("model-a"))
+    try:
+        assert back.vector_identity.state == "mixed"
+        assert any(reason.startswith("vectors:") for reason in (await back.recall("space", "office")).degraded)
+    finally:
+        await back.close()
+
+
+async def test_an_interrupted_rebuild_is_never_mistaken_for_either_writer(tmp_path: Path) -> None:
+    class FailsSecondCall(Rotated):
+        calls = 0
+
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            FailsSecondCall.calls += 1
+            if FailsSecondCall.calls == 2:
+                raise RuntimeError("embedding provider went away")
+            return await super().embed(texts)
+
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    await first.remember("space", "The Lisbon office opens in May")
+    await first.remember("space", "The Porto office opens in June")
+    await first.close()
+    second = await open_sqlite(path, FailsSecondCall("model-b"))
+    try:
+        with pytest.raises(RuntimeError, match="went away"):
+            await second.reembed_vectors()
+        assert second.vector_identity.state == "interrupted"
+    finally:
+        await second.close()
+    for embedder in (Model("model-a"), Rotated("model-b")):
+        reopened = await open_sqlite(path, embedder)
+        try:
+            assert reopened.vector_identity.state == "interrupted", embedder.id
+        finally:
+            await reopened.close()
+    finisher = await open_sqlite(path, Rotated("model-b"))
+    try:
+        await finisher.reembed_vectors()
+    finally:
+        await finisher.close()
+    done = await open_sqlite(path, Rotated("model-b"))
+    try:
+        assert done.vector_identity.state == "verified"
+    finally:
+        await done.close()
+
+
+async def test_an_engine_opened_before_another_rebuilt_stops_trusting_its_vectors(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    stale = await open_sqlite(path, Model("model-a"))
+    await stale.remember("space", "The Lisbon office opens in May")
+    rebuilder = await open_sqlite(path, Rotated("model-b"))
+    try:
+        await rebuilder.reembed_vectors()
+        result = await stale.recall("space", "Lisbon office")
+        assert any(reason.startswith("vectors:") for reason in result.degraded)
+        assert stale.vector_identity.state == "mismatch"
+        await stale.remember("space", "The Porto office opens in June")
+    finally:
+        await rebuilder.close()
+        await stale.close()
+    reopened = await open_sqlite(path, Rotated("model-b"))
+    try:
+        assert reopened.vector_identity.state == "mixed"
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.parametrize(("intruder", "finishes"), [(Model("model-a"), False), (Rotated("model-b"), True)])
+async def test_a_write_during_a_rebuild_is_judged_by_who_wrote_it(tmp_path: Path, intruder: Model, finishes: bool) -> None:
+    from scone_memory.memory.vector_identity import VectorWriterChanged
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    await first.remember("space", "The Lisbon office opens in May")
+    await first.remember("space", "The Porto office opens in June")
+    await first.close()
+    other = await MemoryEngine(SqliteDocumentStore(path), SqliteVectorIndex(path), intruder).open()
+
+    class WritesMidway(Rotated):
+        calls = 0
+
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            WritesMidway.calls += 1
+            if WritesMidway.calls == 2:
+                await other.remember("space", "The Faro office opens in July")
+            return await super().embed(texts)
+
+    rebuilder = await open_sqlite(path, WritesMidway("model-b"))
+    try:
+        if finishes:
+            await rebuilder.reembed_vectors()
+            assert rebuilder.vector_identity.state == "rebuilt"
+        else:
+            with pytest.raises(VectorWriterChanged):
+                await rebuilder.reembed_vectors()
+            assert rebuilder.vector_identity.state == "mixed"
+    finally:
+        await rebuilder.close()
+        await other.close()
+
+
+async def test_semantic_duplicate_search_rereads_the_writer_before_comparing(tmp_path: Path) -> None:
+    from scone_memory.deduplication.memory import MemoryCandidateProvider
+    from scone_memory.deduplication.types import DocumentRevision, PassageEmbedding
+    path = tmp_path / "memory.db"
+    stale = await open_sqlite(path, Model("model-a"))
+    await stale.remember("space", "The Lisbon office opens in May")
+    rebuilder = await open_sqlite(path, Rotated("model-b"))
+    try:
+        await rebuilder.reembed_vectors()
+        [vector] = await stale.embedder.embed(["The Lisbon office opens in May"])
+        with pytest.raises(ValueError, match="embedder"):
+            await MemoryCandidateProvider(stale).candidates(
+                DocumentRevision("space", "incoming", "1", "The Lisbon office opens in May"),
+                query_embeddings=(PassageEmbedding(0, 1, tuple(vector)),), embedder_id=stale.embedder.id, limit=4)
+    finally:
+        await rebuilder.close()
+        await stale.close()

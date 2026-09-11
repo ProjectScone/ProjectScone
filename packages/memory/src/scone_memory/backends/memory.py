@@ -19,6 +19,7 @@ from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
+from ..core.vector_writers import after_write
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
@@ -423,8 +424,22 @@ class InMemoryVectorIndex:
     async def written_by(self) -> tuple[str, str] | None:
         return self._writer
 
-    async def record_writer(self, writer: str, basis: str) -> None:
-        self._writer = (writer, basis)
+    async def holds_vectors(self) -> bool:
+        return bool(self._points)
+
+    async def swap_writer(self, expected: tuple[str, str] | None, record: tuple[str, str], *,
+                          require_empty: bool = False) -> bool:
+        if self._writer != expected or (require_empty and self._points):
+            return False
+        self._writer = record
+        return True
+
+    async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
+        for point in points:
+            validate_vector(point.vector, self.dim)
+        self._writer = after_write(self._writer, writer, bool(self._points))
+        for point in points:
+            self._points[point.chunk_id] = point
 
     async def spaces_with_vectors(self) -> list[str]:
         return sorted({p.space for p in self._points.values()})

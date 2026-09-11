@@ -96,39 +96,54 @@ one set of settings, and a vector's width cannot tell two embedders apart.
 SQLite and in-memory vector indexes record their writer: the embedder id
 plus whether contextual prefixes were embedded. The hash embedder's id also
 names the tokenizer version and Python's Unicode tables, because its vectors
-are hashed tokens. `MemoryEngine.open()` settles `engine.vector_identity`:
+are hashed tokens.
+
+The record is kept true. Every vector write checks it in the same
+transaction (SQLite takes its write lock first). A write by a different
+embedder turns the record to `mixed` instead of leaving another writer's
+name over vectors it did not make. A rebuild marks the index `rebuilding`
+before its first write, and records its writer only if that marker is still
+there at the end. The engine reads the record before every recall and every
+semantic duplicate search, not only when it opens, so an engine that
+another process rebuilt underneath stops trusting its vectors at once.
 
 | State | Meaning | Vector lane |
 | --- | --- | --- |
-| `verified` | The index records this engine's writer, or held no vectors | on |
+| `verified` | The index records this engine's writer | on |
 | `rebuilt` | This engine re-embedded every stored chunk and recorded itself | on |
 | `declared` | An operator vouched for vectors stored before writers were recorded | on |
 | `mismatch` | Another writer is recorded | off |
-| `unknown` | Vectors exist and no writer is recorded | off |
+| `unknown` | Some vectors have no recorded writer | off |
+| `mixed` | Vectors from more than one writer | off |
+| `interrupted` | A rebuild began and never finished | off |
 | `unverifiable` | The index cannot record a writer | on, as before |
 
-With the lane off, recall still answers from the lexical lane and reports
-`vectors: embedder mismatch …` or `vectors: embedder unknown …` in `degraded`,
-and semantic duplicate detection refuses rather than comparing. Nothing is
-mixed. The hash embedder is local, free and deterministic, so a store it
-wrote under other rules is re-embedded on open, like a derived index. Any
-other embedder may be slow or paid, so it is rebuilt only on request:
+With the lane off, recall still answers from the lexical lane and names the
+reason in `degraded` (for example `vectors: embedder mixed: …`), and
+semantic duplicate detection refuses rather than comparing. The hash
+embedder is local, free and deterministic, so a store it cannot trust is
+re-embedded on open, like a derived index. Any other embedder may be slow or
+paid, so it is rebuilt only on request:
 
 ```bash
 scone vectors            # state, recorded writer, this engine's writer
 scone vectors --reembed  # re-embed every stored chunk, drop orphan vectors, record the writer
-scone vectors --adopt    # vouch for unrecorded vectors (recorded as declared)
+scone vectors --adopt    # vouch for vectors no one recorded (recorded as declared)
 ```
 
-The same operations are `MemoryEngine.reembed_vectors()` and
-`MemoryEngine.adopt_vector_identity()`. A rebuild records its writer last,
-so an interrupted rebuild is simply run again. `--adopt` applies only to
-vectors with no recorded writer; a different recorded writer can only be
-rebuilt. Other vector indexes (Qdrant, Chroma, LanceDB, Milvus, PostgreSQL,
-Redis, Elasticsearch, OpenSearch, ElastiCache and bridged LangChain stores)
-do not yet record a writer. They report `unverifiable` and keep their
-previous behaviour, so switching embedders on them still requires emptying
-or rebuilding the index yourself.
+The same operations are `MemoryEngine.reembed_vectors()`,
+`MemoryEngine.adopt_vector_identity()` and `MemoryEngine.check_vectors()`.
+An interrupted rebuild is simply run again. `--adopt` applies only to
+`unknown` vectors, and only if any vectors written since then came from this
+same embedder; a recorded different writer, a mix or an unfinished rebuild
+can only be rebuilt. If another embedder writes during a rebuild, the
+rebuild fails with `VectorWriterChanged` and the record stays `mixed`.
+
+Other vector indexes (Qdrant, Chroma, LanceDB, Milvus, PostgreSQL, Redis,
+Elasticsearch, OpenSearch, ElastiCache and bridged LangChain stores) do not
+yet record a writer. They report `unverifiable` and keep their previous
+behaviour, so switching embedders on them still requires emptying or
+rebuilding the index yourself.
 
 ## Indexed fact recall
 

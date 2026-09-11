@@ -63,7 +63,7 @@ class MemoryCandidateProvider:
     ) -> CandidateBatch:
         if embedder_id != self.memory.embedder.id:
             raise ValueError("query embedder differs from the memory index embedder")
-        if self.memory.vector_block is not None:
+        if self.memory.vector_identity is not None and (await self.memory.check_vectors()).blocked is not None:
             raise ValueError(f"stored vectors cannot be compared: {self.memory.vector_block}")
         if len(embeddings) > 256:
             raise ValueError("semantic query batch exceeds 256 passages")
