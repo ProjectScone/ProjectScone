@@ -275,3 +275,20 @@ async def test_a_candidates_stored_text_is_clipped_like_its_line():
     assert all(len(c["label"]) <= 120 and len(c["key"]) <= 120 and c["label"].endswith("…")
                for c in packet.candidates)
     assert all(c["id"].startswith("ent:") for c in packet.candidates)
+
+
+async def test_an_id_beside_another_spelling_of_it_is_still_looked_up():
+    """Ids are exact: an upper-cased id names nothing, and must not stand in
+    for the real one asked beside it."""
+    engine = await seeded()
+    identifier = (await graph_context(engine, "alpha", names=["Alice Chen"])).seeds[0]
+    for names in ([identifier.upper(), identifier], [identifier, identifier.upper()]):
+        packet = await graph_context(engine, "alpha", names=names)
+        assert packet.status == "prepared" and packet.seeds == (identifier,)
+        assert "not_found 1" in packet.coverage["reasons"]
+
+
+async def test_each_unknown_name_is_counted_once_per_spelling():
+    engine = await seeded()
+    packet = await graph_context(engine, "alpha", names=["nobody", "Nobody", "someone else", "Alice Chen"])
+    assert "not_found 2" in packet.coverage["reasons"] and packet.status == "prepared"

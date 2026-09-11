@@ -273,13 +273,17 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     candidates: list[dict[str, str]] = []
     unknown: list[str] = []
     cut_candidates = 0
-    asked: set[str] = set()
+    asked: set[tuple[object, ...]] = set()
     for name in names:
-        # A name asked again, in any case or spacing, resolves the same way.
-        if entity_key(name) in asked:
-            continue
-        asked.add(entity_key(name))
         found = resolve(projection, name, limit=limits.max_entities)
+        # A name that finds what an earlier one found adds nothing; an
+        # unknown one counts once per spelling. Ids stay exact, so only
+        # what a name resolves to is compared, never the names themselves.
+        found_as = ((found.status, entity_key(name)) if found.status == "not_found"
+                    else (found.status, tuple(c.entity_id for c in found.candidates), found.total))
+        if found_as in asked:
+            continue
+        asked.add(found_as)
         cut_candidates += found.total - len(found.candidates)
         if found.status == "resolved":
             entity = entities[found.candidates[0].entity_id]
