@@ -410,9 +410,36 @@ recall path.
 `coverage.read_mode` says which way a view was read: `paged` or
 `unpaged`.
 
+### How projections are kept between requests
+
+The engine holds each space's ledger read and the views built from it
+(`engine.entities`):
+
+- **Same revision:** a view is returned after one revision check, with
+  no other store call.
+- **New revision:** the ledger is read again. If every fact is as it was
+  (an episode was stored, say), the views are kept and restamped with the
+  new revision. Otherwise they are rebuilt when next asked for.
+- **Moments:** `current` and `history` count facts by their `valid_from`
+  and `valid_until`. A view built for a moment is exact until the next
+  such boundary, so time passing costs a rebuild but no read.
+- **Bounds:** the facts held across spaces stay under 200,000, and the
+  least recently used spaces go first. A read that never held still
+  (`ledger_changed_during_read`) is never kept. A deleted space, and a
+  closed engine, are forgotten.
+
+Requests that arrive together for one space share a single read.
+
+With 20,000 facts on SQLite, a view costs:
+
+| When | Time |
+| --- | --- |
+| First read | 1.0 s |
+| Same revision | 0.1 ms |
+| Revision moved, facts unchanged | 0.2 s |
+
 ### Limits of this first version
 
-- The projection is built on each request. It is not yet cached.
 - Identity is key identity only: no merges of different spellings yet.
 - Resolution uses key identity only; merges of different spellings come with identity decisions.
 

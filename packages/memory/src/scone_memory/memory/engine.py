@@ -92,6 +92,7 @@ from ..core.ports import (
     VectorIndex,
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
+from ..entities.service import EntityService
 
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
@@ -173,6 +174,8 @@ class MemoryEngine:
         self.vector_identity: vector_identity.VectorIdentity | None = None
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
+        #: Each space's entity projection, held between graph requests.
+        self.entities = EntityService(self)
         self.clock = clock
         #: (space, premise ids) of every group a derivation pass has sent.
         self._derive_seen: set[tuple[str, frozenset[int]]] = set()
@@ -269,6 +272,7 @@ class MemoryEngine:
         if self._closed:
             return
         self._closed = True
+        self.entities.clear()
         first: Optional[BaseException] = None
         for store in (self.documents, self.vectors, self.events, self.blobs):
             closer = getattr(store, "close", None)
@@ -587,7 +591,10 @@ class MemoryEngine:
         space with their vectors, then the event trail; mark the space
         deleted so no write re-creates it. Returns the receipt
         ``space_impact`` would have shown, with the counts of the deed."""
-        return await retention.delete_space(self._retention_runtime(), space)
+        try:
+            return await retention.delete_space(self._retention_runtime(), space)
+        finally:
+            self.entities.forget(space)
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)

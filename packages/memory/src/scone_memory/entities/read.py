@@ -51,6 +51,8 @@ class LedgerRead:
     read_mode: Literal["paged", "unpaged"]
     #: False when the space changed during every attempt to read it.
     consistent: bool
+    #: The most facts the read would keep.
+    limit: int = MAX_FACTS
 
 
 class _PageRefused(Exception):
@@ -102,8 +104,8 @@ async def read_ledger(engine: "MemoryEngine", space: str, *, max_facts: int | No
         before = await engine.revision(space)
         facts, reasons, mode = await _rows(engine.documents, space, limit)
         if await engine.revision(space) == before:
-            return LedgerRead(space, before, tuple(facts), tuple(reasons), mode, True)
-    return LedgerRead(space, before, tuple(facts), (*reasons, "ledger_changed_during_read"), mode, False)
+            return LedgerRead(space, before, tuple(facts), tuple(reasons), mode, True, limit)
+    return LedgerRead(space, before, tuple(facts), (*reasons, "ledger_changed_during_read"), mode, False, limit)
 
 
 async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMode" = "all",
@@ -116,10 +118,6 @@ async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMo
     """
     from .view import counts
 
-    ledger = await read_ledger(engine, space)
+    check_space(space)
     when = parse_rfc3339(as_of if as_of is not None else engine.clock())
-    facts = [fact for fact in ledger.facts
-             if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
-    projection = project_entities(space, facts, revision=ledger.revision)
-    return projection, {"facts_read": len(ledger.facts), "facts_counted": len(facts), "facts_limit": MAX_FACTS,
-                        "reasons": list(ledger.reasons), "read_mode": ledger.read_mode}
+    return await engine.entities.projection(space, mode=mode, when=when)
