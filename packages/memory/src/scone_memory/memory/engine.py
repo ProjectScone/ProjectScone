@@ -223,7 +223,9 @@ class MemoryEngine:
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
-        await self.recover()
+        report = await self.recover()
+        if report.retirements_pending:
+            raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
         return self
 
     async def close(self) -> None:
@@ -254,8 +256,13 @@ class MemoryEngine:
         if first is not None:
             raise first
 
-    async def recover(self) -> RecoveryReport:
-        """Finish or forget what a crash interrupted. A remember marks its
+    async def recover(self, *, retirement_limit: int = 100) -> RecoveryReport:
+        """Finish interrupted deletions before repairing interrupted ingestion.
+
+        At most ``retirement_limit`` source cleanups (1..1000, default 100) run
+        per call. A remaining backlog is disclosed and ingestion repair waits
+        for a later call. A failing store leaves its intent and raises; callers
+        serialize this operation with source writes. A remember marks its
         episode identity in the document store before writing and clears
         the mark once the rows and the vectors are all durable. Anything
         still marked here was cut off somewhere in between: an episode row
@@ -265,7 +272,12 @@ class MemoryEngine:
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
 
-        return await ingestion_batch.recover(self._ingestion_runtime())
+        retired, pending = await retention.recover_forgets(self._retention_runtime(), retirement_limit)
+        if pending:
+            return RecoveryReport(retired=retired, retirements_pending=True)
+        report = await ingestion_batch.recover(self._ingestion_runtime())
+        report.retired = retired
+        return report
 
     # -- episodes ---------------------------------------------------------
 

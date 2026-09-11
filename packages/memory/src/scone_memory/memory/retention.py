@@ -13,7 +13,8 @@ from typing import Awaitable, Callable, Mapping, Optional
 from ..backends.blobs import BlobStore
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, SpaceReceipt, Tombstone
-from ..core.ports import DocumentStore, EventLog, NewTombstone, VectorIndex
+from ..core.ports import DocumentStore, EventLog, NewEvent, NewTombstone, VectorIndex
+from ..core.retirement import Retirement, RetirementStore, retirement_key
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space, retention_policy
 
@@ -170,30 +171,99 @@ async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
     attachments nothing else carries; return the receipt that
     ``impact`` would have shown. Claims and links stand."""
     check_space(space)
+    retirement_key(space, episode_id)
+    store = _retirement_store(runtime)
     started = time.perf_counter()
+    pending = await store.retirement(space, episode_id)
+    if pending is not None:
+        return await _finish_forget(runtime, store, pending)
     try:
         receipt = await runtime.impact(space, episode_id)
     except NotFound as error:
         await runtime.emit(space, "forget", {"episode_id": episode_id, "error": type(error).__name__, "latency_ms": _ms(started)})
         raise
     episode = await runtime.episode_or_gone(space, episode_id)
-    removed = await runtime.documents.delete_episode(space, episode_id)
-    await runtime.vectors.delete(removed)
-    await runtime.blobs.unlink(space, episode_id)
-    # The tombstone outlives the episode: the id keeps meaning something
-    # and the decision is not undone by a later import.
-    stone = await runtime.documents.record_tombstone(NewTombstone(
-        space=space, episode_id=episode_id, content_hash=episode.content_hash, forgotten_at=runtime.clock(),
+    if (space, episode.content_hash) in await runtime.documents.inflight():
+        raise InvalidInput("source indexing is unfinished; recover before forgetting it")
+    chunks = await runtime.documents.chunks_of(space, episode_id)
+    pending = await store.record_retirement(Retirement(
+        space=space, episode_id=episode_id, content_hash=episode.content_hash,
+        requested_at=runtime.clock(), chunk_ids=tuple(c.chunk_id for c in chunks), receipt=receipt,
     ))
-    receipt = receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
+    if pending.content_hash != episode.content_hash:
+        raise InvalidInput("retirement identity does not match its source")
+    return await _finish_forget(runtime, store, pending)
+
+
+def _retirement_store(runtime: RetentionRuntime) -> RetirementStore:
+    store = runtime.documents
+    if not isinstance(store, RetirementStore) or not all(callable(getattr(store, name, None)) for name in (
+        "record_retirement", "retirement", "page_retirements", "clear_retirement",
+    )):
+        raise InvalidInput("this document store does not implement durable retirement")
+    return store
+
+
+async def _finish_forget(runtime: RetentionRuntime, store: RetirementStore, pending: Retirement) -> ForgetReceipt:
+    """Retry captured targets; clear the intent only after every acknowledgement."""
+    space, episode_id = pending.space, pending.episode_id
+    episode = await runtime.documents.get_episode(space, episode_id)
+    if episode is not None and episode.content_hash != pending.content_hash:
+        raise InvalidInput("retirement identity does not match its source")
+    prior_stone = await runtime.documents.tombstone(space, episode_id)
+    if prior_stone is not None and prior_stone.content_hash != pending.content_hash:
+        raise InvalidInput("retirement identity does not match its tombstone")
+    current = await runtime.documents.chunks_of(space, episode_id)
+    if not {chunk.chunk_id for chunk in current}.issubset(pending.chunk_ids):
+        raise InvalidInput("source chunks changed after retirement began")
+    await runtime.documents.delete_episode(space, episode_id)
+    if (await runtime.documents.get_episode(space, episode_id) is not None
+            or await runtime.documents.chunks_of(space, episode_id)):
+        raise InvalidInput("source row cleanup is incomplete; its retirement remains pending")
+    await runtime.vectors.delete(pending.chunk_ids)
+    await runtime.blobs.unlink(space, episode_id)
+    stone = await runtime.documents.record_tombstone(NewTombstone(
+        space=space, episode_id=episode_id, content_hash=pending.content_hash, forgotten_at=pending.requested_at,
+    ))
+    if stone.content_hash != pending.content_hash:
+        raise InvalidInput("retirement identity does not match its tombstone")
+    # A later explicit write of the same source key can have its own mark.
+    # Do not clear that newer episode's unfinished indexing on this retry.
+    replacement = await runtime.documents.episode_by_hash(space, pending.content_hash)
+    if replacement is None:
+        await runtime.documents.clear_inflight(space, pending.content_hash)
+    receipt = pending.receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
     await runtime.documents.bump_revision(space)
-    await runtime.emit(space, "forget", {
-        "episode_id": episode_id, "chunks_removed": len(removed),
+    payload: dict[str, object] = {
+        "episode_id": episode_id, "chunks_removed": len(pending.chunk_ids),
         "attachments_released": len(receipt.attachments_released),
         "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
-        "latency_ms": _ms(started),
-    })
+    }
+    if runtime.events is not None:
+        # Stable payload/key makes a lost append acknowledgement retryable.
+        # A retry's latency is not the latency of the original deletion.
+        await runtime.events.append(NewEvent(ts=pending.requested_at, space=space, kind="forget", payload=payload,
+                                             dedup_key=f"source-retirement:{episode_id}"))
+    await store.clear_retirement(space, episode_id)
     return receipt
+
+
+async def recover_forgets(runtime: RetentionRuntime, limit: int) -> tuple[int, bool]:
+    """A bounded pass before ingestion repair; failures keep their intents."""
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise InvalidInput("retirement_limit must be 1..1000")
+    if not isinstance(runtime.documents, RetirementStore):
+        return 0, False
+    store = _retirement_store(runtime)
+    completed = 0
+    while completed < limit:
+        pending = await store.page_retirements(None, min(100, limit - completed))
+        if not pending:
+            return completed, False
+        for record in pending:
+            await _finish_forget(runtime, store, record)
+            completed += 1
+    return completed, bool(await store.page_retirements(None, 1))
 
 
 async def living(runtime: RetentionRuntime, space: str) -> None:

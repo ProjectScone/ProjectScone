@@ -54,6 +54,35 @@ def receipts(result):
     return {item.path: item for item in result.receipts}
 
 
+@pytest.mark.parametrize('failure', ['vectors', 'blobs', 'stone'])
+async def test_directory_update_resumes_its_catalog_retirement(env, monkeypatch, failure):
+    memory, root, _ = env
+    (root / 'report.txt').write_text('Old observatory schedule')
+    sync = runner(env)
+    original = receipts(await sync.synchronize())['report.txt'].episode_id
+    (root / 'report.txt').write_text('New observatory schedule')
+    target, method = {
+        'vectors': (memory.vectors, 'delete'), 'blobs': (memory.blobs, 'unlink'),
+        'stone': (memory.documents, 'record_tombstone'),
+    }[failure]
+    operation = getattr(target, method)
+
+    async def interrupt(*args, **kwargs):
+        raise RuntimeError('cleanup interrupted')
+
+    monkeypatch.setattr(target, method, interrupt)
+    first = await sync.synchronize()
+    assert not first.complete
+    assert await memory.documents.retirement('alpha', original) is not None
+    monkeypatch.setattr(target, method, operation)
+    repaired = await sync.synchronize()
+    assert repaired.complete
+    assert receipts(repaired)['report.txt'].status == 'updated'
+    assert await memory.documents.retirement('alpha', original) is None
+    with pytest.raises(Gone):
+        await memory.episode('alpha', original)
+
+
 async def test_three_file_cycle_updates_deletes_and_reuses_unchanged(env):
     memory, root, _ = env
     for path, content in [('edit.txt', 'Old observatory schedule'), ('delete.txt', 'Retired telescope instructions'),

@@ -10,6 +10,8 @@ from typing import Literal
 from pydantic import ValidationError
 
 from ..core.errors import Gone, InvalidInput, NotFound
+from ..core.retirement import RetirementStore
+from .records import key_hash
 from ..core.models import Episode
 from ..memory.engine import MemoryEngine
 from .document_source import DocumentSource, source_revision_key
@@ -80,6 +82,14 @@ class DirectorySync:
                        *, provenance: bool = True) -> Episode:
         source = self._source(state, path, revision)
         key = source_revision_key(source, revision.original_sha256, revision.manifest_sha256)
+        if revision.episode_id is not None and isinstance(self.memory.documents, RetirementStore):
+            pending = await self.memory.documents.retirement(self.space, revision.episode_id)
+            if pending is not None:
+                if pending.content_hash != key_hash(self.space, key):
+                    raise InvalidInput('source retirement does not match its directory journal')
+                # The catalog already accepted this deletion. Finish its exact
+                # identity before the normal Gone/ownership checks below.
+                await self.memory.forget(self.space, revision.episode_id)
         episode = await self.memory.episode_by_key(self.space, key)
         expected = source.metadata() | {'document_original': revision.original_sha256,
                                        'document_manifest': revision.manifest_sha256}

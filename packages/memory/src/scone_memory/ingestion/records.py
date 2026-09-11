@@ -41,11 +41,15 @@ class Record:
 class RecoveryReport:
     """What recover() found: episodes brought to a complete state, of
     which how many needed their chunks rebuilt, and marks with no
-    episode behind them (the write never landed)."""
+    episode behind them (the write never landed). ``retired`` counts completed
+    pending source deletions. If ``retirements_pending`` is true, the bounded
+    cleanup pass left work and ingestion repair has not run yet."""
 
     completed: int = 0
     rechunked: int = 0
     forgotten: int = 0
+    retired: int = 0
+    retirements_pending: bool = False
 
 
 @dataclass(frozen=True)

@@ -129,9 +129,10 @@ not a global transaction. Both revisions can be visible before retirement. The
 runner recovers interruptions between recorded stages and repairs replayable
 attachment links. It refuses retirement when indexing remains marked in flight
 or retained evidence is missing. Reopen/recover the engine to finish its own
-in-flight indexing before retrying. A storage failure inside forgetting that
-removes a record without its tombstone is reported as unresolved, never guessed
-to be a completed deletion. Bytes retained before a failed intent save can remain
+in-flight indexing before retrying. A storage failure inside forgetting now keeps
+a [catalog cleanup intent](retirement-catalog.md); the runner verifies its managed
+source identity and resumes it before treating the source as gone. Missing rows
+without an intent or tombstone remain unresolved. Bytes retained before a failed intent save can remain
 unlinked; the runner does not garbage-collect them.
 
 Forgetting a source removes its episode, chunks and releasable attachment links.
