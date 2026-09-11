@@ -188,3 +188,141 @@ async def test_the_recorded_artefact_is_the_one_the_fixture_gives():
     recorded = re.findall(r"Artefact: `([0-9a-f]{64})`", (FIXTURE.parent / "results.md").read_text())
     report = await run_entity_graph_benchmark(FIXTURE)
     assert recorded == [report.artefact_sha256]
+
+
+async def test_a_value_carried_by_the_wrong_attribute_is_not_carried(monkeypatch):
+    """Six values dropped and their fact ids pinned onto the one left: an id
+    is evidence only on an attribute with the claim's subject, predicate
+    and value."""
+    _projected_without(monkeypatch, lambda projection: replace(projection, attributes=(replace(
+        projection.attributes[0],
+        fact_ids=tuple(fact_id for attribute in projection.attributes for fact_id in attribute.fact_ids)),)))
+    report = await run_entity_graph_benchmark(FIXTURE)
+    assert report.claims_missing == 6 and report.literal_error_rate == round(6 / 15, 6)
+    assert {"claims_missing", "literal_error_rate"} <= _breached(report)
+
+
+async def test_a_relation_carried_between_the_wrong_entities_is_not_carried(monkeypatch):
+    def misplaced(projection):
+        leads = next(relation for relation in projection.relations if relation.predicate == "leads")
+        rest = [relation for relation in projection.relations if relation is not leads]
+        rest[0] = replace(rest[0], fact_ids=rest[0].fact_ids + leads.fact_ids)
+        return replace(projection, relations=tuple(rest))
+
+    _projected_without(monkeypatch, misplaced)
+    report = await run_entity_graph_benchmark(FIXTURE)
+    assert report.claims_missing == 1 and report.connected_claim_share == round(7 / 8, 6)
+
+
+def _with(tmp_path, *extra):
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines() if line.strip()]
+    path = tmp_path / "extended.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in [*rows, *extra]))
+    return path
+
+
+async def test_a_fact_that_begins_after_as_of_is_out_of_view_not_missing(tmp_path):
+    report = await run_entity_graph_benchmark(_with(tmp_path, {
+        "kind": "fact", "subject": "future person", "predicate": "works_at", "object": "Future Company",
+        "valid_from": "2030-01-01T00:00:00Z"}))
+    assert report.claims_missing == 0 and report.claims_out_of_view == 1
+    assert failures(report, THRESHOLDS_V1) == []
+
+
+async def test_a_superseded_fact_is_out_of_view_not_missing(tmp_path):
+    report = await run_entity_graph_benchmark(_with(tmp_path, {
+        "kind": "fact", "subject": "bob stone", "predicate": "lives_in", "object": "Porto",
+        "valid_from": "2023-01-01T00:00:00Z"}))
+    assert report.claims_missing == 0 and report.claims_out_of_view == 1
+
+
+async def test_the_fixture_has_nothing_out_of_view():
+    assert (await run_entity_graph_benchmark(FIXTURE)).claims_out_of_view == 0
+
+
+async def test_a_label_on_a_claim_the_view_does_not_hold_is_refused(tmp_path):
+    later = {"kind": "fact", "subject": "future person", "predicate": "age", "object": "40",
+             "valid_from": "2030-01-01T00:00:00Z"}
+    with pytest.raises(FixtureError, match="does not hold at as_of; its fact begins later"):
+        await run_entity_graph_benchmark(_with(tmp_path, later, {
+            "kind": "literal", "subject": "future person", "predicate": "age", "object": "40", "value": True}))
+    earlier = {"kind": "fact", "subject": "bob stone", "predicate": "lives_in", "object": "Porto",
+               "valid_from": "2023-01-01T00:00:00Z"}
+    with pytest.raises(FixtureError, match="does not hold at as_of; the ledger closed it"):
+        await run_entity_graph_benchmark(_with(tmp_path, earlier, {
+            "kind": "literal", "subject": "bob stone", "predicate": "lives_in", "object": "Porto", "value": False}))
+
+
+@pytest.mark.parametrize("row, complaint", [
+    ({"kind": "literal", "subject": "alice chen", "predicate": "age", "object": "34", "value": None}, "value"),
+    ({"kind": "literal", "subject": "alice chen", "predicate": "age", "object": "34", "value": "true"}, "value"),
+    ({"kind": "literal", "subject": "alice chen"}, "predicate"),
+    ({"kind": "path", "from": "alice chen", "to": "lisbon", "hops": 2, "expected": "false"}, "expected"),
+    ({"kind": "path", "from": "alice chen", "to": "lisbon", "hops": "2"}, "hops"),
+    ({"kind": "path", "from": "alice chen", "to": "lisbon", "hops": True}, "hops"),
+    ({"kind": "path", "from": "alice chen", "to": "lisbon", "hops": 9}, "hops"),
+    ({"kind": "path", "from": "alice chen", "to": "lisbon", "hops": 2, "expect": False}, "expect"),
+    ({"kind": "same_entity", "names": "alice chen"}, "names"),
+    ({"kind": "same_entity", "names": ["alice chen", ""]}, "names"),
+    ({"kind": "fact", "subject": "alice chen", "predicate": "age", "object": 34}, "object"),
+    ({"kind": "fact", "subject": "x", "predicate": "p", "object": "y", "valid_from": "someday"}, "valid_from"),
+    ({"kind": "meta", "name": "second"}, "meta"),
+    (["not", "an", "object"], "object"),
+])
+async def test_malformed_gold_is_refused_with_its_line(tmp_path, row, complaint):
+    """Gold is never reinterpreted: a wrong type, a missing or unknown field,
+    or a second meta row is refused, naming the line and the field."""
+    with pytest.raises(FixtureError, match=complaint) as refused:
+        await run_entity_graph_benchmark(_with(tmp_path, row))
+    assert "line 41" in str(refused.value)
+
+
+async def test_a_line_that_is_not_json_is_refused(tmp_path):
+    path = tmp_path / "broken.jsonl"
+    path.write_text('{"kind": "meta", "name": "broken"}\n{"kind": "fact",\n')
+    with pytest.raises(FixtureError, match="line 2"):
+        await run_entity_graph_benchmark(path)
+
+
+async def test_a_meta_as_of_that_is_not_a_time_is_refused(tmp_path):
+    path = tmp_path / "when.jsonl"
+    path.write_text(json.dumps({"kind": "meta", "name": "when", "as_of": "June"}))
+    with pytest.raises(FixtureError, match="as_of"):
+        await run_entity_graph_benchmark(path)
+
+
+async def test_a_gold_name_only_a_later_fact_states_is_refused(tmp_path):
+    with pytest.raises(FixtureError, match="'future person' is in no fact due by as_of"):
+        await run_entity_graph_benchmark(_with(tmp_path, {
+            "kind": "fact", "subject": "future person", "predicate": "works_at", "object": "Globex",
+            "valid_from": "2030-01-01T00:00:00Z"}, {"kind": "same_entity", "names": ["future person"]}))
+
+
+async def test_a_claim_the_store_lost_is_missing_not_out_of_view(monkeypatch):
+    """With no stored fact to say otherwise, a claim due by as_of is one the
+    view should hold, so losing it counts against the graph."""
+    from scone_memory.backends.memory import InMemoryDocumentStore
+
+    listed = InMemoryDocumentStore.list_facts
+
+    async def losing(self, *args, **kwargs):
+        return [fact for fact in await listed(self, *args, **kwargs) if fact.predicate != "leads"]
+
+    monkeypatch.setattr(InMemoryDocumentStore, "list_facts", losing)
+    report = await run_entity_graph_benchmark(FIXTURE)
+    assert report.claims_missing == 1 and report.claims_out_of_view == 0
+
+
+async def test_a_lost_claim_that_begins_after_as_of_is_still_out_of_view(monkeypatch, tmp_path):
+    from scone_memory.backends.memory import InMemoryDocumentStore
+
+    listed = InMemoryDocumentStore.list_facts
+
+    async def losing(self, *args, **kwargs):
+        return [fact for fact in await listed(self, *args, **kwargs) if fact.subject != "future person"]
+
+    monkeypatch.setattr(InMemoryDocumentStore, "list_facts", losing)
+    report = await run_entity_graph_benchmark(_with(tmp_path, {
+        "kind": "fact", "subject": "future person", "predicate": "works_at", "object": "Future Company",
+        "valid_from": "2030-01-01T00:00:00Z"}))
+    assert report.claims_missing == 0 and report.claims_out_of_view == 1

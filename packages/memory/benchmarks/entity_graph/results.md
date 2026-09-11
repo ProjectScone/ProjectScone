@@ -7,25 +7,41 @@ path that must not be found. Every number except the timing is
 deterministic and hashed into `artefact_sha256`.
 
 Scores are read from what the projection carries, and something missing
-is never scored as right. A labelled value counts only if an attribute
-carries its fact, and a labelled thing only if a relation does. A gold
-name with no entity adds nothing to B-cubed. Three counts report missing
-evidence outright:
+is never scored as right. A fact is carried only by an item that has its
+own subject, predicate and object or value. An item that merely cites
+the fact's id doesn't count. So a labelled value counts only if such an
+attribute carries it, and a labelled thing only if such a relation does.
+A gold name with no entity adds nothing to B-cubed. Three counts report
+missing evidence outright:
 
-- loaded facts that became neither a relation nor an attribute;
+- facts the view should hold at `as_of` that nothing carries;
 - gold names with no entity;
 - path ends with no entity.
 
-A fixture whose gold names something no fact states is refused (exit 2)
-rather than scored, because such gold could only be vacuously right. A
-score with no gold at all is reported as unmeasured, and its threshold
-fails.
+Which facts the view should hold is decided by the view's own rule. A
+fact that begins after `as_of`, or one the ledger closed, is counted
+apart as out of view, not as missing.
+
+A fixture is refused (exit 2), naming each line, rather than scored, in
+two cases:
+
+- **A malformed row.** A required field is missing or an unknown one is
+  present. Or a field has the wrong type: `null` or `"false"` where
+  `true` or `false` is due, hops that are not a whole number from 1 to
+  4, or a time that is not RFC 3339.
+- **Gold about something the view does not hold.** A name, a path end
+  or a labelled claim that no fact due by `as_of` states.
+
+Either kind of gold could only be scored by being reinterpreted, or by
+being vacuously right. A score with no gold at all is reported as
+unmeasured, and its threshold fails.
 
 ## Baseline (September 11, 2026)
 
 | Metric | Value | Threshold |
 | --- | --- | --- |
 | Claims missing from the projection | 0 | at most 0 |
+| Claims out of view at `as_of` | 0 | recorded |
 | Gold names with no entity | 0 | at most 0 |
 | Path ends with no entity | 0 | at most 0 |
 | Literal error rate | 0.0 | at most 0.0 |
@@ -37,9 +53,9 @@ fails.
 | View bytes (knowledge, report, context) | 8,774, 5,509, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `ca795461b85212cd25cd1109aa82b4ae0f4b49320ea9a0315d70f151cb584d57`. The scores
-match the first recording (`44ceae91…`). The hash moved when the three
-missing-evidence counts joined the report.
+Artefact: `daceac5828f47ea9d3a875a761fb75c8f1b086896cef192c96075df9ae497d2f`. The scores
+match the first recording (`44ceae91…`). The hash moved when the
+missing-evidence and out-of-view counts joined the report.
 
 ## What the numbers say
 
@@ -62,4 +78,7 @@ the gate fails on each of these:
 - a classifier that calls every object a thing;
 - a projection that loses every value;
 - a projection that loses one relation while its role survives;
+- a projection that pins six lost values' fact ids onto the one value
+  left;
+- a projection that moves a relation's fact ids onto another relation;
 - a projection that loses an entity.
