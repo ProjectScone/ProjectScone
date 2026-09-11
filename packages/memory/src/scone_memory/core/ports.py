@@ -16,6 +16,14 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
 
+class EmbeddingCheckpoint(Protocol):
+    """Caller-owned, source-scoped work receipts; implementations encrypt at rest."""
+
+    def get(self, key: str) -> bytes | None: ...
+
+    def put(self, key: str, value: bytes) -> None: ...
+
+
 @dataclass(frozen=True)
 class NewEpisode:
     space: str

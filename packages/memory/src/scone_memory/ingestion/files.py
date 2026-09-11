@@ -15,6 +15,7 @@ from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 if TYPE_CHECKING:
+    from ..core.ports import EmbeddingCheckpoint
     from ..memory.engine import MemoryEngine
 
 
@@ -105,7 +106,8 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
 
 
 async def store_document(memory: MemoryEngine, space: str, original: Attachment,
-                         manifest: DocumentManifest) -> DocumentIngested:
+                         manifest: DocumentManifest, *,
+                         embedding_checkpoint: EmbeddingCheckpoint | None = None) -> DocumentIngested:
     """Index prepared extraction. Replays repair links using content identities."""
     validate_document(manifest.parsed, DocumentLimits())
     if original.attachment_id != manifest.original_sha256:
@@ -120,6 +122,7 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
         dedup_key=f'document-v1:{original.attachment_id}:{retained.attachment_id}',
         attachment_ids=(original.attachment_id, retained.attachment_id),
+        embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': manifest.parsed.format, 'document_original': original.attachment_id,
                   'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text'})
     return DocumentIngested(added, original, retained, manifest.parsed.format,

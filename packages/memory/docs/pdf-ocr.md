@@ -134,6 +134,12 @@ absolute UTF-8 spans and validates the final PDF manifest before indexing.
 `page_status(run_id, space=..., attachment_id=..., page=1)` reports committed
 page state, attempt count and error class without exposing source text. It
 returns `None` for a page that has no OCR receipt, including native-text pages.
+The index step also retains validated embedding batches in its encrypted
+journal. Retrying after interruption during embedding skips batches whose
+source, chunk spans, embedding inputs and model identity still match. This does
+not persist a chunk plan or change engine recovery after episode writes begin;
+see [embedding recovery and limits](file-ingestion.md#durable-extraction-checkpoints).
+
 `reused_pages` lists reused OCR page numbers; `reused_index` reports whether the
 final indexing receipt was reused. A reused receipt retains its original `Added`
 fields; it does not issue another `remember` call.

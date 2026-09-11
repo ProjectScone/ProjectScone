@@ -191,11 +191,36 @@ exposed. A missing source, changed evidence, or an explicit verifier rejection
 still permanently invalidates that run.
 
 This is one caller-owned active document per journal. It does not provide a
-background queue, distributed worker leases, or separate durable
-chunking/embedding stages. Cancellation interrupts the active call; an explicit
+background queue, distributed worker leases, or a persisted chunking plan.
+Cancellation interrupts the active call; an explicit
 retry resumes eligible stages. For retained PDFs, the separate `PdfOcrWorkflow`
 provides encrypted per-page OCR checkpoints and indexing recovery; see the
 [PDF OCR guide](pdf-ocr.md#resume-completed-pages-after-interruption).
+
+Indexing saves each complete, validated embedding batch inside the encrypted
+journal before calling the next batch. After cancellation or process failure
+during embedding, a retry rebuilds the chunk plan and reuses matching vectors.
+Receipts bind the space, source content identities, ordered UTF-8 chunk spans,
+exact embedding input texts, batch boundaries, and embedder `id` and dimension.
+The configured `id` must identify the model revision and its embedding options;
+changing model behavior without changing that identity cannot be detected.
+Changed chunking or contextual input also prevents reuse. No episode is written
+until every vector validates. Malformed provider batches are never saved.
+
+`job.status(...).checkpoint_count` reports retained intermediate batches,
+separately from completed extraction/index steps. Each receipt is limited to
+16 MiB; one run permits at most 4,096 receipts and 128 MiB of encrypted receipt
+data. Missing/deleted evidence invalidates the run and removes its receipts on
+the next verification; successful completion removes them too. Temporary
+verification outages preserve them. This is logical deletion from an encrypted,
+caller-owned journal, not secure erasure of SQLite pages or backups.
+
+This recovery covers unfinished embedding work. If the process dies after
+episode/chunk writes begin, the engine's existing inflight-write recovery may
+still re-embed those chunks before the document workflow resumes. Replaying an
+already completed workflow verifies its recorded source; it does not migrate
+an existing vector index to a new model. HTTP ingestion does not automatically
+use these caller-owned journals.
 
 ## HTTP and execution boundaries
 

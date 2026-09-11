@@ -177,7 +177,7 @@ class PdfOcrWorkflow:
         if prepared is None or hashlib.sha256(prepared.parsed.model_dump_json().encode()).hexdigest() != inputs['parsed']:
             raise InvalidInput('prepared PDF does not match its indexing checkpoint')
         result = await ingest_pdf(self._memory, context.space, raw, filename=original.filename,
-                                 limits=self._limits, parser=prepared)
+                                 limits=self._limits, parser=prepared, embedding_checkpoint=context.checkpoints)
         return {'added': cast(JSONValue, result.added.model_dump(mode='json')), 'manifest': result.manifest.attachment_id}
 
     async def run(self, run_id: str, *, space: str, attachment_id: str) -> PdfOcrIngested:

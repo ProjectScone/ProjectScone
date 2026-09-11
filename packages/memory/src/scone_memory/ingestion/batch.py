@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 from typing import cast
 
 from ..core.errors import InvalidInput
 from ..core.models import Added, MAX_CONTENT_BYTES
-from ..core.ports import DocumentStore, Embedder, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
+from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import byte_spans, chunk_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
@@ -20,26 +22,56 @@ from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 EMBED_BATCH = 64
 
 
-async def _embed_chunks(embedder: Embedder, texts: Sequence[str]) -> list[list[float]]:
-    """Require complete, valid provider responses before accepting any chunk vectors."""
+def _validated_vectors(response: object, count: int, dimension: int) -> list[list[float]]:
+    if not isinstance(response, list) or len(response) != count:
+        raise ValueError('embedding response must contain one vector per input text')
+    vectors: list[list[float]] = []
+    for vector in response:
+        if not isinstance(vector, list) or len(vector) != dimension:
+            raise ValueError('embedding vector does not match the configured dimension')
+        try:
+            valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                        and math.isfinite(value) for value in vector)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError('embedding vector must contain finite numeric values')
+        # Providers may reuse their response buffers on the next call.
+        vectors.append(list(vector))
+    return vectors
+
+
+async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
+                        checkpoint: EmbeddingCheckpoint | None = None,
+                        binding: str = '') -> list[list[float]]:
+    """Persist only complete validated batches, and validate receipts on reuse."""
+    identifier, dimension = embedder.id, embedder.dim
+    prefix = ''
+    if checkpoint is not None:
+        digest = hashlib.sha256(json.dumps(['embedding-batch-v1', identifier, dimension, EMBED_BATCH, binding]).encode())
+        for text in texts:
+            encoded = text.encode('utf-8')
+            digest.update(len(encoded).to_bytes(8, 'big'))
+            digest.update(encoded)
+        prefix = digest.hexdigest()
     vectors: list[list[float]] = []
     for offset in range(0, len(texts), EMBED_BATCH):
         batch = texts[offset:offset + EMBED_BATCH]
-        response = await embedder.embed(batch)
-        if not isinstance(response, list) or len(response) != len(batch):
-            raise ValueError('embedding response must contain one vector per input text')
-        for vector in response:
-            if not isinstance(vector, list) or len(vector) != embedder.dim:
-                raise ValueError('embedding vector does not match the configured dimension')
+        key = f'{prefix}:{offset}'
+        saved = checkpoint.get(key) if checkpoint is not None else None
+        if saved is None:
+            response: object = await embedder.embed(batch)
+        else:
             try:
-                valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                            and math.isfinite(value) for value in vector)
-            except OverflowError:
-                valid = False
-            if not valid:
-                raise ValueError('embedding vector must contain finite numeric values')
-            # Providers may reuse their response buffers on the next call.
-            vectors.append(list(vector))
+                response = json.loads(saved)
+            except (ValueError, UnicodeError, RecursionError):
+                raise ValueError('embedding checkpoint is invalid') from None
+        if embedder.id != identifier or embedder.dim != dimension:
+            raise ValueError('embedding identity changed during indexing')
+        validated = _validated_vectors(response, len(batch), dimension)
+        if saved is None and checkpoint is not None:
+            checkpoint.put(key, json.dumps(validated, allow_nan=False, separators=(',', ':')).encode())
+        vectors.extend(validated)
     return vectors
 
 
@@ -54,6 +86,7 @@ class IngestionRuntime:
     chunk_target: int
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
+    embedding_checkpoint: EmbeddingCheckpoint | None = None
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
@@ -110,7 +143,9 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
 
     if fresh:
         texts = [runtime.embed_text(p.new, t) for p in fresh for t in p.texts]
-        vectors = await _embed_chunks(runtime.embedder, texts)
+        binding = '' if runtime.embedding_checkpoint is None else json.dumps(
+            [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
+        vectors = await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
         await write_batch(runtime, space, fresh, vectors, results)
         await runtime.documents.bump_revision(space)
 

@@ -13,6 +13,7 @@ from ..core.validation import check_space
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
 
 if TYPE_CHECKING:
+    from ..core.ports import EmbeddingCheckpoint
     from ..memory.engine import MemoryEngine
 
 
@@ -62,7 +63,8 @@ def _coverage(pages: tuple[PdfPage, ...]) -> str:
 
 
 async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename: str | None = None,
-                     limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None) -> PdfIngested:
+                     limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None,
+                     embedding_checkpoint: EmbeddingCheckpoint | None = None) -> PdfIngested:
     """Parse first, then store original, manifest and searchable derived episode.
 
     Uses existing attachment/write primitives; this is not an atomic ingest job.
@@ -95,6 +97,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     empty = tuple(page.number for page in parsed.pages if page.empty)
     added = await memory.remember(space, parsed.text, kind='file', source=f'attachment:{original.attachment_id}',
         dedup_key=identity, attachment_ids=(original.attachment_id, retained.attachment_id),
+        embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': 'pdf', 'evidence_origin': 'extracted_text',
             'pdf_original': original.attachment_id, 'pdf_manifest': retained.attachment_id,
             'pdf_coverage': _coverage(parsed.pages)})

@@ -99,5 +99,6 @@ class DocumentIngestionWorkflow:
     async def _index(self, context: StepContext) -> JSONValue:
         manifest = await self._manifest(context)
         original, _ = await self._memory.attachment(context.space, manifest.original_sha256)
-        result = await store_document(self._memory, context.space, original, manifest)
+        result = await store_document(self._memory, context.space, original, manifest,
+                                      embedding_checkpoint=context.checkpoints)
         return cast(JSONValue, json.loads(result.added.model_dump_json()))

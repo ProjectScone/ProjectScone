@@ -79,6 +79,7 @@ from ..core.ports import (
     DocumentStore,
     DuplicateEvent,
     Embedder,
+    EmbeddingCheckpoint,
     Event,
     EventLog,
     NewEpisode,
@@ -280,16 +281,19 @@ class MemoryEngine:
         attachment_ids: Sequence[str] = (),
         dedup_key: Optional[str] = None,
         replace: bool = False,
+        *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate."""
         await self._living(space)
+        if replace and embedding_checkpoint is not None:
+            raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
         if replace:
             added = (await self.replace(space, record)).added
         else:
-            [added] = await self.remember_many(space, [record])
+            [added] = await self.remember_many(space, [record], embedding_checkpoint=embedding_checkpoint)
         for attachment_id in dict.fromkeys(attachment_ids):
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
@@ -353,7 +357,8 @@ class MemoryEngine:
         check_space(space)
         return await self.blobs.get(space, attachment_id)
 
-    async def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
+    async def remember_many(self, space: str, records: Iterable[Record], *,
+                            embedding_checkpoint: EmbeddingCheckpoint | None = None) -> list[Added]:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
         instead of one per record, and one revision bump. Outcomes come
         back in input order; a record identical to an earlier one in the
@@ -369,7 +374,7 @@ class MemoryEngine:
         started = time.perf_counter()
         records = list(records)
         try:
-            resolved = await self._remember_many(space, records)
+            resolved = await self._remember_many(space, records, embedding_checkpoint=embedding_checkpoint)
         except Exception as e:
             await self._emit(space, "remember", {
                 "records": len(records), "error": f"{type(e).__name__}: {e}",
@@ -388,14 +393,15 @@ class MemoryEngine:
         })
         return resolved
 
-    def _ingestion_runtime(self) -> ingestion_batch.IngestionRuntime:
+    def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit,
+            self._embed_text, self._emit, embedding_checkpoint,
         )
 
-    async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
-        return await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
+    async def _remember_many(self, space: str, records: Sequence[Record], *,
+                             embedding_checkpoint: EmbeddingCheckpoint | None = None) -> list[Added]:
+        return await ingestion_batch.remember_many(self._ingestion_runtime(embedding_checkpoint), space, records)
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
