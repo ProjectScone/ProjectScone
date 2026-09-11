@@ -32,6 +32,10 @@ async def test_upload_index_recall_cite_repeat_and_delete(service, filename, raw
     indexed = await client.post('/v1/documents', json=body)
     assert indexed.status_code == 200, indexed.text
     episode_id = indexed.json()['added']['episode_id']
+    episode = (await client.get(f'/v1/episodes/{episode_id}')).json()
+    assert episode['metadata']['document_filename'] == filename
+    inventory = (await client.get('/v1/sources')).json()['items']
+    assert next(row for row in inventory if row['episode_id'] == episode_id)['document_filename'] == filename
     repeated = await client.post('/v1/documents', json=body)
     assert repeated.json()['added']['episode_id'] == episode_id
     assert repeated.json()['added']['deduplicated'] is True
@@ -187,3 +191,17 @@ async def test_explicit_extraction_filename_is_validated(service, filename):
         'attachment_id': uploaded.json()['attachment_id'], 'filename': filename}),
         headers={'content-type': 'application/json'})
     assert response.status_code in (400, 422)
+
+
+async def test_long_extraction_filename_remains_accepted_without_oversize_display_metadata(service):
+    client, _ = service
+    filename = 'a' * 253 + '.txt'
+    uploaded = await client.post('/v1/attachments', content=b'Long filename source',
+        headers={'content-type': 'text/plain'})
+    result = await client.post('/v1/documents', json={'attachment_id': uploaded.json()['attachment_id'], 'filename': filename})
+    assert result.status_code == 200, result.text
+    episode_id = result.json()['added']['episode_id']
+    assert result.json()['filename'] == filename
+    assert (await client.get(f'/v1/episodes/{episode_id}/document')).json()['filename'] == filename
+    episode = (await client.get(f'/v1/episodes/{episode_id}')).json()
+    assert 'document_filename' not in episode['metadata']

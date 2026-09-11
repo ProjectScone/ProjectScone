@@ -507,6 +507,11 @@ def create_app(
         return {"items": [{"episode_id": e.episode_id, "kind": e.kind, "source": e.source,
                            "created_at": e.created_at, "byte_count": len(e.content.encode("utf-8")),
                            "preview": e.content[:500], "preview_truncated": len(e.content) > 500,
+                           **({'document_filename': e.metadata['document_filename']}
+                              if e.kind == 'file' and 'document_filename' in e.metadata
+                              and 0 < len(e.metadata['document_filename'].encode('utf-8')) <= 1024
+                              and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
+                              else {}),
                            **status_of(e.episode_id)}
                           for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
 

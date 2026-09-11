@@ -410,6 +410,13 @@ filename, then post `{"attachment_id":"<retained SHA-256>"}` to
 `POST /v1/documents`. Include `"filename":"report.csv"` to choose the parser
 independently of the original upload label, including for nameless attachments.
 The response's `filename` reports this choice without rewriting upload metadata.
+New source episodes also retain extraction labels of at most 256 characters in
+`metadata.document_filename`, within the existing metadata value limit;
+the source inventory exposes it as an optional `document_filename` display label.
+The label does not change the original/manifest deduplication key or grant access
+to a file. Replaying an older source preserves its recorded metadata; its exact
+extraction filename remains available through document provenance. Longer labels
+also remain complete in the manifest and provenance without an inventory label.
 Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.

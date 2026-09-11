@@ -77,13 +77,14 @@ async def test_parser_revision_and_collection_are_part_of_owned_identity(engine)
     assert len({result.added.episode_id for result in results}) == 3
 
 
-async def test_default_document_identity_and_metadata_are_unchanged(engine):
+async def test_document_filename_is_additive_without_changing_default_identity(engine):
     original, manifest = await prepared(engine)
     result = await store_document(engine, 'alpha', original, manifest)
     key = f'document-v1:{original.attachment_id}:{result.manifest.attachment_id}'
     episode = await engine.episode_by_key('alpha', key)
     assert episode.source == f'attachment:{original.attachment_id}'
-    assert set(episode.metadata) == {'document_format', 'document_original', 'document_manifest', 'evidence_origin'}
+    assert set(episode.metadata) == {'document_format', 'document_filename', 'document_original', 'document_manifest', 'evidence_origin'}
+    assert episode.metadata['document_filename'] == manifest.filename
     owned = await store_document(engine, 'alpha', original, manifest, source=DocumentSource('a' * 32, 'report.txt', 'v1'))
     assert owned.added.episode_id != result.added.episode_id
 
@@ -128,3 +129,18 @@ async def test_a_managed_source_can_return_to_earlier_bytes_after_retirement(eng
 def test_source_generation_is_a_bounded_nonnegative_integer(generation):
     with pytest.raises(InvalidInput):
         DocumentSource('a' * 32, 'report.txt', 'v1', generation=generation)
+
+
+async def test_legacy_document_replay_preserves_old_identity_and_metadata(engine):
+    original, manifest = await prepared(engine)
+    retained = await engine.attach('alpha', encode_manifest(manifest), 'application/json', 'document-provenance.json')
+    metadata = {'document_format': manifest.parsed.format, 'document_original': original.attachment_id,
+                'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text'}
+    key = f'document-v1:{original.attachment_id}:{retained.attachment_id}'
+    old = await engine.remember('alpha', manifest.parsed.segments[0].text, kind='file',
+        source=f'attachment:{original.attachment_id}', dedup_key=key,
+        attachment_ids=(original.attachment_id, retained.attachment_id), metadata=metadata)
+    replay = await store_document(engine, 'alpha', original, manifest)
+    assert replay.added.deduplicated and replay.added.episode_id == old.episode_id
+    assert (await engine.episode('alpha', old.episode_id)).metadata == metadata
+    assert (await document_provenance(engine, 'alpha', old.episode_id)).filename == manifest.filename

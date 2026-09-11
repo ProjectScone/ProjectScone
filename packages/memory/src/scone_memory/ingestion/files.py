@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
-from ..core.validation import check_space
+from ..core.validation import MAX_METADATA_VALUE, check_space
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .document_source import DocumentSource, source_revision_key
@@ -146,7 +146,9 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
         dedup_key=identity or f'document-v1:{original.attachment_id}:{retained.attachment_id}',
         attachment_ids=(original.attachment_id, retained.attachment_id),
         embedding_checkpoint=embedding_checkpoint,
-        metadata={'document_format': manifest.parsed.format, 'document_original': original.attachment_id,
+        metadata={'document_format': manifest.parsed.format,
+                  **({'document_filename': manifest.filename} if len(manifest.filename) <= MAX_METADATA_VALUE else {}),
+                  'document_original': original.attachment_id,
                   'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text',
                   **source_metadata})
     return DocumentIngested(added, original, retained, manifest.parsed.format,
