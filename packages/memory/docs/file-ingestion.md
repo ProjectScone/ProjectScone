@@ -90,7 +90,20 @@ Directly hidden runs (`w:vanish`) are omitted; inherited style visibility is not
 resolved. Formatting properties do not supply text or tabs. Word ruby and Excel
 phonetic hints are omitted while their base text remains. Word nonbreaking
 hyphens and position tabs remain in extracted text. This is a text view, not a
-rendered preview; headers, footers and text-box layout remain open coverage gaps.
+rendered preview; headers, footers and text-box geometry remain open coverage gaps.
+
+Word text boxes retain their own paragraphs/table rows, with `content_role=textbox`,
+the source archive `member`, and the anchor paragraph or table row as `parent_locator`.
+They are queued after body text instead of being concatenated into the anchor.
+Nested boxes receive nested locators; extraction order is not page layout order.
+For DOCX main/note/comment XML parts, alternate content selects the first choice
+whose required namespace URIs are supported for text extraction (Word main,
+Word 2010 wordprocessingShape, and VML), otherwise its fallback. Prefix aliases
+and local namespace shadowing are honored. Missing/invalid requirements, malformed
+branch ordering, or an unsupported choice without fallback are explicit errors.
+Unused alternatives still count against XML construction limits. This is text
+extraction support, not full drawing rendering or general markup-compatibility
+processing for all Office formats.
 
 Referenced DOCX footnotes, endnotes and comments are extracted after the main
 body, in first-reference order. Each part is emitted once, with its `member`,

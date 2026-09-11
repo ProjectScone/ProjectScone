@@ -59,6 +59,7 @@ class SafeArchive:
         except (KeyError, BadZipFile, RuntimeError, OSError, NotImplementedError):
             raise InvalidInput('archive member is missing or unreadable') from None
 
-    def xml(self, name: str, *, allow_doctype: bool = False) -> Element:
+    def xml(self, name: str, *, allow_doctype: bool = False,
+            supported_namespaces: frozenset[str] | None = None) -> Element:
         data = self._read(name, min(self._limit, XML_MAX_BYTES), 'XML member')
-        return parse_xml(data, allow_doctype=allow_doctype)
+        return parse_xml(data, allow_doctype=allow_doctype, supported_namespaces=supported_namespaces)

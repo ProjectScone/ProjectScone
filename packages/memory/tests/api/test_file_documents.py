@@ -120,6 +120,32 @@ async def test_docx_note_citation_retains_relocated_source_part_and_original(ser
     assert (await client.get(evidence.json()['download_path'])).content == raw
 
 
+async def test_docx_textbox_citation_keeps_anchor_separate(service):
+    from ..ingestion.test_docx_parts import document
+    from ..ingestion.test_docx_textboxes import alternatives
+
+    client, _ = service
+    raw = document(f'<w:p><w:r><w:t>Anchor.</w:t>{alternatives()}</w:r></w:p>')
+    uploaded = await client.post('/v1/attachments', content=raw,
+        headers={'content-type': 'application/octet-stream', 'x-filename': 'boxes.docx'})
+    assert uploaded.status_code == 200, uploaded.text
+    indexed = await client.post('/v1/documents', json={'attachment_id': uploaded.json()['attachment_id']})
+    assert indexed.status_code == 200, indexed.text
+    episode_id = indexed.json()['added']['episode_id']
+    recalled = (await client.get('/v1/recall', params={'q': 'Box text'})).json()['items']
+    chunk = next(item for item in recalled if item['episode_id'] == episode_id)
+    evidence = await client.get(f'/v1/episodes/{episode_id}/document',
+        params={'chunk_id': chunk['chunk_id']}, headers={'authorization': 'Bearer read'})
+    assert evidence.status_code == 200, evidence.text
+    anchor, textbox = evidence.json()['segments']
+    assert anchor['text'] == 'Anchor.'
+    assert textbox['text'] == 'Box text'
+    assert textbox['locator'] == 'paragraph:1/textbox:1/paragraph:1'
+    assert textbox['metadata'] == {
+        'member': 'content/main.xml', 'content_role': 'textbox', 'parent_locator': 'paragraph:1',
+    }
+
+
 @pytest.mark.parametrize('first_name', [None, 'plan.txt'])
 async def test_extraction_filename_overrides_first_upload_label_without_rewriting_original(service, first_name):
     client, _ = service

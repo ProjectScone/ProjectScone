@@ -44,6 +44,11 @@ _RUN_METADATA = frozenset(
     '{http://purl.oclc.org/ooxml/spreadsheetml/main}rPh',
 })
 _WORD_RUNS = frozenset(f'{{{namespace}}}r' for namespace in _WORD_NAMESPACES)
+_WORD_TEXTBOXES = frozenset(f'{{{namespace}}}txbxContent' for namespace in _WORD_NAMESPACES)
+_WORD_TEXT_NAMESPACES = frozenset(_WORD_NAMESPACES) | frozenset({
+    'http://schemas.microsoft.com/office/word/2010/wordprocessingShape',
+    'urn:schemas-microsoft-com:vml',
+})
 _WORD_REFERENCES = {
     f'{{{namespace}}}{tag}': kind
     for namespace in _WORD_NAMESPACES
@@ -238,24 +243,50 @@ def _row_text(row: Element, output: _Output) -> str:
 
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
-) -> Iterator[tuple[Element, str]]:
+) -> Iterator[tuple[Element, str, list[Element]]]:
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
         if block.tag in _WORD_REFERENCES:
-            yield block, prefix.rstrip('/') or 'body'
+            yield block, prefix.rstrip('/') or 'body', []
             continue
         if _local(block.tag) == 'tbl':
             tables += 1
             for number, row in enumerate((child for child in block if _local(child.tag) == 'tr'), 1):
                 locator = f'{prefix}table:{tables}/row:{number}'
+                boxes = _detach_textboxes(row, output)
                 output.add(_row_text(row, output), locator, metadata)
-                yield row, locator
+                yield row, locator, boxes
         else:
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
+            boxes = _detach_textboxes(block, output)
             output.add(_run_text(block, output), locator, metadata)
-            yield block, locator
+            yield block, locator, boxes
+
+
+def _detach_textboxes(root: Element, output: _Output) -> list[Element]:
+    boxes: list[Element] = []
+    stack: list[tuple[Element, Iterator[Element], list[Element]]] = [(root, iter(root), [])]
+    while stack:
+        output.check()
+        parent, children, retained = stack[-1]
+        child = next(children, None)
+        if child is None:
+            parent[:] = retained
+            stack.pop()
+        elif child.tag in _WORD_TEXTBOXES:
+            boxes.append(child)
+        else:
+            retained.append(child)
+            stack.append((child, iter(child), []))
+    return boxes
+
+
+def _word_prefix(locator: str, suffix: str) -> str:
+    if len(locator) + len(suffix) > 4096:
+        raise InvalidInput('document source locator exceeds its limit')
+    return locator + suffix
 
 
 def _word_attribute(element: Element, name: str, default: str = '') -> str:
@@ -277,7 +308,7 @@ def _word_note_part(
     if len(identifiers) != 1:
         raise InvalidInput('DOCX reference requires exactly one note or comment relationship')
     path = _related(source, relations, identifiers[0], kind + 's')
-    root = bundle.xml(path)
+    root = bundle.xml(path, supported_namespaces=_WORD_TEXT_NAMESPACES)
     if root.tag not in {f'{{{namespace}}}{kind}s' for namespace in _WORD_NAMESPACES}:
         raise InvalidInput('DOCX note or comment relationship has the wrong part type')
     entry_tag = root.tag[:-1]
@@ -294,7 +325,7 @@ def _word_note_part(
 
 def _docx(bundle: SafeArchive, output: _Output) -> None:
     source = _main_part(bundle)
-    root = bundle.xml(source)
+    root = bundle.xml(source, supported_namespaces=_WORD_TEXT_NAMESPACES)
     body = _child(root, 'body')
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
@@ -304,7 +335,10 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     pending = deque([(body, '', {'member': source})])
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator in _word_content(content, output, prefix, metadata):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata):
+            for number, box in enumerate(boxes, 1):
+                details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
+                pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
             for reference in block.iter():
                 output.check()
                 kind = _WORD_REFERENCES.get(reference.tag)
@@ -327,9 +361,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
                         if value := _word_attribute(note, key):
                             details[key] = value
                 suffix = f'/{kind}:{identifier}/'
-                if len(locator) + len(suffix) > 4096:
-                    raise InvalidInput('document source locator exceeds its limit')
-                pending.append((note, locator + suffix, details))
+                pending.append((note, _word_prefix(locator, suffix), details))
 
 
 def _xlsx(bundle: SafeArchive, output: _Output) -> None:
