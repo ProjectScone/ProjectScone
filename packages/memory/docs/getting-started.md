@@ -89,6 +89,50 @@ imports ONNX Runtime or FastEmbed first, export that variable before starting
 the process. A later API call cannot undo earlier initialization events; see
 [ONNX Runtime's telemetry documentation](https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md).
 
+## Ask the graph
+
+Facts form an entity graph that is read, not guessed: every line an answer
+gives cites the facts behind it, read again before it is shown.
+
+```python
+import asyncio
+from scone_memory import MemoryEngine, InMemoryDocumentStore, InMemoryVectorIndex, HashEmbedder
+from scone_memory.entities.changes import graph_changes
+from scone_memory.entities.context import graph_context
+from scone_memory.entities.match import graph_match
+
+async def main():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("default", "alice chen", "works_at", "Globex", valid_from="2024-03-01T00:00:00Z")
+    await engine.assert_fact("default", "globex", "based_in", "Lisbon", valid_from="2019-01-01T00:00:00Z")
+    # What the graph records around a name, one cited line per item.
+    print((await graph_context(engine, "default", names=["alice chen"])).text)
+    # Who works somewhere based in Lisbon?
+    found = await graph_match(engine, "default", [
+        {"subject": "?who", "predicate": "works_at", "object": "?org"},
+        {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}])
+    print(found.text)
+    # What changed since the start of 2024?
+    print((await graph_changes(engine, "default", since="2024-01-01T00:00:00Z")).text)
+
+asyncio.run(main())
+```
+
+Among what it prints:
+
+```
+hop 1: alice chen works_at Globex [fact 2]
+hop 2: Globex based_in Lisbon [fact 3]
+row: ?who = alice chen (person) ent:…; ?org = Globex (organisation) ent:… [facts 2, 3]
+moved: alice chen works_at Acme Robotics → Globex [facts 1, 2]
+```
+
+The same reads are HTTP routes (`/v1/graph/context`, `/v1/graph/match`,
+`/v1/graph/changes`), MCP tools and `scone graph` commands. See
+[Retrieval and storage](retrieval-and-storage.md) for every graph route,
+the report, the drawings and their bounds.
+
 ## PDF ingestion
 
 The optional `pdf` extra adds native text-layer PDF ingestion, retained originals,
