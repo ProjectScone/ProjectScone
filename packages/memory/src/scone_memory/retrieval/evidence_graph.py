@@ -7,7 +7,6 @@ not trusted URLs. The caller must pass the same validated scope as recall.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 
 from typing import Literal, Protocol, Sequence, runtime_checkable
@@ -16,6 +15,10 @@ from pydantic import BaseModel, Field, JsonValue
 
 from ..core.models import Chunk, Episode, Fact, FactLink, RecallResult
 from ..core.ports import TextFilter
+from ..core.validation import entity_key
+from ..entities.classify import ClassificationContext, classify_object, reference_flag
+from ..entities.ids import ENTITY_ID_SCHEME, key_id
+from ..entities.project import quoted_form
 from ..memory.engine import check_space
 
 MAX_CHUNKS = 24
@@ -249,79 +252,97 @@ async def build_query_evidence_graph(documents: EvidenceDocuments, space: str, q
         builder.notice("Graph limits omitted some returned records or stored relations.")
     if graph.provenance_missing:
         builder.notice("Some recorded source episodes are no longer retained; their quotes are not shown.")
-    _add_concepts(graph)
+    _add_concepts(graph, space)
     graph.counts = {kind: sum(node.kind == kind for node in graph.nodes) for kind in sorted({node.kind for node in graph.nodes})}
     return graph
 
 
-# These are literal typographic spans, not entity extraction or inferred facts.
-_NAMED_SPAN = re.compile(r"(?<![\w])(?:[A-Z][a-z][A-Za-z0-9_-]{2,}|[A-Z]{2,})(?![\w])")
-_MENTION_STOP = frozenset({"The", "This", "That", "These", "Those", "What", "When", "Where", "Which", "How",
-                           "We", "You", "They", "Our", "Your", "Their", "Some", "Ignore", "Note", "Source"})
+def _mentioned(form: str, text: str) -> re.Match[str] | None:
+    """Where a recorded spelling occurs as a whole word. Short and all-caps
+    names must match their own case: 'AI' is not 'ai', 'May' is not 'may'."""
+    strict = len(form) <= 3 or (form.isupper() and len(form) <= 5)
+    pattern = r"(?<!\w)" + r"\s+".join(re.escape(token) for token in form.split()) + r"(?!\w)"
+    return re.search(pattern, text, 0 if strict else re.IGNORECASE)
 
 
-def _add_concepts(graph: QueryEvidenceGraph) -> None:
+def _add_concepts(graph: QueryEvidenceGraph, space: str) -> None:
+    """Draw the entities retained claims are about, and where chunks mention them.
+
+    Subjects are entities; an object is one only when the entity classifier
+    says it names a thing, so dates, amounts and prose stay on their claim.
+    Node ids are the entity ids the knowledge map uses, so a person can pivot
+    from recall evidence to the whole-space graph. Nothing comes from
+    typography: a chunk mentions a concept only where a spelling some claim
+    recorded for it appears.
+    """
+    claims = [claim for claim in graph.nodes
+              if claim.kind == "claim" and claim.data.get("provenance_status") == "retained"
+              and claim.data.get("record_complete") is True
+              and all(isinstance(claim.data.get(key), str) for key in ("subject", "predicate", "object"))]
+    context = ClassificationContext(anchors=frozenset(entity_key(str(claim.data["subject"])) for claim in claims))
     concepts: dict[str, EvidenceNode] = {}
+    spellings: dict[str, set[str]] = {}
     concept_truncated = False
     added_edges: list[EvidenceEdge] = []
 
-    def concept(name: str, basis: str) -> EvidenceNode | None:
+    def concept(key: str, spelling: str, label: str, basis: str) -> EvidenceNode | None:
         nonlocal concept_truncated
-        normalized = " ".join(name.casefold().split())
-        if not normalized or len(name) > PREVIEW_CHARS:
+        if not key or len(spelling) > PREVIEW_CHARS:
             return None
-        if normalized in concepts:
-            return concepts[normalized]
-        if len(concepts) >= MAX_CONCEPTS:
-            graph.truncated = True
-            concept_truncated = True
-            return None
-        found = EvidenceNode(id="concept:" + hashlib.sha256(normalized.encode()).hexdigest(),
-                             kind="concept", label=name, data={"name": name, "basis": basis})
-        concepts[normalized] = found
-        return found
+        if key not in concepts:
+            if len(concepts) >= MAX_CONCEPTS:
+                graph.truncated = True
+                concept_truncated = True
+                return None
+            flag = reference_flag(key)
+            concepts[key] = EvidenceNode(id=key_id(space, key), kind="concept", label=label, data={
+                "name": label, "basis": basis, "key": key, "entity_id": key_id(space, key),
+                "id_scheme": ENTITY_ID_SCHEME, "flags": [] if flag is None else [flag]})
+        spellings.setdefault(key, set()).add(spelling)
+        return concepts[key]
 
-    for claim in graph.nodes:
-        if (claim.kind != "claim" or claim.data.get("provenance_status") != "retained"
-                or claim.data.get("record_complete") is not True):
+    for claim in claims:
+        subject, predicate, obj = (str(claim.data[key]) for key in ("subject", "predicate", "object"))
+        quote = claim.data.get("quote")
+        subject_key = entity_key(subject)
+        spelled = quoted_form(subject_key, quote if isinstance(quote, str) else None) or subject.strip()
+        left = concept(subject_key, spelled, spelled, "retained_claim")
+        classification = classify_object(obj, predicate, context)
+        right = (concept(entity_key(obj), obj.strip(), obj.strip(), "retained_claim")
+                 if classification.object_class == "entity" else None)
+        if left is None:
             continue
-        subject, predicate, obj = (claim.data.get(key) for key in ("subject", "predicate", "object"))
-        if not isinstance(subject, str) or not isinstance(predicate, str) or not isinstance(obj, str):
+        added_edges.append(EvidenceEdge(source=claim.id, target=left.id, kind="asserts", label="subject",
+                                        data={"category": "assertion", "role": "subject", "fact_id": claim.data["fact_id"]}))
+        if right is None:
             continue
-        left, right = concept(subject, "retained_claim"), concept(obj, "retained_claim")
-        if left is None or right is None:
-            continue
-        for target, role in ((left, "subject"), (right, "object")):
-            added_edges.append(EvidenceEdge(source=claim.id, target=target.id, kind="asserts", label=role,
-                                            data={"category": "assertion", "role": role, "fact_id": claim.data["fact_id"]}))
+        added_edges.append(EvidenceEdge(source=claim.id, target=right.id, kind="asserts", label="object",
+                                        data={"category": "assertion", "role": "object", "fact_id": claim.data["fact_id"],
+                                              "classification": classification.basis}))
         added_edges.append(EvidenceEdge(source=left.id, target=right.id, kind="relation", label=predicate,
             data={"category": "fact_relation", "predicate": predicate, "fact_id": claim.data["fact_id"],
                   "source_episode_id": claim.data["source_episode_id"], "quote": claim.data["quote"],
                   "origin": claim.data["origin"], "provenance_status": "retained"}))
 
-    chunks = [node for node in graph.nodes if node.kind == "chunk"]
-    for chunk in chunks:
-        text = chunk.data.get("text")
-        if not isinstance(text, str):
-            continue
-        for match in _NAMED_SPAN.finditer(text):
-            if match.group() not in _MENTION_STOP:
-                concept(match.group(), "literal_mention")
     mentions = 0
-    for chunk in chunks:
+    for chunk in (node for node in graph.nodes if node.kind == "chunk"):
         text = chunk.data.get("text")
         if not isinstance(text, str):
             continue
-        for found in concepts.values():
-            occurrence = re.search(r"(?<!\w)" + re.escape(found.label) + r"(?!\w)", text, re.IGNORECASE)
+        for key, found in concepts.items():
+            if reference_flag(key) is not None:
+                continue
+            occurrence = next((hit for form in sorted(spellings[key]) if (hit := _mentioned(form, text))), None)
             if occurrence is None:
                 continue
             if mentions >= MAX_MENTIONS:
                 graph.truncated = True
                 concept_truncated = True
                 break
-            added_edges.append(EvidenceEdge(source=chunk.id, target=found.id, kind="mentions", label="Mentions exact name",
-                                            data={"category": "mention", "quote": occurrence.group()}))
+            added_edges.append(EvidenceEdge(source=chunk.id, target=found.id, kind="mentions",
+                                            label="Mentions a recorded name",
+                                            data={"category": "mention", "quote": occurrence.group(),
+                                                  "match": "exact_case" if occurrence.group() in spellings[key] else "folded"}))
             mentions += 1
     graph.nodes.extend(concepts.values())
     graph.edges.extend(added_edges)

@@ -161,7 +161,7 @@ def _support(facts: Iterable[Fact]) -> Support:
     return Support(**{name: counts[name] for name in Support.__slots__})
 
 
-def _quoted_form(key: str, quote: str | None) -> str | None:
+def quoted_form(key: str, quote: str | None) -> str | None:
     """The quote's own spelling of a key: case and spacing as written."""
     if not quote:
         return None
@@ -201,7 +201,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> Ent
     for fact in held:
         subject_key = entity_key(fact.subject)
         subject_id = key_id(space, subject_key)
-        forms[subject_key][_quoted_form(subject_key, fact.quote) or fact.subject.strip()] += 1
+        forms[subject_key][quoted_form(subject_key, fact.quote) or fact.subject.strip()] += 1
         roles_count[subject_key]["subject"] += 1
         if (kind := hint(fact.predicate, "subject")) is not None:
             hints[subject_key].append((kind, fact.fact_id))
