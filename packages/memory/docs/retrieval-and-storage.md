@@ -441,7 +441,16 @@ other requests while it builds.
 A graph request waits at most 5 seconds for a projection. Past that, the
 build continues in the background, and the request gets a 503 with
 `Retry-After: 1` and `{"code": "projection_building"}`. The next request
-finds the view ready. Closing the engine cancels any build still running.
+finds the view ready.
+
+- **Bounded:** at most 8 builds are in flight at once. A request past
+  that gets the same 503 immediately and starts nothing.
+- **Workers:** large views are projected on two worker threads per
+  engine.
+- **Closing** the engine cancels waiting builds, and returns only once no
+  worker thread is still projecting.
+- **Failures:** a store that fails (its own read timing out, say) gives
+  its own error, never a 503.
 
 With 20,000 facts on SQLite, a view costs:
 

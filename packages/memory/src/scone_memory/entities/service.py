@@ -34,6 +34,8 @@ import bisect
 import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from functools import partial
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -57,6 +59,11 @@ MAX_VIEWS_PER_SPACE = 16
 BUILD_TIMEOUT = 5.0
 #: Views over more facts than this are projected off the event loop.
 INLINE_FACTS = 2_000
+#: Builds in flight at once, waiting or running. A request past it is told
+#: to come back and starts nothing.
+MAX_BUILDS = 8
+#: Worker threads projecting at once, per engine.
+WORKERS = 2
 
 
 class ProjectionBuilding(Exception):
@@ -107,6 +114,8 @@ class EntityService:
         self._locks: dict[str, asyncio.Lock] = {}
         self._projecting: dict[_Slot, asyncio.Future[tuple[EntityProjection, int]]] = {}
         self._background: set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]] = set()
+        self._executor: ThreadPoolExecutor | None = None
+        self._workers: set[Future[EntityProjection]] = set()
 
     def cached(self, space: str) -> EntityProjection | None:
         """The most recently used view held for the space, of any revision,
@@ -130,6 +139,19 @@ class EntityService:
         self._locks.clear()
         self._projecting.clear()
 
+    async def aclose(self) -> None:
+        """Cancel every build and return only once no worker thread is still
+        projecting: a running thread cannot be cancelled, so it is waited for."""
+        self.clear()
+        executor, self._executor = self._executor, None
+        if executor is None:
+            return
+        executor.shutdown(wait=False, cancel_futures=True)
+        running = [worker for worker in self._workers if not worker.done()]
+        if running:
+            await asyncio.to_thread(wait_for_futures, running)
+        self._workers.clear()
+
     def building(self) -> set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]]:
         """Builds still running, including those whose caller stopped waiting."""
         return {task for task in self._background if not task.done()}
@@ -138,7 +160,11 @@ class EntityService:
                          timeout: float | None = None) -> tuple[EntityProjection, dict[str, object]]:
         """The projection of the facts that count in ``mode`` at ``when``,
         with what the read behind it covered. Past ``timeout`` seconds the
-        build continues in the background and ``ProjectionBuilding`` is raised."""
+        build continues in the background and ``ProjectionBuilding`` is raised;
+        with ``MAX_BUILDS`` already in flight, it is raised at once and nothing
+        starts."""
+        if timeout is not None and len(self.building()) >= MAX_BUILDS:
+            raise ProjectionBuilding(space)
         task = asyncio.ensure_future(self._view(space, mode, when))
         self._background.add(task)
         task.add_done_callback(self._settled)
@@ -160,9 +186,14 @@ class EntityService:
         self._projecting.pop(slot, None)
 
     async def _project(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
-        if len(facts) > INLINE_FACTS:
-            return await asyncio.to_thread(project_entities, space, facts, revision=revision), len(facts)
-        return project_entities(space, facts, revision=revision), len(facts)
+        if len(facts) <= INLINE_FACTS:
+            return project_entities(space, facts, revision=revision), len(facts)
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="scone-projection")
+        worker = self._executor.submit(partial(project_entities, space, facts, revision=revision))
+        self._workers.add(worker)
+        worker.add_done_callback(self._workers.discard)
+        return await asyncio.wrap_future(worker), len(facts)
 
     async def _view(self, space: str, mode: "StatusMode",
                     when: datetime) -> tuple[EntityProjection, dict[str, object]]:

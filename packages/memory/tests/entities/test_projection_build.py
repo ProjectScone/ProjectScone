@@ -127,3 +127,40 @@ async def test_a_store_that_times_out_is_a_failure_not_a_build_in_progress():
     with pytest.raises(TimeoutError, match="storage read timed out"):
         await engine.entities.projection("alpha", mode="current", when=WHEN, timeout=1.0)
     assert not engine.entities.building()
+
+
+async def test_builds_past_the_admission_limit_are_turned_away_without_starting(monkeypatch):
+    """A flood of distinct views must not start a build each: past the limit
+    a request is told to come back, and no work begins for it."""
+    monkeypatch.setattr(service_module, "MAX_BUILDS", 2)
+    store = Slow()
+    engine = await engine_with(store)
+    store.delay = 0.5
+    for mode in ("current", "history", "all", "proposed"):
+        with pytest.raises(ProjectionBuilding):
+            await engine.entities.projection("alpha", mode=mode, when=WHEN, timeout=0.01)
+    assert len(engine.entities.building()) == 2
+    await engine.close()
+
+
+async def test_closing_waits_for_a_worker_thread_still_projecting(monkeypatch):
+    """A thread cannot be cancelled; close returns only once it has finished,
+    so nothing of the engine is still running afterwards."""
+    import time
+
+    monkeypatch.setattr(service_module, "INLINE_FACTS", 0)
+    finished = []
+    real = service_module.project_entities
+
+    def slow_projection(*args, **kwargs):
+        time.sleep(0.3)
+        result = real(*args, **kwargs)
+        finished.append(True)
+        return result
+
+    monkeypatch.setattr(service_module, "project_entities", slow_projection)
+    engine = await engine_with(Slow())
+    with pytest.raises(ProjectionBuilding):
+        await engine.entities.projection("alpha", mode="current", when=WHEN, timeout=0.01)
+    await engine.close()
+    assert finished == [True]

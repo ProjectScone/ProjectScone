@@ -272,7 +272,7 @@ class MemoryEngine:
         if self._closed:
             return
         self._closed = True
-        self.entities.clear()
+        await self.entities.aclose()
         first: Optional[BaseException] = None
         for store in (self.documents, self.vectors, self.events, self.blobs):
             closer = getattr(store, "close", None)
