@@ -13,6 +13,7 @@ from ..core.models import Added, Attachment
 from ..core.validation import check_space
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
+from .document_source import DocumentSource, source_revision_key
 
 if TYPE_CHECKING:
     from ..core.ports import EmbeddingCheckpoint
@@ -126,6 +127,7 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
 
 async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          manifest: DocumentManifest, *,
+                         source: DocumentSource | None = None,
                          embedding_checkpoint: EmbeddingCheckpoint | None = None) -> DocumentIngested:
     """Index prepared extraction. Replays repair links using content identities."""
     validate_document(manifest.parsed, DocumentLimits())
@@ -134,16 +136,19 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     encoded = encode_manifest(manifest)
     if len(encoded) > memory.max_attachment_bytes:
         raise InvalidInput('document manifest exceeds its attachment byte limit')
+    identity = source_revision_key(source, original.attachment_id, digest(encoded)) if source is not None else None
+    source_metadata = source.metadata() if source is not None else {}
     retained = await memory.attach(space, encoded, 'application/json', filename='document-provenance.json')
     if retained.media_type != 'application/json':
         raise InvalidInput('document manifest has an incompatible retained media type')
     content = '\n\n'.join(segment.text for segment in manifest.parsed.segments)
     added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
-        dedup_key=f'document-v1:{original.attachment_id}:{retained.attachment_id}',
+        dedup_key=identity or f'document-v1:{original.attachment_id}:{retained.attachment_id}',
         attachment_ids=(original.attachment_id, retained.attachment_id),
         embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': manifest.parsed.format, 'document_original': original.attachment_id,
-                  'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text'})
+                  'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text',
+                  **source_metadata})
     return DocumentIngested(added, original, retained, manifest.parsed.format,
                             len(manifest.parsed.segments), manifest.filename)
 
