@@ -42,7 +42,7 @@ def projection():
 
 
 def test_every_format_is_offered():
-    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"}
+    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -101,7 +101,7 @@ def test_the_same_projection_always_exports_the_same_bytes(projection):
         assert export_graph(projection, format).body == export_graph(projection, format).body
 
 
-@pytest.mark.parametrize("format", ["csv", "obsidian"])
+@pytest.mark.parametrize("format", ["csv", "obsidian", "wiki"])
 def test_zipped_exports_carry_a_fixed_timestamp_not_the_clock(projection, format):
     """A zip entry written by name takes the current time; two exports of
     the same projection a second apart would then differ."""
@@ -140,7 +140,7 @@ def text_of(body: bytes) -> str:
     return "\n".join(bundle.read(name).decode() for name in bundle.namelist())
 
 
-@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
+@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"])
 def test_every_format_keeps_every_value_and_its_facts(projection, format):
     text = text_of(export_graph(projection, format).body)
     assert "May 2021" in text and "joined_on" in text
@@ -227,7 +227,7 @@ def test_cypher_and_markdown_write_control_characters_as_escapes():
     assert "\x01" not in notes and "␁" in notes
 
 
-@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
+@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"])
 def test_every_format_writes_whatever_the_ledger_holds(format):
     """The ledger accepts NUL and lone surrogates. No export may fail on
     them or write a file its own parser rejects."""
@@ -393,3 +393,83 @@ def test_gexf_keeps_each_stretch_a_relation_held_not_one_envelope():
     assert by_label["Acme"]["spells"] == acme
     assert next(edge for edge in edges.values() if nodes[edge["target"]]["label"] == "Acme")["spells"] == acme
     assert by_label["alice"]["spells"] == [("2020-01-01T00:00:00.000Z", None, None)]
+
+
+WIKI_LEDGER = [
+    fact(1, "alice chen", "works_at", "Acme Robotics"), fact(2, "bob stone", "works_at", "Acme Robotics"),
+    fact(3, "acme robotics", "based_in", "Lisbon"), fact(4, "carol diaz", "works_at", "Globex"),
+    fact(5, "dan roe", "works_at", "Globex"), fact(6, "globex", "based_in", "Porto"),
+    fact(7, "bob stone", "knows", "Carol Diaz"), fact(8, "alice chen", "age", "34"),
+    fact(9, "alice chen", "knows", "[x](http://evil.example)"),
+]
+
+
+def wiki(ledger=WIKI_LEDGER):
+    bundle = zipfile.ZipFile(io.BytesIO(export_graph(project_entities("alpha", ledger, revision=1), "wiki").body))
+    return {name: bundle.read(name).decode() for name in bundle.namelist()}
+
+
+_LINK = re.compile(r"\]\(([^)\s]+)\)")
+
+
+def test_the_wiki_is_an_index_topic_articles_and_entity_articles():
+    files = wiki()
+    topics = [name for name in files if name.startswith("topics/")]
+    entities = [name for name in files if name.startswith("entities/")]
+    projected = project_entities("alpha", WIKI_LEDGER, revision=1)
+    assert "index.md" in files and len(topics) >= 2 and len(entities) == len(projected.entities)
+    assert all(name.endswith(".md") for name in files)
+
+
+def test_every_link_in_the_wiki_opens_a_page_in_it():
+    """An agent crawling from index.md reaches every page, and no link
+    points outside the wiki or at a page that is not there."""
+    import posixpath
+    from urllib.parse import unquote
+
+    files = wiki()
+    reached, frontier = {"index.md"}, ["index.md"]
+    while frontier:
+        page = frontier.pop()
+        for target in _LINK.findall(files[page]):
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(page), unquote(target)))
+            assert resolved in files, (page, target)
+            if resolved not in reached:
+                reached.add(resolved)
+                frontier.append(resolved)
+    assert reached == set(files)
+
+
+def test_a_topic_lists_its_members_the_relations_inside_and_those_leading_out():
+    """A relation inside one topic is listed there once; one between two
+    topics is listed as leading out of both, linking the other."""
+    files = wiki()
+    topics = {name: text for name, text in files.items() if name.startswith("topics/")}
+    assert all("## Entities" in text for text in topics.values())
+    for number in range(1, 8):
+        inside = sum(text.split("## Leading out")[0].count(f"(fact {number})") for text in topics.values())
+        leading = sum(text.split("## Leading out")[1].count(f"(fact {number})") for text in topics.values()
+                      if "## Leading out" in text)
+        assert (inside, leading) in ((1, 0), (0, 2)), number
+    assert any("## Leading out" in text and ", other end in topic [" in text.split("## Leading out")[1]
+               for text in topics.values())
+
+
+def test_an_entity_article_cites_every_statement_and_names_its_topic():
+    files = wiki()
+    alice = next(text for name, text in files.items() if name.startswith("entities/alice chen"))
+    assert "(fact 1)" in alice and "(fact 8)" in alice and "34" in alice
+    assert "../topics/" in alice
+
+
+def test_stored_text_cannot_become_a_link_or_markup_in_the_wiki():
+    files = wiki()
+    everything = "\n".join(files.values())
+    assert "http://evil.example" not in _LINK.findall(everything) and "http://evil.example" in everything
+
+
+def test_a_crowded_entity_lists_its_first_relations_and_counts_the_rest():
+    ledger = [fact(n, f"worker {n:03d}", "works_at", "Acme") for n in range(1, 251)]
+    acme = next(text for name, text in wiki(ledger).items() if name.lower() == "entities/acme.md")
+    assert acme.count("works\\_at (fact") + acme.count("works_at (fact") == 200
+    assert "and 50 more" in acme

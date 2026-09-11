@@ -604,6 +604,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
 | `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` | Obsidian and other note tools |
+| `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -637,6 +638,21 @@ How each format places values and escapes its own syntax:
   employer's edge is gone at the moment the new one appears. Nodes, values and
   escaping are laid out as in GraphML, and the file's description holds
   the projection digest and `about`.
+- **Wiki** is for an agent to read instead of the raw ledger, starting
+  from `index.md`.
+  - The index lists the topics, which are the report's communities, the
+    20 most connected entities, and any entity in no topic.
+  - Each topic article lists its members with their kinds, the relations
+    inside it, and those leading out, each naming the topic at its other
+    end.
+  - Each entity article lists its kind, its other spellings, its topic,
+    its relations both ways and its values.
+  - Every statement cites its facts. Links are plain relative Markdown,
+    and every page is reachable from the index. Stored text is escaped,
+    parentheses included, so a stored `[x](url)` cannot pass for a link
+    even to a crawler that reads links with a pattern.
+  - A section longer than 200 lines lists the first 200 and says how many
+    more there are.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
   `[:HAS_VALUE]`, with the predicate a property, never query syntax.
   Strings escape quotes and backslashes, and write controls, line

@@ -358,7 +358,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         space: str = Depends(space_for),
     ) -> Response:
         """The view's whole graph as a file another tool reads: node-link JSON,
-        GraphML, dynamic GEXF, Cypher, CSV, JSON-LD or an Obsidian vault. The file says which
+        GraphML, dynamic GEXF, Cypher, CSV, JSON-LD, an Obsidian vault or a wiki
+        an agent can crawl. The file says which
         projection it holds and, when the read was capped, that it is partial."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)

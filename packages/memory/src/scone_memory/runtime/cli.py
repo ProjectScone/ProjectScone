@@ -220,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--limit", type=int, default=200, help="predicates to list, most used first (default 200)")
     g.add_argument("--max-bytes", type=int, default=64_000, help="byte budget for the listed predicates")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
-    g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
+    g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
     p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
     p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
