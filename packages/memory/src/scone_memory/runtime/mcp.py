@@ -30,7 +30,7 @@ from typing import Annotated, Awaitable, Callable, Mapping, Optional, Sequence
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from .. import __version__
 from ..core.errors import InvalidInput
@@ -349,6 +349,13 @@ def create_server(engine: MemoryEngine, space: str = "default",
         max_bytes: Annotated[
             Optional[StrictInt], Field(description="Byte budget for the packet (512..=64000); defaults to 8000")
         ] = None,
+        similar: Annotated[
+            Optional[StrictBool],
+            Field(description="Also centre on up to three entities the question resembles, each marked with its score"),
+        ] = None,
+        min_similarity: Annotated[
+            Optional[float], Field(description="Keep out resembling entities below this cosine similarity (-1..=1)")
+        ] = None,
     ) -> CallToolResult:
         """What the entity graph records around some names or the entities a
         question names: one line per item, coverage first, then the entities,
@@ -363,8 +370,11 @@ def create_server(engine: MemoryEngine, space: str = "default",
         budget = max_bytes if max_bytes is not None else 8_000
         if not 512 <= budget <= 64_000:
             return tool_error("max_bytes must be 512..=64000")
+        if min_similarity is not None and not -1.0 <= min_similarity <= 1.0:
+            return tool_error("min_similarity must be -1..=1")
         packet = await graph_context(engine, space or default_space, names=names or (), question=question,
-                                     limits=ContextLimits(max_bytes=budget))
+                                     limits=ContextLimits(max_bytes=budget), similar=bool(similar),
+                                     min_similarity=min_similarity)
         return ok_text(packet.text)
 
     @tool(server, "memory_entity")

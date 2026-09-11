@@ -125,3 +125,10 @@ async def test_one_huge_predicate_cannot_make_the_schema_answer_huge():
     assert result["ok"] is True and len(json.dumps(result).encode()) < 4_000
     assert result["predicates"][0]["length"] == 200_000 and small["ok"] is True
     assert (await box.run("graph_schema", {"max_bytes": 100}))["ok"] is False
+
+
+async def test_graph_context_can_seed_by_resemblance(box):
+    result = await box.run("graph_context", {"question": "which robotics firm?", "similar": True})
+    assert result["ok"] is True and result["coverage"]["similar"] and " similar " in result["text"]
+    assert (await box.run("graph_context", {"question": "x", "similar": "yes"}))["ok"] is False
+    assert (await box.run("graph_context", {"question": "x", "min_similarity": 2}))["ok"] is False

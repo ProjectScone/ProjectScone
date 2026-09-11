@@ -167,6 +167,7 @@ def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
     (("schema", "--limit", "0"), "--limit"),
     (("schema", "--max-bytes", "100"), "--max-bytes"),
     (("walk", "lisbon", "--hops", "9"), "--hops"),
+    (("context", "--question", "q", "--min-similarity", "nan"), "--min-similarity"),
     (("walk", *(f"person {n}" for n in range(25))), "names"),
     (("timeline", "alice", "--as-of", "0001-01-01T00:00:00+01:00"), "--as-of"),
     (("timeline", "alice", "--as-of", "9999-12-31T23:59:59-01:00"), "--as-of"),
@@ -230,3 +231,8 @@ async def test_walk_names_an_unknown_or_ambiguous_seed(engine):
     assert code == 1 and len(json.loads(text)["candidates"]) == 2
     code, text = await graph(engine, "walk", "nobody")
     assert code == 1 and "no entity is named" in json.loads(text)["error"]
+
+
+async def test_context_can_seed_by_resemblance(engine):
+    code, text = await graph(engine, "context", "--question", "which robotics firm?", "--similar")
+    assert code == 0 and " similar " in text

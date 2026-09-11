@@ -373,19 +373,23 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         names: list[str] = Query(default=[]),
         q: Optional[str] = Query(default=None, min_length=1, max_length=MAX_QUESTION),
         max_hops: int = Query(default=2, ge=1, le=4), max_bytes: int = Query(default=8_000, ge=512, le=64_000),
+        similar: bool = False, min_similarity: Optional[float] = Query(default=None, ge=-1, le=1),
         status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
     ) -> dict[str, object]:
         """What the graph records around some names, or the entities a question
         names, as one line per item for a model: coverage first, then the
         entities, paths between them, relations by hop and values, each citing
-        facts re-read now. Cut between lines to ``max_bytes``."""
+        facts re-read now. Cut between lines to ``max_bytes``. With
+        ``similar``, a question also seeds up to three entities it resembles
+        by vector, each marked with its score."""
         if not names and q is None:
             raise InvalidInput("give names or q")
         if len(names) > MAX_NAMES or any(not 1 <= len(name) <= MAX_NAME for name in names):
             raise InvalidInput(f"names: at most {MAX_NAMES}, each 1..{MAX_NAME} characters")
         when = _moment(engine, as_of)
         packet = await graph_context(engine, space, names=names, question=q, status=status, as_of=when,
-                                     limits=ContextLimits(max_bytes=max_bytes, max_hops=max_hops))
+                                     limits=ContextLimits(max_bytes=max_bytes, max_hops=max_hops), similar=similar,
+                                     min_similarity=min_similarity)
         return packet.record(space, status, when)
 
     @app.get("/v1/graph/sources")

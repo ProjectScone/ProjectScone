@@ -30,7 +30,7 @@ RUST_ARGUMENTS = {
 #: The entity graph, read only: a packet around names or a question, one
 #: entity with its relations both ways, and the paths between two.
 GRAPH_ARGUMENTS = {
-    "memory_graph_context": {"names", "question", "space", "max_bytes"},
+    "memory_graph_context": {"names", "question", "space", "max_bytes", "similar", "min_similarity"},
     "memory_entity": {"name", "space"},
     "memory_connections": {"source", "target", "max_hops", "space"},
     "memory_graph_schema": {"limit", "max_bytes", "space"},
@@ -517,3 +517,11 @@ async def test_the_graph_report_and_schema_are_resources_a_client_can_attach(ser
 async def test_a_resource_for_a_space_that_cannot_exist_is_refused(server):
     with pytest.raises(Exception, match="space"):
         list(await server.read_resource("scone://BAD%20SPACE/graph/report"))
+
+
+async def test_graph_context_can_seed_by_resemblance(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_context", question="which robotics firm?", similar=True)
+    assert not error and " similar " in text
+    error, text = await call(server, "memory_graph_context", question="which robotics firm?")
+    assert not error and " similar " not in text

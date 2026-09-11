@@ -107,6 +107,10 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
             "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
                           "description": ("Byte budget for the packet text, 512 to 64000. Defaults to 8000. "
                                           "Candidates and ids around it are capped separately.")},
+            "similar": {"type": "boolean",
+                        "description": "Also centre on up to three entities the question resembles, each with its score."},
+            "min_similarity": {"type": "number", "minimum": -1, "maximum": 1,
+                               "description": "Keep out resembling entities below this cosine similarity."},
         }, []),
     ),
     ToolSpec(
@@ -183,6 +187,11 @@ def check(spec: ToolSpec, arguments: Mapping[str, Any]) -> Optional[str]:
             return f"{name} must be a whole number"
         if kind == "array" and not (isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value)):
             return f"{name} must be a list of text"
+        if kind == "boolean" and not isinstance(value, bool):
+            return f"{name} must be true or false"
+        if kind == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                 or not rule.get("minimum", 0) <= value <= rule.get("maximum", MAX_ITEMS)):
+            return f"{name} must be a number from {rule.get('minimum')} to {rule.get('maximum')}"
         if kind == "integer" and not rule.get("minimum", 0) <= value <= rule.get("maximum", MAX_ITEMS):
             return f"{name} must be from {rule.get('minimum')} to {rule.get('maximum')}"
     return None
@@ -280,7 +289,9 @@ class ToolBox:
             if question is not None and not 1 <= len(question) <= MAX_QUESTION:
                 raise InvalidInput(f"question must be 1 to {MAX_QUESTION} characters")
             packet = await graph_context(self.engine, self.space, names=names, question=question, as_of=when,
-                                         limits=ContextLimits(max_bytes=arguments.get("max_bytes", 8_000)))
+                                         limits=ContextLimits(max_bytes=arguments.get("max_bytes", 8_000)),
+                                         similar=bool(arguments.get("similar", False)),
+                                         min_similarity=arguments.get("min_similarity"))
         return packet.record(self.space, "current", when)
 
     @staticmethod

@@ -43,7 +43,9 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   names, or around the entities a question names. `max_bytes` (512 to
   64,000) bounds the packet text. The candidates and ids around it are
   capped on their own: 24 candidates at most, with names clipped to 120
-  characters.
+  characters. With `similar: true`, a question also finds up to three
+  entities it resembles by vector, each marked with its score. Only a
+  `min_similarity` you pass keeps weak matches out.
 - `explain_entity` returns one entity's relations in both directions and
   its values, or the candidates for an ambiguous name.
 - `connect_entities` returns the shortest paths between two entities,

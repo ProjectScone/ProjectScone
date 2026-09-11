@@ -479,7 +479,29 @@ A graph context packet for a model: what the graph records around some
 names (`names=`, repeatable, at most 24) or around the entities a
 question names (`q=`). A question's words are matched to entity names
 case- and punctuation-insensitively, the longest name first. Common
-words never count as names. The packet is one self-describing line per
+words never count as names.
+
+A question can ask about something it never names, such as "which
+manufacturing firm do we know?". With `similar=true` it also finds up
+to three entities it resembles by vector (LlamaIndex's vector entry
+into a graph):
+
+- **How entities are described.** Each entity is described in one line:
+  its label and kind, then its strongest relations both ways and its
+  values. That line is embedded with the engine's own embedder, and the
+  nearest lines join the named seeds without repeating them.
+- **What the packet says.** Each such seed says so:
+  `entity: Acme Robotics (organisation) ent:… similar 0.83`, and
+  `coverage.similar` lists `{id, score}`.
+- **No floor is guessed.** Only one you pass as `min_similarity` keeps
+  weak matches out.
+- **Cost.** A line is embedded once, whatever projection it appears in.
+  Only the 5,000 most connected entities are compared, and
+  `similar_cut N` counts the rest. With a remote embedder each new line
+  is a call, which is why this is opt-in.
+- Advertised as `graph.context_similar`. MCP `memory_graph_context`, the
+  ToolBox `graph_context` and `scone graph context --similar` take the
+  same options. The packet is one self-describing line per
 item, in this order:
 
 | Line | Holds |

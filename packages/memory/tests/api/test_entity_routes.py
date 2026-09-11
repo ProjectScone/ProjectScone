@@ -731,3 +731,13 @@ def test_walk_parameters_are_checked_and_advertised(city):
     assert client.get("/v1/graph/knowledge", params={"direction": "in"}, headers=auth()).status_code == 422
     features = client.get("/v1/capabilities", headers=auth()).json()["features"]
     assert features["graph.knowledge_walk"] is True
+
+
+def test_context_can_seed_by_resemblance_when_asked(seeded):
+    client, _ = seeded
+    plain = client.get("/v1/graph/context", params={"q": "which robotics firm?"}, headers=auth()).json()
+    aided = client.get("/v1/graph/context", params={"q": "which robotics firm?", "similar": "true"}, headers=auth()).json()
+    assert plain["coverage"]["similar"] == [] and aided["coverage"]["similar"]
+    assert " similar " in aided["text"]
+    assert client.get("/v1/graph/context", params={"q": "x", "min_similarity": 2}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context_similar"] is True

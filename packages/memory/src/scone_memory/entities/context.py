@@ -80,7 +80,8 @@ class GraphContext:
                 "status": self.status, "text": self.text, "seeds": list(self.seeds),
                 "candidates": list(self.candidates),
                 "coverage": {"reasons": self.coverage.get("reasons", []), "read": self.coverage.get("read", {}),
-                             "hubs_not_crossed": self.coverage.get("hubs_not_crossed", [])}}
+                             "hubs_not_crossed": self.coverage.get("hubs_not_crossed", []),
+                             "similar": self.coverage.get("similar", [])}}
 
 
 def _shown(character: str) -> str:
@@ -100,6 +101,9 @@ def one_line(text: object, limit: int = 120) -> str:
 def _plain(text: str) -> str:
     return " ".join(name_words(text))
 
+
+#: Seeds a question may gain by resemblance, after those it names.
+SIMILAR_SEEDS = 3
 
 #: One set of bounds for every surface that asks the graph by name.
 MAX_NAMES = 24
@@ -260,8 +264,16 @@ async def _path_line(evidence: _Evidence, path: "Path", label: Callable[[str], s
 
 async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[str] = (),
                         question: str | None = None, limits: ContextLimits | None = None,
-                        status: "StatusMode" = "current", as_of: str | None = None) -> GraphContext:
+                        status: "StatusMode" = "current", as_of: str | None = None, similar: bool = False,
+                        min_similarity: float | None = None) -> GraphContext:
+    """``similar`` adds, after the entities a question names, up to
+    ``SIMILAR_SEEDS`` it resembles by vector, each marked with its score;
+    ``min_similarity`` keeps out any below it."""
+    from .similar import similar_entities
+
     limits = limits or ContextLimits()
+    if min_similarity is not None and not -1.0 <= min_similarity <= 1.0:
+        raise ValueError("min_similarity must be a cosine similarity in [-1, 1]")
     when = as_of if as_of is not None else engine.clock()
     moment = parse_rfc3339(when)
     projection, read = await load_projection(engine, space, mode=status, as_of=when)
@@ -302,6 +314,16 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         # Every mention, so the cut below can say how many it left out; a
         # mention takes at least one character.
         seeds += [entity for entity in mentioned(projection, question, limit=len(question)) if entity not in seeds]
+    resembled: list[dict[str, object]] = []
+    if question and similar:
+        resembling, uncompared = await similar_entities(
+            engine, projection, question, limit=min(SIMILAR_SEEDS, max(0, limits.max_entities - len(seeds))),
+            min_similarity=min_similarity, exclude=[entity.entity_id for entity in seeds])
+        if uncompared:
+            reasons.append(f"similar_cut {uncompared}")
+        seeds += [entity for entity, _ in resembling]
+        resembled = [{"id": entity.entity_id, "score": score} for entity, score in resembling]
+    closeness = {str(item["id"]): item["score"] for item in resembled}
     if len(seeds) > limits.max_entities:
         reasons.append(f"seeds_cut {len(seeds) - limits.max_entities}")
         del seeds[limits.max_entities:]
@@ -315,10 +337,10 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
                  *(f"candidate: {one_line(c['label'])} ({one_line(c['key'])}) {c['id']} for "
                    f"\"{one_line(c['name'])}\"" for c in candidates)]
         return GraphContext("ambiguous", _fit(lines, limits.max_bytes), tuple(e.entity_id for e in seeds),
-                            tuple(candidates), {"reasons": reasons})
+                            tuple(candidates), {"reasons": reasons, "similar": resembled})
     if not seeds:
         lines = [*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note]
-        return GraphContext("empty", _fit(lines, limits.max_bytes), (), (), {"reasons": reasons})
+        return GraphContext("empty", _fit(lines, limits.max_bytes), (), (), {"reasons": reasons, "similar": resembled})
 
     touching: dict[str, list[Relation]] = defaultdict(list)
     for relation in projection.relations:
@@ -419,11 +441,12 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     if unverified:
         reasons.append(f"unverified {unverified}")
     seed_lines = [f"entity: {label(entity.entity_id)} ({entity.kind or 'unknown kind'}) {entity.entity_id}"
+                  + (f" similar {closeness[entity.entity_id]:.2f}" if entity.entity_id in closeness else "")
                   for entity in seeds]
     lines = [*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,
              *seed_lines, *path_lines, *relation_lines, *value_lines]
     return GraphContext("prepared", _fit(lines, limits.max_bytes), tuple(entity.entity_id for entity in seeds), (),
-                        {"reasons": reasons, "read": read, "hubs_not_crossed": sorted(hubs)})
+                        {"reasons": reasons, "read": read, "hubs_not_crossed": sorted(hubs), "similar": resembled})
 
 
 async def graph_connections(engine: "MemoryEngine", space: str, source: str, target: str, *, max_hops: int = 3,

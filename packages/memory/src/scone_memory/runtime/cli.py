@@ -211,6 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("names", nargs="*")
     g.add_argument("--question")
     g.add_argument("--max-bytes", type=int, default=8000)
+    g.add_argument("--similar", action="store_true", help="also centre on entities the question resembles")
+    g.add_argument("--min-similarity", type=float, help="keep out resembling entities below this cosine similarity")
     g = graph.add_parser("entity", help="one entity: its relations both ways and its values")
     g.add_argument("name")
     g = graph.add_parser("timeline", help="one entity's facts in valid time")
@@ -516,6 +518,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     if command == "context":
         if args.question is not None and not 1 <= len(args.question) <= MAX_QUESTION:
             raise InvalidInput(f"--question must be 1 to {MAX_QUESTION} characters")
+        if args.min_similarity is not None and not -1.0 <= args.min_similarity <= 1.0:
+            raise InvalidInput("--min-similarity must be from -1 to 1")
         try:
             ContextLimits(max_bytes=args.max_bytes)
         except ValueError:
@@ -535,7 +539,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
             if not args.names and not args.question:
                 raise InvalidInput("give names or --question")
             found = await graph_context(engine, space, names=args.names, question=args.question, as_of=when,
-                                        limits=ContextLimits(max_bytes=args.max_bytes))
+                                        limits=ContextLimits(max_bytes=args.max_bytes), similar=args.similar,
+                                        min_similarity=args.min_similarity)
         else:
             found = await graph_context(engine, space, names=[args.name], as_of=when,
                                         limits=ContextLimits(max_hops=1))
