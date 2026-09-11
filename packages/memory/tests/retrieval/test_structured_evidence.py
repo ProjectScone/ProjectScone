@@ -276,3 +276,19 @@ async def test_native_path_witness_is_atomic_scoped_and_fresh(engine, monkeypatc
             assert {row.subject for row in result.recall.facts} == {'aster', 'cedar'}
             assert result.evidence_basis == 'unselected_candidates'
             assert result.model_selected_ids == ()
+
+
+@pytest.mark.parametrize('value', ['"ship it"', 'it', 'It rained. We stayed in.', 'MB'])
+async def test_an_exact_recorded_value_witnesses_a_requirement_without_becoming_a_hop(value):
+    said = (fact(1, 'team', 'said', value),)
+    direct = EvidenceRequirement(kind='fact', subject='team', predicate='said', object=value)
+    inverse = EvidenceRequirement(kind='fact', predicate='said', object=value)
+    assert (await assessor(direct).assess('bound question', said)).status == 'sufficient'
+    assert (await assessor(inverse).assess('bound question', said)).status == 'sufficient'
+    reached = (fact(1, 'invoice', 'assigned to', 'team'), fact(2, 'team', 'said', value))
+    reach = EvidenceRequirement(kind='reachable_fact', subject='invoice', predicate='said', object=value,
+                                via=('assigned to',), max_hops=2)
+    assert (await assessor(reach).assess('bound question', reached)).status == 'sufficient'
+    through = (fact(1, 'start', 'relates', value), fact(2, value, 'relates', 'finish'))
+    route = EvidenceRequirement(kind='path', subject='start', predicate='relates', object='finish')
+    assert (await assessor(route).assess('bound question', through)).status == 'insufficient'

@@ -562,3 +562,40 @@ async def test_a_first_write_that_fails_leaves_no_claim_behind() -> None:
     with pytest.raises(ConnectionError):
         await index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a")
     assert await index.written_by() is None
+
+
+async def test_a_failed_write_never_withdraws_another_pending_writers_claim() -> None:
+    import asyncio
+    from scone_memory.core.ports import VectorPoint
+
+    class Gated(InMemoryVectorIndex):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gates: list[asyncio.Event] = []
+
+        async def upsert(self, points):
+            gate = asyncio.Event()
+            self.gates.append(gate)
+            await gate.wait()
+            if points[0].chunk_id == 1:
+                raise ConnectionError("first write fails")
+            await super().upsert(points)
+
+    def point(chunk: int, vector: list[float]) -> VectorPoint:
+        return VectorPoint(chunk, "s", chunk, "2025-01-01T00:00:00Z", vector)
+
+    index = Gated()
+    await index.ensure(2)
+    first = asyncio.ensure_future(index.upsert_as([point(1, [1.0, 0.0])], "model-a"))
+    second = asyncio.ensure_future(index.upsert_as([point(2, [1.0, 0.0])], "model-a"))
+    await asyncio.sleep(0)
+    index.gates[0].set()
+    with pytest.raises(ConnectionError):
+        await first
+    other = asyncio.ensure_future(index.upsert_as([point(3, [0.0, 1.0])], "model-b"))
+    await asyncio.sleep(0)
+    index.gates[2].set()
+    await other
+    index.gates[1].set()
+    await second
+    assert await index.written_by() == ("mixed", "invalidated")

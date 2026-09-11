@@ -416,6 +416,8 @@ class InMemoryVectorIndex:
         self._points: dict[int, VectorPoint] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
+        #: Writes that have taken the record and not yet finished.
+        self._pending = 0
 
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
@@ -441,14 +443,17 @@ class InMemoryVectorIndex:
         # be written back over theirs.
         before = self._writer
         self._writer = settled = after_write(before, writer, bool(self._points))
+        self._pending += 1
         try:
             await self.upsert(points)
         except BaseException:
-            # Nothing landed in an empty index: leave no claim behind, unless
-            # another writer has changed the record meanwhile.
-            if before is None and not self._points and self._writer == settled:
+            self._pending -= 1
+            # Nothing landed in an empty index: leave no claim behind, but only
+            # when no other write still counts on it and nobody changed it.
+            if before is None and not self._points and not self._pending and self._writer == settled:
                 self._writer = None
             raise
+        self._pending -= 1
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,

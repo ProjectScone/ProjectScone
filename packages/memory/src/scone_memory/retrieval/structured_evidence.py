@@ -136,7 +136,12 @@ def _next(index: dict[tuple[str, str], list[EvidenceCandidate]], name: str,
 
 
 def _names(value: str | None, target: str | None) -> bool:
-    return value is not None and target is not None and join_match(value, target) is not None
+    """Whether a recorded object satisfies a requirement's object: the same
+    recorded value exactly, or the same name by the join rule. A value can
+    witness a requirement without ever becoming a hop (``_next``)."""
+    if value is None or target is None:
+        return False
+    return value.strip() == target.strip() or join_match(value, target) is not None
 
 
 @dataclass
