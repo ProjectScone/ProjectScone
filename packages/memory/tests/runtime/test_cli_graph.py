@@ -65,3 +65,93 @@ async def test_export_writes_any_format_to_a_file(engine, tmp_path):
     code, text = await graph(engine, "export", "--format", "graphml", "--out", str(target))
     assert code == 0 and str(target) in text
     assert ElementTree.fromstring(target.read_bytes()).tag.endswith("graphml")
+
+
+@pytest.mark.parametrize("arguments, code", [(("path", "alice chen", "lisbon"), 0),
+                                             (("context", "alice chen"), 0),
+                                             (("entity", "alice chen"), 0),
+                                             (("entity", "alice"), 1)])
+async def test_json_prints_the_packet_as_the_http_route_does(engine, arguments, code):
+    """--json is honoured, not ignored: the same packet text, with its
+    status, seeds, candidates, coverage and the instant it was read at."""
+    engine.clock = lambda: "2025-06-01T00:00:00.000Z"
+    plain_code, plain = await graph(engine, *arguments)
+    json_code, printed = await graph(engine, *arguments, "--json")
+    body = json.loads(printed)
+    assert plain_code == json_code == code
+    assert body["text"] == plain.rstrip("\n") and body["status"] == ("prepared" if code == 0 else "ambiguous")
+    assert body["filters"] == {"status": "current", "as_of": "2025-06-01T00:00:00.000Z"}
+    assert {"seeds", "candidates", "coverage"} <= set(body) and "reasons" in body["coverage"]
+    assert len(body["candidates"]) == (2 if code else 0)
+
+
+@pytest.fixture
+async def capped(monkeypatch):
+    """Three people at Acme, with a read that holds only the newest two."""
+    from scone_memory.entities import read
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for n in range(3):
+        await memory.assert_fact("default", f"Alice {n}", "works_at", "Acme", valid_from=DAY)
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    yield memory
+    await memory.close()
+
+
+async def test_a_timeline_name_missing_from_a_capped_read_may_still_exist(capped):
+    code, text = await graph(capped, "timeline", "Alice 0")
+    body = json.loads(text)
+    assert code == 1 and body["complete"] is False and body["coverage"]["truncated"] is True
+    assert "may exist" in body["error"] and body["name"] == "Alice 0"
+
+
+async def test_a_timeline_ambiguity_in_a_capped_read_says_its_candidates_are_partial(capped):
+    code, text = await graph(capped, "timeline", "Alice")
+    body = json.loads(text)
+    assert code == 1 and body["complete"] is False and body["truncated"] is True
+    assert body["coverage"]["truncated"] is True and len(body["candidates"]) == 2
+
+
+@pytest.fixture
+async def moved():
+    """Alice left Acme for Beta at the turn of 2025, and the clock is read
+    once just before it and ever after just past it."""
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.assert_fact("default", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    await memory.assert_fact("default", "alice", "works_at", "Beta", valid_from="2025-01-01T00:00:00Z")
+    readings = iter(["2024-12-31T23:59:59.000Z"])
+    memory.clock = lambda: next(readings, "2025-01-01T00:00:01.000Z")
+    yield memory
+    await memory.close()
+
+
+async def test_a_report_is_read_and_labelled_at_one_instant(moved):
+    code, text = await graph(moved, "report", "--json")
+    report = json.loads(text)
+    keys = {entity["key"] for entity in report["central_entities"]}
+    assert code == 0 and report["filters"]["as_of"] == "2024-12-31T23:59:59.000Z"
+    assert "acme" in keys and "beta" not in keys
+
+
+async def test_an_export_says_the_instant_it_was_read_at(moved):
+    code, text = await graph(moved, "export", "--format", "json")
+    about = json.loads(text)["graph"]["about"]
+    assert code == 0 and about["as_of"] == "2024-12-31T23:59:59.000Z" and about["status"] == "current"
+    assert about["coverage"]["truncated"] is False
+
+
+@pytest.mark.parametrize("arguments, named", [
+    (("report", "--resolution", "0"), "--resolution"),
+    (("report", "--resolution", "nan"), "--resolution"),
+    (("report", "--resolution", "11"), "--resolution"),
+    (("context", "alice", "--max-bytes", "1"), "--max-bytes"),
+    (("timeline", "alice", "--as-of", "not-a-date"), "--as-of"),
+])
+def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
+    """Refused at the command line the way the HTTP route refuses it: exit
+    2 with the option named, never a traceback."""
+    from scone_memory.runtime.cli import main
+
+    code = main(["graph", *arguments], env={"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory"},
+                out=io.StringIO(), stdin=io.StringIO())
+    assert code == 2 and named in capsys.readouterr().err

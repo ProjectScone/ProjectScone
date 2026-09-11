@@ -31,16 +31,40 @@ _LINKS_PER_ITEM = 16
 _ATTEMPTS = 3
 
 
+def _read_record(read: dict[str, object]) -> tuple[bool, dict[str, object]]:
+    """Whether the read held every fact, and its coverage as answered. A
+    capped read can show what it found, never that something is absent."""
+    reasons = read.get("reasons")
+    capped = isinstance(reasons, list) and bool(reasons)
+    return not capped, {**read, "truncated": capped}
+
+
 class TimelineEntityAmbiguous(Exception):
     def __init__(self, candidates: list[dict[str, str]], total: int, read: dict[str, object]) -> None:
         super().__init__("the name could mean several entities")
         self.candidates, self.total, self.read = candidates, total, read
+
+    def record(self, name: str) -> dict[str, object]:
+        """The answer every surface gives: the candidates, and whether the
+        read they came from was whole."""
+        complete, read = _read_record(self.read)
+        return {"error": f"{name!r} could mean several entities", "name": name,
+                "candidates": self.candidates, "candidates_total": self.total,
+                "truncated": self.total > len(self.candidates) or not complete,
+                "complete": complete, "coverage": read}
 
 
 class TimelineEntityMissing(Exception):
     def __init__(self, name: str, read: dict[str, object]) -> None:
         super().__init__(name)
         self.read = read
+
+    def record(self, name: str) -> dict[str, object]:
+        """The answer every surface gives; after a capped read, not found
+        is not the same as absent."""
+        complete, read = _read_record(self.read)
+        where = "" if complete else " in the facts read; the read was capped, so it may exist"
+        return {"error": f"no entity is named {name!r}{where}", "name": name, "complete": complete, "coverage": read}
 
 
 def _role(role: FactRole, entity_id: str) -> Literal["subject", "object", "value"]:

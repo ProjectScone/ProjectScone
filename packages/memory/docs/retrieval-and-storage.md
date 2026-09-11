@@ -602,8 +602,23 @@ store:
 | `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
-Every command takes `--space`. A name that is ambiguous or unknown exits
-with status 1, after printing its candidates or the reason.
+Every command takes `--space`, and reads the clock once, so what it
+prints and the instant it says it read at always agree. `--json` prints
+`path`, `context` and `entity` as the JSON that `/v1/graph/context`
+returns: the packet text with its status, seeds, candidates, coverage
+and filters.
+
+A name that is ambiguous or unknown exits with status 1, after printing
+its candidates or the reason. For `timeline`, that is the body the HTTP
+404 or 409 answer carries, including whether the read was whole: after a
+capped read, a name that was not found may still exist.
+
+An option the HTTP route would refuse is refused here too, with exit
+status 2 and the option named:
+
+- `--resolution` outside (0, 10], or not a number;
+- `--max-bytes` outside 512 to 64,000;
+- an `--as-of` that is not an RFC 3339 timestamp.
 
 ### How the ledger is read
 

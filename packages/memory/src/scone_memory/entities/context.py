@@ -74,6 +74,14 @@ class GraphContext:
     candidates: tuple[dict[str, str], ...] = ()
     coverage: dict[str, object] = field(default_factory=dict)
 
+    def record(self, space: str, status: str, as_of: str) -> dict[str, object]:
+        """The packet as JSON, as the HTTP route and the CLI answer it."""
+        return {"schema_version": 1, "space": space, "filters": {"status": status, "as_of": as_of},
+                "status": self.status, "text": self.text, "seeds": list(self.seeds),
+                "candidates": list(self.candidates),
+                "coverage": {"reasons": self.coverage.get("reasons", []), "read": self.coverage.get("read", {}),
+                             "hubs_not_crossed": self.coverage.get("hubs_not_crossed", [])}}
+
 
 def _shown(character: str) -> str:
     if unicodedata.category(character) not in ("Cc", "Cs"):

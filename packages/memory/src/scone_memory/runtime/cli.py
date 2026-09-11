@@ -465,7 +465,9 @@ def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
 
 async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
     """The graph subcommands, on the same projection as the HTTP routes.
-    Exits 1 when a name is ambiguous or unknown."""
+    Each reads the clock once, so what it shows and the instant it says it
+    was read at agree. Exits 1 when a name is ambiguous or unknown."""
+    from ..core.timeutil import format_rfc3339, parse_rfc3339
     from ..entities.analysis import analyze_projection
     from ..entities.context import ContextLimits, graph_connections, graph_context
     from ..entities.export import export_graph
@@ -475,39 +477,59 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     from ..entities.view import knowledge_view
 
     space, command = args.space, args.graph_command
+    # Refused here as the HTTP routes refuse them, before anything is read;
+    # NaN fails the comparison, so it is refused too.
+    if command == "report" and not 0 < args.resolution <= 10:
+        raise InvalidInput("--resolution must be a number above 0 and at most 10")
+    if command == "context":
+        try:
+            ContextLimits(max_bytes=args.max_bytes)
+        except ValueError:
+            raise InvalidInput("--max-bytes must be between 512 and 64000") from None
+    as_of = getattr(args, "as_of", None)
+    if as_of is not None:
+        try:
+            as_of = format_rfc3339(parse_rfc3339(as_of))
+        except ValueError:
+            raise InvalidInput("--as-of must be an RFC 3339 timestamp") from None
     if command in ("path", "context", "entity"):
+        when = engine.clock()
         if command == "path":
-            found = await graph_connections(engine, space, args.source, args.target, max_hops=args.max_hops)
+            found = await graph_connections(engine, space, args.source, args.target, max_hops=args.max_hops,
+                                            as_of=when)
         elif command == "context":
             if not args.names and not args.question:
                 raise InvalidInput("give names or --question")
-            found = await graph_context(engine, space, names=args.names, question=args.question,
+            found = await graph_context(engine, space, names=args.names, question=args.question, as_of=when,
                                         limits=ContextLimits(max_bytes=args.max_bytes))
         else:
-            found = await graph_context(engine, space, names=[args.name], limits=ContextLimits(max_hops=1))
-        print(found.text, file=out)
+            found = await graph_context(engine, space, names=[args.name], as_of=when,
+                                        limits=ContextLimits(max_hops=1))
+        if getattr(args, "json", False):
+            print(json.dumps(found.record(space, "current", when), ensure_ascii=False, indent=2), file=out)
+        else:
+            print(found.text, file=out)
         return 0 if found.status == "prepared" else 1
     if command == "timeline":
         try:
-            view = await timeline_view(engine, space, args.name, as_of=args.as_of)
-        except TimelineEntityAmbiguous as ambiguous:
-            print(json.dumps({"error": "ambiguous", "candidates": ambiguous.candidates}), file=out)
-            return 1
-        except TimelineEntityMissing:
-            print(json.dumps({"error": f"no entity is named {args.name!r}"}), file=out)
+            view = await timeline_view(engine, space, args.name, as_of=as_of)
+        except (TimelineEntityAmbiguous, TimelineEntityMissing) as unresolved:
+            print(json.dumps(unresolved.record(args.name), ensure_ascii=False), file=out)
             return 1
         print(json.dumps(view, ensure_ascii=False, indent=2), file=out)
         return 0
-    projection, coverage = await load_projection(engine, space, mode="current")
+    when = engine.clock()
+    projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
     if command == "report":
-        when = engine.clock()
         view = knowledge_view(projection, mode="current", as_of=when, limit=1, attribute_limit=0, coverage=coverage)
         report = build_report(projection, analyze_projection(projection, resolution=args.resolution),
                               meta=view["projection"], filters={"status": "current", "as_of": when},  # type: ignore[arg-type]
                               coverage=coverage)
         print(render_markdown(report) if args.markdown else json.dumps(report, ensure_ascii=False, indent=2), file=out)
         return 0
-    exported = export_graph(projection, args.format, about={"status": "current", "coverage": coverage})
+    reasons = coverage.get("reasons") or []
+    exported = export_graph(projection, args.format, about={"status": "current", "as_of": when,
+                                                           "coverage": {**coverage, "truncated": bool(reasons)}})
     if args.out:
         with open(args.out, "wb") as file:
             file.write(exported.body)
