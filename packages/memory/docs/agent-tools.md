@@ -90,6 +90,19 @@ around = await box.run("graph_context", {"question": "who works with Alice Chen?
 route = await box.run("connect_entities", {"source": "Alice Chen", "target": "Lisbon"})
 ```
 
+A structured question, the whole graph at a glance, and what changed
+since a session last looked:
+
+```python
+box = ToolBox(engine, "default", tools=["graph_schema", "graph_match", "graph_overview", "graph_changes"])
+rows = await box.run("graph_match", {"where": [
+    {"subject": "?who", "predicate": "works_at", "object": "?org"},
+    {"subject": "?org", "predicate": "based_in", "object": "Lisbon"},
+], "returns": ["?who"]})
+groups = await box.run("graph_overview", {"question": "what are the main groups here?"})
+since = await box.run("graph_changes", {"since": "2025-06-01T00:00:00Z"})
+```
+
 The trace is read-only and bounded: 16 facts, 32 edges, 256 traversal store
 calls/candidates, eight paths, and a two-second async timeout. Two additional
 revision reads fence native writes. Complete source episodes may be loaded
