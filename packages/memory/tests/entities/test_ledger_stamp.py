@@ -102,3 +102,40 @@ async def test_the_stamped_path_always_equals_a_full_reread(engine, seed):
         for mode in ("current", "all"):
             cached, _ = await load_projection(engine, "alpha", mode=mode, as_of=MOMENT)
             assert cached.digest == await full(engine, mode), (seed, choice, mode)
+
+
+async def test_a_fact_moved_to_another_space_changes_both_stamps(engine):
+    """A row that leaves a space changes that space's ledger as surely as
+    one that arrives changes the other's."""
+    fact = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    before = {space: await engine.documents.ledger_stamp(space) for space in ("alpha", "beta")}
+    if isinstance(engine.documents, InMemoryDocumentStore):
+        await engine.documents.update_fact(fact.model_copy(update={"space": "beta"}))
+    else:
+        engine.documents.conn.execute("UPDATE facts SET space = ? WHERE id = ?", ("beta", fact.fact_id))
+    after = {space: await engine.documents.ledger_stamp(space) for space in ("alpha", "beta")}
+    assert after["alpha"] != before["alpha"] and after["beta"] != before["beta"]
+
+
+async def test_an_older_installed_trigger_is_replaced_on_open(tmp_path):
+    """A file whose update trigger stamps only the new space gets the
+    current trigger when it is opened again."""
+    import sqlite3
+
+    from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
+
+    path = tmp_path / "old.db"
+    first = await MemoryEngine(SqliteDocumentStore(path), SqliteVectorIndex(path), HashEmbedder(), clock=Clock(MOMENT)).open()
+    fact = await first.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    await first.close()
+    with sqlite3.connect(path) as older:
+        older.executescript("""DROP TRIGGER fact_writes_update;
+CREATE TRIGGER fact_writes_update AFTER UPDATE ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (NEW.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;""")
+    store = SqliteDocumentStore(path)
+    engine = await MemoryEngine(store, SqliteVectorIndex(path), HashEmbedder(), clock=Clock(MOMENT)).open()
+    before = await store.ledger_stamp("alpha")
+    store.conn.execute("UPDATE facts SET space = ? WHERE id = ?", ("beta", fact.fact_id))
+    assert await store.ledger_stamp("alpha") != before
+    await engine.close()

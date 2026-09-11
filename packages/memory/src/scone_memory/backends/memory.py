@@ -300,6 +300,8 @@ class InMemoryDocumentStore:
     async def update_fact(self, fact: Fact) -> None:
         if fact.fact_id not in self._facts:
             raise KeyError(fact.fact_id)
+        # A row leaving a space changes that space's ledger too.
+        self._fact_writes[self._facts[fact.fact_id].space] += 1
         old_key = self._fact_subject_keys[fact.fact_id]
         new_key = (fact.space, fact.subject)
         if old_key != new_key:
