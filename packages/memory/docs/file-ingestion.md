@@ -24,6 +24,22 @@ checks the retained source, manifest and chunk before returning overlapping
 source segments. Repeated identical originals and extraction outputs reuse
 their identity. This does not make arbitrary parser output authoritative.
 
+Configured PDF OCR and image readers retain typed `DocumentTextRegion` values
+on each segment. Each region includes its recognized text, normalized box,
+recognizer score, block/line identifiers and half-open `start`/`end` offsets
+in the **segment's UTF-8 bytes**. `coordinate_space` identifies the displayed
+page or image frame with a top-left origin. PDF dimensions in segment metadata
+still describe the unrotated media box; apply the recorded rotation when
+displaying it. Recognition scores are not factual confidence.
+
+Chunk citations return whole overlapping source segments and only regions
+that overlap the chunk. Region spans remain relative to the full segment,
+including after empty PDF pages are omitted. New manifests containing regions
+use schema version 2. Documents without regions retain version 1 and their
+existing serialized attachment identities; existing version 1 evidence stays
+readable. Re-extract an old OCR document to obtain typed regions. When using a
+workflow, change its `parser_revision` and use a new run for that re-extraction.
+
 ## Coverage
 
 | Reader | Evidence retained | Limits |
@@ -36,8 +52,8 @@ their identity. This does not make arbitrary parser output authoritative.
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
-| PDF | Page locators and extraction method | Native text by default; dedicated PDF API retains richer OCR region geometry |
-| Images | Frame and OCR-region locators | Explicit `ImageDocumentParser` and OCR engine required |
+| PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
+| Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
 
 Use `document_formats()` or authenticated `GET /v1/documents/formats` to

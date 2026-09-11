@@ -24,7 +24,7 @@ from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ...ocr.types import OcrEngine
 from .registry import extension
-from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
+from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
 IMAGE_EXTENSIONS = frozenset({'.png', '.jpg', '.jpeg', '.gif', '.webp', '.tif', '.tiff', '.bmp'})
 AUDIO_EXTENSIONS = frozenset({'.wav', '.mp3', '.flac', '.ogg', '.oga', '.opus', '.aac', '.m4a'})
@@ -127,7 +127,10 @@ class ImageDocumentParser:
                 if region.score is not None:
                     metadata['recognizer_score'] = str(region.score)
                 segments.append(DocumentSegment(text=region.text,
-                    locator=f'frame:{number}/region:{region_number}', metadata=metadata))
+                    locator=f'frame:{number}/region:{region_number}', metadata=metadata,
+                    regions=(DocumentTextRegion(text=region.text, box=region.box, score=region.score,
+                        block=region.block, line=region.line, start=0, end=len(region.text.encode()),
+                        coordinate_space='normalized_displayed_frame_top_left'),)))
         if not segments:
             raise InvalidInput('image contains no recognized text')
         parsed = ParsedDocument(format=suffix, parser='image-ocr', segments=tuple(segments),

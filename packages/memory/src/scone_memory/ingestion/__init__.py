@@ -16,10 +16,10 @@ __all__ += ["HtmlImageContext", "image_contexts_from_html"]
 
 from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
 from .formats.registry import BuiltinDocumentParser, DocumentParser
-from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument
+from .formats.types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument
 
 __all__ += ['DocumentIngested', 'DocumentProvenance', 'document_provenance', 'ingest_document',
-            'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'ParsedDocument',
+            'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'DocumentTextRegion', 'ParsedDocument',
             'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested']
 
 

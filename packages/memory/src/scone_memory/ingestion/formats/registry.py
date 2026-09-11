@@ -9,7 +9,7 @@ from typing import Protocol
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ..pdf import PdfLimits, PdfParser, PypdfParser, validate_pdf
-from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
+from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
 
 class DocumentParser(Protocol):
@@ -49,7 +49,12 @@ class BuiltinDocumentParser:
                 DocumentSegment(text=encoded[p.start:p.end].decode(), locator=f'page:{p.number}',
                     metadata={'page': str(p.number), 'extraction': p.extraction,
                               'width_points': str(p.width_points), 'height_points': str(p.height_points),
-                              'rotation': str(p.rotation)}) for p in pdf.pages if not p.empty),
+                              'rotation': str(p.rotation),
+                              **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {})},
+                    regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
+                        block=r.block, line=r.line, start=r.start - p.start, end=r.end - p.start,
+                        coordinate_space=p.region_geometry) for r in p.regions))
+                for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty)})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',

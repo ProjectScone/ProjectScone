@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from ..agents.workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep
 from ..core.errors import InvalidInput
 from ..core.validation import check_space
-from .files import DocumentManifest, digest, document_provenance, prepare_document, store_document
+from .files import DocumentManifest, digest, document_provenance, encode_manifest, prepare_document, store_document
 from .formats.registry import BuiltinDocumentParser, DocumentParser
 from .formats.types import DocumentLimits, validate_document
 
@@ -74,7 +74,7 @@ class DocumentIngestionWorkflow:
         if not original.filename:
             raise InvalidInput('document attachment must retain a filename')
         manifest = await prepare_document(raw, original.filename, parser=self._parser, limits=self._limits)
-        retained = await self._memory.attach(context.space, manifest.model_dump_json().encode(),
+        retained = await self._memory.attach(context.space, encode_manifest(manifest),
                                               'application/json', filename='document-provenance.json')
         if retained.media_type != 'application/json':
             raise InvalidInput('document manifest has an incompatible media type')

@@ -1,9 +1,20 @@
 """Format-neutral extraction results with source-local evidence locators."""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ...core.errors import InvalidInput
+from ...ocr.types import OcrRegion
+
+
+class DocumentTextRegion(OcrRegion):
+    """Recognized geometry with half-open, segment-relative UTF-8 byte spans."""
+    start: int = Field(ge=0, le=2_000_000)
+    end: int = Field(ge=0, le=2_000_000)
+    coordinate_space: Literal['normalized_displayed_page_top_left',
+                              'normalized_displayed_frame_top_left'] = 'normalized_displayed_page_top_left'
 
 
 class DocumentLimits(BaseModel):
@@ -21,6 +32,7 @@ class DocumentSegment(BaseModel):
     text: str = Field(min_length=1)
     locator: str = Field(min_length=1, max_length=4096)
     metadata: dict[str, str] = Field(default_factory=dict)
+    regions: tuple[DocumentTextRegion, ...] = Field(default=(), max_length=50_000)
 
 
 class ParsedDocument(BaseModel):
@@ -42,7 +54,30 @@ def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
         if total - 2 > limits.max_text_bytes:
             raise InvalidInput('document exceeds its extracted text byte limit')
         _metadata(segment.metadata)
+        _regions(segment)
     _metadata(parsed.metadata)
+
+
+def _regions(segment: DocumentSegment) -> None:
+    if not segment.regions:
+        return
+    if len(segment.regions) > 50_000:
+        raise InvalidInput('document region count exceeds its limit')
+    encoded = segment.text.encode('utf-8')
+    previous_end = 0
+    for observed in segment.regions:
+        # Extension parsers may use model_copy/model_construct, bypassing validation.
+        try:
+            region = DocumentTextRegion.model_validate(observed.model_dump())
+        except (ValidationError, AttributeError):
+            raise InvalidInput('document region geometry is invalid') from None
+        if (not previous_end <= region.start < region.end <= len(encoded)
+                or encoded[region.start:region.end] != region.text.encode('utf-8')
+                or encoded[previous_end:region.start].strip()):
+            raise InvalidInput('document region does not match its extracted text span')
+        previous_end = region.end
+    if encoded[previous_end:].strip():
+        raise InvalidInput('document regions do not cover the extracted text')
 
 
 def _metadata(values: dict[str, str]) -> None:
