@@ -112,6 +112,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
     enable_wal(conn)
     conn.executescript(SCHEMA)
     check_schema(conn, path)
+    # Capture a legacy catalog's high-water mark before any caller can delete
+    # its last old row. Seeding only on insert loses that history.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)",
+                     (str(_next_chunk_id(conn)),))
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        conn.close()
+        raise
     # Derived retrieval indices follow schema validation/migration: adding them
     # before check_schema would change the historical backup or failed upgrade.
     conn.executescript("""BEGIN;
@@ -124,6 +136,15 @@ CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 COMMIT;""")
     initialize_fact_search(conn)
     return conn
+
+
+def _next_chunk_id(conn: sqlite3.Connection) -> int:
+    """Read the allocation floor while the caller holds a write transaction."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'next_chunk_id'").fetchone()
+    highest = conn.execute("SELECT MAX("
+        "(SELECT COALESCE(MAX(id), 0) FROM chunks),"
+        "(SELECT COALESCE(MAX(chunk_id), 0) FROM vectors))").fetchone()[0]
+    return max(int(row["value"]) if row else 1, highest + 1)
 
 
 def enable_wal(conn: sqlite3.Connection, attempts: int = 100, pause_s: float = 0.02) -> None:
@@ -356,15 +377,29 @@ class SqliteDocumentStore:
         return removed
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
-        out = []
-        for n in new:
-            cur = self.conn.execute(
-                'INSERT INTO chunks (episode_id, space, ordinal, start, "end", text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
-            )
-            assert cur.lastrowid is not None
-            out.append(Chunk(chunk_id=cur.lastrowid, **n.__dict__))
-        self.conn.commit()
+        if not new:
+            return []
+        out: list[Chunk] = []
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Cleanup can retry after a row disappears. Reusing that row's ID
+            # would let the retry remove an unrelated source's vector. Keep
+            # the high-water mark even when every chunk has been deleted.
+            next_id = _next_chunk_id(self.conn)
+            for n in new:
+                self.conn.execute(
+                    'INSERT INTO chunks (id, episode_id, space, ordinal, start, "end", text, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (next_id, n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
+                )
+                out.append(Chunk(chunk_id=next_id, **n.__dict__))
+                next_id += 1
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)", (str(next_id),))
+            self.conn.execute("COMMIT")
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+            raise
         return out
 
     async def get_chunks(self, space: str, chunk_ids: Sequence[int]) -> list[Chunk]:
