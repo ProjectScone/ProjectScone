@@ -39,6 +39,9 @@ class LedgerPager(Protocol):
         facts included), only ``space``, only ids below ``before_id`` (None
         starts at the newest), at most ``limit`` rows and never more than
         ``MAX_LEDGER_PAGE``. Pages chain: the next cursor is the last id.
+        A page may hold fewer rows than asked; only an empty page says the
+        ledger is exhausted. A page should cost work in proportion to its
+        rows, not to the size of the ledger.
         """
         ...
 
@@ -52,6 +55,10 @@ def ledger_page_limit(limit: int) -> int:
 def checked_ledger_page(rows: list[Fact], *, space: str, before_id: int | None, limit: int) -> str | None:
     """What is wrong with a page a store returned, or None. A reader refuses
     a page that breaks the contract rather than projecting from it."""
+    if not isinstance(rows, list):
+        return "not_a_list"
+    if not all(isinstance(row, Fact) for row in rows):
+        return "not_a_fact"
     if len(rows) > limit:
         return "too_long"
     if any(row.space != space for row in rows):

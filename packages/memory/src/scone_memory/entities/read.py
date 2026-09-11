@@ -68,9 +68,9 @@ async def _paged(pager: graph_read.LedgerPager, space: str, limit: int) -> tuple
         problem = graph_read.checked_ledger_page(page, space=space, before_id=before_id, limit=want)
         if problem is not None:
             raise _PageRefused(problem)
-        rows.extend(page)
-        if len(page) < want:
+        if not page:  # the port promises at most ``want`` rows; only an empty page ends the ledger
             break
+        rows.extend(page)
         before_id = page[-1].fact_id
     return rows[:limit][::-1], len(rows) > limit
 

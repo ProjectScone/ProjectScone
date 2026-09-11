@@ -116,7 +116,7 @@ async def test_views_asked_at_once_share_one_read():
     store = Counting()
     engine = await engine_with(store)
     await asyncio.gather(*(load_projection(engine, "alpha", mode=mode) for mode in ("current", "history", "all")))
-    assert store.pages == 1
+    assert store.pages == 2  # one read: its page, and the empty page that ends it
 
 
 async def test_a_deleted_space_is_forgotten():

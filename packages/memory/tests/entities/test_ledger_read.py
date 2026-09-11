@@ -89,7 +89,8 @@ async def test_a_pager_is_read_a_page_at_a_time_and_the_ledger_never_listed(monk
     engine = await many(store, 10)
     store.listed = 0
     found = await read.read_ledger(engine, "alpha")
-    assert found.read_mode == "paged" and store.listed == 0 and store.pages == 3
+    # Pages of 4, 4 and 2, then the empty page that ends the ledger.
+    assert found.read_mode == "paged" and store.listed == 0 and store.pages == 4
     assert [fact.fact_id for fact in found.facts] == list(range(1, 11)) and found.reasons == ()
 
 
@@ -175,3 +176,71 @@ async def test_a_space_that_will_not_hold_still_is_reported():
     found = await read.read_ledger(engine, "alpha")
     assert found.consistent is False and "ledger_changed_during_read" in found.reasons
     assert found.revision < await engine.revision("alpha")
+
+
+class Short(InMemoryDocumentStore):
+    """A conforming pager that returns fewer rows than asked, mid-ledger."""
+
+    async def page_facts(self, space, before_id, limit):
+        return await super().page_facts(space, before_id, min(limit, 2))
+
+
+async def test_a_short_page_is_not_the_end_of_the_ledger():
+    """The port promises at most ``limit`` rows, not exactly that many; only
+    an empty page ends the read."""
+    engine = await many(Short(), 10)
+    found = await read.read_ledger(engine, "alpha")
+    assert [fact.fact_id for fact in found.facts] == list(range(1, 11))
+    assert found.read_mode == "paged" and found.reasons == ()
+
+
+class WrongShape(InMemoryDocumentStore):
+    shape = "none"
+
+    async def page_facts(self, space, before_id, limit):
+        if self.shape == "none":
+            return [None]
+        if self.shape == "dict":
+            return [{"fact_id": 1, "space": space}]
+        real = await super().page_facts(space, before_id, limit)
+        return (fact for fact in real)  # real facts, but a one-pass generator, not a list
+
+
+@pytest.mark.parametrize("shape", ["none", "dict", "generator"])
+async def test_a_page_of_things_that_are_not_facts_is_refused(shape):
+    store = WrongShape()
+    store.shape = shape
+    engine = await many(store, 3)
+    found = await read.read_ledger(engine, "alpha")
+    assert found.read_mode == "unpaged" and "pager_rejected" in found.reasons and len(found.facts) == 3
+
+
+class CountedFacts(dict):
+    """Counts every fact a whole-ledger pass looks at."""
+    visits = 0
+
+    def values(self):
+        for value in super().values():
+            self.visits += 1
+            yield value
+
+    def items(self):
+        for item in super().items():
+            self.visits += 1
+            yield item
+
+
+async def test_paging_the_in_memory_ledger_never_scans_it():
+    from scone_memory.core.ports import NewFact
+
+    store = InMemoryDocumentStore()
+    await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(3000):
+        await store.insert_fact(NewFact(space="alpha" if number % 3 else "beta", subject=f"person {number}",
+                                        predicate="knows", object="Bob", valid_from="2025-01-01T00:00:00Z"))
+    store._facts = CountedFacts(store._facts)
+    first = await store.page_facts("alpha", None, 10)
+    older = await store.page_facts("alpha", first[-1].fact_id, 10)
+    assert store._facts.visits == 0 and len(first) == len(older) == 10
+    assert [fact.fact_id for fact in first + older] == sorted((f.fact_id for f in first + older), reverse=True)
+    assert {fact.space for fact in first + older} == {"alpha"}
