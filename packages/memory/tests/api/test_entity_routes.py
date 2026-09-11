@@ -174,6 +174,28 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert set(groupings["membership"]) == shown
     assert {item["entity_id"] for item in groupings["importance"]} == shown
     assert all(set(community["members"]) <= shown for community in groupings["communities"])
+    assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
+                                     "truncated": False, "reasons": [], "betweenness": "exact",
+                                     "betweenness_estimated": False, "levels": groupings["coverage"]["levels"]}
+
+
+async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
+    """Past the exact limit, betweenness is estimated. The groupings and both
+    report forms say so, apart from the view's paging and the analysis caps."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(500):
+        await engine.assert_fact("alpha", f"person{number:03d}", "knows", "hub", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 1000}, headers=auth()).json()
+        report = client.get("/v1/graph/report", headers=auth()).json()
+        markdown = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth()).text
+    analysed = view["groupings"]["coverage"]
+    assert analysed["betweenness"] == "sampled:64" and analysed["betweenness_estimated"] is True
+    assert analysed["entities_analysed"] == 501 and analysed["truncated"] is False
+    assert view["coverage"]["truncated"] is False and view["coverage"]["reasons"] == []
+    assert max(item["betweenness"] for item in view["groupings"]["importance"]) <= 1.0
+    assert report["analysis"]["coverage"] == analysed
+    assert "Betweenness (estimated)" in markdown and "estimated from 64 sampled sources" in markdown
 
 
 def test_the_report_is_per_space_and_advertised(teams):

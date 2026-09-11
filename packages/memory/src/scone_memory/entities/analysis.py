@@ -89,6 +89,14 @@ class AnalysisCoverage:
     betweenness: str
     levels: int
 
+    def record(self) -> dict[str, object]:
+        """What the analysis covered, for a caller to show beside its scores:
+        apart from any paging of the view that shows them."""
+        return {"entities_total": self.entities_total, "entities_analysed": self.entities_analysed,
+                "isolated_entities": self.isolated_entities, "truncated": self.truncated,
+                "reasons": list(self.reasons), "betweenness": self.betweenness,
+                "betweenness_estimated": self.betweenness != "exact", "levels": self.levels}
+
 
 @dataclass(frozen=True)
 class GraphAnalysis:
@@ -257,7 +265,9 @@ def _betweenness(graph: Adjacency) -> tuple[dict[str, float], str]:
                 score[node] += credit[node]
     count = len(nodes)
     scale = (count / len(sources) if sources else 0) / ((count - 1) * (count - 2) or 1)
-    return {node: _round(value * scale) for node, value in score.items()}, method
+    # Scaling a sample up to the whole graph can overshoot; no node lies on
+    # more than every shortest path, so an estimate stops at 1.
+    return {node: _round(min(1.0, value * scale)) for node, value in score.items()}, method
 
 
 def _community_id(members: list[str]) -> str:

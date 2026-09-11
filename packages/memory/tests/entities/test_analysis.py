@@ -154,3 +154,18 @@ def test_a_budget_that_strands_a_kept_hub_still_analyses():
     kept = {member for community in analysis.communities for member in community.members}
     hub = next(entity.entity_id for entity in projection.entities if entity.key == "hub")
     assert hub in kept and len(kept) == len(strength) + 1 and analysis.coverage.truncated
+
+
+def test_sampled_betweenness_is_marked_and_never_passes_its_maximum():
+    """A 501-entity star is past the exact limit. Scaling 64 sampled sources
+    up to the whole graph overshoots the hub's true score of 1; an estimate
+    above the largest possible value is clamped, and the method says sampled."""
+    rows = [fact(number, f"person{number:03d}", "knows", "Hub") for number in range(1, 501)]
+    analysis = analyze_projection(project_entities("alpha", rows, revision=1))
+    assert analysis.coverage.betweenness == "sampled:64"
+    hub = max(analysis.importance, key=lambda item: item.betweenness)
+    assert labels_of(rows, hub.entity_id) == "hub" and hub.betweenness == 1.0
+
+
+def labels_of(rows, entity_id):
+    return labels(project_entities("alpha", rows, revision=1))[entity_id]

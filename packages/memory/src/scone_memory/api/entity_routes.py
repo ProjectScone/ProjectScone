@@ -133,6 +133,21 @@ class GroupingImportance(BaseModel):
     participation: float
 
 
+class AnalysisCoverage(BaseModel):
+    """What the analysis covered. Separate from the view's coverage: a view
+    can show every entity while the analysis behind it was capped, or its
+    betweenness estimated from a sample of sources."""
+    entities_total: int
+    entities_analysed: int
+    isolated_entities: int
+    truncated: bool
+    reasons: list[str]
+    #: "exact", or "sampled:N" when estimated from N sampled sources.
+    betweenness: str
+    betweenness_estimated: bool
+    levels: int
+
+
 class Groupings(BaseModel):
     """Computed from the view's recorded relations: analysis, never facts."""
     basis: Literal["computed"]
@@ -141,6 +156,7 @@ class Groupings(BaseModel):
     membership: dict[str, str]
     communities: list[GroupingCommunity]
     importance: list[GroupingImportance]
+    coverage: AnalysisCoverage
 
 
 class KnowledgeView(BaseModel):
@@ -184,6 +200,7 @@ def _groupings(analysis: GraphAnalysis, view: dict[str, object]) -> dict[str, ob
         "importance": [{"entity_id": item.entity_id, "community_id": item.community_id, "degree": item.degree,
                         "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation}
                        for item in analysis.importance if item.entity_id in shown],
+        "coverage": analysis.coverage.record(),
     }
 
 
