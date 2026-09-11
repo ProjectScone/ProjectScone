@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, cast
 from ..agents.workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep
 from ..core.errors import InvalidInput
 from ..core.validation import check_space
-from .files import DocumentManifest, digest, document_provenance, encode_manifest, prepare_document, store_document
-from .formats.registry import BuiltinDocumentParser, DocumentParser
+from .files import DocumentManifest, digest, document_provenance, encode_manifest, extraction_filename, prepare_document, store_document
+from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, validate_document
 
 if TYPE_CHECKING:
@@ -40,25 +40,32 @@ class DocumentIngestionWorkflow:
     def close(self) -> None:
         self._runner.close()
 
-    def _scope(self) -> dict[str, JSONValue]:
-        return {'limits': cast(JSONValue, json.loads(self._limits.model_dump_json()))}
+    def _scope(self, filename: str | None = None) -> dict[str, JSONValue]:
+        scope: dict[str, JSONValue] = {'limits': cast(JSONValue, json.loads(self._limits.model_dump_json()))}
+        if filename is not None:
+            extension(filename)
+            scope['filename'] = filename
+        return scope
 
-    def status(self, run_id: str, *, space: str, attachment_id: str) -> WorkflowStatus | None:
-        return self._runner.status(run_id, space=space, scope=self._scope(), inputs=attachment_id)
+    def status(self, run_id: str, *, space: str, attachment_id: str,
+               filename: str | None = None) -> WorkflowStatus | None:
+        return self._runner.status(run_id, space=space, scope=self._scope(filename), inputs=attachment_id)
 
-    async def run(self, run_id: str, *, space: str, attachment_id: str) -> WorkflowResult:
+    async def run(self, run_id: str, *, space: str, attachment_id: str,
+                  filename: str | None = None) -> WorkflowResult:
         check_space(space)
-        return await self._runner.run(run_id, space=space, scope=self._scope(), inputs=attachment_id)
+        return await self._runner.run(run_id, space=space, scope=self._scope(filename), inputs=attachment_id)
 
     async def _verify(self, context: StepContext) -> bool:
         if not isinstance(context.inputs, str) or await self._memory.space_deleted(context.space):
             return False
         original, raw = await self._memory.attachment(context.space, context.inputs)
-        if digest(raw) != context.inputs or not original.filename:
+        if digest(raw) != context.inputs:
             return False
+        filename = extraction_filename(original, cast(str | None, context.scope.get('filename')))
         if 'extract' in context.completed:
             manifest = await self._manifest(context)
-            if manifest.original_sha256 != original.attachment_id or manifest.filename != original.filename:
+            if manifest.original_sha256 != original.attachment_id or manifest.filename != filename:
                 return False
         if 'index' in context.completed:
             result = cast(dict[str, JSONValue], context.completed['index'])
@@ -71,9 +78,8 @@ class DocumentIngestionWorkflow:
 
     async def _extract(self, context: StepContext) -> JSONValue:
         original, raw = await self._memory.attachment(context.space, cast(str, context.inputs))
-        if not original.filename:
-            raise InvalidInput('document attachment must retain a filename')
-        manifest = await prepare_document(raw, original.filename, parser=self._parser, limits=self._limits)
+        filename = extraction_filename(original, cast(str | None, context.scope.get('filename')))
+        manifest = await prepare_document(raw, filename, parser=self._parser, limits=self._limits)
         retained = await self._memory.attach(context.space, encode_manifest(manifest),
                                               'application/json', filename='document-provenance.json')
         if retained.media_type != 'application/json':

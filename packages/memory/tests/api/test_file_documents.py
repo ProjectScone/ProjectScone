@@ -60,3 +60,46 @@ async def test_document_boundary_rejects_oversize_extra_fields_and_reports_forma
     assert (await client.post('/v1/documents', content=b'x'*4097)).status_code == 413
     assert (await client.post('/v1/documents', json={'attachment_id': 'a'*64, 'url': 'http://example.com'})).status_code == 400
     assert (await client.post('/v1/documents', json={'attachment_id': 'a'*64})).status_code == 404
+
+
+@pytest.mark.parametrize('first_name', [None, 'plan.txt'])
+async def test_extraction_filename_overrides_first_upload_label_without_rewriting_original(service, first_name):
+    client, _ = service
+    raw = b'task,day\nlaunch,Friday\n'
+    headers = {'content-type': 'application/octet-stream'}
+    if first_name is not None:
+        headers['x-filename'] = first_name
+    uploaded = await client.post('/v1/attachments', content=raw, headers=headers)
+    attachment_id = uploaded.json()['attachment_id']
+    body = {'attachment_id': attachment_id, 'filename': 'plan.csv'}
+    indexed = await client.post('/v1/documents', json=body)
+    assert indexed.status_code == 200, indexed.text
+    assert indexed.json()['format'] == 'csv'
+    assert indexed.json()['filename'] == 'plan.csv'
+    assert indexed.json()['original']['filename'] == first_name
+    episode_id = indexed.json()['added']['episode_id']
+    evidence = (await client.get(f'/v1/episodes/{episode_id}/document')).json()
+    assert evidence['filename'] == 'plan.csv'
+    assert evidence['original']['filename'] == first_name
+    assert [segment['locator'] for segment in evidence['segments']] == ['row:2']
+    assert (await client.get(evidence['download_path'])).content == raw
+    repeated = await client.post('/v1/documents', json=body)
+    assert repeated.json()['added']['episode_id'] == episode_id
+    text = await client.post('/v1/documents', json={**body, 'filename': 'plan.txt'})
+    assert text.status_code == 200, text.text
+    assert text.json()['format'] == 'txt'
+    assert text.json()['added']['episode_id'] != episode_id
+    assert (await client.post('/v1/documents', json=body, headers={'authorization': 'Bearer other'})).status_code == 404
+
+
+@pytest.mark.parametrize('filename', ['', 42, 'x'*1025, '\x00.csv', '\ud800.csv', 'é'*513 + '.csv'])
+async def test_explicit_extraction_filename_is_validated(service, filename):
+    client, _ = service
+    uploaded = await client.post('/v1/attachments', content=b'a,b\n1,2',
+                                 headers={'content-type': 'text/csv', 'x-filename': 'a.csv'})
+    assert uploaded.status_code == 200, uploaded.text
+    import json
+    response = await client.post('/v1/documents', content=json.dumps({
+        'attachment_id': uploaded.json()['attachment_id'], 'filename': filename}),
+        headers={'content-type': 'application/json'})
+    assert response.status_code in (400, 422)

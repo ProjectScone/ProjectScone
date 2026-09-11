@@ -10,8 +10,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..core.errors import InvalidInput
-from ..ingestion.files import document_provenance, prepare_document, store_document
+from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document
 from ..ingestion.formats.registry import BuiltinDocumentParser
 from ..ingestion.formats.types import DocumentLimits
 from ..memory.engine import MemoryEngine
@@ -20,6 +19,7 @@ from ..memory.engine import MemoryEngine
 class _FileBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    filename: str | None = Field(default=None, min_length=1, max_length=1024)
 
 
 def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
@@ -43,9 +43,8 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             return JSONResponse({'error': 'invalid document attachment request'}, status_code=400)
         async with ingest_slot(1):
             original, raw = await engine.attachment(space, body.attachment_id)
-            if not original.filename:
-                raise InvalidInput('document attachment must retain a filename with its format extension')
-            manifest = await prepare_document(raw, original.filename, parser=BuiltinDocumentParser(), limits=DocumentLimits())
+            filename = extraction_filename(original, body.filename)
+            manifest = await prepare_document(raw, filename, parser=BuiltinDocumentParser(), limits=DocumentLimits())
             saved = await store_document(engine, space, original, manifest)
         return JSONResponse(jsonable_encoder(asdict(saved)))
 

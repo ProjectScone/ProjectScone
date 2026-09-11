@@ -64,6 +64,7 @@ class DocumentIngested:
     manifest: Attachment
     format: str
     segments: int
+    filename: str
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,15 @@ class DocumentProvenance:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def extraction_filename(original: Attachment, filename: str | None = None) -> str:
+    """Choose a parse label independently of the blob's first-upload metadata."""
+    selected = original.filename if filename is None else filename
+    if selected is None:
+        raise InvalidInput('document requires an extraction filename with its format extension')
+    extension(selected)
+    return selected
 
 
 async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser,
@@ -112,7 +122,8 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
         attachment_ids=(original.attachment_id, retained.attachment_id),
         metadata={'document_format': manifest.parsed.format, 'document_original': original.attachment_id,
                   'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text'})
-    return DocumentIngested(added, original, retained, manifest.parsed.format, len(manifest.parsed.segments))
+    return DocumentIngested(added, original, retained, manifest.parsed.format,
+                            len(manifest.parsed.segments), manifest.filename)
 
 
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,

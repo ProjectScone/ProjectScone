@@ -24,6 +24,13 @@ checks the retained source, manifest and chunk before returning overlapping
 source segments. Repeated identical originals and extraction outputs reuse
 their identity. This does not make arbitrary parser output authoritative.
 
+Attachments are identified by their bytes and keep the first upload's filename
+and media type. Each extraction separately records the filename used to select
+its parser. `result.filename` and `evidence.filename` are that extraction label;
+`result.original.filename` is the original upload label and may differ or be
+absent. Identical bytes can have distinct CSV and plain-text interpretations,
+each with its own extraction manifest and deduplication identity.
+
 Configured PDF OCR and image readers retain typed `DocumentTextRegion` values
 on each segment. Each region includes its recognized text, normalized box,
 recognizer score, block/line identifiers and half-open `start`/`end` offsets
@@ -50,17 +57,17 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | HTML | Visible extracted text | Bounded parser; no browser execution, stylesheets or remote resource fetching |
 | DOCX, XLSX, PPTX | Paragraphs/tables, sheet cell references, slides and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
-
-OpenDocument extraction uses current content: `text:tracked-changes` revision
-history and `office:change-info` metadata are omitted. Current text, including
-tracked insertions, remains in its document order. Revision history is not
-emitted as a separate searchable view.
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
 | PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
+
+OpenDocument extraction uses current content: `text:tracked-changes` revision
+history and `office:change-info` metadata are omitted. Current text, including
+tracked insertions, remains in its document order. Revision history is not
+emitted as a separate searchable view.
 
 Use `document_formats()` or authenticated `GET /v1/documents/formats` to
 inspect default-reader dependencies on the running installation. Availability
@@ -104,7 +111,11 @@ finally:
     job.close()
 ```
 
-The source must already be retained with a filename. Extraction saves its
+The source must already be retained. Supply `filename="release.json"` to both
+`run()` and `status()` to choose an extraction label explicitly; omitting it
+uses the retained filename. The label is bound to the run, so changing or
+removing an explicit label requires a new run id. Existing runs that omitted
+the argument keep their original checkpoint binding. Extraction saves its
 manifest before indexing. Reopening the same journal with the same key,
 parser revision, limits and source identity resumes indexing without
 repeating completed extraction. Changed parser/model options need a changed
@@ -127,7 +138,10 @@ provides encrypted per-page OCR checkpoints and indexing recovery; see the
 
 Retain the original through the existing attachment upload route with its
 filename, then post `{"attachment_id":"<retained SHA-256>"}` to
-`POST /v1/documents`. Read provenance through
+`POST /v1/documents`. Include `"filename":"report.csv"` to choose the parser
+independently of the original upload label, including for nameless attachments.
+The response's `filename` reports this choice without rewriting upload metadata.
+Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.
 HTTP indexing is synchronous and does not automatically create a durable

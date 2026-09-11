@@ -189,3 +189,49 @@ async def test_missing_indexed_episode_invalidates_checkpoint_even_when_all_blob
     finally:
         job.close()
         await memory.close()
+
+
+@pytest.mark.parametrize('first_name', [None, 'plan.txt'])
+async def test_workflow_binds_explicit_extraction_filename_and_resumes_it(tmp_path, first_name):
+    from scone_memory.ingestion import document_provenance
+    memory = await open_memory(tmp_path)
+    original = await memory.attach('alpha', b'task,day\nlaunch,Friday\n', 'text/plain', filename=first_name)
+    parser = CountingParser()
+    job = workflow(memory, tmp_path, parser)
+    args = dict(space='alpha', attachment_id=original.attachment_id, filename='plan.csv')
+    try:
+        first = await job.run('plan', **args)
+        assert job.status('plan', **args).completed_steps == ('extract', 'index')
+        job.close()
+        job = workflow(memory, tmp_path, parser)
+        result = await job.run('plan', **args)
+        assert result.results == first.results and result.reused_steps == ('extract', 'index')
+        assert parser.calls == 1
+        evidence = await document_provenance(memory, 'alpha', result.results['index']['episode_id'])
+        assert evidence.filename == 'plan.csv' and evidence.format == 'csv'
+        assert evidence.original.filename == first_name
+        for changed in ['plan.txt', None]:
+            with pytest.raises(WorkflowError, match='binding_mismatch'):
+                await job.run('plan', **{**args, 'filename': changed})
+            with pytest.raises(WorkflowError, match='binding_mismatch'):
+                job.status('plan', **{**args, 'filename': changed})
+    finally:
+        job.close()
+        await memory.close()
+
+
+async def test_direct_ingestion_reports_parse_label_when_original_was_retained_under_another_name(tmp_path):
+    from scone_memory.ingestion import document_provenance, ingest_document
+    memory = await open_memory(tmp_path)
+    raw = b'task,day\nlaunch,Friday\n'
+    try:
+        original = await memory.attach('alpha', raw, 'text/plain', filename='plan.txt')
+        result = await ingest_document(memory, 'alpha', raw, filename='plan.csv')
+        assert result.original == original
+        assert result.filename == 'plan.csv' and result.format == 'csv'
+        evidence = await document_provenance(memory, 'alpha', result.added.episode_id)
+        assert evidence.filename == result.filename
+        assert evidence.original.filename == 'plan.txt'
+        assert evidence.segments[0].locator == 'row:2'
+    finally:
+        await memory.close()
