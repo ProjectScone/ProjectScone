@@ -435,19 +435,34 @@ class InMemoryVectorIndex:
         return True
 
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
-        settled = after_write(self._writer, writer, bool(self._points))
-        # Through upsert, so a subclass that changes writing still decides it;
-        # the record changes only once the write has happened.
-        await self.upsert(points)
-        self._writer = settled
+        # Write through upsert, so a subclass that changes writing still
+        # decides it. The record changes before anything can yield: a writer
+        # that runs while this one awaits sees it, and a stale value can never
+        # be written back over theirs.
+        before = self._writer
+        self._writer = settled = after_write(before, writer, bool(self._points))
+        try:
+            await self.upsert(points)
+        except BaseException:
+            # Nothing landed in an empty index: leave no claim behind, unless
+            # another writer has changed the record meanwhile.
+            if before is None and not self._points and self._writer == settled:
+                self._writer = None
+            raise
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
                         writer: str) -> list[tuple[int, float]]:
-        if not vouches(self._writer, writer, bool(self._points)):
+        record = self._writer
+        if not vouches(record, writer, bool(self._points)):
             raise VectorsNotComparable(f"stored vectors are recorded as "
-                                       f"{self._writer[0] if self._writer else 'unrecorded'}, not {writer}")
-        return await self.search(space, vector, limit, as_of, tags, where)
+                                       f"{record[0] if record else 'unrecorded'}, not {writer}")
+        found = await self.search(space, vector, limit, as_of, tags, where)
+        # A search override may yield; any write that changed the record while
+        # it ran may have put another writer's vectors into what it compared.
+        if self._writer != record:
+            raise VectorsNotComparable("the vectors' writer changed during the search")
+        return found
 
     async def spaces_with_vectors(self) -> list[str]:
         return sorted({p.space for p in self._points.values()})

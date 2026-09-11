@@ -511,3 +511,54 @@ async def test_a_record_forgotten_during_a_rebuild_does_not_come_back(tmp_path: 
     finally:
         await rebuilder.close()
         await other.close()
+
+
+async def test_a_yielding_write_override_cannot_overwrite_another_writers_mark() -> None:
+    import asyncio
+    from scone_memory.core.ports import VectorPoint
+
+    class Yielding(InMemoryVectorIndex):
+        async def upsert(self, points):
+            await asyncio.sleep(0)
+            await super().upsert(points)
+
+    index = Yielding()
+    await index.ensure(2)
+    await asyncio.gather(
+        index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a"),
+        index.upsert_as([VectorPoint(2, "s", 2, "2025-01-01T00:00:00Z", [0.0, 1.0])], "model-b"))
+    assert await index.written_by() == ("mixed", "invalidated")
+
+
+async def test_a_yielding_search_override_is_rechecked_after_it_returns() -> None:
+    import asyncio
+    from scone_memory.core.ports import VectorPoint
+    from scone_memory.core.vector_writers import VectorsNotComparable
+
+    class YieldingSearch(InMemoryVectorIndex):
+        async def search(self, *args, **kwargs):
+            await asyncio.sleep(0)
+            return await super().search(*args, **kwargs)
+
+    index = YieldingSearch()
+    await index.ensure(2)
+    await index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a")
+    search = asyncio.ensure_future(index.search_as("s", [1.0, 0.0], 5, writer="model-a"))
+    await asyncio.sleep(0)
+    await index.upsert_as([VectorPoint(2, "s", 2, "2025-01-01T00:00:00Z", [0.0, 1.0])], "model-b")
+    with pytest.raises(VectorsNotComparable):
+        await search
+
+
+async def test_a_first_write_that_fails_leaves_no_claim_behind() -> None:
+    from scone_memory.core.ports import VectorPoint
+
+    class Failing(InMemoryVectorIndex):
+        async def upsert(self, points):
+            raise ConnectionError("vector store went away")
+
+    index = Failing()
+    await index.ensure(2)
+    with pytest.raises(ConnectionError):
+        await index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a")
+    assert await index.written_by() is None
