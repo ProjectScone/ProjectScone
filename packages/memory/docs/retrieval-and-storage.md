@@ -393,13 +393,18 @@ projection always exports the same file. Advertised as `graph.export`.
 Each graph request reads the space's ledger. It never reads it on a
 recall path.
 
-- **Paged**, when the store can page its ledger (in-memory and SQLite
-  today). `page_facts` returns the newest facts first, in every status,
-  below a cursor, at most 1,000 at a time. The read stops one row past
-  the 50,000-fact cap, so a capped read never touches older facts.
+- **Paged**, when the store can page its ledger. All five document
+  stores can: in-memory, SQLite, MongoDB, PostgreSQL and Elasticsearch.
+  `page_facts` returns the newest facts first, in every status, below a
+  cursor, at most 1,000 at a time, each page on the store's (space, id)
+  index. A short page is not the end; only an empty page is. The read
+  stops one row past the 50,000-fact cap, so a capped read never touches
+  older facts.
 - **Unpaged** otherwise: one whole-ledger list, then the newest 50,000.
-  Elasticsearch returns at most 10,000 rows, so a read that hits that is
-  reported as `store_read_cap_reached`.
+  A store without a pager that stops a list at a fixed row count
+  (Elasticsearch stops at 10,000) is reported as
+  `store_read_cap_reached`. With its pager, Elasticsearch is read whole:
+  each page is one bounded search, well inside that window.
 - **Refused pages:** a page with another space's rows, ids out of order,
   rows at or past the cursor, or too many rows is refused. The read falls
   back to one list and reports `pager_rejected`.

@@ -423,6 +423,20 @@ class PostgresDocumentStore:
             sql += " AND status = 'active'"
         return [_fact(r) for r in await self._rows(sql + " ORDER BY id", (space,))]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """Newest first below the cursor, on facts_space_id."""
+        from ..core.graph_read import ledger_page_limit
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []
+        if before_id is None:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s ORDER BY id DESC LIMIT %s',
+                (space, cap))
+        else:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s AND id < %s '
+                'ORDER BY id DESC LIMIT %s', (space, before_id, cap))
+        return [_fact(row) for row in rows]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)

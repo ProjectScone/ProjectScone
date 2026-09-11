@@ -373,6 +373,18 @@ class MongoDocumentStore:
             query["status"] = "active"
         return [_fact(doc) async for doc in self.facts.find(query).sort("_id", 1)]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """Newest first below the cursor, on the (space, _id) index."""
+        from ..core.graph_read import ledger_page_limit
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []  # MongoDB limit(0) would remove the bound.
+        query: dict[str, object] = {'space': space}
+        if before_id is not None:
+            query['_id'] = {'$lt': before_id}
+        cursor = self.facts.find(query).sort('_id', -1).limit(cap)
+        return [_fact(doc) async for doc in cursor]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)

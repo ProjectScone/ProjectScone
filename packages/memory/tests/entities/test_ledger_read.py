@@ -8,6 +8,9 @@ space that will not hold still is reported, never cached as whole.
 """
 from __future__ import annotations
 
+import os
+import uuid
+
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
@@ -15,16 +18,51 @@ from scone_memory.core.graph_read import MAX_LEDGER_PAGE, LedgerPager, checked_l
 from scone_memory.entities import read
 
 
-@pytest.fixture(params=["memory", "sqlite"])
+def stores():
+    """Every document store with a ledger pager: local ones always, remote
+    ones when CI points the test at a live server."""
+    yield "memory"
+    yield "sqlite"
+    if os.environ.get("SCONE_TEST_MONGO_URL"):
+        yield pytest.param("mongo", marks=pytest.mark.mongo)
+    if os.environ.get("SCONE_TEST_POSTGRES_URL"):
+        yield pytest.param("postgres", marks=pytest.mark.postgres)
+    if os.environ.get("SCONE_TEST_ELASTICSEARCH_URL"):
+        yield pytest.param("elasticsearch", marks=pytest.mark.elasticsearch)
+
+
+@pytest.fixture(params=list(stores()))
 async def engine(request, tmp_path):
+    name = f"scone_test_{uuid.uuid4().hex[:8]}"
+    vectors = InMemoryVectorIndex()
     if request.param == "memory":
-        documents, vectors = InMemoryDocumentStore(), InMemoryVectorIndex()
-    else:
+        documents = InMemoryDocumentStore()
+    elif request.param == "sqlite":
         from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
 
         documents, vectors = SqliteDocumentStore(tmp_path / "m.db"), SqliteVectorIndex(tmp_path / "m.db")
+    elif request.param == "mongo":
+        from scone_memory.backends import MongoDocumentStore
+
+        documents = MongoDocumentStore(os.environ["SCONE_TEST_MONGO_URL"], name)
+        await documents.open()
+    elif request.param == "postgres":
+        from scone_memory.backends import PostgresDocumentStore
+
+        documents = PostgresDocumentStore(os.environ["SCONE_TEST_POSTGRES_URL"], schema=name)
+        await documents.open()
+        vectors = documents.vectors()
+    else:
+        from scone_memory.backends import ElasticsearchDocumentStore
+
+        documents = ElasticsearchDocumentStore(os.environ["SCONE_TEST_ELASTICSEARCH_URL"], prefix=name)
+        await documents.open()
+        vectors = documents.vectors()
     engine = await MemoryEngine(documents, vectors, HashEmbedder()).open()
     yield engine
+    for store in (documents, vectors):
+        if hasattr(store, "drop"):
+            await store.drop()
     await engine.close()
 
 
@@ -51,10 +89,36 @@ async def test_a_store_pages_its_ledger_newest_first_in_every_status(engine):
     assert await engine.documents.page_facts("alpha", None, 0) == []
 
 
-async def test_a_page_is_never_longer_than_the_largest_page(engine):
-    for number in range(MAX_LEDGER_PAGE + 5):
+async def test_every_store_is_read_whole_across_many_pages(engine, monkeypatch):
+    """Pages of four across ten facts: each cursor picks up exactly below the
+    last row, on every store, with nothing missed or repeated."""
+    monkeypatch.setattr(read, "MAX_LEDGER_PAGE", 4)
+    for number in range(10):
         await engine.assert_fact("alpha", f"team {number}", "based_in", "Lisbon")
-    rows = await engine.documents.page_facts("alpha", None, MAX_LEDGER_PAGE * 3)
+    await engine.assert_fact("beta", "zed", "based_in", "Porto")
+    found = await read.read_ledger(engine, "alpha")
+    assert found.read_mode == "paged" and found.reasons == () and found.consistent
+    assert len(found.facts) == 10 and len({fact.fact_id for fact in found.facts}) == 10
+    assert {fact.space for fact in found.facts} == {"alpha"}
+
+
+@pytest.mark.parametrize("local", ["memory", "sqlite"])
+async def test_a_page_is_never_longer_than_the_largest_page(local, tmp_path):
+    """Every store caps through the port's shared limit; checked on the local
+    stores, where a thousand writes are quick."""
+    from scone_memory.core.ports import NewFact
+
+    if local == "memory":
+        store = InMemoryDocumentStore()
+    else:
+        from scone_memory.backends import SqliteDocumentStore
+
+        store = SqliteDocumentStore(tmp_path / "m.db")
+    await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(MAX_LEDGER_PAGE + 5):
+        await store.insert_fact(NewFact(space="alpha", subject=f"team {number}", predicate="based_in", object="Lisbon",
+                                        valid_from="2025-01-01T00:00:00Z"))
+    rows = await store.page_facts("alpha", None, MAX_LEDGER_PAGE * 3)
     assert len(rows) == MAX_LEDGER_PAGE
 
 

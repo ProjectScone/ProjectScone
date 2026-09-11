@@ -459,6 +459,19 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """Newest first below the cursor. Each page is one bounded search,
+        so a whole-space read is never cut at the 10,000-hit window."""
+        from ..core.graph_read import ledger_page_limit
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []
+        filters: list[dict] = [{'term': {'space': space}}]
+        if before_id is not None:
+            filters.append({'range': {'fact_id': {'lt': before_id}}})
+        hits = await self._search('facts', query={'bool': {'filter': filters}}, size=cap, sort=[{'fact_id': 'desc'}])
+        return [_fact(hit) for hit in hits]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)
