@@ -45,6 +45,7 @@
       "episodes.list": true,
       "episodes.read": true,
       "facts.links": true,
+      "episodes.by_key": true,
       "jobs.read": true,
       "integrity.read": true,
       "profile.read": true,

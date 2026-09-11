@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
 
+    p = sub.add_parser("source-key", help="read the current source stored with remember --key")
+    p.add_argument("dedup_key")
+
     p = sub.add_parser("jobs", help="recent ingest batches and how far each has got")
     p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("job", help="one ingest batch: what each record became")
@@ -489,6 +492,15 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
         if not result.items and not result.facts:
             print("nothing matched", file=out)
+        return 0
+
+    if args.command == "source-key":
+        episode = await engine.episode_by_key(space, args.dedup_key)
+        if args.json:
+            emit(episode.model_dump())
+        else:
+            print(f"episode {episode.episode_id} in {space}: {len(episode.attachments)} attachment(s)", file=out)
+            print(json.dumps(episode.content, ensure_ascii=True), file=out)
         return 0
 
     if args.command == "attachments":

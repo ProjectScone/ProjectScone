@@ -68,10 +68,19 @@ class _DupOf:
 
 def content_hash(space: str, content: str, dedup_key: Optional[str] = None) -> str:
     if dedup_key is not None:
-        if not dedup_key or len(dedup_key) > 256:
-            raise InvalidInput("dedup_key must be 1..=256 chars")
-        return hashlib.sha256(f"{space}\x00key\x00{dedup_key}".encode()).hexdigest()
+        return key_hash(space, dedup_key)
     return hashlib.sha256(f"{space}\x00{content.strip()}".encode()).hexdigest()
+
+
+def key_hash(space: str, dedup_key: str) -> str:
+    """The same exact, space-bound identity for keyed reads and writes."""
+    if not isinstance(dedup_key, str) or not 1 <= len(dedup_key) <= 256:
+        raise InvalidInput("dedup_key must be a string of 1..=256 chars")
+    try:
+        encoded = f"{space}\x00key\x00{dedup_key}".encode("utf-8")
+    except UnicodeError as error:
+        raise InvalidInput("dedup_key must be valid UTF-8") from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def contextual_prefix(episode: "NewEpisode") -> str:

@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention
+from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -612,6 +612,13 @@ class MemoryEngine:
         found = await self._episode_or_gone(space, episode_id)
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
+
+    async def episode_by_key(self, space: str, dedup_key: str) -> Episode:
+        """Read a keyed source and its attachment metadata. Unknown keys raise
+        NotFound; a key with only a deletion record raises Gone. A changing
+        key is retried at most three times before Conflict. The result does
+        not reserve the key for a subsequent write or include prior versions."""
+        return await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key)
 
     # -- recall -----------------------------------------------------------
 

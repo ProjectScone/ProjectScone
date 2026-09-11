@@ -162,8 +162,7 @@ async def test_failed_revision_receipt_does_not_claim_the_written_key_is_empty(s
         await engine.replace('alpha', Record('The observatory moved to Porto.', dedup_key='doc:observatory'))
     assert 'names nothing' not in str(failure.value)
     assert (await engine.status('alpha')).episodes == 1
-    from scone_memory.ingestion.records import content_hash
-    current = await engine.documents.episode_by_hash('alpha', content_hash('alpha', '', 'doc:observatory'))
+    current = await engine.episode_by_key('alpha', 'doc:observatory')
     assert current.content == 'The observatory moved to Porto.'
 
 
@@ -244,6 +243,9 @@ async def test_write_failure_after_forget_reports_stage_and_can_be_retried(sourc
     assert str(original.episode_id) in str(failure.value)
     assert (await engine.status('alpha')).episodes == 0
     assert await engine.documents.inflight() == []
+    from scone_memory.core.errors import Gone
+    with pytest.raises(Gone):
+        await engine.episode_by_key('alpha', 'doc:observatory')
     monkeypatch.setattr(engine.vectors, 'upsert', normal_upsert)
     retried = await engine.replace('alpha', Record('The observatory moved to Porto.', dedup_key='doc:observatory'))
     assert retried.outcome == 'accepted'

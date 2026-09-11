@@ -24,6 +24,47 @@ checks the retained source, manifest and chunk before returning overlapping
 source segments. Repeated identical originals and extraction outputs reuse
 their identity. This does not make arbitrary parser output authoritative.
 
+## Inspect a source after a keyed update
+
+When a source was stored with `dedup_key`, read its current episode with the
+same exact key. This is useful after an uncertain replacement error: the
+new source may have been stored even if returning its receipt failed.
+
+```python
+from scone_memory.core.errors import Gone, NotFound
+
+try:
+    current = await memory.episode_by_key("research", "doc:observatory")
+except Gone as error:
+    print("The source was forgotten at", error.forgotten_at)
+except NotFound:
+    print("No source is recorded under this key")
+else:
+    print(current.episode_id, current.content, current.attachments)
+```
+
+`SyncMemoryEngine.episode_by_key(space, key)` provides the same blocking
+operation. In a shell, use
+`scone-memory source-key doc:observatory --space research --json`.
+Successful CLI JSON contains the native Episode fields. Missing and forgotten
+sources exit with code 2 and a diagnostic on stderr.
+
+Authenticated `GET /v1/episodes/by-key?dedup_key=...` returns the same source
+shape as `GET /v1/episodes/{episode_id}`. Use your HTTP client's query-parameter
+encoding for keys containing spaces, `#`, `?` or other reserved characters.
+The bearer key determines the space. HTTP 404 means no recorded source under
+that key; HTTP 410 includes `forgotten_at`. The operation is advertised as
+`episodes.by_key` in `/v1/capabilities`.
+
+Keys are exact UTF-8 strings of 1–256 characters; whitespace and case remain
+significant. A key addresses the current source, not a history of replacements
+or a source stored only by content hash. The read includes attachment metadata,
+does not embed or write anything, and retries observed identity changes at most
+three times before raising `Conflict` (HTTP 409). It is not a lock or a transaction
+with a later write; coordinate competing writers before deciding to retry an
+update. Rust and the lightweight `scone-client` package do not yet expose this
+native operation.
+
 Attachments are identified by their bytes and keep the first upload's filename
 and media type. Each extraction separately records the filename used to select
 its parser. `result.filename` and `evidence.filename` are that extraction label;

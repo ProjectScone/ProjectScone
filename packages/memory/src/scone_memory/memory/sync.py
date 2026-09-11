@@ -153,6 +153,9 @@ class SyncMemoryEngine:
     def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
         return self._run(self._engine.remember_many(space, list(records)))
 
+    def episode_by_key(self, space: str, dedup_key: str) -> Episode:
+        return self._run(self._engine.episode_by_key(space, dedup_key))
+
     def recall(self, space: str, query: str, *, candidate_limit: int | None = None,
                rerank: bool = True, **kwargs) -> RecallResult:
         return self._run(self._engine.recall(space, query, candidate_limit=candidate_limit, rerank=rerank, **kwargs))

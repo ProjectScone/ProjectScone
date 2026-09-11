@@ -334,6 +334,7 @@ def create_app(
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
+            "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
         if conversations:
@@ -508,6 +509,11 @@ def create_app(
                            "preview": e.content[:500], "preview_truncated": len(e.content) > 500,
                            **status_of(e.episode_id)}
                           for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+
+    @app.get("/v1/episodes/by-key")
+    async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
+                                 space: str = Depends(space_for)) -> dict:
+        return episode_json(await engine.episode_by_key(space, dedup_key))
 
     @app.get("/v1/episodes/{episode_id}")
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
