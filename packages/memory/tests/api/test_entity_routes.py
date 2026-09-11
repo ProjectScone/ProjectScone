@@ -554,3 +554,59 @@ def test_an_export_names_its_scope_in_its_headers(seeded, format):
     assert response.headers["x-scone-projection-digest"] == view["projection"]["digest"]
     assert response.headers["x-scone-status"] == "history"
     assert response.headers["x-scone-as-of"] == view["filters"]["as_of"]
+
+
+@pytest.fixture
+async def city():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "carol diaz", "works_at", "Globex", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        yield client, engine
+
+
+def test_a_seeded_view_walks_out_from_its_seed_both_ways(city):
+    client, _ = city
+    view = client.get("/v1/graph/knowledge", params={"seed": "Lisbon"}, headers=auth()).json()
+    keys = [entity["key"] for entity in view["entities"]]
+    assert keys[0] == "lisbon" and "alice chen" in keys and "carol diaz" not in keys
+    assert keys.index("acme robotics") < keys.index("alice chen")
+    assert view["filters"]["seeds"] == [view["entities"][0]["id"]]
+
+
+async def test_a_hub_is_shown_but_not_walked_through_unless_seeded(city):
+    client, engine = city
+    for number in range(5):
+        await engine.assert_fact("alpha", f"visitor {number}", "visited", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    through = client.get("/v1/graph/knowledge", params={"seed": "alice chen", "hub_degree": 3}, headers=auth()).json()
+    keys = [entity["key"] for entity in through["entities"]]
+    assert "lisbon" in keys and not any(key.startswith("visitor") for key in keys)
+    assert "hub_skipped" in through["coverage"]["reasons"]
+    seeded = client.get("/v1/graph/knowledge", params={"seed": "lisbon", "hub_degree": 3}, headers=auth()).json()
+    assert any(entity["key"].startswith("visitor") for entity in seeded["entities"])
+
+
+async def test_pages_cover_the_ranking_once_and_a_moved_graph_refuses_the_cursor(city):
+    client, engine = city
+    seen, cursor = [], None
+    while True:
+        params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
+        page = client.get("/v1/graph/knowledge", params=params, headers=auth()).json()
+        seen += [entity["id"] for entity in page["entities"]]
+        cursor = page["coverage"].get("next_cursor")
+        if not cursor:
+            break
+    everything = client.get("/v1/graph/knowledge", params={"limit": 100}, headers=auth()).json()
+    assert seen == [entity["id"] for entity in everything["entities"]] and len(seen) == len(set(seen))
+    first = client.get("/v1/graph/knowledge", params={"limit": 2}, headers=auth()).json()["coverage"]["next_cursor"]
+    await engine.assert_fact("alpha", "dana", "works_at", "Globex", valid_from="2024-01-01T00:00:00Z")
+    moved = client.get("/v1/graph/knowledge", params={"limit": 2, "cursor": first}, headers=auth())
+    assert moved.status_code == 409
+
+
+def test_an_ambiguous_or_unknown_seed_is_refused(city):
+    client, _ = city
+    assert client.get("/v1/graph/knowledge", params={"seed": "nobody"}, headers=auth()).status_code == 404
+    assert client.get("/v1/graph/knowledge", params={"cursor": "not-a-cursor"}, headers=auth()).status_code == 422

@@ -12,6 +12,8 @@ described in docs/retrieval-and-storage.md under "Knowledge graph".
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -100,6 +102,8 @@ class ProjectionMeta(BaseModel):
 class Filters(BaseModel):
     status: StatusMode
     as_of: str
+    #: The entity ids a seeded view walked out from.
+    seeds: Optional[list[str]] = None
 
 
 class ListFilters(Filters):
@@ -122,6 +126,8 @@ class Coverage(BaseModel):
     attributes_shown: Optional[int] = None
     truncated: bool
     reasons: list[str]
+    #: Pass as ``cursor`` for the next page of the ranking; absent on the last.
+    next_cursor: Optional[str] = None
 
 
 class GroupingCommunity(BaseModel):
@@ -231,6 +237,22 @@ def _candidates(found: Resolution) -> dict[str, object]:
             "candidates_total": found.total, "truncated": found.total > len(found.candidates)}
 
 
+def _write_cursor(offset: int, digest: str) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"v": 1, "offset": offset, "digest": digest}).encode()).decode()
+
+
+def _read_cursor(cursor: str) -> tuple[int, str]:
+    """The offset and projection digest a cursor names, or a 422."""
+    try:
+        found = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        offset, digest = found["offset"], found["digest"]
+        if found.get("v") != 1 or type(offset) is not int or offset < 0 or not isinstance(digest, str):
+            raise ValueError(cursor)
+    except (ValueError, KeyError, TypeError) as error:
+        raise InvalidInput("cursor is not one this server issued") from error
+    return offset, digest
+
+
 def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
     return {entity.entity_id: {"id": entity.entity_id, "label": entity.label, "key": entity.key}
             for entity in projection.entities}
@@ -247,17 +269,47 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         status: StatusMode = "current", as_of: Optional[str] = None,
         limit: int = Query(default=150, ge=1, le=1000), attribute_limit: int = Query(default=300, ge=0, le=5000),
         groupings: bool = False, resolution: float = Query(default=1.0, gt=0, le=10),
-        space: str = Depends(space_for),
-    ) -> dict[str, object]:
+        seed: list[str] = Query(default=[]), hub_degree: int = Query(default=64, ge=1, le=100_000),
+        cursor: Optional[str] = Query(default=None, max_length=512), space: str = Depends(space_for),
+    ) -> dict[str, object] | JSONResponse:
         """Entities, the relations between them and their values, as the ledger records them.
 
-        With ``groupings=true`` a separate, computed block assigns the shown
-        entities to communities, found at ``resolution``, and scores their
-        importance."""
+        Without ``seed``, the entities ranked by the claims they take part
+        in, a page at a time: ``coverage.next_cursor`` asks for the next, and
+        a cursor from before the graph changed is refused with 409. With
+        ``seed`` (names or ids), the entities reached from them breadth
+        first in both directions, hubs past ``hub_degree`` shown but not
+        walked through. With ``groupings=true`` a separate, computed block
+        assigns the shown entities to communities, found at ``resolution``,
+        and scores their importance."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        offset = 0
+        if cursor is not None:
+            offset, digest = _read_cursor(cursor)
+            if digest != projection.digest:
+                return JSONResponse(status_code=409, content={
+                    "error": "the graph changed since this cursor was issued; start again without it",
+                    "code": "cursor_stale"})
+        seeds: list[str] = []
+        for name in seed[:24]:
+            found = resolve(projection, name)
+            if found.status == "ambiguous":
+                return JSONResponse(status_code=409, content={
+                    "error": f"{name!r} could mean several entities", "name": name, **_candidates(found)})
+            if found.status == "not_found":
+                complete, read = _read(coverage)
+                where = "" if complete else " in the facts read; the read was capped, so it may exist"
+                return JSONResponse(status_code=404, content={"error": f"no entity is named {name!r}{where}",
+                                                              "name": name, "complete": complete, "coverage": read})
+            seeds.append(found.candidates[0].entity_id)
         view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
-                              coverage=coverage)
+                              coverage=coverage, seeds=seeds, hub_degree=hub_degree, offset=offset)
+        page = view["coverage"]
+        assert isinstance(page, dict)
+        next_offset = page.pop("next_offset", None)
+        if isinstance(next_offset, int):
+            page["next_cursor"] = _write_cursor(next_offset, projection.digest)
         if groupings:
             view["groupings"] = _groupings(analyze_projection(projection, resolution=resolution), view)
         return view

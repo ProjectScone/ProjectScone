@@ -164,6 +164,24 @@ capability, named with the route.
 | `as_of` | now | RFC 3339 moment for `current` and `history`; anything else is a 422 |
 | `limit` | 150 (1–1000) | Most entities shown, ranked by claims in this view |
 | `attribute_limit` | 300 (0–5000) | Most attributes shown |
+| `cursor` | none | The next page of the ranking, from `coverage.next_cursor` |
+| `seed` | none | Names or ids (repeatable, up to 24) to walk out from instead of ranking |
+| `hub_degree` | 64 | In a seeded view, an entity with more relations is shown but not walked through |
+
+Without `seed`, the view pages through the ranking. `coverage.next_cursor`
+names the next page and is absent on the last. A cursor encodes the
+projection digest it was issued for. Once the graph has changed, the
+cursor is refused with a 409 (`cursor_stale`), because a page from a
+different graph would repeat or skip entities. Each page shows the
+relations among its own entities.
+
+With `seed`, the view walks out from the named entities breadth first, in
+both directions, taking each entity's neighbours in order of the facts
+behind the relation, until `limit` entities are shown. An entity with
+more than `hub_degree` relations is shown but not walked through, unless
+it is a seed, and `hub_skipped` says so. An unknown seed is a 404, and an
+ambiguous one a 409 listing the candidates. `filters.seeds` gives the
+resolved ids.
 
 Status modes:
 
