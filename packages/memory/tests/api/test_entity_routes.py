@@ -182,4 +182,56 @@ def test_the_report_is_per_space_and_advertised(teams):
     beta = client.get("/v1/graph/report", headers=auth("key-b")).json()
     assert beta["communities"] == [] and beta["surprising_connections"] == []
     assert client.get("/v1/graph/report", params={"format": "pdf"}, headers=auth()).status_code == 422
-    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.report"] is True
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.report"] is True and features["graph.path"] is True
+
+
+@pytest.fixture
+async def quoted():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Dr. Alice Chen joined Acme Robotics. Acme Robotics is based in Lisbon.")
+    works = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", source_episode_id=note.episode_id,
+                                     quote="Dr. Alice Chen joined Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    based = await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice park", "joined_on", "May 2021", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"})) as client:
+        yield client, works, based
+
+
+def test_a_name_resolves_or_reports_ambiguity(quoted):
+    client, _, _ = quoted
+    resolved = client.get("/v1/entities/resolve", params={"name": "ACME Robotics"}, headers=auth()).json()
+    assert resolved["status"] == "resolved" and resolved["tier"] == "key"
+    assert [c["label"] for c in resolved["candidates"]] == ["Acme Robotics"]
+    ambiguous = client.get("/v1/entities/resolve", params={"name": "alice"}, headers=auth()).json()
+    assert ambiguous["status"] == "ambiguous" and len(ambiguous["candidates"]) == 2
+
+
+def test_an_entity_page_groups_relations_and_rechecks_quotes(quoted):
+    client, works, based = quoted
+    acme = client.get("/v1/entities/resolve", params={"name": "acme robotics"}, headers=auth()).json()["candidates"][0]["id"]
+    page = client.get(f"/v1/entities/{acme}", headers=auth()).json()
+    assert page["entity"]["label"] == "Acme Robotics"
+    assert [(group["predicate"], [r["subject"]["label"] for r in group["relations"]]) for group in page["incoming"]] == \
+        [("works_at", ["Alice Chen"])]
+    assert [(group["predicate"], [r["object"]["label"] for r in group["relations"]]) for group in page["outgoing"]] == \
+        [("based_in", ["Lisbon"])]
+    facts = {fact["fact_id"]: fact for fact in page["facts"]}
+    assert facts[works.fact_id]["grounding"] == "quote_verified"
+    assert facts[based.fact_id]["grounding"] == "stated"
+    assert client.get("/v1/entities/ent:000000000000000000000000", headers=auth()).status_code == 404
+
+
+def test_a_path_joins_two_names_and_refuses_an_ambiguous_one(quoted):
+    client, works, based = quoted
+    route = client.get("/v1/graph/path", params={"from": "Alice Chen", "to": "Bob Stone"}, headers=auth()).json()
+    assert route["status"] == "found"
+    hops = route["paths"][0]["hops"]
+    assert [(hop["predicate"], hop["direction"]) for hop in hops] == [("works_at", "forward"), ("based_in", "forward"),
+                                                                      ("lives_in", "reverse")]
+    assert hops[0]["fact_ids"] == [works.fact_id] and hops[0]["subject"]["label"] == "Alice Chen"
+    ambiguous = client.get("/v1/graph/path", params={"from": "alice", "to": "Bob Stone"}, headers=auth())
+    assert ambiguous.status_code == 409 and len(ambiguous.json()["candidates"]) == 2
+    assert client.get("/v1/graph/path", params={"from": "Globex", "to": "Bob Stone"}, headers=auth()).status_code == 404
+    assert client.get("/v1/graph/path", params={"from": "Alice Chen", "to": "Bob Stone"}).status_code == 401

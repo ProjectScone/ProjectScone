@@ -25,7 +25,7 @@ from ..core.timeutil import parse_rfc3339
 from .classify import CLASSIFIER_VERSION
 from .ids import ENTITY_ID_SCHEME
 from .kinds import KIND_HINTS_VERSION
-from .project import EntityProjection, FactRole, PROJECTION_VERSION
+from .project import Entity, EntityProjection, FactRole, PROJECTION_VERSION
 
 StatusMode = Literal["current", "history", "proposed", "all"]
 STATUS_MODES: tuple[StatusMode, ...] = ("current", "history", "proposed", "all")
@@ -52,7 +52,7 @@ def _passes(role: FactRole, mode: StatusMode, when: datetime) -> bool:
     return counts(role.status, role.excluded, role.valid_from, role.valid_until, mode, when)
 
 
-def _support(roles: Sequence[FactRole]) -> dict[str, int]:
+def support(roles: Sequence[FactRole]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for role in roles:
         counts["facts"] += 1
@@ -64,7 +64,7 @@ def _support(roles: Sequence[FactRole]) -> dict[str, int]:
                                              "unquoted", "unsourced", "stated", "extracted", "inferred")}
 
 
-def _projection_meta(projection: EntityProjection) -> dict[str, object]:
+def projection_meta(projection: EntityProjection) -> dict[str, object]:
     return {"version": PROJECTION_VERSION, "classifier": CLASSIFIER_VERSION, "kinds": KIND_HINTS_VERSION,
             "id_scheme": ENTITY_ID_SCHEME, "digest": projection.digest, "revision": projection.revision}
 
@@ -90,7 +90,7 @@ class _Counted:
                                key=lambda entity: (-self.score[entity.entity_id], entity.entity_id))
 
 
-def _entity(entity, score: int) -> dict[str, object]:
+def entity_record(entity: Entity, score: int) -> dict[str, object]:
     return {"id": entity.entity_id, "key": entity.key, "label": entity.label,
             "names": [{"text": form.text, "count": form.count} for form in entity.surface_forms],
             "kind": entity.kind, "kind_status": entity.kind_status, "kind_basis": list(entity.kind_basis),
@@ -116,12 +116,12 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
     if len(attributes) > attribute_limit:
         reasons.append("attribute_limit")
     return {
-        "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": _projection_meta(projection),
+        "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
         "filters": {"status": mode, "as_of": as_of},
-        "entities": [_entity(entity, counted.score[entity.entity_id]) for entity in shown],
+        "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in shown],
         "relations": [{"id": relation.relation_id, "subject_id": relation.subject_id,
                        "predicate": relation.predicate, "object_id": relation.object_id,
-                       "fact_ids": [role.fact_id for role in roles], "support": _support(roles),
+                       "fact_ids": [role.fact_id for role in roles], "support": support(roles),
                        "first_valid_from": min(role.valid_from for role in roles),
                        "last_valid_until": None if any(role.valid_until is None for role in roles)
                        else max(role.valid_until for role in roles if role.valid_until)}
@@ -129,7 +129,7 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
         "attributes": [{"id": attribute.attribute_id, "entity_id": attribute.entity_id,
                         "predicate": attribute.predicate, "value": attribute.value,
                         "literal_kind": attribute.literal_kind, "fact_ids": [role.fact_id for role in roles],
-                        "support": _support(roles)}
+                        "support": support(roles)}
                        for attribute, roles in attributes[:attribute_limit]],
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(counted.entities), "entities_shown": len(shown),
@@ -152,9 +152,9 @@ def entity_listing(projection: EntityProjection, *, mode: StatusMode, as_of: str
     if len(matching) > limit:
         reasons.append("entity_limit")
     return {
-        "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": _projection_meta(projection),
+        "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
         "filters": {"status": mode, "as_of": as_of, "q": query},
-        "entities": [_entity(entity, counted.score[entity.entity_id]) for entity in matching[:limit]],
+        "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in matching[:limit]],
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(matching), "entities_shown": min(len(matching), limit),
                      "truncated": bool(reasons), "reasons": reasons},

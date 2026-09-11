@@ -241,12 +241,49 @@ The same entities as a ranked list. It takes `status`, `as_of`, `limit`
 spellings case-insensitively. It returns `api.entity_routes.EntityList`,
 where `coverage` counts the matches.
 
+#### `GET /v1/entities/resolve`, `GET /v1/entities/{id}`, `GET /v1/graph/path`
+
+- `resolve?name=` returns the entity a name or id means, by the first tier
+  that matches:
+  - `id`: the id itself;
+  - `key`: the same key, with case and spacing folded;
+  - `prefix`: a key that begins with the name at a word boundary, so
+    `alice` finds `alice chen` but `ali` finds nothing;
+  - `tokens`: a key holding every word of the name.
+
+  It returns `resolved` with one candidate, `ambiguous` with every
+  candidate (it never guesses), or `not_found`.
+- `/v1/entities/{id}` is an entity page: outgoing and incoming relations
+  grouped by predicate, the entity's values, and every fact behind them.
+  Each fact is re-read from the store, and its quote is checked against the
+  retained source now, giving one of:
+  - `quote_verified`;
+  - `quote_not_found`;
+  - `quote_source_missing`;
+  - `source_unquoted`;
+  - `stated`.
+
+  At most `limit` relations are shown per direction, and `coverage` counts
+  the rest. An unknown id is a 404.
+- `path?from=&to=` connects two entities, named or by id. It returns up to
+  `limit` distinct shortest routes within `max_hops`.
+  - Relations are walked in either direction, and each hop says `forward`
+    or `reverse` and lists its facts.
+  - An entity with more than `hub_degree` neighbours is never passed
+    through; it can only be an endpoint. The response lists such hubs.
+  - `status` is `found`, `none_within_limit` (reachable but farther than
+    allowed) or `disconnected`.
+  - A name that could mean several entities is a 409 listing the
+    candidates, and an unknown name is a 404.
+
+  Advertised as `graph.path`.
+
 ### Limits of this first version
 
 - The projection is built on each request from a whole-ledger read. It is
   never built on a recall path, and it is not yet cached.
 - Identity is key identity only: no merges of different spellings yet.
-- There are no paths or neighbourhoods yet; those come in later slices.
+- Resolution uses key identity only; merges of different spellings come with identity decisions.
 
 ## Which embedder wrote the vectors
 

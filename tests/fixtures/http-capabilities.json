@@ -52,7 +52,8 @@
       "recall.multi_hop": true,
       "entities.read": true,
       "graph.knowledge": true,
-      "graph.report": true
+      "graph.report": true,
+      "graph.path": true
     }
   }
 }
