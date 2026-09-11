@@ -120,8 +120,10 @@ decides every join in retrieval too.
 
 ### Routes
 
-Both routes are read-only and scoped to the caller's key. They are
-advertised as the capabilities `graph.knowledge` and `entities.read`.
+Every route here is read-only and scoped to the caller's key. The view
+and the entity list are advertised as `graph.knowledge` and
+`entities.read`. The report, paths and export each have their own
+capability, named with the route.
 
 #### `GET /v1/graph/knowledge`
 
@@ -198,10 +200,18 @@ requests and stores. A client should drop cached selections when
 - `membership` maps each shown entity to its community;
 - `communities` gives each community's id, label, size and shown members;
 - `importance` gives each shown entity's degree, PageRank, betweenness and
-  participation across communities.
+  participation across communities;
+- `coverage` says what the analysis itself covered: entities analysed,
+  any cap it hit, and `betweenness`, which is `exact` or `sampled:64`
+  with `betweenness_estimated` true.
 
 It is computed from the same counted facts as the view (see the report
-below).
+below). Three limits stay separate, because a client has to show each one
+differently. The view's `coverage` is paging: what this response left out.
+The groupings' `coverage` is the analysis: what it was capped at, and
+whether betweenness is an estimate. A read cap (`fact_limit`,
+`store_read_cap_reached`) appears in the view's reasons. A view can show
+every entity while its betweenness is still estimated.
 
 #### `GET /v1/graph/report`
 
@@ -226,7 +236,15 @@ the same `status` and `as_of`:
 
 Results are deterministic: the same facts give the same report. The report
 states the projection digest and analysis version it came from, and
-`coverage` lists every limit that applied. A 50,000-fact space takes about
+`coverage` lists every limit that applied. `analysis.coverage` has the
+same shape as the groupings' coverage. When betweenness is estimated, the
+Markdown table heads the column "Betweenness (estimated)" and the coverage
+section says from how many sources.
+
+Every name, predicate, value and question in the Markdown form comes from
+the ledger, so each is escaped. A stored `Alice | Injected` stays in one
+table cell, and a stored `<img>` tag shows as text, not an image. Line
+breaks inside a name become spaces. The JSON form keeps the raw values. A 50,000-fact space takes about
 two and a half seconds. Advertised as `graph.report`.
 
 A caveat from the ledger itself: a subject and predicate hold one value at
@@ -277,6 +295,42 @@ where `coverage` counts the matches.
     candidates, and an unknown name is a 404.
 
   Advertised as `graph.path`.
+
+#### `GET /v1/graph/export`
+
+The view's whole graph as a file for another tool. It takes `status` and
+`as_of` like the knowledge view, and `format`:
+
+| `format` | File | For |
+| --- | --- | --- |
+| `json` (default) | node-link JSON: `nodes`, `links`, `graph` | NetworkX, d3, custom tools |
+| `graphml` | GraphML XML | Gephi, yEd, NetworkX |
+| `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
+| `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
+| `jsonld` | JSON-LD linked data | RDF tooling |
+| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` | Obsidian and other note tools |
+
+Every relation and value carries the ids of the facts behind it. Every
+file records its projection digest and an `about` block: the filters, and
+what the read counted and left out. The response headers repeat the digest
+and whether the read was capped (`X-Scone-Projection-Digest`,
+`X-Scone-Truncated`), so a partial export says so in the file and in the
+response.
+
+Each format escapes its own syntax:
+
+- GraphML is written by an XML serializer.
+- Cypher strings are quoted with backslash escapes, and a predicate is a
+  property of a `RELATES` edge, never query syntax.
+- CSV cells that a spreadsheet would read as a formula (`=`, `+`, `-`, `@`)
+  are prefixed with `'`.
+- Obsidian notes escape names as the Markdown report does, and note file
+  names drop characters that file systems or wiki links misread. Two names
+  that clash once made safe get distinct notes, and every `[[link]]` opens
+  one.
+
+The bytes are deterministic, zip timestamps included, so the same
+projection always exports the same file. Advertised as `graph.export`.
 
 ### Limits of this first version
 

@@ -257,3 +257,42 @@ def test_a_path_joins_two_names_and_refuses_an_ambiguous_one(quoted):
     assert ambiguous.status_code == 409 and len(ambiguous.json()["candidates"]) == 2
     assert client.get("/v1/graph/path", params={"from": "Globex", "to": "Bob Stone"}, headers=auth()).status_code == 404
     assert client.get("/v1/graph/path", params={"from": "Alice Chen", "to": "Bob Stone"}).status_code == 401
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+def test_the_graph_downloads_in_each_format_named_by_its_projection(seeded, format):
+    client, _ = seeded
+    digest = client.get("/v1/graph/knowledge", headers=auth()).json()["projection"]["digest"]
+    response = client.get("/v1/graph/export", params={"format": format}, headers=auth())
+    assert response.status_code == 200 and response.content
+    assert response.headers["x-scone-projection-digest"] == digest
+    assert response.headers["content-disposition"].startswith("attachment; filename=")
+    assert response.headers["x-scone-truncated"] == "false"
+
+
+def test_an_export_holds_what_its_view_counts_and_says_what_it_read(seeded):
+    client, works = seeded
+    current = client.get("/v1/graph/export", headers=auth()).json()
+    history = client.get("/v1/graph/export", params={"status": "history"}, headers=auth()).json()
+    assert {link["predicate"] for link in current["links"]} == {"works_at", "based_in"}
+    assert "lived_in" in {link["predicate"] for link in history["links"]}
+    assert all("met" != link["predicate"] for link in history["links"])
+    about = current["graph"]["about"]
+    assert about["status"] == "current" and about["as_of"]
+    assert about["coverage"]["truncated"] is False and about["coverage"]["facts_counted"] >= 3
+    assert client.get("/v1/graph/export", params={"format": "pdf"}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/export").status_code == 401
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.export"] is True
+
+
+async def test_an_export_of_a_capped_read_is_marked_partial(monkeypatch):
+    from scone_memory.entities import read
+
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("Ana", "Ben"), ("Ben", "Cho"), ("Cho", "Dev")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/export", headers=auth())
+    assert response.headers["x-scone-truncated"] == "true"
+    assert response.json()["graph"]["about"]["coverage"]["reasons"] == ["fact_limit"]

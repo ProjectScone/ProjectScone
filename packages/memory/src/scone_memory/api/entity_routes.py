@@ -15,12 +15,13 @@ from __future__ import annotations
 from typing import Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Query
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from ..core.errors import InvalidInput, NotFound
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
+from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import neighbourhood, paths_between, resolve
 from ..entities.read import load_projection
@@ -269,6 +270,23 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
         return report
+
+    @app.get("/v1/graph/export", response_model=None)
+    async def get_export(
+        format: ExportFormat = "json", status: StatusMode = "current", as_of: Optional[str] = None,
+        space: str = Depends(space_for),
+    ) -> Response:
+        """The view's whole graph as a file another tool reads: node-link JSON,
+        GraphML, Cypher, CSV, JSON-LD or an Obsidian vault. The file says which
+        projection it holds and, when the read was capped, that it is partial."""
+        when = _moment(engine, as_of)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        reasons = coverage.get("reasons") or []
+        about = {"status": status, "as_of": when, "coverage": {**coverage, "truncated": bool(reasons)}}
+        exported = export_graph(projection, format, about=about)
+        return Response(exported.body, media_type=exported.media_type, headers={
+            "Content-Disposition": f'attachment; filename="{exported.filename}"',
+            "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false"})
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(
