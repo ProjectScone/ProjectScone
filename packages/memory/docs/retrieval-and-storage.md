@@ -761,10 +761,19 @@ holding at `until`:
   it held then, and one behind `until` that it holds then. A change
   resting on a fact that stopped counting is dropped as
   `stale_evidence`.
-- **Honesty.**
+- **Honesty.** Every change rests on an absence, and a read cut short
+  proves no absence.
+  - What began or appeared needs the read at `since` whole, what ended or
+    is gone the read at `until`, and a move or a changed value both.
+  - What a cut read cannot confirm is withheld, never guessed:
+    `coverage.withheld` names the kinds, a `withheld:` line says why, and
+    the entity counts it cannot tell are `null`.
+  - With nothing shown and anything withheld, the status is `unknown`.
   - "No change" is said only when both reads were whole.
-  - A ledger written between the two reads is said as
-    `ledger_moved_between_reads`.
+  - The space's revision fences the answer. A ledger written while it was
+    made, between the two reads or during the re-reads, is read again. One
+    still moving on the second try is answered `unknown`, with every kind
+    withheld and `ledger_moved_during_read`.
 - Both moments are read as `current` facts, so what held is a matter of
   valid time, not of when the ledger learned it.
 - Advertised as `graph.changes`. MCP `memory_graph_changes`, the ToolBox
