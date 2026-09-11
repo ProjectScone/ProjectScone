@@ -83,11 +83,14 @@ async def test_cross_scope_vector_hit_is_not_exposed(guard_memory, monkeypatch):
     assert await guard_memory.documents.get_episode("private", saved.episode_id) is not None
 
 
-@pytest.mark.parametrize("embedder_id,vector", [("other-model", (1.0, 0.0)), ("hash-256", (1.0, 0.0))])
+@pytest.mark.parametrize("embedder_id,vector", [("other-model", (1.0, 0.0)), (None, (1.0, 0.0))])
 async def test_invalid_model_or_vector_dimension_is_rejected(guard_memory, embedder_id, vector):
+    # None stands for the memory's own embedder, so the second case can only
+    # fail on the vector's width.
     with pytest.raises(ValueError, match="embedder|dimension"):
         await MemoryCandidateProvider(guard_memory).candidates(
-            incoming(), query_embeddings=(PassageEmbedding(0, 1, vector),), embedder_id=embedder_id, limit=8,
+            incoming(), query_embeddings=(PassageEmbedding(0, 1, vector),),
+            embedder_id=guard_memory.embedder.id if embedder_id is None else embedder_id, limit=8,
         )
 
 

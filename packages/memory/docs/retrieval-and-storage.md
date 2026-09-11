@@ -68,6 +68,20 @@ Consult [current measurements and their scope](scaling-validation.md) separately
 | Milvus | | yes | | embedded (Milvus Lite); server by URI | filter expressions with JSON literals |
 | any LangChain VectorStore | | yes | | embedded (`InMemoryVectorStore`, FAISS) | needs a `filter_builder` and a stated `score`; see [the bridge guide](integrations.md#any-langchain-vectorstore-as-the-vector-index) |
 
+Query terms come from one shared tokenizer, `retrieval.lexical.tokenize`.
+A term is a run of letters, combining marks and digits in any script, after
+NFKC normalisation and case folding, so "Zürich", "हिन्दी" and "ＡＢＣ" stay
+whole; underscores still split words. Scripts written without spaces
+(Chinese, Japanese, Korean, Thai, Lao, Khmer, Myanmar) become overlapping
+pairs of characters. The in-process BM25 lane, SQLite's fact index and the
+hash embedder match those pairs directly. Stores that tokenize documents
+themselves do not: SQLite FTS5 and PostgreSQL keep a whole unspaced run as
+one token, so their chunk lanes still cannot match inside Chinese or
+Japanese text, and Elasticsearch's standard analyzer re-splits the pairs by
+its own Unicode word rules, so matches there are looser. Anything that stores tokens or values hashed from them
+records `TOKENIZER_VERSION`; SQLite rebuilds its fact index when that
+version or Python's Unicode tables change.
+
 Intentional differences: lexical scores are each store's own (BM25,
 `$text`, `ts_rank`); only their order reaches the shared fusion algorithm.
 Both rankings and raw scores can differ across stores. Retention is a TTL

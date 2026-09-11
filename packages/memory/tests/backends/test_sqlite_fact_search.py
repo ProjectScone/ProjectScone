@@ -147,6 +147,30 @@ async def test_existing_v11_backfills_once_without_semantic_version_change(tmp_p
     finally: again.conn.close()
 
 
+async def test_postings_left_by_an_older_tokenizer_are_rebuilt_on_open(tmp_path: Path) -> None:
+    path = tmp_path/"facts.db"
+    first = SqliteDocumentStore(path)
+    try:
+        row = await fact(first,"Zürich","office")
+        assert await first.search_facts("alpha","office",WHEN,1) == [row]
+        # Leave the cache exactly as the ASCII-only tokenizer wrote it, under
+        # the marker that tokenizer's cache carried.
+        first.conn.execute("DELETE FROM fact_search_postings")
+        first.conn.executemany("INSERT INTO fact_search_postings(space,term,fact_id) VALUES('alpha',?,?)",
+                               [(term,row.fact_id) for term in ("z","rich","relates","office")])
+        first.conn.execute("UPDATE meta SET value='1' WHERE key='fact_search_postings_version'")
+        first.conn.commit()
+    finally: first.conn.close()
+    reopened = SqliteDocumentStore(path)
+    try:
+        assert [item.fact_id for item in await reopened.search_facts("alpha","Zürich",WHEN,5)] == [row.fact_id]
+        assert await reopened.search_facts("alpha","rich",WHEN,5) == []
+    finally: reopened.conn.close()
+    again = SqliteDocumentStore(path)
+    try: assert again.conn.execute("SELECT count(*) FROM fact_search_dirty").fetchone()[0] == 0
+    finally: again.conn.close()
+
+
 async def test_healing_is_space_local_and_does_not_commit_caller_transaction(store: SqliteDocumentStore) -> None:
     row = await fact(store,"oldtoken")
     await fact(store,"other",space="beta")

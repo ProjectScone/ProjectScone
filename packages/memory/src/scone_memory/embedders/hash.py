@@ -4,7 +4,7 @@ import hashlib
 import math
 from typing import Sequence
 
-from ..retrieval.lexical import tokenize
+from ..retrieval.lexical import TOKENIZER_VERSION, tokenize
 
 
 class HashEmbedder:
@@ -13,10 +13,14 @@ class HashEmbedder:
     Two texts that share tokens share buckets, so cosine tracks lexical
     overlap. Unrelated texts land near-orthogonal, which is why tests
     that need a refusal must not rely on this embedder to trigger it.
+
+    The id names the tokenizer version. A vector is only its hashed
+    tokens, so vectors hashed under different token rules are not
+    comparable and must not pass for the same embedder.
     """
 
     def __init__(self, dim: int = 256) -> None:
-        self.id = f"hash-{dim}"
+        self.id = f"hash-{dim}-t{TOKENIZER_VERSION}"
         self.dim = dim
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
