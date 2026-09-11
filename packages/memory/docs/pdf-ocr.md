@@ -43,6 +43,11 @@ without extractable text. A page with a short text layer over a scan is therefor
 not automatically recognized. Choose `all_pages` explicitly to replace all native
 text with OCR; this mode reads page metadata without extracting discarded text.
 The default text-only `PypdfParser` still requires an existing text layer.
+Pages with no content stream are valid empty pages. In OCR mode, a page-level
+text extraction failure also falls back to recognizing that page; successful
+native pages keep their text. The parser identity records when this fallback
+was needed. Encrypted/corrupt document structure, invalid page geometry and
+resource-limit violations still fail; OCR does not bypass those checks.
 
 OCR regions retain the recognizer's block and line order. Their half-open `start`
 and `end` offsets index UTF-8 bytes in the searchable document, including preceding

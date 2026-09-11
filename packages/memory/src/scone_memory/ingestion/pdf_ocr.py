@@ -113,7 +113,7 @@ class OcrPdfParser:
     async def inspect(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
         """Read native page geometry/text without recognizing missing pages."""
         return await PypdfParser()._parse(data, limits, allow_empty=True,
-            metadata_only=self.options.mode == 'all_pages')
+            metadata_only=self.options.mode == 'all_pages', allow_text_errors=True)
 
     async def recognize_page(self, data: bytes, page: int, *, timeout_seconds: float = 30.0) -> OcrResult:
         """Render and recognize one page, including a deadline for the provider."""

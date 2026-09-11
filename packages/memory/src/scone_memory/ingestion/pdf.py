@@ -65,7 +65,8 @@ class PypdfParser:
     async def parse(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
         return await self._parse(data, limits, allow_empty=False)
 
-    async def _parse(self, data: bytes, limits: PdfLimits, *, allow_empty: bool, metadata_only: bool = False) -> ParsedPdf:
+    async def _parse(self, data: bytes, limits: PdfLimits, *, allow_empty: bool, metadata_only: bool = False,
+                     allow_text_errors: bool = False) -> ParsedPdf:
         if not isinstance(data, bytes) or not data or len(data) > limits.max_input_bytes:
             raise InvalidInput('PDF input exceeds its byte limit or has no bytes')
         if not data.startswith(b'%PDF-'):
@@ -76,6 +77,7 @@ class PypdfParser:
             'scone_memory.ingestion._pdf_worker', limits.model_dump_json(),
             *(['--allow-empty'] if allow_empty else []),
             *(['--metadata-only'] if metadata_only else []),
+            *(['--allow-text-errors'] if allow_text_errors else []),
         ), data, timeout=limits.timeout_seconds, label='PDF parser',
             max_output=limits.max_text_bytes * 6 + limits.max_pages * 2048 + 4096)
         try:

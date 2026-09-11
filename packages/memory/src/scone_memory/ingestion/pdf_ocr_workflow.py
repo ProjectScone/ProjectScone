@@ -76,6 +76,7 @@ class PdfOcrWorkflow:
         self._closed = False
         self._scope: dict[str, JSONValue] = {
             'format': 'pdf-ocr-workflow-v1', 'recognizer_revision': recognizer_revision,
+            'text_strategy': 'layout-text-fallback-v1',
             'options': cast(JSONValue, json.loads(options.model_dump_json())),
             'limits': cast(JSONValue, json.loads(limits.model_dump_json())),
             'pypdf': _dependency_revision('pypdf'), 'renderer': _dependency_revision('pypdfium2'),
