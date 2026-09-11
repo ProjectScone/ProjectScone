@@ -45,21 +45,24 @@ def _candidate(entity: Entity) -> Candidate:
 #: Words a spelling may lead with that do not name the thing itself. Not
 #: "st": St. Louis is a city, not Louis.
 _LEADING = frozenset({"the", "a", "an", "dr", "mr", "mrs", "ms", "mx", "miss", "prof", "sir", "dame"})
-#: Sentence punctuation around a word, as opposed to symbols inside a name
-#: (C#, C++, /tmp/a-b, node.js), which are part of it and kept.
-_EDGES = ".,;:!?\"'()[]{}\u2018\u2019\u201c\u201d\u00ab\u00bb"
+#: Punctuation that opens or closes a phrase in running text. Only these
+#: leave a word, and only from the side they sit on: a leading dot or a
+#: path prefix (.env, ../config) and symbols inside a name (C#, C++,
+#: node.js) are part of it and kept.
+_OPENING = "\"'([{\u2018\u201c\u00ab"
+_CLOSING = ".,;:!?\"')]}\u2019\u201d\u00bb"
 _POSSESSIVE = re.compile(r"['\u2019]s$")
 
 
 def variant_fold(name: str) -> str:
     """A spelling reduced for lookup: compatibility forms unified (NFKC),
-    case folded, sentence punctuation and a possessive stripped from word
-    edges, and a leading article or title dropped, so "Dr. Alice Chen" and
-    "ACME, Inc." meet "alice chen" and "acme inc". Symbols that make a name
-    (C# against C++) stay. Lookup only: identity stays with ``entity_key``."""
+    case folded, opening and closing punctuation and a possessive stripped
+    from their sides of each word, and a leading article or title dropped,
+    so "Dr. Alice Chen" and "ACME, Inc." meet "alice chen" and "acme inc".
+    Lookup only: identity stays with ``entity_key``."""
     words = []
     for word in unicodedata.normalize("NFKC", name).casefold().split():
-        word = _POSSESSIVE.sub("", word.strip(_EDGES)).strip(_EDGES)
+        word = _POSSESSIVE.sub("", word.lstrip(_OPENING).rstrip(_CLOSING)).rstrip(_CLOSING)
         if word:
             words.append(word)
     while len(words) > 1 and words[0] in _LEADING:

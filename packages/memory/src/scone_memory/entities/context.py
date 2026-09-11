@@ -205,18 +205,19 @@ class _Evidence:
     def stale(self) -> int:
         return sum(1 for fact_id in self._read if not self.holds(fact_id))
 
-    async def hop(self, fact_ids: Sequence[int]) -> int | None | Literal[False]:
-        """One fact behind a hop that still holds, newest first, re-reading
-        only until one does. False when every one has stopped counting;
-        None when the budget ran out before any was confirmed."""
+    async def hop(self, fact_ids: Sequence[int]) -> tuple[Literal["holds", "stopped", "unread"], int | None]:
+        """One fact behind a hop, newest first, re-reading only until one
+        still holds ("holds", that fact). "stopped" when every one stopped
+        counting. "unread" when the budget ran out first, with the newest
+        fact not yet re-read: never one already found to have stopped."""
         for fact_id in sorted(fact_ids, reverse=True):
             if self.holds(fact_id) is None:
                 if not self.spare():
-                    return None
+                    return "unread", fact_id
                 await self.fetch([fact_id])
             if self.holds(fact_id):
-                return fact_id
-        return False
+                return "holds", fact_id
+        return "stopped", None
 
 
 async def _path_line(evidence: _Evidence, path: "Path", label: Callable[[str], str]) -> tuple[str | None, bool]:
@@ -226,14 +227,11 @@ async def _path_line(evidence: _Evidence, path: "Path", label: Callable[[str], s
     cited: list[int] = []
     unconfirmed = False
     for step in path.hops:
-        found = await evidence.hop(step.fact_ids)
-        if found is False:
+        outcome, fact_id = await evidence.hop(step.fact_ids)
+        if outcome == "stopped" or fact_id is None:
             return None, False
-        if found is None:
-            unconfirmed = True
-            cited.append(max(step.fact_ids))
-        else:
-            cited.append(found)
+        unconfirmed = unconfirmed or outcome == "unread"
+        cited.append(fact_id)
     steps = [label(path.entity_ids[0])]
     for step in path.hops:
         far = step.object_id if step.direction == "forward" else step.subject_id

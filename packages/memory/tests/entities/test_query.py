@@ -120,3 +120,14 @@ def test_technical_punctuation_is_part_of_a_name():
     for spelling in ("C#", "/tmp/a/b", "St. Louis", "node js"):
         assert resolve(projection, spelling).status == "not_found", spelling
     assert resolve(projection, "Node.js,").tier == "variant"
+
+
+def test_a_leading_dot_or_path_prefix_is_part_of_a_name():
+    """Only closing punctuation leaves a word's end and only opening quotes
+    or brackets its start: ../config is not /config, and .env is not env."""
+    projection = project_entities("alpha", [fact(1, "/config", "used_by", "team"), fact(2, "env", "used_by", "team"),
+                                            fact(3, "alice chen", "used_by", "team")], revision=1)
+    for spelling in ("../config", ".env"):
+        assert resolve(projection, spelling).status == "not_found", spelling
+    for spelling in ("“Alice Chen”", "(Alice Chen)", "Alice Chen’s", "Dr. Alice Chen,"):
+        assert resolve(projection, spelling).tier == "variant", spelling

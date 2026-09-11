@@ -281,11 +281,13 @@ where `coverage` counts the matches.
   - `id`: the id itself;
   - `key`: the same key, with case and spacing folded;
   - `variant`: the same spelling once compatibility forms are unified,
-    sentence punctuation and a possessive are stripped from word edges,
-    and a leading article or title is dropped. So `Dr. Alice Chen` finds
-    `alice chen`, and `ACME, Inc` finds `acme inc`. Symbols that make a
-    name are kept, so `C#` never finds `c++`, and `/tmp/a/b` never finds
-    `/tmp/a-b`. This is for lookup only: identity stays with the key;
+    opening quotes and brackets are stripped from a word's start, closing
+    punctuation and a possessive from its end, and a leading article or
+    title is dropped. So `Dr. Alice Chen` finds `alice chen`, and
+    `ACME, Inc` finds `acme inc`. Symbols that make a name are kept, so
+    `C#` never finds `c++`, `/tmp/a/b` never finds `/tmp/a-b`, and
+    neither `.env` nor `../config` loses its leading dots. This is for
+    lookup only: identity stays with the key;
   - `prefix`: a key that begins with the name at a word boundary, so
     `alice` finds `alice chen` but `ali` finds nothing;
   - `tokens`: a key holding every word of the name.

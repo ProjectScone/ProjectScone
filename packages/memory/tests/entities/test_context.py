@@ -207,3 +207,26 @@ async def test_more_candidates_than_shown_are_counted():
     packet = await graph_context(engine, "alpha", names=["alice"])
     assert packet.status == "ambiguous" and len(packet.candidates) == 24
     assert any(reason.startswith("candidates_cut ") for reason in packet.coverage["reasons"])
+
+
+async def test_an_unconfirmed_hop_never_cites_a_fact_known_to_have_stopped():
+    """When the budget runs out mid-hop, the hop cites a fact that was not
+    re-read, never one the re-read already found excluded."""
+    from scone_memory.core.ports import NewFact
+    from scone_memory.entities.context import _Evidence, _path_line
+    from scone_memory.entities.query import paths_between
+    from scone_memory.entities.read import load_projection
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    rows = [await engine.documents.insert_fact(NewFact(space="alpha", subject="alice", predicate="knows", object="Bob",
+                                                       valid_from=DAY)) for _ in range(5)]
+    projection, _ = await load_projection(engine, "alpha", mode="current")
+    for row in rows[1:]:
+        await engine.documents.update_fact(row.model_copy(update={"excluded_reason": "retracted"}))
+    ids = {entity.key: entity.entity_id for entity in projection.entities}
+    path = paths_between(projection, ids["alice"], ids["bob"], max_hops=1, limit=1).paths[0]
+    from scone_memory.core.timeutil import parse_rfc3339
+    evidence = _Evidence(engine, "alpha", "current", parse_rfc3339("2025-06-01T00:00:00Z"), budget=4)
+    line, unconfirmed = await _path_line(evidence, path, lambda entity_id: entity_id)
+    assert unconfirmed and line is not None and line.endswith(f"[fact {rows[0].fact_id}]")
