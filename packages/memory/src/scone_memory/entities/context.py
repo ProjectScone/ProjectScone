@@ -28,13 +28,14 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 import re
 import unicodedata
-from typing import TYPE_CHECKING, Literal, Mapping, Sequence
+from datetime import datetime
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 
 from ..core.timeutil import parse_rfc3339
 from ..retrieval.lexical import STOPWORDS
 from .grounding import checked_facts
 from .project import Entity, EntityProjection, Relation
-from .query import paths_between, resolve
+from .query import Path, paths_between, resolve
 from .read import load_projection
 
 if TYPE_CHECKING:
@@ -162,6 +163,85 @@ def _fit(lines: list[str], budget: int) -> str:
     return "\n".join([*kept, f"omitted: {len(lines) - len(kept)} more lines to fit {budget} bytes"])
 
 
+class _Evidence:
+    """Facts re-read now, within a budget: each one either still counts in
+    the view's mode and moment, has stopped counting (or is gone), or was
+    not re-read for want of budget."""
+
+    def __init__(self, engine: "MemoryEngine", space: str, status: "StatusMode", moment: datetime,
+                 budget: int) -> None:
+        self._engine, self._space, self._status, self._moment = engine, space, status, moment
+        self._budget = budget
+        self._read: dict[int, dict[str, object] | None] = {}
+
+    def spare(self) -> int:
+        return max(0, self._budget - len(self._read))
+
+    async def fetch(self, fact_ids: Sequence[int]) -> None:
+        wanted = [fact_id for fact_id in dict.fromkeys(fact_ids) if fact_id not in self._read][:self.spare()]
+        if not wanted:
+            return
+        found = {int(str(fact["fact_id"])): fact for fact in await checked_facts(self._engine.documents, self._space,
+                                                                                  wanted)}
+        for fact_id in wanted:
+            self._read[fact_id] = found.get(fact_id)
+
+    def holds(self, fact_id: int) -> bool | None:
+        """True when it still counts, False when it stopped or is gone, None
+        when it was not re-read."""
+        from .view import counts
+
+        if fact_id not in self._read:
+            return None
+        fact = self._read[fact_id]
+        return fact is not None and counts(str(fact["status"]), bool(fact["excluded"]), str(fact["valid_from"]),
+                                           None if fact["valid_until"] is None else str(fact["valid_until"]),
+                                           self._status, self._moment)
+
+    def quote(self, fact_id: int) -> str | None:
+        fact = self._read.get(fact_id)
+        return str(fact["quote"]) if fact is not None and fact["grounding"] == "quote_verified" else None
+
+    def stale(self) -> int:
+        return sum(1 for fact_id in self._read if not self.holds(fact_id))
+
+    async def hop(self, fact_ids: Sequence[int]) -> int | None | Literal[False]:
+        """One fact behind a hop that still holds, newest first, re-reading
+        only until one does. False when every one has stopped counting;
+        None when the budget ran out before any was confirmed."""
+        for fact_id in sorted(fact_ids, reverse=True):
+            if self.holds(fact_id) is None:
+                if not self.spare():
+                    return None
+                await self.fetch([fact_id])
+            if self.holds(fact_id):
+                return fact_id
+        return False
+
+
+async def _path_line(evidence: _Evidence, path: "Path", label: Callable[[str], str]) -> tuple[str | None, bool]:
+    """A path as one line citing a still-holding fact per hop, or None when
+    some hop rests only on facts that stopped counting. The flag says a
+    hop could not be confirmed within the re-read budget."""
+    cited: list[int] = []
+    unconfirmed = False
+    for step in path.hops:
+        found = await evidence.hop(step.fact_ids)
+        if found is False:
+            return None, False
+        if found is None:
+            unconfirmed = True
+            cited.append(max(step.fact_ids))
+        else:
+            cited.append(found)
+    steps = [label(path.entity_ids[0])]
+    for step in path.hops:
+        far = step.object_id if step.direction == "forward" else step.subject_id
+        predicate = _one_line(step.predicate, 60)
+        steps += [f"-{predicate}->" if step.direction == "forward" else f"<-{predicate}-", label(far)]
+    return f"path: {' '.join(steps)} [{_cited(sorted(set(cited)))}]", unconfirmed
+
+
 async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[str] = (),
                         question: str | None = None, limits: ContextLimits | None = None,
                         status: "StatusMode" = "current", as_of: str | None = None) -> GraphContext:
@@ -180,8 +260,10 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     seeds: list[Entity] = []
     candidates: list[dict[str, str]] = []
     unknown: list[str] = []
+    cut_candidates = 0
     for name in names:
         found = resolve(projection, name, limit=limits.max_entities)
+        cut_candidates += found.total - len(found.candidates)
         if found.status == "resolved":
             entity = entities[found.candidates[0].entity_id]
             if entity not in seeds:
@@ -195,6 +277,8 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     seeds = seeds[:limits.max_entities]
     if unknown:
         reasons.append(f"not_found {len(unknown)}")
+    if cut_candidates:
+        reasons.append(f"candidates_cut {cut_candidates}")
 
     if candidates:
         lines = [*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,
@@ -239,45 +323,44 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
 
     seed_ids = {entity.entity_id for entity in seeds}
     values = [attribute for attribute in projection.attributes if attribute.entity_id in seed_ids]
+    evidence = _Evidence(engine, space, status, moment, limits.max_rereads)
+
+    def label(entity_id: str) -> str:
+        return _one_line(entities[entity_id].label, 80)
+
+    unverified = 0
+    path_lines: list[str] = []
+    ordered = sorted(seed_ids)
+    pairs = [(a, b) for index, a in enumerate(ordered) for b in ordered[index + 1:]][:_MAX_PAIRS]
+    for start_id, end_id in pairs:
+        routes = [paths_between(projection, one, other, max_hops=limits.max_hops + 1, limit=1,
+                                hub_degree=limits.hub_degree) for one, other in ((start_id, end_id), (end_id, start_id))]
+        shortest = [route.paths[0] for route in routes if route.paths]
+        if not shortest:
+            continue
+        path = max(shortest, key=lambda p: sum(step.direction == "forward" for step in p.hops))
+        line, unconfirmed = await _path_line(evidence, path, label)
+        if line is not None:
+            path_lines.append(line)
+            unverified += unconfirmed
+
     wanted: list[int] = []
     for _hop, relation in walked:
         wanted += relation.fact_ids
     for attribute in values:
         wanted += attribute.fact_ids
-    budgeted = list(dict.fromkeys(wanted))[:limits.max_rereads]
-    reread = {int(str(fact["fact_id"])): fact for fact in await checked_facts(engine.documents, space, budgeted)}
-    stale = 0
+    await evidence.fetch(wanted)
 
     def still(fact_ids: Sequence[int]) -> tuple[list[int], str | None, bool]:
-        """The facts that still count, a quote that still verifies, and
-        whether any of them went unchecked for want of budget."""
-        nonlocal stale
-        kept, quote, unchecked = [], None, False
-        for fact_id in fact_ids:
-            fact = reread.get(fact_id)
-            if fact is None:
-                if fact_id in budgeted:
-                    stale += 1  # re-read and gone
-                    continue
-                kept.append(fact_id)
-                unchecked = True
-                continue
-            if not counts(str(fact["status"]), bool(fact["excluded"]), str(fact["valid_from"]),
-                          None if fact["valid_until"] is None else str(fact["valid_until"]), status, moment):
-                stale += 1
-                continue
-            kept.append(fact_id)
-            if quote is None and fact["grounding"] == "quote_verified":
-                quote = str(fact["quote"])
-        return kept, quote, unchecked
+        """The facts that still count or went unchecked, a quote that still
+        verifies, and whether any went unchecked for want of budget."""
+        kept = [fact_id for fact_id in fact_ids if evidence.holds(fact_id) is not False]
+        quote = next((found for fact_id in kept if evidence.holds(fact_id) and (found := evidence.quote(fact_id))),
+                     None)
+        return kept, quote, any(evidence.holds(fact_id) is None for fact_id in kept)
 
-    unverified = 0
-
-    def evidence(fact_ids: list[int], quote: str | None) -> str:
+    def cite(fact_ids: list[int], quote: str | None) -> str:
         return f"[{_cited(fact_ids)}" + (f'; quote verified: "{_one_line(quote)}"' if quote else "") + "]"
-
-    def label(entity_id: str) -> str:
-        return _one_line(entities[entity_id].label, 80)
 
     relation_lines: list[str] = []
     for hop, relation in walked:
@@ -286,7 +369,7 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
             continue
         unverified += unchecked
         relation_lines.append(f"hop {hop}: {label(relation.subject_id)} {_one_line(relation.predicate, 60)} "
-                              f"{label(relation.object_id)} {evidence(kept, quote)}")
+                              f"{label(relation.object_id)} {cite(kept, quote)}")
     value_lines: list[str] = []
     for attribute in sorted(values, key=lambda a: (a.entity_id, a.predicate, a.value)):
         kept, quote, unchecked = still(attribute.fact_ids)
@@ -294,25 +377,8 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
             continue
         unverified += unchecked
         value_lines.append(f"value: {label(attribute.entity_id)} {_one_line(attribute.predicate, 60)} "
-                           f"{_one_line(attribute.value)} {evidence(kept, quote)}")
-
-    path_lines: list[str] = []
-    ordered = sorted(seed_ids)
-    pairs = [(a, b) for index, a in enumerate(ordered) for b in ordered[index + 1:]][:_MAX_PAIRS]
-    for start, end in pairs:
-        routes = [paths_between(projection, one, other, max_hops=limits.max_hops + 1, limit=1,
-                                hub_degree=limits.hub_degree) for one, other in ((start, end), (end, start))]
-        shortest = [route.paths[0] for route in routes if route.paths]
-        if not shortest:
-            continue
-        path = max(shortest, key=lambda p: sum(step.direction == "forward" for step in p.hops))
-        steps = [label(path.entity_ids[0])]
-        for step in path.hops:
-            far = step.object_id if step.direction == "forward" else step.subject_id
-            predicate = _one_line(step.predicate, 60)
-            steps += [f"-{predicate}->" if step.direction == "forward" else f"<-{predicate}-", label(far)]
-        cited = sorted({fact_id for step in path.hops for fact_id in step.fact_ids})
-        path_lines.append(f"path: {' '.join(steps)} [{_cited(cited)}]")
+                           f"{_one_line(attribute.value)} {cite(kept, quote)}")
+    stale = evidence.stale()
 
     if stale:
         reasons.append(f"stale_evidence {stale}")
@@ -350,6 +416,8 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
     candidates: list[dict[str, str]] = []
     for name in (source, target):
         found = resolve(projection, name, limit=10)
+        if found.total > len(found.candidates):
+            reasons.append(f"candidates_cut {found.total - len(found.candidates)}")
         if found.status == "resolved":
             ends.append(entities[found.candidates[0].entity_id])
         elif found.status == "ambiguous":
@@ -369,29 +437,21 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
         return GraphContext("empty", _fit([*header, coverage(), note], max_bytes), (), (), {"reasons": reasons})
     result = paths_between(projection, ends[0].entity_id, ends[1].entity_id, max_hops=limits.max_hops,
                            limit=max(1, min(limit, 5)), hub_degree=hub_degree)
-    cited = sorted({fact_id for path in result.paths for hop in path.hops for fact_id in hop.fact_ids})
-    reread = {int(str(fact["fact_id"])): fact for fact in await checked_facts(engine.documents, space, cited[:128])}
-    moment = parse_rfc3339(when)
+    evidence = _Evidence(engine, space, status, parse_rfc3339(when), 128)
 
-    def holds(fact_id: int) -> bool:
-        fact = reread.get(fact_id)
-        return fact is not None and counts(str(fact["status"]), bool(fact["excluded"]), str(fact["valid_from"]),
-                                           None if fact["valid_until"] is None else str(fact["valid_until"]),
-                                           status, moment)
+    def label(entity_id: str) -> str:
+        return _one_line(entities[entity_id].label, 80)
 
-    path_lines, stale = [], 0
+    path_lines: list[str] = []
+    unverified = 0
     for path in result.paths:
-        if not all(any(holds(fact_id) for fact_id in hop.fact_ids) for hop in path.hops):
-            stale += 1
-            continue
-        steps = [_one_line(entities[path.entity_ids[0]].label, 80)]
-        for hop in path.hops:
-            far = hop.object_id if hop.direction == "forward" else hop.subject_id
-            predicate = _one_line(hop.predicate, 60)
-            steps += [f"-{predicate}->" if hop.direction == "forward" else f"<-{predicate}-",
-                      _one_line(entities[far].label, 80)]
-        facts = sorted({fact_id for hop in path.hops for fact_id in hop.fact_ids if holds(fact_id)})
-        path_lines.append(f"path: {' '.join(steps)} [{_cited(facts)}]")
+        line, unconfirmed = await _path_line(evidence, path, label)
+        if line is not None:
+            path_lines.append(line)
+            unverified += unconfirmed
+    stale = evidence.stale()
+    if unverified:
+        reasons.append(f"unverified {unverified}")
     if stale:
         reasons.append(f"stale_evidence {stale}")
     if result.hubs_skipped:

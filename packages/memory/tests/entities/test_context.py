@@ -171,3 +171,39 @@ async def test_a_hub_is_reached_but_never_walked_through():
     assert any("based_in Lisbon" in line for line in lines(packet.text, "hop 1: "))
     assert not any("visitor" in line for line in lines(packet.text, "hop 2: "))
     assert "hubs_not_crossed 1" in lines(packet.text, "coverage: ")[0]
+
+
+async def test_a_path_through_a_fact_that_stopped_counting_is_not_shown():
+    store = ExcludesOnReread()
+    engine = await seeded(store)
+    works = next(fact for fact in await store.list_facts("alpha", include_closed=True) if fact.predicate == "works_at")
+    store.engine, store.target = engine, works.fact_id
+    packet = await graph_context(engine, "alpha", names=["alice chen", "lisbon"])
+    assert not any("works_at" in line for line in lines(packet.text, "path: "))
+    assert "stale_evidence" in lines(packet.text, "coverage: ")[0]
+
+
+async def test_a_hop_needs_one_fact_that_still_holds_not_all_of_them():
+    """A hop resting on 128 facts is verified by re-reading one that holds,
+    so a path past the re-read budget is shown, never called stale."""
+    from scone_memory.core.ports import NewFact
+    from scone_memory.entities.context import graph_connections
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for _ in range(128):
+        await engine.documents.insert_fact(NewFact(space="alpha", subject="alice", predicate="knows", object="Bob",
+                                                   valid_from=DAY))
+    await engine.documents.insert_fact(NewFact(space="alpha", subject="bob", predicate="knows", object="Carol",
+                                               valid_from=DAY))
+    found = await graph_connections(engine, "alpha", "alice", "carol")
+    assert lines(found.text, "path: ") and lines(found.text, "coverage: ") == ["coverage: complete"]
+
+
+async def test_more_candidates_than_shown_are_counted():
+    engine = await seeded()
+    for number in range(25):
+        await engine.assert_fact("alpha", f"alice {number:02d}", "works_at", "Acme", valid_from=DAY)
+    packet = await graph_context(engine, "alpha", names=["alice"])
+    assert packet.status == "ambiguous" and len(packet.candidates) == 24
+    assert any(reason.startswith("candidates_cut ") for reason in packet.coverage["reasons"])

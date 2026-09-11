@@ -365,10 +365,15 @@ item, in this order:
 | `hop N:` | relations N steps out (`max_hops`, 1–4, default 2), those with the most facts first |
 | `value:` | values recorded for the entities asked about |
 
-Every relation and value cites its facts. Each cited fact is re-read,
-and one that no longer counts is dropped and counted as
-`stale_evidence`. A quote is shown only when it still verifies against
-its own source. An entity with more than 64 relations is reached but
+Every relation, value and path cites its facts. Each cited fact is
+re-read (up to 128 per packet), and one that no longer counts is
+dropped and counted as `stale_evidence`. A path hop needs only one fact
+that still holds, so its facts are re-read newest first until one does.
+A path resting on a hop whose facts have all stopped counting is not
+shown. A fact left unread when the budget runs out is kept but counted
+as `unverified`, never as stale. A quote is shown only when it still
+verifies against its own source. When a name matches more candidates
+than are listed, `candidates_cut N` says how many were left out. An entity with more than 64 relations is reached but
 never walked through. Names are folded onto one line, with control
 characters shown as symbols, so no stored text can start a line of its
 own. The text fits `max_bytes` (512–64,000, default 8,000). It is cut
