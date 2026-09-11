@@ -8,12 +8,13 @@ from scone_memory.core.errors import InvalidInput
 from scone_memory.ingestion import BuiltinDocumentParser, DocumentLimits
 from scone_memory.ingestion.formats.archive import SafeArchive
 from scone_memory.ingestion.formats.office import parse_office
-from .test_office_formats import W, archive
+from .test_office_formats import W, archive, package_relationship
 
 
 def container(xml, compression=ZIP_DEFLATED):
     stream = BytesIO()
     with ZipFile(stream, 'w', compression=compression) as bundle:
+        bundle.writestr('_rels/.rels', package_relationship('word/document.xml'))
         bundle.writestr('word/document.xml', xml)
     return stream.getvalue()
 

@@ -44,6 +44,11 @@ _RUN_METADATA = frozenset(
 })
 _WORD_RUNS = frozenset(f'{{{namespace}}}r' for namespace in _WORD_NAMESPACES)
 _RUN_CHARACTERS = {'tab': '\t', 'ptab': '\t', 'br': '\n', 'cr': '\n', 'noBreakHyphen': '\u2011'}
+_PACKAGE_RELATIONSHIPS = '{http://schemas.openxmlformats.org/package/2006/relationships}'
+_MAIN_PART_TYPES = frozenset({
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
+    'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument',
+})
 
 
 def _local(tag: str) -> str:
@@ -133,6 +138,37 @@ def _related(source: str, relations: dict[str, tuple[str, str]], identifier: str
     return _resolve(source, relation[0])
 
 
+def _main_part(bundle: SafeArchive) -> str:
+    if '_rels/.rels' not in bundle.names:
+        raise InvalidInput('OOXML is missing its package relationships')
+    root = bundle.xml('_rels/.rels')
+    if root.tag != _PACKAGE_RELATIONSHIPS + 'Relationships':
+        raise InvalidInput('OOXML has invalid package relationships')
+    identifiers: set[str] = set()
+    candidates: list[Element] = []
+    for relation in root:
+        if relation.tag != _PACKAGE_RELATIONSHIPS + 'Relationship':
+            continue
+        identifier = relation.get('Id', '')
+        if not identifier or identifier in identifiers:
+            raise InvalidInput('OOXML has invalid package relationship identifiers')
+        identifiers.add(identifier)
+        if relation.get('Type') in _MAIN_PART_TYPES:
+            candidates.append(relation)
+    if len(candidates) != 1:
+        raise InvalidInput('OOXML requires exactly one main document relationship')
+    selected = candidates[0]
+    if selected.get('TargetMode', 'Internal') != 'Internal':
+        raise InvalidInput('OOXML main document relationship must be internal')
+    target = selected.get('Target', '')
+    if '?' in target or '#' in target:
+        raise InvalidInput('OOXML main document relationship cannot have a query or fragment')
+    if (any(ord(character) <= 32 or ord(character) == 127 for character in target)
+            or any(ord(character) < 32 or ord(character) == 127 for character in unquote(target))):
+        raise InvalidInput('OOXML main document relationship contains invalid whitespace or controls')
+    return _resolve('', target)
+
+
 def _blocks(
     root: Element, names: set[str], *,
     include_tags: frozenset[str] = frozenset(), skip_tags: frozenset[str] = frozenset(),
@@ -188,7 +224,7 @@ def _table(root: Element, output: _Output, locator: str) -> None:
 
 
 def _docx(bundle: SafeArchive, output: _Output) -> None:
-    root = bundle.xml('word/document.xml')
+    root = bundle.xml(_main_part(bundle))
     body = _child(root, 'body')
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
@@ -204,7 +240,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
 
 
 def _xlsx(bundle: SafeArchive, output: _Output) -> None:
-    source = 'xl/workbook.xml'
+    source = _main_part(bundle)
     root = bundle.xml(source)
     if _local(root.tag) != 'workbook':
         raise InvalidInput('XLSX is missing its workbook')
@@ -263,7 +299,7 @@ def _drawing(root: Element, output: _Output, prefix: str) -> None:
 
 
 def _pptx(bundle: SafeArchive, output: _Output) -> None:
-    source = 'ppt/presentation.xml'
+    source = _main_part(bundle)
     root = bundle.xml(source)
     if _local(root.tag) != 'presentation':
         raise InvalidInput('PPTX is missing its presentation')

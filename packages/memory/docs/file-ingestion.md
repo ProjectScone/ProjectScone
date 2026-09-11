@@ -93,6 +93,13 @@ hyphens and position tabs remain in extracted text. This is a text view, not a
 rendered preview; comments, footnotes and other separate DOCX parts are not yet
 extracted.
 
+DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
+child relationships relative to that selected part. Nonstandard main-part paths
+are supported. An unreferenced conventional filename does not supply document
+text. Missing, external or ambiguous main-document declarations are rejected;
+older minimal ZIP containers without package relationships must be repaired or
+re-exported before extraction.
+
 Use `document_formats()` or authenticated `GET /v1/documents/formats` to
 inspect default-reader dependencies on the running installation. Availability
 does not guarantee that every valid variant of a format is supported.
