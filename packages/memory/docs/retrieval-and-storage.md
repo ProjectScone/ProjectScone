@@ -525,30 +525,52 @@ that decision. Nothing is merged.
 | `status`, `as_of` | `current`, now | Which facts count, and when |
 
 - **Why a pair is suggested**, each reason named on the pair:
-  - the same name once titles and punctuation are set aside, which scores 1;
-  - the names share words, or are alike by their letters (three-letter
-    runs), which catches a misspelling such as "Welington";
+  - the same name once titles and punctuation, or spacing, are set aside
+    ("Studio54" and "Studio 54"), which scores 1;
+  - the names share words, or have words one letter apart, which catches
+    a misspelling such as "Welington" or "Acme Compnay";
   - one name is the initials of the other ("IBM");
-  - neighbours in common, cited by their facts, which raise the likelihood.
+  - neighbours in common, cited by their facts, which raise the likelihood
+    by up to 0.15 but never make one: two people at one firm in one city
+    are two people.
+- **Names are read word by word.**
+  - Words are scored like a set: how many the names share, of all they
+    hold. A misspelt word counts for how alike its letters are, so a
+    misspelling of a long word stands on its own, while one letter in a
+    short name needs shared neighbours to reach 0.5.
+  - A misspelling is one edit (a letter changed, added or dropped, or two
+    neighbouring letters swapped) in words of four letters or more. One
+    letter makes another word of a short one, so Bob is not Rob.
+  - Two names that each keep a word the other has no spelling of name two
+    things, however much else they share: "University of Lisbon" and
+    "University of Porto", "John Smith" and "Jane Smith". One name may
+    still sit within the other ("Acme" and "Acme Robotics").
 - **What keeps a pair out.** Two entities of different known kinds are never
-  suggested, nor two whose names hold different numbers ("Room 101" and
-  "Room 102" are two rooms, however alike their letters). Two related to
-  each other are halved, since a thing rarely points at itself under
-  another name, and the relation is named.
-- **Only pairs that could reach `min_score` are compared.**
-  - Two names can be alike enough by their words or letters only if they
-    share one of the rarest of them. So each name is filed under its
-    rarest words, and for short names its rarest three-letter runs: as
-    many as a match at that score needs, allowing for what shared
-    neighbours add.
-  - The same folded name and matching initials are always compared.
-  - A run shared by more than 200 names is too common to compare by and is
-    counted as `blocks_skipped N`.
-  - At most 200,000 pairs are compared, the rarest blocks' first; the rest
-    are counted as `candidates_cut`.
-  - On 10,000 generated names built from a few syllables, as alike as
-    names get, an answer takes about six seconds and says what it cut.
-    Real names differ more and are cheaper.
+  suggested, nor two whose names hold different numbers, read as their runs
+  of digits in order ("Room 101" and "Room 102" are two rooms; "version
+  1.23" is not "version 12.3"). Two related to each other are halved, since
+  a thing rarely points at itself under another name, and the relation is
+  named.
+- **Every pair that can score is compared, and few others.**
+  - Of two names alike by their words, one has all its words matched in
+    the other. So each name is filed under the spellings of all its words
+    (the word, and for words of four letters or more each spelling one
+    letter shorter, which two words one edit apart share).
+  - Each name then searches under one of its words, the one whose
+    spellings the fewest names hold, and keeps only the names that hold a
+    spelling of every one of its words.
+  - Names that fold the same, and matching initials, are filed together.
+  - A test compares every pair outright over generated names mixing
+    misspellings, initials, spacing, small words and numbers, and finds
+    exactly the same pairs.
+  - A spelling held by more than 200 names is too common to search under,
+    and is counted as `blocks_skipped N`.
+  - At most 1,000,000 pairs are looked at and 50,000 compared, the cheapest
+    searches first; the rest are counted as `candidates_cut N blocks`.
+  - On 10,000 generated names built from twelve syllables, as alike as
+    names get, an answer takes under a second and says what it cut. On
+    9,000 names of random words it compares 34,000 pairs, cuts nothing,
+    and takes about half a second.
   - `coverage.compared` says how many pairs were compared.
 - Each pair puts the likelier canonical name first: the more connected,
   then the earlier.
