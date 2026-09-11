@@ -336,24 +336,44 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `jsonld` | JSON-LD linked data | RDF tooling |
 | `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` | Obsidian and other note tools |
 
-Every relation and value carries the ids of the facts behind it. Every
-file records its projection digest and an `about` block: the filters, and
-what the read counted and left out. The response headers repeat the digest
-and whether the read was capped (`X-Scone-Projection-Digest`,
-`X-Scone-Truncated`), so a partial export says so in the file and in the
-response.
+Every relation and every value carries the ids of the facts behind it,
+in every format. Every file records its projection digest and an `about`
+block: the filters, and what the read counted and left out. The response
+headers repeat the digest and whether the read was capped
+(`X-Scone-Projection-Digest`, `X-Scone-Truncated`), so a partial export
+says so in the file and in the response.
 
-Each format escapes its own syntax:
+How each format places values and escapes its own syntax:
 
-- GraphML is written by an XML serializer.
-- Cypher strings are quoted with backslash escapes, and a predicate is a
-  property of a `RELATES` edge, never query syntax.
-- CSV cells that a spreadsheet would read as a formula (`=`, `+`, `-`, `@`)
-  are prefixed with `'`.
-- Obsidian notes escape names as the Markdown report does, and note file
-  names drop characters that file systems or wiki links misread. Two names
-  that clash once made safe get distinct notes, and every `[[link]]` opens
-  one.
+- **GraphML** nodes have a `type`, `entity` or `value`. A value hangs off
+  its entity by an edge of `kind` `value` that carries its predicate and
+  facts; relations are edges of `kind` `relation`. The file is written by
+  an XML serializer. XML 1.0 cannot hold some characters the ledger
+  accepts (U+0001, U+FFFE, a lone surrogate). Text shows a control as its
+  Control Pictures symbol (U+0001 as ␁) and anything else as U+FFFD, and
+  that element gains an `exact` field holding its original values as JSON.
+- **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
+  `[:HAS_VALUE]`, with the predicate a property, never query syntax.
+  Strings escape quotes and backslashes, and write controls, line
+  separators and lone surrogates as `\u` escapes, which Cypher decodes
+  back to the same text.
+- **CSV** prefixes with `'` any cell that a spreadsheet would read as a
+  formula (`=`, `+`, `-`, `@`). A NUL or a lone surrogate, which CSV
+  readers cannot take, is shown as ␀ or U+FFFD; `about.json` and the JSON
+  formats keep it exactly.
+- **JSON-LD** puts every predicate under the `p:` prefix,
+  percent-encoded, so a stored predicate named `label`, `key` or `@id`
+  cannot overwrite the node's own fields.
+- **Obsidian** notes escape names as the Markdown report does. Note file
+  names drop characters that file systems or wiki links misread, and a
+  Windows device name (`con`, `lpt1`, even `con.txt`) gains a leading
+  `_`. Each name is checked against every name already given, folded the
+  way a case- and normalisation-insensitive disk folds it. On a clash it
+  takes more of the entity's id, then a number, so every entity keeps its
+  own note and every `[[link]]` opens one.
+
+Entity ids are defined for any text the ledger holds, lone surrogates
+included. Valid text gets the same id it always had.
 
 The bytes are deterministic, zip timestamps included, so the same
 projection always exports the same file. Advertised as `graph.export`.

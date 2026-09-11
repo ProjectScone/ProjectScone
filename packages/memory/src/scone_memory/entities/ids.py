@@ -14,7 +14,10 @@ ENTITY_ID_SCHEME = "scone.entity/1"
 
 
 def _digest(*parts: str) -> str:
-    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
+    # The ledger can hold a lone surrogate, which UTF-8 cannot encode.
+    # surrogatepass gives such text bytes to hash and leaves every valid
+    # string's bytes, and so its id, exactly as UTF-8 has them.
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
 def key_id(space: str, key: str) -> str:

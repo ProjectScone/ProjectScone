@@ -11,13 +11,16 @@ import csv
 import io
 import json
 import re
+import unicodedata
 import xml.etree.ElementTree as ElementTree
 import zipfile
 
 import pytest
 
 from scone_memory.core.models import Fact
+from scone_memory.core.validation import entity_key
 from scone_memory.entities.export import EXPORT_FORMATS, export_graph
+from scone_memory.entities.ids import key_id
 from scone_memory.entities.project import project_entities
 
 HOSTILE = 'O\'Brien "Bob" <script>'
@@ -58,14 +61,15 @@ def test_graphml_parses_and_keeps_hostile_names_as_text(projection):
     names = [data.text for data in root.iterfind(".//g:node/g:data[@key='label']", ns)]
     assert HOSTILE in names
     assert not [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "script"]
-    assert len(root.findall(".//g:edge", ns)) == len(projection.relations)
+    kinds = [edge.find("g:data[@key='kind']", ns).text for edge in root.iterfind(".//g:edge", ns)]
+    assert kinds.count("relation") == len(projection.relations) and kinds.count("value") == len(projection.attributes)
 
 
 def test_cypher_escapes_quotes_and_creates_one_statement_per_item(projection):
     script = export_graph(projection, "cypher").body.decode()
     assert "O\\'Brien \\\"Bob\\\" <script>" in script
     statements = [line for line in script.splitlines() if line.strip() and not line.startswith("//")]
-    assert len(statements) == len(projection.entities) + len(projection.relations)
+    assert len(statements) == len(projection.entities) + len(projection.relations) + len(projection.attributes)
 
 
 def test_csv_neutralises_formulas_and_round_trips(projection):
@@ -80,7 +84,7 @@ def test_csv_neutralises_formulas_and_round_trips(projection):
 def test_json_ld_is_linked_data(projection):
     data = json.loads(export_graph(projection, "jsonld").body)
     assert "@context" in data and data["@graph"]
-    assert any(item.get("works_at") for item in data["@graph"])
+    assert any(item.get("p:works_at") for item in data["@graph"])
 
 
 def test_the_obsidian_vault_links_notes_with_safe_file_names(projection):
@@ -126,3 +130,118 @@ def test_names_that_clash_once_made_safe_get_their_own_notes_and_every_link_open
     assert len(notes) == len(projection.entities) == 3
     links = set(re.findall(r"\[\[([^\]]+)\]\]", "\n".join(bundle.read(name).decode() for name in bundle.namelist())))
     assert len(links) == 3 and links <= notes
+
+
+
+def text_of(body: bytes) -> str:
+    if body[:2] != b"PK":
+        return body.decode()
+    bundle = zipfile.ZipFile(io.BytesIO(body))
+    return "\n".join(bundle.read(name).decode() for name in bundle.namelist())
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+def test_every_format_keeps_every_value_and_its_facts(projection, format):
+    text = text_of(export_graph(projection, format).body)
+    assert "May 2021" in text and "joined_on" in text
+
+
+def test_graphml_and_cypher_hang_each_value_off_its_entity_with_its_facts(projection):
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    root = ElementTree.fromstring(export_graph(projection, "graphml").body)
+    values = {node.get("id"): node.find("g:data[@key='label']", ns).text for node in root.iterfind(".//g:node", ns)
+              if node.find("g:data[@key='type']", ns).text == "value"}
+    edge = next(edge for edge in root.iterfind(".//g:edge", ns) if values.get(edge.get("target")) == "May 2021")
+    assert edge.find("g:data[@key='predicate']", ns).text == "joined_on"
+    assert edge.find("g:data[@key='fact_ids']", ns).text == "4"
+    script = export_graph(projection, "cypher").body.decode()
+    line = next(line for line in script.splitlines() if "'May 2021'" in line)
+    assert ":HAS_VALUE" in line and "r.predicate = 'joined_on'" in line and "r.fact_ids = [4]" in line
+
+
+def test_json_ld_predicates_never_collide_with_its_own_fields():
+    """A stored predicate may be called label, key or @id; each lives under
+    the predicate prefix, so none overwrites the node's own fields."""
+    rows = [fact(1, "alice", "label", "Example"), fact(2, "alice", "@id", "urn:evil"), fact(3, "alice", "key", "k"),
+            fact(4, "alice", "works_at", "Acme")]
+    data = json.loads(export_graph(project_entities("alpha", rows, revision=1), "jsonld").body)
+    alice = next(item for item in data["@graph"] if item["key"] == "alice")
+    assert alice["label"] == "alice" and alice["@id"].startswith("urn:scone:alpha:ent:")
+    assert {"p:label", "p:%40id", "p:key", "p:works_at"} <= set(alice)
+    assert data["@context"]["p"].endswith("/")
+
+
+def notes_of(rows) -> list[str]:
+    projection = project_entities("alpha", rows, revision=1)
+    bundle = zipfile.ZipFile(io.BytesIO(export_graph(projection, "obsidian").body))
+    notes = [name[len("entities/"):-len(".md")] for name in bundle.namelist() if name.startswith("entities/")]
+    assert len(notes) == len(projection.entities)
+    return notes
+
+
+def raw(number: int, subject: str) -> Fact:
+    return Fact(fact_id=number, space="alpha", subject=subject, predicate="status", object="ready",
+                valid_from="2025-01-01T00:00:00Z")
+
+
+def test_a_name_spelling_out_another_notes_disambiguated_name_gets_its_own_note():
+    """Two names that are equal once made file-safe; then a third that
+    spells out the name the second was given. All three keep a note."""
+    pair = [raw(1, "item0/x"), raw(2, "item0:x")]
+    given = next(note for note in notes_of(pair) if note != "item0-x")
+    notes = notes_of([*pair, raw(3, given)])
+    assert len(set(notes)) == 3
+
+
+def test_names_equal_on_a_disk_that_ignores_case_or_normalisation_get_their_own_notes():
+    notes = notes_of([raw(1, "A/b"), raw(2, "a:B"), raw(3, "caf\u00e9"), raw(4, "cafe\u0301")])
+    assert len({unicodedata.normalize("NFC", note).casefold() for note in notes}) == 4
+
+
+def test_no_note_takes_the_index_or_a_windows_device_name():
+    notes = notes_of([raw(1, "index"), raw(2, "con"), raw(3, "Con.txt"), raw(4, "LPT1")])
+    assert not {note.casefold().split(".")[0] for note in notes} & {"index", "con", "lpt1"}
+
+CONTROLLED = "Alice\x01Admin\x0bNote￾"
+
+
+def test_graphml_carries_characters_xml_cannot_hold_without_breaking():
+    """XML 1.0 has no way to write U+0001, a vertical tab or U+FFFE. The
+    label shows each as a visible symbol, and ``exact`` keeps the value."""
+    projection = project_entities("alpha", [fact(1, CONTROLLED, "knows", "Bob")], revision=1)
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    root = ElementTree.fromstring(export_graph(projection, "graphml").body)
+    node = next(node for node in root.iterfind(".//g:node", ns)
+                if "admin" in node.find("g:data[@key='label']", ns).text)
+    assert node.find("g:data[@key='label']", ns).text == "alice␁admin␋note�"
+    assert json.loads(node.find("g:data[@key='exact']", ns).text)["label"] == CONTROLLED.casefold()
+    plain = next(node for node in root.iterfind(".//g:node", ns) if node.find("g:data[@key='label']", ns).text == "Bob")
+    assert plain.find("g:data[@key='exact']", ns) is None
+
+
+def test_cypher_and_markdown_write_control_characters_as_escapes():
+    projection = project_entities("alpha", [fact(1, CONTROLLED, "knows", "Bob")], revision=1)
+    script = export_graph(projection, "cypher").body.decode()
+    assert "\\u0001" in script and "\x01" not in script and "\x0b" not in script
+    notes = text_of(export_graph(projection, "obsidian").body)
+    assert "\x01" not in notes and "␁" in notes
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+def test_every_format_writes_whatever_the_ledger_holds(format):
+    """The ledger accepts NUL and lone surrogates. No export may fail on
+    them or write a file its own parser rejects."""
+    names = ["nul\x00here", "half\ud800pair", CONTROLLED]
+    projection = project_entities("alpha", [fact(n, name, "knows", "Bob") for n, name in enumerate(names, 1)],
+                                  revision=1)
+    body = export_graph(projection, format).body
+    if format in ("json", "jsonld"):
+        keys = {json.dumps(item) for item in json.loads(body).get("nodes", json.loads(body).get("@graph"))}
+        assert all(any(json.dumps(name.casefold())[1:-1] in key for key in keys) for name in names)
+    elif format == "graphml":
+        ElementTree.fromstring(body)
+    elif format == "csv":
+        cells = zipfile.ZipFile(io.BytesIO(body)).read("entities.csv").decode()
+        assert "nul\u2400here" in cells and "half\ufffdpair" in cells
+    else:
+        text_of(body)

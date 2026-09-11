@@ -27,6 +27,8 @@ import io
 import json
 import re
 from typing import Callable, Literal, Mapping
+import unicodedata
+from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
 import zipfile
 
@@ -43,6 +45,29 @@ class Export:
     body: bytes
     media_type: str
     filename: str
+
+
+def _visible(character: str) -> str:
+    """A visible stand-in for a character a format cannot carry: a C0
+    control becomes its Control Pictures symbol (U+0001 is shown as
+    U+2401), and anything else, such as a lone surrogate, becomes U+FFFD."""
+    code = ord(character)
+    return chr(0x2400 + code) if code < 0x20 else "\u2421" if code == 0x7F else "\ufffd"
+
+
+# Characters XML 1.0 has no way to write, even as a character reference.
+_NOT_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+# Characters a Cypher string writes as a \\u escape rather than raw.
+_CYPHER_ESCAPED = re.compile("[\x00-\x1f\x7f\ud800-\udfff\u2028\u2029]")
+# Characters a CSV cell cannot carry to the tools that read it.
+_NOT_CSV = re.compile("[\x00\ud800-\udfff]")
+
+
+def _encoded(text: str) -> bytes:
+    """UTF-8, with any lone surrogate written as a backslash escape. Used
+    only where a surrogate can appear solely inside a JSON or YAML string,
+    whose own escape that is."""
+    return text.encode("utf-8", "backslashreplace")
 
 
 def _degrees(projection: EntityProjection) -> dict[str, int]:
@@ -95,37 +120,63 @@ def _node_link(projection: EntityProjection, about: Mapping[str, object]) -> Exp
                    "predicate": relation.predicate, "fact_ids": list(relation.fact_ids),
                    "facts": relation.support.facts} for relation in projection.relations],
     }
-    return Export(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"),
-                  "application/json", "graph.json")
+    return Export(_encoded(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)), "application/json",
+                  "graph.json")
 
 
 def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """Entities and values are both nodes (``type`` says which), so a value
+    keeps its own edge carrying the predicate and the facts behind it.
+
+    XML 1.0 cannot hold some characters the ledger can (U+0001, U+FFFE, a
+    lone surrogate). Text shows each as a visible stand-in, and the element
+    gains an ``exact`` field: its original values as JSON, which can."""
     ns = "http://graphml.graphdrawing.org/xmlns"
     ElementTree.register_namespace("", ns)
     root = ElementTree.Element(f"{{{ns}}}graphml")
-    for key, target, name in (("label", "node", "label"), ("key", "node", "key"), ("kind", "node", "kind"),
-                              ("predicate", "edge", "predicate"), ("fact_ids", "edge", "fact_ids"),
-                              ("digest", "graph", "digest"), ("about", "graph", "about")):
-        ElementTree.SubElement(root, f"{{{ns}}}key", {"id": key, "for": target, "attr.name": name, "attr.type": "string"})
+    for key, target in (("type", "node"), ("label", "node"), ("key", "node"), ("kind", "node"),
+                        ("literal_kind", "node"), ("kind", "edge"), ("predicate", "edge"), ("fact_ids", "edge"),
+                        ("digest", "graph"), ("about", "graph"), ("exact", "all")):
+        ElementTree.SubElement(root, f"{{{ns}}}key", {"id": key, "for": target, "attr.name": key,
+                                                      "attr.type": "string"})
     graph = ElementTree.SubElement(root, f"{{{ns}}}graph", {"id": projection.space, "edgedefault": "directed"})
-    ElementTree.SubElement(graph, f"{{{ns}}}data", {"key": "digest"}).text = projection.digest
-    ElementTree.SubElement(graph, f"{{{ns}}}data", {"key": "about"}).text = _about_text(about)
+
+    def fields(parent: ElementTree.Element, values: tuple[tuple[str, str], ...]) -> None:
+        exact = {}
+        for key, value in values:
+            shown = _NOT_XML.sub(lambda match: _visible(match.group()), value)
+            if shown != value:
+                exact[key] = value
+            ElementTree.SubElement(parent, f"{{{ns}}}data", {"key": key}).text = shown
+        if exact:
+            ElementTree.SubElement(parent, f"{{{ns}}}data", {"key": "exact"}).text = json.dumps(exact, sort_keys=True)
+
+    def edge(edge_id: str, source: str, target: str, kind: str, predicate: str, fact_ids: tuple[int, ...]) -> None:
+        element = ElementTree.SubElement(graph, f"{{{ns}}}edge", {"id": edge_id, "source": source, "target": target})
+        fields(element, (("kind", kind), ("predicate", predicate), ("fact_ids", " ".join(map(str, fact_ids)))))
+
+    fields(graph, (("digest", projection.digest), ("about", _about_text(about))))
     for entity in projection.entities:
         node = ElementTree.SubElement(graph, f"{{{ns}}}node", {"id": entity.entity_id})
-        for key, value in (("label", entity.label), ("key", entity.key), ("kind", entity.kind or "")):
-            ElementTree.SubElement(node, f"{{{ns}}}data", {"key": key}).text = value
+        fields(node, (("type", "entity"), ("label", entity.label), ("key", entity.key), ("kind", entity.kind or "")))
+    for attribute in projection.attributes:
+        node = ElementTree.SubElement(graph, f"{{{ns}}}node", {"id": attribute.attribute_id})
+        fields(node, (("type", "value"), ("label", attribute.value), ("literal_kind", attribute.literal_kind or "")))
     for relation in projection.relations:
-        edge = ElementTree.SubElement(graph, f"{{{ns}}}edge", {"id": relation.relation_id,
-                                      "source": relation.subject_id, "target": relation.object_id})
-        ElementTree.SubElement(edge, f"{{{ns}}}data", {"key": "predicate"}).text = relation.predicate
-        ElementTree.SubElement(edge, f"{{{ns}}}data", {"key": "fact_ids"}).text = " ".join(map(str, relation.fact_ids))
+        edge(relation.relation_id, relation.subject_id, relation.object_id, "relation", relation.predicate,
+             relation.fact_ids)
+    for attribute in projection.attributes:
+        edge(f"{attribute.attribute_id}:has", attribute.entity_id, attribute.attribute_id, "value", attribute.predicate,
+             attribute.fact_ids)
     return Export(ElementTree.tostring(root, encoding="utf-8", xml_declaration=True), "application/graphml+xml",
                   "graph.graphml")
 
 
 def _cypher_text(value: object) -> str:
+    """A Cypher string literal: quotes and backslashes escaped, and controls,
+    line separators and lone surrogates as \\u escapes Cypher decodes."""
     text = str(value).replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
-    return "'" + text.replace("\n", "\\n").replace("\r", "\\r") + "'"
+    return "'" + _CYPHER_ESCAPED.sub(lambda match: f"\\u{ord(match.group()):04x}", text) + "'"
 
 
 def _cypher(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -140,11 +191,17 @@ def _cypher(projection: EntityProjection, about: Mapping[str, object]) -> Export
                      f"(b:Entity {{id: {_cypher_text(relation.object_id)}}}) "
                      f"MERGE (a)-[r:RELATES {{id: {_cypher_text(relation.relation_id)}}}]->(b) "
                      f"SET r.predicate = {_cypher_text(relation.predicate)}, r.fact_ids = {list(relation.fact_ids)};")
+    for attribute in projection.attributes:
+        lines.append(f"MATCH (e:Entity {{id: {_cypher_text(attribute.entity_id)}}}) "
+                     f"MERGE (v:Value {{id: {_cypher_text(attribute.attribute_id)}}}) "
+                     f"SET v.value = {_cypher_text(attribute.value)}, v.literal_kind = {_cypher_text(attribute.literal_kind or '')} "
+                     f"MERGE (e)-[r:HAS_VALUE]->(v) "
+                     f"SET r.predicate = {_cypher_text(attribute.predicate)}, r.fact_ids = {list(attribute.fact_ids)};")
     return Export(("\n".join(lines) + "\n").encode("utf-8"), "text/plain; charset=utf-8", "graph.cypher")
 
 
 def _cell(value: object) -> str:
-    text = "" if value is None else str(value)
+    text = _NOT_CSV.sub(lambda match: _visible(match.group()), "" if value is None else str(value))
     return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
@@ -154,7 +211,7 @@ def _zip(files: dict[str, str]) -> bytes:
         for name in sorted(files):
             info = zipfile.ZipInfo(name, date_time=_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
-            bundle.writestr(info, files[name].encode("utf-8"))
+            bundle.writestr(info, _encoded(files[name]))
     return buffer.getvalue()
 
 
@@ -182,41 +239,78 @@ def _csv(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     return Export(_zip(files), "application/zip", "graph-csv.zip")
 
 
+_PREDICATES = "https://projectscone.dev/predicate/"
+
+
 def _json_ld(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """Each predicate is a ``p:`` term, percent-encoded, so no stored
+    predicate can take the place of a node's own ``@id``, ``label`` or ``key``."""
     def urn(entity_id: str) -> str:
         return f"urn:scone:{projection.space}:{entity_id}"
+
+    def term(predicate: str) -> str:
+        return "p:" + quote(predicate, safe="-_.~")
 
     nodes: dict[str, dict[str, object]] = {
         entity.entity_id: {"@id": urn(entity.entity_id), "@type": (entity.kind or "entity").capitalize(),
                            "label": entity.label, "key": entity.key}
         for entity in projection.entities}
+    claims: dict[str, dict[str, list[dict[str, object]]]] = defaultdict(lambda: defaultdict(list))
     for relation in projection.relations:
-        links = nodes[relation.subject_id].setdefault(relation.predicate, [])
-        assert isinstance(links, list)
-        links.append({"@id": urn(relation.object_id), "facts": list(relation.fact_ids)})
+        claims[relation.subject_id][term(relation.predicate)].append(
+            {"@id": urn(relation.object_id), "facts": list(relation.fact_ids)})
     for attribute in projection.attributes:
-        values = nodes[attribute.entity_id].setdefault(attribute.predicate, [])
-        assert isinstance(values, list)
-        values.append({"@value": attribute.value, "facts": list(attribute.fact_ids)})
-    data = {"@context": {"@vocab": "https://projectscone.dev/vocab#",
+        claims[attribute.entity_id][term(attribute.predicate)].append(
+            {"@value": attribute.value, "facts": list(attribute.fact_ids)})
+    graph = [{**nodes[entity_id], **claims[entity_id]} for entity_id in sorted(nodes)]
+    data = {"@context": {"@vocab": "https://projectscone.dev/vocab#", "p": _PREDICATES,
                          "label": "http://www.w3.org/2000/01/rdf-schema#label"},
-            "digest": projection.digest, "about": dict(about), "@graph": [nodes[entity_id] for entity_id in sorted(nodes)]}
-    return Export(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"),
-                  "application/ld+json", "graph.jsonld")
+            "digest": projection.digest, "about": dict(about), "@graph": graph}
+    return Export(_encoded(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)), "application/ld+json",
+                  "graph.jsonld")
 
 
-_UNSAFE = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]+')
+_UNSAFE = re.compile('[\\\\/:*?"<>|#^\\[\\]\x00-\x1f\x7f\ud800-\udfff]+')
+
+
+# Names Windows keeps for devices, whatever extension follows them.
+_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)),
+                      *(f"lpt{n}" for n in range(1, 10))})
+
+
+def _folded(name: str) -> str:
+    """How a disk that ignores case and Unicode normalisation sees a name."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _free(candidate: str, taken: set[str]) -> bool:
+    return _folded(candidate) not in taken
 
 
 def _note_names(entities: tuple[Entity, ...]) -> dict[str, str]:
-    """A distinct, safe note name for every entity: characters file systems
-    or wiki links would misread become '-', and clashes get the id's tail."""
+    """A distinct, safe note name for every entity.
+
+    Characters that file systems or wiki links misread become '-', and a
+    name Windows keeps for a device gains a leading '_'. Every name is
+    checked against every name already given, folded the way a case- and
+    normalisation-insensitive disk folds it; a clash takes more of the
+    entity's id, then a number, until it is free, so no note can overwrite
+    another."""
     names: dict[str, str] = {}
-    taken: set[str] = set()
+    taken = {"index"}  # the vault's own index note
     for entity in sorted(entities, key=lambda entity: entity.entity_id):
-        base = " ".join(_UNSAFE.sub("-", entity.label).split()).strip(". ")[:100] or "entity"
-        name = base if base.casefold() not in taken else f"{base} ({entity.entity_id[-6:]})"
-        taken.add(name.casefold())
+        base = " ".join(_UNSAFE.sub("-", entity.label).split()).strip(". ")[:100]
+        base = base or "entity"
+        if _folded(base).split(".")[0].rstrip() in _DEVICES:
+            base = "_" + base
+        digits = entity.entity_id.split(":", 1)[-1]
+        tried = [base, *(f"{base} ({digits[:size]})" for size in (6, 12)), f"{base} ({digits})"]
+        name = next((candidate for candidate in tried if _free(candidate, taken)), None)
+        number = 2
+        while name is None:
+            candidate = f"{base} ({digits} {number})"
+            name, number = (candidate if _free(candidate, taken) else None), number + 1
+        taken.add(_folded(name))
         names[entity.entity_id] = name
     return names
 

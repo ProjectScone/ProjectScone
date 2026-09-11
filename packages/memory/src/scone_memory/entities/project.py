@@ -189,7 +189,8 @@ def _label(forms: Counter[str], key: str) -> str:
 
 
 def _canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=list).encode("utf-8")
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                      default=list).encode("utf-8", "surrogatepass")
 
 
 def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> EntityProjection:
