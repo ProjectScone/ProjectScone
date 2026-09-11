@@ -155,3 +155,21 @@ def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
     code = main(["graph", *arguments], env={"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory"},
                 out=io.StringIO(), stdin=io.StringIO())
     assert code == 2 and named in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments, named", [
+    (("context", *(f"person {n}" for n in range(25))), "names"),
+    (("context", "x" * 201), "names"),
+    (("entity", "x" * 201), "names"),
+    (("path", "alice", "x" * 201), "names"),
+    (("path", "alice", "bob", "--max-hops", "5"), "--max-hops"),
+    (("context", "--question", "q" * 2001), "--question"),
+    (("timeline", "alice", "--as-of", "0001-01-01T00:00:00+01:00"), "--as-of"),
+    (("timeline", "alice", "--as-of", "9999-12-31T23:59:59-01:00"), "--as-of"),
+])
+def test_a_value_past_the_routes_bounds_is_an_input_error(arguments, named, capsys):
+    from scone_memory.runtime.cli import main
+
+    code = main(["graph", *arguments], env={"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory"},
+                out=io.StringIO(), stdin=io.StringIO())
+    assert code == 2 and named in capsys.readouterr().err

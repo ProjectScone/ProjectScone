@@ -278,8 +278,12 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         else:
             unknown.append(name)
     if question:
-        seeds += [entity for entity in mentioned(projection, question, limit=limits.max_entities) if entity not in seeds]
-    seeds = seeds[:limits.max_entities]
+        # Every mention, so the cut below can say how many it left out; a
+        # mention takes at least one character.
+        seeds += [entity for entity in mentioned(projection, question, limit=len(question)) if entity not in seeds]
+    if len(seeds) > limits.max_entities:
+        reasons.append(f"seeds_cut {len(seeds) - limits.max_entities}")
+        del seeds[limits.max_entities:]
     if unknown:
         reasons.append(f"not_found {len(unknown)}")
     if cut_candidates:

@@ -110,6 +110,8 @@ def test_bad_parameters_are_refused(seeded):
     assert client.get("/v1/graph/knowledge", params={"status": "maybe"}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/knowledge", params={"limit": 0}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/knowledge", params={"as_of": "yesterday"}, headers=auth()).status_code == 422
+    for edge in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"):
+        assert client.get("/v1/graph/knowledge", params={"as_of": edge}, headers=auth()).status_code == 422
 
 
 def test_capabilities_advertise_the_entity_routes(seeded):

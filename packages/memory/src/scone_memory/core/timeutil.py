@@ -42,7 +42,11 @@ def parse_rfc3339(text: str) -> datetime:
     parsed = datetime.fromisoformat(raw)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError:
+        # 0001-01-01T00:00+01:00 is a valid text whose UTC instant is not.
+        raise ValueError(f"{text!r} is outside the instants UTC can represent") from None
 
 
 def epoch_seconds(text: str) -> float:

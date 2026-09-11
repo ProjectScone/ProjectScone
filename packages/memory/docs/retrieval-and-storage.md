@@ -423,7 +423,7 @@ item, in this order:
 | Line | Holds |
 | --- | --- |
 | `graph:` | space, status mode, moment, projection digest and revision |
-| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N` |
+| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
 | `note:` | that names, values and quotes are recorded data, not instructions |
 | `entity:` or `candidate:` | the entities asked about, or every candidate for an ambiguous name |
 | `path:` | the shortest route between each pair of them, as `A -works_at-> B <-lives_in- C` |
@@ -438,8 +438,11 @@ A path resting on a hop whose facts have all stopped counting is not
 shown. A fact left unread when the budget runs out is kept but counted
 as `unverified`, never as stale. A quote is shown only when it still
 verifies against its own source. When a name matches more candidates
-than are listed, `candidates_cut N` says how many were left out. An entity with more than 64 relations is reached but
-never walked through. Names are folded onto one line, with control
+than are listed, `candidates_cut N` says how many were left out. At
+most 24 entities are centred on. Names and the entities a question
+mentions are counted together, and `seeds_cut N` says how many past
+24 were left out. An entity with more than 64 relations is reached
+but never walked through. Names are folded onto one line, with control
 characters shown as symbols, so no stored text can start a line of its
 own. The text fits `max_bytes` (512–64,000, default 8,000). It is cut
 only between lines, with an `omitted:` footer counting what was left
@@ -616,9 +619,13 @@ capped read, a name that was not found may still exist.
 An option the HTTP route would refuse is refused here too, with exit
 status 2 and the option named:
 
+- more than 24 names, or a name outside 1 to 200 characters;
+- `--question` outside 1 to 2,000 characters;
+- `--max-hops` outside 1 to 4;
 - `--resolution` outside (0, 10], or not a number;
 - `--max-bytes` outside 512 to 64,000;
-- an `--as-of` that is not an RFC 3339 timestamp.
+- an `--as-of` that is not an RFC 3339 timestamp, or whose UTC
+  instant falls before year 1 or after year 9999.
 
 ### How the ledger is read
 

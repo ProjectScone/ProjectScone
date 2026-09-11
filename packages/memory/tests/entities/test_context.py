@@ -230,3 +230,15 @@ async def test_an_unconfirmed_hop_never_cites_a_fact_known_to_have_stopped():
     evidence = _Evidence(engine, "alpha", "current", parse_rfc3339("2025-06-01T00:00:00Z"), budget=4)
     line, unconfirmed = await _path_line(evidence, path, lambda entity_id: entity_id)
     assert unconfirmed and line is not None and line.endswith(f"[fact {rows[0].fact_id}]")
+
+
+async def test_seeds_past_the_entity_cap_are_reported_not_dropped_silently():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for n in range(26):
+        await engine.assert_fact("alpha", f"person {n:02d}", "lives_in", f"Town {n:02d}", valid_from=DAY)
+    packet = await graph_context(engine, "alpha", names=[f"person {n:02d}" for n in range(26)])
+    assert len(packet.seeds) == 24 and "seeds_cut 2" in packet.coverage["reasons"]
+    assert "coverage: limited: seeds_cut 2" in packet.text
+    asked = await graph_context(engine, "alpha", question=" and ".join(f"person {n:02d}" for n in range(26)))
+    assert len(asked.seeds) == 24 and "seeds_cut 2" in asked.coverage["reasons"]

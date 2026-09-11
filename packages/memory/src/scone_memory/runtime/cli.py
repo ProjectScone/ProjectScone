@@ -481,7 +481,16 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     # NaN fails the comparison, so it is refused too.
     if command == "report" and not 0 < args.resolution <= 10:
         raise InvalidInput("--resolution must be a number above 0 and at most 10")
+    named = {"path": [args.source, args.target] if command == "path" else [],
+             "context": args.names if command == "context" else [],
+             "entity": [args.name] if command == "entity" else []}.get(command, [])
+    if len(named) > 24 or any(not 1 <= len(name) <= 200 for name in named):
+        raise InvalidInput("names: at most 24, each 1 to 200 characters")
+    if command == "path" and not 1 <= args.max_hops <= 4:
+        raise InvalidInput("--max-hops must be from 1 to 4")
     if command == "context":
+        if args.question is not None and not 1 <= len(args.question) <= 2000:
+            raise InvalidInput("--question must be 1 to 2000 characters")
         try:
             ContextLimits(max_bytes=args.max_bytes)
         except ValueError:
