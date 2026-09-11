@@ -368,10 +368,12 @@ For optional atomic relation selection, construct the assessor with
 `group_relations=True, max_evidence_bytes=16000`. The pure
 `retrieval.evidence_groups.build_evidence_groups` helper groups supplied facts
 whose object names another fact's subject, preserving branches and cycles. Names
-are compared by the same identity rule the ledger stores subjects under: case
-folded and spacing collapsed, nothing looser. Each join records `"match":
-"literal"` or `"match": "normalised"`, so a join that relied on folding stays
-distinguishable from literal equality. It does not invent semantic links, merge
+are compared by `memory.identity.join_match`, the rule every join site shares:
+case folded and spacing collapsed, as the ledger stores subjects, nothing
+looser. Prose, quotations and pronouns never join, and a value whose case
+carries meaning ('MB' against 'mb') joins only when spelled exactly the same.
+Each join records `"match": "literal"` or `"match": "normalised"`, so a join
+that relied on folding stays distinguishable from literal equality. It does not invent semantic links, merge
 different spellings, or search beyond the supplied candidate pool. Existing
 stored-link kinds are still handled by the separate graph expansion stage.
 

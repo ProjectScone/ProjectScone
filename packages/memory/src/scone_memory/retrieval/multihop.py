@@ -18,19 +18,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.models import Episode, Fact, FactLink, RecallResult
 from ..core.ports import TextFilter
 from ..core.timeutil import now_rfc3339, parse_rfc3339
-from ..memory.engine import check_space, normalise_term
+from ..memory.engine import check_space
+from ..memory.identity import join_match, lookup_keys
 
 
 def subject_lookup_keys(value: str) -> tuple[str, ...]:
-    if not value.strip():
-        return ()
-    return tuple(dict.fromkeys((normalise_term(value, "subject"), value)))
+    return lookup_keys(value)
 
 
 def matches_subject_object(source_object: object, target_subject: object) -> bool:
     """Apply the same identity rule during traversal and evidence revalidation."""
     return (isinstance(source_object, str) and isinstance(target_subject, str)
-            and target_subject in subject_lookup_keys(source_object))
+            and join_match(source_object, target_subject) is not None)
 
 
 class MultiHopDocuments(Protocol):

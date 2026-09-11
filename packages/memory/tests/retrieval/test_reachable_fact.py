@@ -190,8 +190,11 @@ async def test_reachable_witness_is_atomic_scoped_and_fresh(engine, monkeypatch,
             assert result.model_selected_ids == ()
 
 
-async def test_exact_matching_and_plan_revalidation():
-    assert (await assess((ROUTE[0], ROUTE[1], fact(3, 'Office', 'located in', 'Oslo')))).status == 'insufficient'
+async def test_identity_matching_and_plan_revalidation():
+    # Hops follow the ledger's identity rule: 'office' reaches claims about
+    # 'Office', but not about a different name.
+    assert (await assess((ROUTE[0], ROUTE[1], fact(3, 'Office', 'located in', 'Oslo')))).status == 'sufficient'
+    assert (await assess((ROUTE[0], ROUTE[1], fact(3, 'Offices', 'located in', 'Oslo')))).status == 'insufficient'
     with pytest.raises(ValueError):
         StructuredEvidenceAssessor('question', (requirement().model_copy(update={'via':('located in',)}),))
     assert EvidenceRequirement.model_validate_json(requirement().model_dump_json()) == requirement()

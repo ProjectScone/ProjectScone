@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
 from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, vector_identity
+from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -1080,9 +1081,9 @@ def _ms(since: float) -> float:
 
 def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     """Claims grouped by subject, joined one hop through shared names: a
-    claim whose object is another claim's subject puts both subjects in one
-    group, so "mark works_at acme" and "acme based_in lisbon" meet. Pure;
-    order is by the smallest fact id in each group."""
+    claim whose object names another claim's subject (``join_match``) puts
+    both subjects in one group, so "mark works_at acme" and "acme based_in
+    lisbon" meet. Pure; order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
 
     key = entity_key
@@ -1099,10 +1100,12 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
         if ra != rb:
             parent[rb] = ra
 
-    subjects = {key(f.subject) for f in facts}
+    subjects: dict[str, set[str]] = {}
+    for f in facts:
+        subjects.setdefault(key(f.subject), set()).add(f.subject)
     for f in facts:
         find(key(f.subject))
-        if key(f.object) in subjects:
+        if any(join_match(f.object, named) for named in subjects.get(key(f.object), ())):
             union(key(f.subject), key(f.object))
     grouped: dict[str, list[Fact]] = {}
     for f in facts:

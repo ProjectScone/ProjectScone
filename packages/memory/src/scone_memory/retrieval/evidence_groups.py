@@ -1,9 +1,10 @@
 """Pure grouping of supplied facts by directed object-to-subject joins.
 
-A fact joins another when its object and the other's subject name the same
-entity under ``entity_key``: case folded and spacing collapsed, nothing looser.
-Each join records whether the two names were literally equal or met only after
-that folding, so a reader can tell the two apart. Components preserve branches
+A fact joins another when its object names the other's subject under
+``memory.identity.join_match``: the same key (case folded, spacing collapsed,
+nothing looser), never through prose, a quotation or a pronoun, and for a
+value whose case carries meaning, only by its exact spelling. Each join
+records whether the names were literally equal or met only after folding. Components preserve branches
 and cycles; a join asserts shared naming only, not a semantic, causal, or
 transitive conclusion. No retrieval or model calls occur here. Every input is
 represented exactly once, or the whole call fails.
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 
-from ..core.validation import entity_key
+from ..memory.identity import join_match
 from .adaptive import EvidenceCandidate
 
 
@@ -61,7 +62,7 @@ def _joins(candidates: tuple[EvidenceCandidate, ...]) -> list[tuple[int, int]]:
         for target_index, target in enumerate(candidates):
             if (source_index == target_index or not target.id.startswith("fact:")
                     or target.subject is None or not target.subject.strip()
-                    or entity_key(source.object) != entity_key(target.subject)):
+                    or join_match(source.object, target.subject) is None):
                 continue
             if len(joins) >= 2048:
                 raise ValueError("evidence grouping exceeds directed edge limit")

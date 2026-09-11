@@ -2,7 +2,11 @@
 
 This is not natural-language intent detection, semantic entailment, source
 verification or proof of global completeness. The adaptive retriever owns scope
-and retention. Only exact recorded triples can witness these requirements.
+and retention. Only recorded triples can witness these requirements. Names in
+a requirement and between hops are compared by the ledger's own identity rule
+(``memory.identity.join_match``): case and spacing are folded as the ledger
+folds stored subjects, while a value whose case carries meaning must be
+spelled exactly, and prose or pronouns never stand for a name.
 """
 from __future__ import annotations
 
@@ -12,7 +16,9 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..core.validation import entity_key
 from ..memory.engine import MAX_QUERY
+from ..memory.identity import join_match
 from .adaptive import EvidenceCandidate, EvidenceDecision, EvidenceId, FollowupQuery, evidence_payload_bytes
 from .adaptive_graph import merge_groups
 
@@ -107,13 +113,30 @@ class StructuredEvidenceAssessment(BaseModel):
 
 
 def _facts(candidates: tuple[EvidenceCandidate, ...]) -> dict[tuple[str, str], list[EvidenceCandidate]]:
+    """Fact candidates by (subject key, predicate key).
+
+    Subjects and predicates are compared by entity identity, the rule the
+    ledger stores subjects under; the same claim spelled 'Acme Robotics' as an
+    object and 'acme robotics' as a subject is one hop, not a dead end.
+    """
     index: dict[tuple[str, str], list[EvidenceCandidate]] = {}
     for candidate in candidates:
         if (candidate.id.startswith("fact:") and candidate.subject is not None and candidate.subject.strip()
                 and candidate.predicate is not None and candidate.predicate.strip()
                 and candidate.object is not None and candidate.object.strip()):
-            index.setdefault((candidate.subject, candidate.predicate), []).append(candidate)
+            index.setdefault((entity_key(candidate.subject), entity_key(candidate.predicate)), []).append(candidate)
     return index
+
+
+def _next(index: dict[tuple[str, str], list[EvidenceCandidate]], name: str,
+          predicate: str) -> list[EvidenceCandidate]:
+    """Facts whose subject the name reaches under the join rule."""
+    return [candidate for candidate in index.get((entity_key(name), entity_key(predicate)), [])
+            if candidate.subject is not None and join_match(name, candidate.subject) is not None]
+
+
+def _names(value: str | None, target: str | None) -> bool:
+    return value is not None and target is not None and join_match(value, target) is not None
 
 
 @dataclass
@@ -151,23 +174,24 @@ def _path(requirement: EvidenceRequirement, index: dict[tuple[str, str], list[Ev
     if requirement.subject is None:
         raise ValueError("a path requires an explicit subject")
     pending: deque[tuple[str, tuple[EvidenceCandidate, ...], frozenset[str]]] = deque([
-        (requirement.subject, (), frozenset((requirement.subject,)))])
+        (requirement.subject, (), frozenset((entity_key(requirement.subject),)))])
     while pending:
         subject, path, visited = pending.popleft()
         if len(path) >= requirement.max_hops:
             continue
-        for candidate in index.get((subject, requirement.predicate), []):
+        for candidate in (index.get((entity_key(subject), entity_key(requirement.predicate)), []) if not path
+                          else _next(index, subject, requirement.predicate)):
             if remaining == 0:
                 return (), remaining, True
             remaining -= 1
             target = candidate.object
-            if target is None or target in visited:
+            if target is None or entity_key(target) in visited:
                 continue
             extended = (*path, candidate)
-            if target == requirement.object:
+            if _names(target, requirement.object):
                 return extended, remaining, False
             bridge.consider(extended, requirement.max_hops)
-            pending.append((target, extended, visited | {target}))
+            pending.append((target, extended, visited | {entity_key(target)}))
     return (), remaining, False
 
 
@@ -176,31 +200,32 @@ def _reachable_fact(requirement: EvidenceRequirement, index: dict[tuple[str, str
     if requirement.subject is None:
         raise ValueError("a reachable fact requires an explicit subject")
     pending: deque[tuple[str, tuple[EvidenceCandidate, ...]]] = deque([(requirement.subject, ())])
-    visited = {requirement.subject}
+    visited = {entity_key(requirement.subject)}
     witnesses: dict[str, EvidenceCandidate] = {}
     while pending:
         subject, path = pending.popleft()
         if path:
-            for candidate in index.get((subject, requirement.predicate), []):
+            for candidate in _next(index, subject, requirement.predicate):
                 if remaining == 0:
                     return tuple(witnesses.values()), remaining, True
                 remaining -= 1
-                if requirement.object is None or candidate.object == requirement.object:
+                if requirement.object is None or _names(candidate.object, requirement.object):
                     witnesses.update((row.id, row) for row in (*path, candidate))
         # Reserve one hop for the requested final fact. A matching attribute
         # does not stop traversal: another reachable subject may have a value.
         if len(path) + 1 >= requirement.max_hops:
             continue
         for predicate in requirement.via:
-            for candidate in index.get((subject, predicate), []):
+            for candidate in (index.get((entity_key(subject), entity_key(predicate)), []) if not path
+                              else _next(index, subject, predicate)):
                 if remaining == 0:
                     return tuple(witnesses.values()), remaining, True
                 remaining -= 1
                 target = candidate.object
-                if target is not None and target not in visited:
+                if target is not None and entity_key(target) not in visited:
                     # BFS gives each entity one shortest witness. Merged routes
                     # and cycles cannot multiply downstream expansion work.
-                    visited.add(target)
+                    visited.add(entity_key(target))
                     extended = (*path, candidate)
                     bridge.consider(extended, requirement.max_hops)
                     pending.append((target, extended))
@@ -276,11 +301,12 @@ class StructuredEvidenceAssessor:
             before, exhausted = remaining, False
             bridge = _Bridge()
             if requirement.kind == "fact":
-                observations = (index.get((requirement.subject, requirement.predicate), [])
+                observations = (_next(index, requirement.subject, requirement.predicate)
                     if requirement.subject is not None else [row for (_, predicate), rows in index.items()
-                        if predicate == requirement.predicate for row in rows if row.object == requirement.object])
+                        if predicate == entity_key(requirement.predicate) for row in rows
+                        if _names(row.object, requirement.object)])
                 witnesses = tuple(row for row in observations
-                                  if requirement.object is None or row.object == requirement.object)
+                                  if requirement.object is None or _names(row.object, requirement.object))
             elif requirement.kind == "path":
                 witnesses, remaining, exhausted = _path(requirement, index, remaining, bridge)
                 uncertain = uncertain or exhausted
@@ -302,7 +328,7 @@ class StructuredEvidenceAssessor:
             row_selected: dict[str, None] = {}
             for route in (witnesses,) if witnesses else bridges:
                 ids = tuple(dict.fromkeys(row.id for witness in route
-                    for row in index[(witness.subject or "", witness.predicate or "")]))
+                    for row in index[(entity_key(witness.subject or ""), entity_key(witness.predicate or ""))]))
                 row_selected.update((identifier, None) for identifier in ids)
                 if len(ids) > 1:
                     groups.append(ids)

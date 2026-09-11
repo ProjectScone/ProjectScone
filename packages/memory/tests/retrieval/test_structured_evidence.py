@@ -137,9 +137,17 @@ async def test_forged_candidates_are_revalidated_and_never_repaired():
         await assessor(path()).assess('bound question', (CHAIN[0].model_copy(update={'id':'fact:0'}),))
 
 
-async def test_identity_matching_is_exact_not_normalized():
-    result = await assessor(EvidenceRequirement(kind='fact', subject='ASTER', predicate='depends on')).assess('bound question', CHAIN)
-    assert result.status == 'insufficient'
+async def test_identity_matching_follows_the_ledgers_rule_not_resemblance():
+    # The ledger stores 'ASTER' and 'aster' as one subject, so a requirement
+    # spelled either way finds it. A different spelling is still a different
+    # name, and a value whose case carries meaning is never folded.
+    folded = await assessor(EvidenceRequirement(kind='fact', subject='ASTER', predicate='depends on')).assess('bound question', CHAIN)
+    assert folded.status == 'sufficient' and folded.selected_ids == ('fact:1',)
+    other = await assessor(EvidenceRequirement(kind='fact', subject='asters', predicate='depends on')).assess('bound question', CHAIN)
+    assert other.status == 'insufficient'
+    units = (fact(1, 'disk', 'unit', 'MB'),)
+    value = await assessor(EvidenceRequirement(kind='fact', subject='disk', predicate='unit', object='mb')).assess('bound question', units)
+    assert value.status == 'insufficient'
 
 
 @pytest.mark.parametrize('requirements', [(), [path()], (path(), path()), (path(),) * 9])
