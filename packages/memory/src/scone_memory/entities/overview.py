@@ -17,15 +17,15 @@ size, and says so.
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from ..core.timeutil import parse_rfc3339
 from ..retrieval.lexical import STOPWORDS
-from .analysis import GraphAnalysis, analyze_projection
+from .analysis import cached_analysis
 from .context import MAX_QUESTION, _cited, _Evidence, _fit, _reasons, mentioned, one_line
-from .project import EntityProjection, Relation
+from .project import Relation
 from .query import name_words
 from .read import load_projection, read_record
 
@@ -39,10 +39,6 @@ CENTRAL_SHOWN = 5
 MAX_BYTES, MIN_BYTES, MAX_BYTES_LIMIT = 8_000, 512, 64_000
 #: Facts read again before they are cited.
 MAX_REREADS = 256
-#: Analyses kept by projection digest and resolution; each is the same for
-#: an unchanged graph, and the work grows with it.
-_KEPT = 8
-_ANALYSES: OrderedDict[tuple[str, float], GraphAnalysis] = OrderedDict()
 
 
 class OverviewError(ValueError):
@@ -62,18 +58,6 @@ class Overview:
                 "filters": {"status": status, "as_of": as_of, "question": question},
                 "status": self.status, "communities": list(self.communities), "text": self.text,
                 "coverage": self.coverage}
-
-
-def analysis_of(projection: EntityProjection, resolution: float) -> GraphAnalysis:
-    """The projection's analysis, computed once per digest and resolution."""
-    key = (projection.digest, resolution)
-    if key in _ANALYSES:
-        _ANALYSES.move_to_end(key)
-        return _ANALYSES[key]
-    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution)
-    while len(_ANALYSES) > _KEPT:
-        _ANALYSES.popitem(last=False)
-    return found
 
 
 def _check(question: str | None, limit: int, facts_each: int, resolution: float, max_bytes: int) -> None:
@@ -102,7 +86,7 @@ async def graph_overview(engine: "MemoryEngine", space: str, *, question: str | 
     projection, read = await load_projection(engine, space, mode=status, as_of=when)
     _complete, read_answer = read_record(read)
     reasons = _reasons(read)
-    analysis = analysis_of(projection, float(resolution))
+    analysis = cached_analysis(projection, float(resolution))
     reasons += [reason for reason in analysis.coverage.reasons if reason not in reasons]
     entities = {entity.entity_id: entity for entity in projection.entities}
     header = [f"overview: space {one_line(space)}, {status} facts as of {when}, "
@@ -145,18 +129,26 @@ async def graph_overview(engine: "MemoryEngine", space: str, *, question: str | 
                         key=lambda r: (-(r.subject_id in central or r.object_id in central), -r.support.quoted,
                                        -len(r.fact_ids), r.relation_id))[:facts_each]
         await evidence.fetch([fact_id for relation in chosen for fact_id in sorted(relation.fact_ids, reverse=True)])
+        # One fact cited for each relation shown, and at most ``facts_each``
+        # for the community: the one with a quote that still verifies, else
+        # the newest; how many more stand behind it is said.
         fact_lines, cited = [], []
         for relation in chosen:
             kept = [fact_id for fact_id in relation.fact_ids if evidence.holds(fact_id) is not False]
             if not kept:
                 stale += 1
                 continue
-            unverified += any(evidence.holds(fact_id) is None for fact_id in kept)
-            quote = next((q for fact_id in kept if evidence.holds(fact_id) and (q := evidence.quote(fact_id))), None)
-            cited += kept
+            quoted = [fact_id for fact_id in kept if evidence.holds(fact_id) and evidence.quote(fact_id)]
+            best = max(quoted) if quoted else max(kept)
+            unverified += evidence.holds(best) is None
+            quote = evidence.quote(best)
+            more = len(kept) - 1
+            cited.append(best)
             fact_lines.append(f"  fact: {one_line(entities[relation.subject_id].label)} "
                               f"{one_line(relation.predicate, 60)} {one_line(entities[relation.object_id].label)} "
-                              f"[{_cited(kept)}" + (f'; quote verified: "{one_line(quote)}"' if quote else "") + "]")
+                              f"[{_cited([best])}" + (f'; quote verified: "{one_line(quote)}"' if quote else "")
+                              + (f"; {more} more behind it" if more else "") + "]")
+        total = sum(len(relation.fact_ids) for relation in inside[community.community_id])
         kinds = ", ".join(f"{count} {one_line(kind, 40)}" for kind, count in community.kinds[:4])
         made_of = ", ".join(f"{one_line(predicate, 60)} {count}" for predicate, count in community.predicates[:4])
         why = f'; matched {", ".join(chr(34) + one_line(term, 60) + chr(34) for term in names + words)}' \
@@ -165,7 +157,7 @@ async def graph_overview(engine: "MemoryEngine", space: str, *, question: str | 
                     f"entities: {kinds or 'no kinds'}; "
                     + (f"cohesion {community.cohesion:.2f}; " if community.cohesion is not None else "")
                     + f"mostly {made_of or 'no predicates'}; {community.boundary_links} links to other communities"
-                    + why)
+                    + why + f"; {len(cited)} of {total} facts shown")
         body.append("  central: " + ", ".join(
             f"{one_line(entities[member].label)} ({entities[member].kind or 'unknown kind'}) {member}"
             for member in community.top_entities[:CENTRAL_SHOWN]))
@@ -173,7 +165,7 @@ async def graph_overview(engine: "MemoryEngine", space: str, *, question: str | 
         records.append({"id": community.community_id, "label": community.label, "size": len(community.members),
                         "central": list(community.top_entities[:CENTRAL_SHOWN]), "matched": names + words,
                         "kinds": [list(item) for item in community.kinds], "boundary_links": community.boundary_links,
-                        "fact_ids": sorted(set(cited))})
+                        "fact_ids": sorted(cited), "facts_total": total})
     if stale:
         reasons.append(f"stale_evidence {stale}")
     if unverified:

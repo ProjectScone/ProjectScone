@@ -75,12 +75,12 @@ async def test_an_entity_the_question_names_outweighs_a_word_it_shares():
 
 
 async def test_an_unchanged_graph_is_analysed_once(monkeypatch):
-    from scone_memory.entities import overview as overview_module
+    from scone_memory.entities import analysis as analysis_module
 
     calls = []
-    real = overview_module.analyze_projection
-    monkeypatch.setattr(overview_module, "analyze_projection", lambda *a, **k: calls.append(1) or real(*a, **k))
-    monkeypatch.setattr(overview_module, "_ANALYSES", type(overview_module._ANALYSES)())
+    real = analysis_module.analyze_projection
+    monkeypatch.setattr(analysis_module, "analyze_projection", lambda *a, **k: calls.append(1) or real(*a, **k))
+    monkeypatch.setattr(analysis_module, "_ANALYSES", type(analysis_module._ANALYSES)())
     engine = await seeded()
     await graph_overview(engine, "alpha")
     await graph_overview(engine, "alpha", question="who works at acme robotics?")
@@ -167,3 +167,36 @@ async def test_bounds_are_refused_before_anything_is_read(options, message):
     engine = await seeded()
     with pytest.raises(OverviewError, match=message):
         await graph_overview(engine, "alpha", **options)
+
+
+async def test_facts_each_caps_the_facts_cited_and_says_how_many_there_are():
+    """Alice worked at Acme, Globex, Acme, Globex and Acme again: one
+    relation stands on three facts. Asked for one fact per community, one
+    is cited, and the line says how many more stand behind it."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for year, firm in ((2020, "Acme"), (2021, "Globex"), (2022, "Acme"), (2023, "Globex"), (2024, "Acme")):
+        await engine.assert_fact("alpha", "alice chen", "works_at", firm, valid_from=f"{year}-01-01T00:00:00Z")
+    overview = await graph_overview(engine, "alpha", status="history", facts_each=1)
+    [community] = overview.communities
+    assert community["fact_ids"] == [5] and community["facts_total"] == 5
+    [line] = lines(overview.text, "community: ")
+    assert line.endswith("; 1 of 5 facts shown")
+    assert lines(overview.text, "  fact: ") == ["  fact: alice chen works_at Acme [fact 5; 2 more behind it]"]
+    none = await graph_overview(engine, "alpha", status="history", facts_each=0)
+    assert none.communities[0]["fact_ids"] == [] and lines(none.text, "community: ")[0].endswith("; 0 of 5 facts shown")
+
+
+async def test_the_fact_cited_for_a_relation_is_one_whose_quote_still_verifies():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    note = await engine.remember("alpha", "Alice Chen joined Acme in 2020.")
+    quoted = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme", valid_from="2020-01-01T00:00:00Z",
+                                      source_episode_id=note.episode_id, quote="Alice Chen joined Acme")
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Globex", valid_from="2021-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme", valid_from="2022-01-01T00:00:00Z")
+    overview = await graph_overview(engine, "alpha", status="history", facts_each=1)
+    assert overview.communities[0]["fact_ids"] == [quoted.fact_id]
+    assert lines(overview.text, "  fact: ") == [
+        f'  fact: alice chen works_at Acme [fact {quoted.fact_id}; quote verified: "Alice Chen joined Acme"; '
+        "1 more behind it]"]

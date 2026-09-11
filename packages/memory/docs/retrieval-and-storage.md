@@ -706,7 +706,7 @@ traceable to a fact, and the caller's model reads the digests.
 | --- | --- | --- |
 | `q` | none | A question (1–2,000 characters); the communities it concerns come first |
 | `limit` | 12 (1–50) | Communities digested; more are counted as `communities_cut N` |
-| `facts` | 3 (0–10) | Facts cited for each community |
+| `facts` | 3 (0–10) | Facts cited for each community, at most |
 | `resolution` | 1 (above 0, at most 10) | How fine the communities are, as for the report |
 | `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
 | `status`, `as_of` | `current`, now | Which facts count, and when |
@@ -714,10 +714,14 @@ traceable to a fact, and the caller's model reads the digests.
 - **Each community** says its size and kinds, its most used predicates,
   its cohesion, how many links leave it, and its five most central
   entities.
-- **Its facts** are its own relations: those touching a central entity
-  first, then those with a quote behind them, then the best supported.
-  Each is re-read before it is cited, and one that stopped counting is
-  left out and counted as `stale_evidence`.
+- **Its facts** come from its own relations: those touching a central
+  entity first, then those with a quote behind them, then the best
+  supported. Each relation shown cites one fact: the newest whose quote
+  still verifies, else the newest. The line says how many more stand
+  behind the relation, and the community how many of its facts were shown
+  (`facts_total`), so `facts` caps what is cited, not what is known. Each
+  is re-read before it is cited, and a relation whose facts all stopped
+  counting is left out and counted as `stale_evidence`.
 - **A question** ranks a community by the entities it names in it (three
   times) and the words it shares with the community's names, kinds and
   predicates. Each community says what it `matched`. A question that

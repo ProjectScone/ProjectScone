@@ -16,7 +16,7 @@ merely share a label. Weights are the number of facts behind each pair.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import hashlib
 from typing import Literal
@@ -275,6 +275,24 @@ def _betweenness(graph: Adjacency) -> tuple[dict[str, float], str]:
 
 def _community_id(members: list[str]) -> str:
     return "com:" + hashlib.sha256("\x1f".join(members).encode("utf-8")).hexdigest()[:16]
+
+
+#: Analyses kept by projection digest and resolution: one is the same for an
+#: unchanged graph, and the work grows with the graph.
+_KEPT = 8
+_ANALYSES: OrderedDict[tuple[str, float], GraphAnalysis] = OrderedDict()
+
+
+def cached_analysis(projection: EntityProjection, resolution: float = 1.0) -> GraphAnalysis:
+    """The projection's analysis, computed once per digest and resolution."""
+    key = (projection.digest, float(resolution))
+    if key in _ANALYSES:
+        _ANALYSES.move_to_end(key)
+        return _ANALYSES[key]
+    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution)
+    while len(_ANALYSES) > _KEPT:
+        _ANALYSES.popitem(last=False)
+    return found
 
 
 def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_000,
