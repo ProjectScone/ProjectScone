@@ -40,6 +40,7 @@ from functools import partial
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from ..core.errors import SconeError
 from ..core.models import Fact
 from ..core.timeutil import parse_rfc3339
 from .project import EntityProjection, project_entities
@@ -59,14 +60,23 @@ MAX_VIEWS_PER_SPACE = 16
 BUILD_TIMEOUT = 5.0
 #: Views over more facts than this are projected off the event loop.
 INLINE_FACTS = 2_000
-#: Builds in flight at once, waiting or running. A request past it is told
-#: to come back and starts nothing.
+#: Build jobs (ledger reads and projections) running at once. A request
+#: that needs a new job past it is told to come back (with a budget) or
+#: waits for a slot (without); one joining a job in flight, or finding its
+#: view built, takes no slot.
 MAX_BUILDS = 8
 #: Worker threads projecting at once, per engine.
 WORKERS = 2
 
 
-class ProjectionBuilding(Exception):
+class EntityServiceClosed(SconeError):
+    """The engine is closing or closed; no projection is built or kept."""
+
+    def __init__(self) -> None:
+        super().__init__("the engine is closed; no entity projection can be built")
+
+
+class ProjectionBuilding(SconeError):
     """The projection is still being built; the request should come back."""
 
     def __init__(self, space: str) -> None:
@@ -116,6 +126,9 @@ class EntityService:
         self._background: set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]] = set()
         self._executor: ThreadPoolExecutor | None = None
         self._workers: set[Future[EntityProjection]] = set()
+        #: Set when closing begins; from then on nothing is built or kept.
+        self._closed = False
+        self._slots: asyncio.Semaphore | None = None
 
     def cached(self, space: str) -> EntityProjection | None:
         """The most recently used view held for the space, of any revision,
@@ -141,7 +154,10 @@ class EntityService:
 
     async def aclose(self) -> None:
         """Cancel every build and return only once no worker thread is still
-        projecting: a running thread cannot be cancelled, so it is waited for."""
+        projecting: a running thread cannot be cancelled, so it is waited for.
+        From the moment closing begins no request is admitted, and every one
+        in flight is cancelled, so nothing is started or kept afterwards."""
+        self._closed = True
         self.clear()
         executor, self._executor = self._executor, None
         if executor is None:
@@ -163,9 +179,9 @@ class EntityService:
         build continues in the background and ``ProjectionBuilding`` is raised;
         with ``MAX_BUILDS`` already in flight, it is raised at once and nothing
         starts."""
-        if timeout is not None and len(self.building()) >= MAX_BUILDS:
-            raise ProjectionBuilding(space)
-        task = asyncio.ensure_future(self._view(space, mode, when))
+        if self._closed:
+            raise EntityServiceClosed()
+        task = asyncio.ensure_future(self._view(space, mode, when, timed=timeout is not None))
         self._background.add(task)
         task.add_done_callback(self._settled)
         if timeout is None:
@@ -195,11 +211,30 @@ class EntityService:
         worker.add_done_callback(self._workers.discard)
         return await asyncio.wrap_future(worker), len(facts)
 
-    async def _view(self, space: str, mode: "StatusMode",
-                    when: datetime) -> tuple[EntityProjection, dict[str, object]]:
+    async def _admit(self, space: str, timed: bool) -> None:
+        """Take a slot for a new build job: at once or not at all when the
+        caller has a budget, waiting for one when it has none."""
+        if self._slots is None:
+            self._slots = asyncio.Semaphore(MAX_BUILDS)
+        if timed and self._slots.locked():
+            raise ProjectionBuilding(space)
+        await self._slots.acquire()
+
+    def _free(self) -> None:
+        if self._slots is not None:
+            self._slots.release()
+
+    async def _admitted(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
+        try:
+            return await self._project(space, facts, revision)
+        finally:
+            self._free()
+
+    async def _view(self, space: str, mode: "StatusMode", when: datetime,
+                    timed: bool = False) -> tuple[EntityProjection, dict[str, object]]:
         from .view import counts
 
-        held = await self._ledger(space)
+        held = await self._ledger(space, timed)
         key = held.key(mode, when)
         found = held.views.get(key)
         if found is None:
@@ -208,9 +243,14 @@ class EntityService:
             if pending is None:
                 facts = [fact for fact in held.ledger.facts
                          if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
-                pending = asyncio.ensure_future(self._project(space, facts, held.ledger.revision))
-                self._projecting[slot] = pending
-                pending.add_done_callback(partial(self._projected, slot))
+                await self._admit(space, timed)
+                pending = self._projecting.get(slot)  # another request may have started it meanwhile
+                if pending is not None:
+                    self._free()
+                else:
+                    pending = asyncio.ensure_future(self._admitted(space, facts, held.ledger.revision))
+                    self._projecting[slot] = pending
+                    pending.add_done_callback(partial(self._projected, slot))
             found = await asyncio.shield(pending)
             if self._held.get(space) is held and key not in held.views:
                 held.views[key] = found
@@ -223,7 +263,7 @@ class EntityService:
                             "facts_limit": held.ledger.limit,
                             "reasons": list(held.ledger.reasons), "read_mode": held.ledger.read_mode}
 
-    async def _ledger(self, space: str) -> _Held:
+    async def _ledger(self, space: str, timed: bool = False) -> _Held:
         held = self._current(space, await self._engine.revision(space))
         if held is not None:
             return held
@@ -232,7 +272,11 @@ class EntityService:
             held = self._current(space, await self._engine.revision(space))
             if held is not None:
                 return held
-            ledger = await read_ledger(self._engine, space)
+            await self._admit(space, timed)
+            try:
+                ledger = await read_ledger(self._engine, space)
+            finally:
+                self._free()
             digest = _ledger_digest(ledger.facts)
             if previous is not None and previous.digest == digest:
                 views = OrderedDict((key, (replace(projection, revision=ledger.revision), counted))

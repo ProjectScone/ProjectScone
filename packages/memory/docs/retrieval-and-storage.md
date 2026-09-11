@@ -446,12 +446,16 @@ build continues in the background, and the request gets a 503 with
 `Retry-After: 1` and `{"code": "projection_building"}`. The next request
 finds the view ready.
 
-- **Bounded:** at most 8 builds are in flight at once. A request past
-  that gets the same 503 immediately and starts nothing.
+- **Bounded:** at most 8 build jobs (ledger reads and projections) run
+  at once. A request that needs a new job past that gets the same 503
+  immediately and starts nothing. A library call without a budget waits
+  for a slot instead. A request whose view is built, or is being built,
+  takes no slot.
 - **Workers:** large views are projected on two worker threads per
   engine.
-- **Closing** the engine cancels waiting builds, and returns only once no
-  worker thread is still projecting.
+- **Closing** the engine admits nothing more, cancels every request in
+  flight, and returns only once no worker thread is still projecting.
+  Nothing built afterwards reaches the cache.
 - **Failures:** a store that fails (its own read timing out, say) gives
   its own error, never a 503.
 

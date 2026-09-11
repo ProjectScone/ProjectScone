@@ -129,17 +129,38 @@ async def test_a_store_that_times_out_is_a_failure_not_a_build_in_progress():
     assert not engine.entities.building()
 
 
-async def test_builds_past_the_admission_limit_are_turned_away_without_starting(monkeypatch):
-    """A flood of distinct views must not start a build each: past the limit
-    a request is told to come back, and no work begins for it."""
+async def test_admission_counts_build_jobs_not_the_requests_waiting_on_them(monkeypatch):
+    """Past MAX_BUILDS jobs, a new view waits (library call) or is turned away
+    at once (request with a budget); a view already built is still served,
+    and requests joining a build in flight take no slot of their own."""
+    from datetime import timedelta
+
     monkeypatch.setattr(service_module, "MAX_BUILDS", 2)
-    store = Slow()
-    engine = await engine_with(store)
-    store.delay = 0.5
-    for mode in ("current", "history", "all", "proposed"):
-        with pytest.raises(ProjectionBuilding):
-            await engine.entities.projection("alpha", mode=mode, when=WHEN, timeout=0.01)
-    assert len(engine.entities.building()) == 2
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for day in range(1, 7):
+        await engine.assert_fact("alpha", f"person {day}", "knows", "Bob", valid_from=f"2025-01-0{day}T00:00:00Z")
+    engine.entities = gated = Gated(engine)
+    gated.release.set()
+    warm, _ = await gated.projection("alpha", mode="all", when=WHEN)
+    gated.release.clear()
+    windows = [parse_rfc3339(f"2025-01-0{day}T12:00:00Z") for day in range(1, 6)]
+    untimed = [asyncio.ensure_future(gated.projection("alpha", mode="current", when=when)) for when in windows]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(gated._projecting) == 2
+    joiners = await asyncio.gather(*(gated.projection("alpha", mode="current", when=windows[0], timeout=0.01)
+                                     for _ in range(8)), return_exceptions=True)
+    assert all(isinstance(outcome, ProjectionBuilding) for outcome in joiners) and len(gated._projecting) == 2
+    waiting = len(gated.building())
+    with pytest.raises(ProjectionBuilding):
+        await gated.projection("alpha", mode="current", when=windows[0] + timedelta(days=5), timeout=0.01)
+    await asyncio.sleep(0)
+    assert len(gated.building()) == waiting  # turned away, not left queued to start later
+    served, _ = await gated.projection("alpha", mode="all", when=WHEN, timeout=0.01)
+    assert served is warm
+    gated.release.set()
+    done = await asyncio.gather(*untimed)
+    assert [len(projection.roles) for projection, _ in done] == [1, 2, 3, 4, 5]
     await engine.close()
 
 
@@ -164,3 +185,37 @@ async def test_closing_waits_for_a_worker_thread_still_projecting(monkeypatch):
         await engine.entities.projection("alpha", mode="current", when=WHEN, timeout=0.01)
     await engine.close()
     assert finished == [True]
+
+
+async def test_nothing_is_admitted_or_kept_once_closing_begins(monkeypatch):
+    """While close waits for a worker, a new request must not start another
+    worker (or a new pool), and nothing built may land in the cache after."""
+    from scone_memory.entities.service import EntityServiceClosed
+
+    entered = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    real = service_module.project_entities
+
+    def gated(*args, **kwargs):
+        entered[1 if entered[0].is_set() else 0].set()
+        release.wait(3)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service_module, "INLINE_FACTS", 0)
+    monkeypatch.setattr(service_module, "project_entities", gated)
+    engine = await engine_with(Slow())
+    try:
+        with pytest.raises(ProjectionBuilding):
+            await engine.entities.projection("alpha", mode="all", when=WHEN, timeout=0.01)
+        await asyncio.to_thread(entered[0].wait, 1)
+        closing = asyncio.ensure_future(engine.close())
+        await asyncio.sleep(0.02)
+        assert not closing.done()
+        with pytest.raises(EntityServiceClosed):
+            await engine.entities.projection("alpha", mode="current", when=WHEN, timeout=0.01)
+        release.set()
+        await asyncio.wait_for(closing, 2)
+        await asyncio.sleep(0.02)
+        assert not entered[1].is_set() and engine.entities.cached("alpha") is None and not engine.entities.building()
+    finally:
+        release.set()
