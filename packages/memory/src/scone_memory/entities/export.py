@@ -215,8 +215,10 @@ def _held(projection: EntityProjection) -> dict[str, list[Span]]:
 def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     """A dynamic graph: each node and edge carries one ``spell`` per
     stretch it held, so a relation that lapsed and resumed is absent in
-    between. An end is exclusive (``endopen``), as ``valid_until`` is, so
-    at a switch the old edge is gone when the new one appears. Like
+    between. An end is exclusive, as ``valid_until`` is, and GEXF writes
+    an exclusive end as ``endopen`` holding the instant (instead of
+    ``end``), so at a switch the old edge is gone when the new one
+    appears. Like
     GraphML, entities and values are both
     nodes (``type``), a value hangs off its entity by an edge (``link``),
     and text XML cannot hold is shown with a stand-in beside an ``exact``
@@ -256,8 +258,8 @@ def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
                                                            "value": json.dumps(exact, sort_keys=True)})
         stretches = ElementTree.SubElement(element, "spells")
         for start, end in spells:
-            ElementTree.SubElement(stretches, "spell", {"start": start, **({"end": end, "endopen": "true"}
-                                                                         if end is not None else {})})
+            # GEXF's endopen is the exclusive end itself, never beside an end.
+            ElementTree.SubElement(stretches, "spell", {"start": start, **({"endopen": end} if end is not None else {})})
 
     nodes, edges = ElementTree.SubElement(graph, "nodes"), ElementTree.SubElement(graph, "edges")
     for entity in projection.entities:

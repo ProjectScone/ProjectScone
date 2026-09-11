@@ -632,8 +632,9 @@ How each format places values and escapes its own syntax:
 - **GEXF** is a dynamic graph (`mode="dynamic"`, `timeformat="dateTime"`).
   Each node and edge carries one `spell` per stretch its facts held, so
   a relation that lapsed and resumed is absent in between, not drawn
-  across the gap. Every end is exclusive (`endopen="true"`), as
-  `valid_until` is. A stretch still holding has no end. On Gephi's
+  across the gap. Every end is exclusive, as `valid_until` is, so it is
+  written as GEXF's `endopen`, which holds the instant itself and never
+  appears beside an `end`. A stretch still holding has no end. On Gephi's
   timeline, a person who changed employer keeps their node, and the old
   employer's edge is gone at the moment the new one appears. Nodes, values and
   escaping are laid out as in GraphML, and the file's description holds
