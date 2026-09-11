@@ -32,13 +32,15 @@ _ATTEMPTS = 3
 
 
 class TimelineEntityAmbiguous(Exception):
-    def __init__(self, candidates: list[dict[str, str]], total: int) -> None:
+    def __init__(self, candidates: list[dict[str, str]], total: int, read: dict[str, object]) -> None:
         super().__init__("the name could mean several entities")
-        self.candidates, self.total = candidates, total
+        self.candidates, self.total, self.read = candidates, total, read
 
 
 class TimelineEntityMissing(Exception):
-    pass
+    def __init__(self, name: str, read: dict[str, object]) -> None:
+        super().__init__(name)
+        self.read = read
 
 
 def _role(role: FactRole, entity_id: str) -> Literal["subject", "object", "value"]:
@@ -53,9 +55,9 @@ async def _once(engine: "MemoryEngine", space: str, name: str, *, when: str,
     found = resolve(projection, name, limit=20)
     if found.status == "ambiguous":
         raise TimelineEntityAmbiguous([{"id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates],
-                                      found.total)
+                                      found.total, read)
     if found.status == "not_found":
-        raise TimelineEntityMissing(name)
+        raise TimelineEntityMissing(name, read)
     entity_id = found.candidates[0].entity_id
     entities = {entity.entity_id: entity for entity in projection.entities}
     roles = [role for role in projection.roles if entity_id in (role.subject_id, role.object_id)]

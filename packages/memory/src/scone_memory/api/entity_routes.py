@@ -346,12 +346,17 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         try:
             return await timeline_view(engine, space, entity, as_of=when, limit=limit)
         except TimelineEntityAmbiguous as ambiguous:
+            complete, read = _read(ambiguous.read)
             return JSONResponse(status_code=409, content={
                 "error": f"{entity!r} could mean several entities", "name": entity,
                 "candidates": ambiguous.candidates, "candidates_total": ambiguous.total,
-                "truncated": ambiguous.total > len(ambiguous.candidates)})
-        except TimelineEntityMissing:
-            raise NotFound(f"no entity is named {entity!r}") from None
+                "truncated": ambiguous.total > len(ambiguous.candidates) or not complete,
+                "complete": complete, "coverage": read})
+        except TimelineEntityMissing as missing:
+            complete, read = _read(missing.read)
+            where = "" if complete else " in the facts read; the read was capped, so it may exist"
+            return JSONResponse(status_code=404, content={"error": f"no entity is named {entity!r}{where}",
+                                                          "name": entity, "complete": complete, "coverage": read})
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(

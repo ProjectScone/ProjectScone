@@ -136,3 +136,20 @@ async def test_each_item_names_the_source_it_rests_on():
     view = await timeline_view(engine, "alpha", "alice chen")
     sources = {item["fact_id"]: item["source_episode_id"] for item in view["items"]}
     assert sources == {moved.fact_id: note.episode_id, stated.fact_id: None}
+
+
+async def test_a_capped_read_never_calls_a_name_missing_or_its_candidates_complete(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for number in range(3):
+        await engine.assert_fact("alpha", f"alice {number}", "knows", "bob", valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        missing = client.get("/v1/graph/timeline", params={"entity": "alice 0"}, headers=auth())
+        ambiguous = client.get("/v1/graph/timeline", params={"entity": "alice"}, headers=auth())
+    assert missing.status_code == 404 and missing.json()["complete"] is False
+    assert missing.json()["coverage"]["reasons"] == ["fact_limit"] and "capped" in missing.json()["error"]
+    assert ambiguous.status_code == 409 and ambiguous.json()["complete"] is False
+    assert ambiguous.json()["coverage"]["truncated"] is True
