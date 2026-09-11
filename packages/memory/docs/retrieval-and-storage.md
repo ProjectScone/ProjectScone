@@ -416,7 +416,14 @@ One source followed through (`episode=`, an episode id):
 
 Spans are byte offsets into the unchanged content, like chunk spans, so
 `content.encode()[start:end]` is exactly the quote even after non-ASCII
-text. Caps are reported as `chunk_limit` and `claim_limit`. A store that
+text. `episode.content_sha256` is the SHA-256 of that exact UTF-8
+content, so a client can check that the bytes it shows are the bytes the
+spans point into. The episode, chunks, claims and projection are read
+between two matching revisions, and the view reads again if the space
+moved. `consistent` says whether a still read was reached. Caps are
+reported as `chunk_limit` and `claim_limit`, and the projection read's
+own caps (`fact_limit`, `store_read_cap_reached`) appear in the same
+`coverage.reasons`. A store that
 cannot list a source's claims says `claims_unavailable`. A missing
 episode is a 404 and a forgotten one a 410, as for the episode itself.
 Advertised as `graph.sources`.

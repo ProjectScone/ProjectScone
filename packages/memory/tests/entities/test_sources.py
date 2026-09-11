@@ -108,3 +108,43 @@ async def test_a_store_that_cannot_list_a_sources_claims_says_so():
     note = await engine.remember("alpha", NOTE)
     view = await sources_view(engine, "alpha", note.episode_id)
     assert view["claims"] == [] and "claims_unavailable" in view["coverage"]["reasons"]
+
+
+async def test_the_view_names_the_exact_content_it_located_spans_in(source):
+    import hashlib
+
+    engine, note, _, _ = source
+    view = await sources_view(engine, "alpha", note.episode_id)
+    assert view["episode"]["content_sha256"] == hashlib.sha256(NOTE.encode()).hexdigest()
+
+
+class WritesDuringClaims(InMemoryDocumentStore):
+    """Adds a claim citing the source just after its claims are read."""
+    engine = None
+    episode_id = None
+
+    async def facts_for_graph(self, space, source_episode_id, limit):
+        rows = await super().facts_for_graph(space, source_episode_id, limit)
+        if self.engine is not None:  # just after the claims were read: a view stopping here would miss it
+            engine, self.engine = self.engine, None
+            await engine.assert_fact(space, "rui costa", "knows", "Bruno Alves", source_episode_id=self.episode_id,
+                                     quote="Rui Costa knows Bruno Alves.", valid_from="2024-01-01T00:00:00Z")
+        return rows
+
+
+async def test_a_view_reads_again_when_the_space_moves_while_it_reads():
+    store = WritesDuringClaims()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(), chunk_target=64).open()
+    note = await engine.remember("alpha", NOTE)
+    store.engine, store.episode_id = engine, note.episode_id
+    view = await sources_view(engine, "alpha", note.episode_id)
+    assert view["consistent"] is True and [claim["predicate"] for claim in view["claims"]] == ["knows"]
+
+
+async def test_a_capped_projection_read_shows_in_the_views_coverage(source, monkeypatch):
+    from scone_memory.entities import read
+
+    engine, note, _, _ = source
+    monkeypatch.setattr(read, "MAX_FACTS", 1)
+    view = await sources_view(engine, "alpha", note.episode_id)
+    assert "fact_limit" in view["coverage"]["reasons"] and view["coverage"]["truncated"] is True

@@ -13,6 +13,7 @@ name. Chunks and claims are capped, and the caps are reported.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import TYPE_CHECKING
 
@@ -41,8 +42,30 @@ def _word_spans(content: str) -> list[tuple[str, int, int]]:
     return spans
 
 
+_ATTEMPTS = 3
+
+
 async def sources_view(engine: "MemoryEngine", space: str, episode_id: int, *, max_chunks: int = 64,
                        max_claims: int = 200) -> dict[str, object]:
+    """The view, read between two matching revisions when the space holds
+    still long enough; ``consistent`` says whether it did."""
+    view: dict[str, object] = {}
+    for _attempt in range(_ATTEMPTS):
+        before = await engine.revision(space)
+        view = await _once(engine, space, episode_id, max_chunks=max_chunks, max_claims=max_claims)
+        if await engine.revision(space) == before:
+            view["consistent"] = True
+            return view
+    view["consistent"] = False
+    coverage = view["coverage"]
+    assert isinstance(coverage, dict)
+    coverage["reasons"] = [*coverage["reasons"], "ledger_changed_during_read"]
+    coverage["truncated"] = True
+    return view
+
+
+async def _once(engine: "MemoryEngine", space: str, episode_id: int, *, max_chunks: int,
+                max_claims: int) -> dict[str, object]:
     episode = await engine.episode(space, episode_id)
     content = episode.content
     body = content.encode("utf-8")
@@ -74,6 +97,8 @@ async def sources_view(engine: "MemoryEngine", space: str, episode_id: int, *, m
         reasons.append("claim_limit")
     rows = rows[:max_claims]
     projection, read = await load_projection(engine, space, mode="all")
+    found_reasons = read.get("reasons")
+    reasons += [str(reason) for reason in found_reasons] if isinstance(found_reasons, list) else []
     roles = {role.fact_id: role for role in projection.roles}
     entities = {entity.entity_id: entity for entity in projection.entities}
     named: dict[str, list[int]] = {}
@@ -126,7 +151,8 @@ async def sources_view(engine: "MemoryEngine", space: str, episode_id: int, *, m
     return {
         "schema_version": 1, "space": space,
         "episode": {"id": episode.episode_id, "kind": episode.kind, "source": episode.source,
-                    "created_at": episode.created_at, "bytes": len(body)},
+                    "created_at": episode.created_at, "bytes": len(body),
+                    "content_sha256": hashlib.sha256(body).hexdigest()},
         "sections": sections, "chunks": shown_chunks, "claims": claims,
         "entities": [{"id": entity_id, "key": entities[entity_id].key, "label": entities[entity_id].label,
                       "kind": entities[entity_id].kind, "claims": fact_ids}
