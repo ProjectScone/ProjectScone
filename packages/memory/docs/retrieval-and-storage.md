@@ -269,8 +269,11 @@ where `coverage` counts the matches.
     `alice` finds `alice chen` but `ali` finds nothing;
   - `tokens`: a key holding every word of the name.
 
-  It returns `resolved` with one candidate, `ambiguous` with every
-  candidate (it never guesses), or `not_found`.
+  It returns `resolved` with one candidate, `ambiguous` (it never
+  guesses), or `not_found`. An ambiguous name lists the first `limit`
+  candidates by key (default 20, up to 200), with `candidates_total` and
+  `truncated` saying whether any were cut. A 409 from `path` carries the
+  same fields.
 - `/v1/entities/{id}` is an entity page: outgoing and incoming relations
   grouped by predicate, the entity's values, and every fact behind them.
   Each fact is re-read from the store, and its quote is checked against the
@@ -278,11 +281,23 @@ where `coverage` counts the matches.
   - `quote_verified`;
   - `quote_not_found`;
   - `quote_source_missing`;
+  - `quote_source_mismatch`: the store returned a source whose space or
+    id is not the one the fact names, so the quote is not checked against
+    it;
   - `source_unquoted`;
   - `stated`.
 
   At most `limit` relations are shown per direction, and `coverage` counts
   the rest. An unknown id is a 404.
+
+  The page is built from one read of the ledger and then re-reads its
+  facts. A write that lands between the two (an exclusion, say) would
+  leave the relations counting a fact that the re-read shows excluded. The
+  page compares the space's revision before its read and after its
+  re-reads, and reads again when they differ. `consistent` is true when
+  they matched. It is false only if the space changed through all three
+  attempts, and then `coverage.reasons` holds
+  `ledger_changed_during_read`.
 - `path?from=&to=` connects two entities, named or by id. It returns up to
   `limit` distinct shortest routes within `max_hops`.
   - Relations are walked in either direction, and each hop says `forward`
@@ -295,6 +310,17 @@ where `coverage` counts the matches.
     candidates, and an unknown name is a 404.
 
   Advertised as `graph.path`.
+
+A read capped at 50,000 facts (`fact_limit`), or by a store's own row
+limit, holds only part of the ledger. These routes then show what they
+found, but never claim that something is absent. Each response carries
+`complete` and the read's `coverage`:
+
+- `resolve` returns `not_found_in_read` instead of `not_found`;
+- `path` returns `not_connected_in_read` instead of `disconnected`;
+- a 404 for an unknown name or id says the read was capped;
+- an entity page adds `fact_limit` to its coverage reasons, since its
+  incoming relations may be missing.
 
 #### `GET /v1/graph/export`
 

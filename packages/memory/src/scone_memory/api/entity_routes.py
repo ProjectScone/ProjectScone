@@ -23,7 +23,7 @@ from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
-from ..entities.query import neighbourhood, paths_between, resolve
+from ..entities.query import Resolution, neighbourhood, paths_between, resolve
 from ..entities.read import load_projection
 from ..entities.report import build_report, render_markdown
 from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
@@ -205,6 +205,23 @@ def _groupings(analysis: GraphAnalysis, view: dict[str, object]) -> dict[str, ob
     }
 
 
+def _read_reasons(coverage: dict[str, object]) -> list[str]:
+    found = coverage.get("reasons")
+    return [str(reason) for reason in found] if isinstance(found, list) else []
+
+
+def _read(coverage: dict[str, object]) -> tuple[bool, dict[str, object]]:
+    """Whether the read held every fact, and its coverage for the response.
+    A capped read can show what it found, never that something is absent."""
+    reasons = _read_reasons(coverage)
+    return not reasons, {**coverage, "truncated": bool(reasons)}
+
+
+def _candidates(found: Resolution) -> dict[str, object]:
+    return {"candidates": [{"id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates],
+            "candidates_total": found.total, "truncated": found.total > len(found.candidates)}
+
+
 def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
     return {entity.entity_id: {"id": entity.entity_id, "label": entity.label, "key": entity.key}
             for entity in projection.entities}
@@ -227,7 +244,10 @@ async def _checked_facts(engine: MemoryEngine, space: str, fact_ids: list[int]) 
                 episodes[fact.source_episode_id] = await engine.documents.get_episode(space, fact.source_episode_id)
             episode = episodes[fact.source_episode_id]
             content = getattr(episode, "content", None)
-            grounding = ("quote_source_missing" if content is None
+            own = (getattr(episode, "space", None) == space
+                   and getattr(episode, "episode_id", None) == fact.source_episode_id)
+            grounding = ("quote_source_missing" if episode is None or content is None
+                         else "quote_source_mismatch" if not own
                          else "quote_verified" if fact.quote in content else "quote_not_found")
         checked.append({"fact_id": fact.fact_id, "subject": fact.subject, "predicate": fact.predicate,
                         "object": fact.object, "status": fact.status, "excluded": fact.excluded,
@@ -291,14 +311,16 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     @app.get("/v1/entities/resolve")
     async def get_resolved(
         name: str = Query(min_length=1, max_length=200), status: StatusMode = "current", as_of: Optional[str] = None,
-        space: str = Depends(space_for),
+        limit: int = Query(default=20, ge=1, le=200), space: str = Depends(space_for),
     ) -> dict[str, object]:
-        """Which entity a name or id means; every candidate when it could mean several."""
+        """Which entity a name or id means. When it could mean several, the
+        first ``limit`` candidates and how many there are; it never guesses."""
         when = _moment(engine, as_of)
-        projection, _ = await load_projection(engine, space, mode=status, as_of=when)
-        found = resolve(projection, name)
-        return {"status": found.status, "tier": found.tier,
-                "candidates": [{"id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates]}
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        complete, read = _read(coverage)
+        found = resolve(projection, name, limit=limit)
+        state = "not_found_in_read" if found.status == "not_found" and not complete else found.status
+        return {"status": state, "tier": found.tier, **_candidates(found), "complete": complete, "coverage": read}
 
     @app.get("/v1/graph/path", response_model=None)
     async def get_path(
@@ -310,20 +332,24 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         """How two entities connect: up to ``limit`` shortest routes, each hop
         with its relation's direction and the facts behind it."""
         when = _moment(engine, as_of)
-        projection, _ = await load_projection(engine, space, mode=status, as_of=when)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        complete, read = _read(coverage)
         ends = []
         for name in (from_, to):
             found = resolve(projection, name)
             if found.status == "not_found":
-                raise NotFound(f"no entity is named {name!r}")
+                where = "" if complete else " in the facts read; the read was capped, so it may exist"
+                return JSONResponse(status_code=404, content={
+                    "error": f"no entity is named {name!r}{where}", "name": name, "complete": complete, "coverage": read})
             if found.status == "ambiguous":
                 return JSONResponse(status_code=409, content={
-                    "error": f"{name!r} could mean several entities", "name": name,
-                    "candidates": [{"id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates]})
+                    "error": f"{name!r} could mean several entities", "name": name, **_candidates(found),
+                    "complete": complete, "coverage": read})
             ends.append(found.candidates[0].entity_id)
         result = paths_between(projection, ends[0], ends[1], max_hops=max_hops, limit=limit, hub_degree=hub_degree)
         names = _names(projection)
-        return {"status": result.status, "from": names[ends[0]], "to": names[ends[1]],
+        state = "not_connected_in_read" if result.status == "disconnected" and not complete else result.status
+        return {"status": state, "complete": complete, "coverage": read, "from": names[ends[0]], "to": names[ends[1]],
                 "hubs_skipped": [names[hub] for hub in result.hubs_skipped], "truncated": result.truncated,
                 "paths": [{"entities": [names[entity] for entity in path.entity_ids],
                            "hops": [{"relation_id": hop.relation_id, "subject": names[hop.subject_id],
@@ -341,40 +367,73 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         return entity_listing(projection, mode=status, as_of=when, limit=limit, query=q, coverage=coverage)
 
-    @app.get("/v1/entities/{entity_id}")
+    @app.get("/v1/entities/{entity_id}", response_model=None)
     async def get_entity(
         entity_id: str, status: StatusMode = "current", as_of: Optional[str] = None,
         limit: int = Query(default=100, ge=1, le=500), space: str = Depends(space_for),
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | JSONResponse:
         """One entity: its relations in both directions grouped by predicate, its
-        values, and every fact behind them re-read with its quote checked now."""
+        values, and every fact behind them re-read with its quote checked now.
+
+        The page is built from one read of the ledger and then re-reads its
+        facts. A write between the two would leave them disagreeing, so the
+        page is read again; ``consistent`` is false only if the space kept
+        changing through every attempt."""
         when = _moment(engine, as_of)
-        projection, _ = await load_projection(engine, space, mode=status, as_of=when)
-        found = neighbourhood(projection, entity_id, limit=limit)
-        if found is None:
-            raise NotFound(f"no entity {entity_id!r} in this view")
-        names = _names(projection)
-        roles = {role.fact_id: role for role in projection.roles}
+        for _attempt in range(_PAGE_ATTEMPTS):
+            projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+            page = await _entity_page(engine, space, projection, entity_id, status=status, when=when, limit=limit,
+                                      coverage=coverage)
+            if await engine.revision(space) == projection.revision:
+                page["consistent"] = True
+                return _page_or_missing(page, entity_id)
+        page["consistent"] = False
+        page_coverage = page["coverage"]
+        assert isinstance(page_coverage, dict)
+        page_coverage["reasons"] = [*page_coverage["reasons"], "ledger_changed_during_read"]
+        return _page_or_missing(page, entity_id)
 
-        def grouped(relations: tuple[Relation, ...], far: Literal["subject", "object"]) -> list[dict[str, object]]:
-            groups: dict[str, list[dict[str, object]]] = {}
-            for relation in relations:
-                groups.setdefault(relation.predicate, []).append({
-                    "relation_id": relation.relation_id,
-                    far: names[relation.subject_id if far == "subject" else relation.object_id],
-                    "fact_ids": list(relation.fact_ids),
-                    "support": support([roles[fact_id] for fact_id in relation.fact_ids if fact_id in roles])})
-            return [{"predicate": predicate, "relations": items} for predicate, items in groups.items()]
 
-        cited = sorted({fact_id for relation in (*found.outgoing, *found.incoming) for fact_id in relation.fact_ids}
-                       | {fact_id for attribute in found.attributes for fact_id in attribute.fact_ids})
-        return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
-                "filters": {"status": status, "as_of": when}, "entity": entity_record(found.entity, found.claims),
-                "outgoing": grouped(found.outgoing, "object"), "incoming": grouped(found.incoming, "subject"),
-                "attributes": [{"predicate": attribute.predicate, "value": attribute.value,
-                                "literal_kind": attribute.literal_kind, "fact_ids": list(attribute.fact_ids)}
-                               for attribute in found.attributes],
-                "facts": await _checked_facts(engine, space, cited),
-                "coverage": {"relations_total": found.relations_total,
-                             "relations_shown": len(found.outgoing) + len(found.incoming),
-                             "truncated": found.truncated, "reasons": ["relation_limit"] if found.truncated else []}}
+_PAGE_ATTEMPTS = 3
+
+
+def _page_or_missing(page: dict[str, object], entity_id: str) -> dict[str, object] | JSONResponse:
+    if page.get("entity") is not None:
+        return page
+    where = "" if page["complete"] else " in the facts read; the read was capped, so it may exist"
+    return JSONResponse(status_code=404, content={"error": f"no entity {entity_id!r} in this view{where}",
+                                                  "complete": page["complete"], "coverage": page["coverage"]})
+
+
+async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProjection, entity_id: str, *,
+                       status: StatusMode, when: str, limit: int, coverage: dict[str, object]) -> dict[str, object]:
+    complete, read = _read(coverage)
+    found = neighbourhood(projection, entity_id, limit=limit)
+    if found is None:
+        return {"entity": None, "complete": complete, "coverage": read}
+    names = _names(projection)
+    roles = {role.fact_id: role for role in projection.roles}
+
+    def grouped(relations: tuple[Relation, ...], far: Literal["subject", "object"]) -> list[dict[str, object]]:
+        groups: dict[str, list[dict[str, object]]] = {}
+        for relation in relations:
+            groups.setdefault(relation.predicate, []).append({
+                "relation_id": relation.relation_id,
+                far: names[relation.subject_id if far == "subject" else relation.object_id],
+                "fact_ids": list(relation.fact_ids),
+                "support": support([roles[fact_id] for fact_id in relation.fact_ids if fact_id in roles])})
+        return [{"predicate": predicate, "relations": items} for predicate, items in groups.items()]
+
+    cited = sorted({fact_id for relation in (*found.outgoing, *found.incoming) for fact_id in relation.fact_ids}
+                   | {fact_id for attribute in found.attributes for fact_id in attribute.fact_ids})
+    reasons = [*_read_reasons(coverage), *(["relation_limit"] if found.truncated else [])]
+    return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
+            "filters": {"status": status, "as_of": when}, "entity": entity_record(found.entity, found.claims),
+            "outgoing": grouped(found.outgoing, "object"), "incoming": grouped(found.incoming, "subject"),
+            "attributes": [{"predicate": attribute.predicate, "value": attribute.value,
+                            "literal_kind": attribute.literal_kind, "fact_ids": list(attribute.fact_ids)}
+                           for attribute in found.attributes],
+            "facts": await _checked_facts(engine, space, cited), "complete": complete,
+            "coverage": {**read, "relations_total": found.relations_total,
+                         "relations_shown": len(found.outgoing) + len(found.incoming),
+                         "truncated": bool(reasons), "reasons": reasons}}

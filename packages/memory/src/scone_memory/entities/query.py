@@ -31,7 +31,9 @@ class Candidate:
 class Resolution:
     status: Literal["resolved", "ambiguous", "not_found"]
     tier: ResolveTier | None
+    #: The first ``limit`` candidates by key; ``total`` counts them all.
     candidates: tuple[Candidate, ...]
+    total: int = 0
 
 
 def _candidate(entity: Entity) -> Candidate:
@@ -54,8 +56,8 @@ def resolve(projection: EntityProjection, name: str, *, limit: int = 20) -> Reso
     for tier, matches in tiers:
         if matches:
             status: Literal["resolved", "ambiguous"] = "resolved" if len(matches) == 1 else "ambiguous"
-            return Resolution(status, tier, tuple(_candidate(entity) for entity in matches[:limit]))
-    return Resolution("not_found", None, ())
+            return Resolution(status, tier, tuple(_candidate(entity) for entity in matches[:limit]), len(matches))
+    return Resolution("not_found", None, (), 0)
 
 
 @dataclass(frozen=True)

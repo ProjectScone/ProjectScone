@@ -296,3 +296,153 @@ async def test_an_export_of_a_capped_read_is_marked_partial(monkeypatch):
         response = client.get("/v1/graph/export", headers=auth())
     assert response.headers["x-scone-truncated"] == "true"
     assert response.json()["graph"]["about"]["coverage"]["reasons"] == ["fact_limit"]
+
+
+class WritesDuringReread(InMemoryDocumentStore):
+    """Runs a write the moment the entity page re-reads a fact."""
+    during = None
+    every_time = False
+
+    async def get_fact(self, space, fact_id):
+        if self.during is not None:
+            during = self.during
+            if not self.every_time:
+                self.during = None
+            await during()
+        return await super().get_fact(space, fact_id)
+
+
+async def test_an_entity_page_rebuilds_when_the_ledger_moves_while_it_reads():
+    """An exclusion that lands mid-page would leave relations counting a
+    fact the page's own re-read shows excluded. The page reads again, and
+    says so when the space will not hold still."""
+    from scone_memory.entities.ids import key_id
+
+    store = WritesDuringReread()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Alice works at Acme.")
+    await engine.assert_fact("alpha", "alice", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    works = await engine.assert_fact("alpha", "alice", "works_at", "Acme", source_episode_id=note.episode_id,
+                                     quote="Alice works at Acme.", valid_from="2024-01-01T00:00:00Z")
+    store.during = lambda: engine.exclude("alpha", works.fact_id, "no longer evidence")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+        assert [group["predicate"] for group in page["outgoing"]] == ["based_in"]
+        assert [fact["excluded"] for fact in page["facts"]] == [False] and page["consistent"] is True
+        store.every_time = True
+        store.during = lambda: store.bump_revision("alpha")
+        moving = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert moving["consistent"] is False and "ledger_changed_during_read" in moving["coverage"]["reasons"]
+
+
+@pytest.fixture
+async def capped(monkeypatch):
+    """A chain a-b-c-d read with room for only the two newest facts."""
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("a", "b"), ("b", "c"), ("c", "d")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        yield client
+
+
+def test_a_capped_read_never_claims_a_name_is_absent(capped):
+    found = capped.get("/v1/entities/resolve", params={"name": "a"}, headers=auth()).json()
+    assert found["status"] == "not_found_in_read" and found["complete"] is False
+    assert found["coverage"]["reasons"] == ["fact_limit"] and found["coverage"]["truncated"] is True
+
+
+def test_a_capped_read_never_claims_two_entities_are_disconnected(capped):
+    unknown = capped.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth())
+    assert unknown.status_code == 404 and unknown.json()["complete"] is False
+    assert unknown.json()["coverage"]["reasons"] == ["fact_limit"]
+    # b-c and c-d were read, so b to d is found; the result still says the read was capped.
+    found = capped.get("/v1/graph/path", params={"from": "b", "to": "d"}, headers=auth()).json()
+    assert found["status"] == "found" and found["complete"] is False
+
+
+def test_a_capped_read_marks_an_entity_page_incomplete(capped):
+    from scone_memory.entities.ids import key_id
+
+    page = capped.get(f"/v1/entities/{key_id('alpha', 'b')}", headers=auth()).json()
+    assert page["incoming"] == [] and page["complete"] is False
+    assert page["coverage"]["truncated"] is True and "fact_limit" in page["coverage"]["reasons"]
+
+
+async def test_many_candidates_are_counted_and_the_cut_is_said():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for letter in "ABCDEFGHIJKLMNOPQRSTU":
+        await engine.assert_fact("alpha", f"alice {letter}", "knows", "bob", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        first = client.get("/v1/entities/resolve", params={"name": "alice"}, headers=auth()).json()
+        every = client.get("/v1/entities/resolve", params={"name": "alice", "limit": 50}, headers=auth()).json()
+        path = client.get("/v1/graph/path", params={"from": "alice", "to": "bob"}, headers=auth())
+    assert first["status"] == "ambiguous" and len(first["candidates"]) == 20
+    assert first["candidates_total"] == 21 and first["truncated"] is True
+    assert len(every["candidates"]) == 21 and every["truncated"] is False
+    assert path.status_code == 409 and path.json()["candidates_total"] == 21 and path.json()["truncated"] is True
+
+
+async def test_a_quote_is_verified_only_against_its_own_source():
+    """A store that hands back another space's or another id's episode must
+    not have the quote checked against it."""
+    from scone_memory.entities.ids import key_id
+
+    store = InMemoryDocumentStore()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Alice works at Acme.")
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", source_episode_id=note.episode_id,
+                             quote="Alice works at Acme.", valid_from="2024-01-01T00:00:00Z")
+    real = store.get_episode
+
+    async def someone_elses(space, episode_id):
+        episode = await real(space, episode_id)
+        return episode.model_copy(update={"space": "beta", "episode_id": episode_id + 100})
+
+    store.get_episode = someone_elses
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert [fact["grounding"] for fact in page["facts"]] == ["quote_source_mismatch"]
+
+
+class WritesAfterListing(InMemoryDocumentStore):
+    """Runs a write just after the whole-ledger read returns its rows."""
+    after = None
+
+    async def list_facts(self, space, **options):
+        rows = await super().list_facts(space, **options)
+        if self.after is not None:
+            after, self.after = self.after, None
+            await after()
+        return rows
+
+
+async def test_a_write_right_after_the_ledger_read_is_not_mistaken_for_the_read():
+    """The projection records the revision from before its rows; read after
+    them, it would vouch for rows that no longer hold."""
+    from scone_memory.entities.ids import key_id
+
+    store = WritesAfterListing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    works = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    store.after = lambda: engine.exclude("alpha", works.fact_id, "no longer evidence")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert [group["predicate"] for group in page["outgoing"]] == ["based_in"] and page["consistent"] is True
+
+
+async def test_entities_joined_only_beyond_a_capped_read_are_not_called_disconnected(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("b", "c"), ("a", "b"), ("c", "d")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        whole = client.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth()).json()
+        monkeypatch.setattr(read, "MAX_FACTS", 2)
+        part = client.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth()).json()
+    assert whole["status"] == "found" and whole["complete"] is True
+    assert part["status"] == "not_connected_in_read" and part["complete"] is False and part["paths"] == []

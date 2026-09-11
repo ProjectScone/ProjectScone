@@ -34,6 +34,9 @@ async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMo
     from .view import counts
 
     check_space(space)
+    # The revision is read first: a write that lands after it leaves the
+    # projection's revision behind the store's, so a caller can see it.
+    revision = await engine.revision(space)
     facts = await engine.documents.list_facts(space, include_closed=True)
     reasons: list[str] = []
     cap = _SILENT_CAPS.get(engine.documents.name)
@@ -45,5 +48,5 @@ async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMo
     read = len(facts)
     when = parse_rfc3339(as_of if as_of is not None else engine.clock())
     facts = [fact for fact in facts if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
-    projection = project_entities(space, facts, revision=await engine.revision(space))
+    projection = project_entities(space, facts, revision=revision)
     return projection, {"facts_read": read, "facts_counted": len(facts), "facts_limit": MAX_FACTS, "reasons": reasons}
