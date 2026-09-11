@@ -1,8 +1,8 @@
 """One tool contract, rendered for whichever API is calling.
 
-A model that can search, trace relationships, add memory and read a profile
-needs three things described once: what the tools are called, what arguments they
-take, and what running them returns. Keeping that in one place is what
+A model that can search, trace relationships, add memory, read a profile
+and read the entity graph needs three things described once: what the
+tools are called, what arguments they take, and what running them returns. Keeping that in one place is what
 makes the OpenAI-shaped and Anthropic-shaped bindings share a contract.
 Hosts choose which tools to offer and execute; this does not register tools
 with separate HTTP, MCP or framework services automatically.
@@ -19,11 +19,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
-from ..core.errors import SconeError
+from ..core.errors import InvalidInput, SconeError
 from ..memory.engine import MemoryEngine
 
 #: The most a search may return however the model asks.
 MAX_ITEMS = 20
+#: The graph tools' bounds, the same as the HTTP routes and the MCP server.
+MAX_NAMES = 24
+MAX_NAME = 200
+MAX_QUESTION = 2000
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,41 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                      "description": "Every supporting source must carry all these tags."},
         }, ["seed_fact_id"]),
     ),
+    ToolSpec(
+        name="graph_context",
+        summary=("What the entity graph records around some names, or around the entities a question "
+                 "names: one line per item, coverage first, then entities, the paths between them, "
+                 "relations by hop and values. Every line cites the facts behind it, re-read now."),
+        parameters=_schema({
+            "names": {"type": "array", "items": {"type": "string"},
+                      "description": f"Entities to centre on, by name or id; at most {MAX_NAMES}."},
+            "question": {"type": "string", "description": "A question; the entities it names become the centre."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer, 512 to 64000. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="explain_entity",
+        summary=("One entity: its relations in both directions and its values, each citing its facts. "
+                 "An ambiguous name lists the candidates to choose from."),
+        parameters=_schema({
+            "name": {"type": "string", "description": "The entity, by name or id."},
+        }, ["name"]),
+    ),
+    ToolSpec(
+        name="connect_entities",
+        summary=("How two entities connect: the shortest paths between them, each hop with its "
+                 "direction and the facts behind it. Nothing is shown that no fact supports."),
+        parameters=_schema({
+            "source": {"type": "string", "description": "One entity, by name or id."},
+            "target": {"type": "string", "description": "The other entity, by name or id."},
+            "max_hops": {"type": "integer", "minimum": 1, "maximum": 4,
+                         "description": "Longest path to look for, 1 to 4. Defaults to 3."},
+        }, ["source", "target"]),
+    ),
 )
+
+_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -171,6 +209,8 @@ class ToolBox:
             return {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
     async def _call(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        if name in _GRAPH_TOOLS:
+            return await self._graph(name, arguments)
         if name == "search_memory":
             found = await self.engine.recall(
                 self.space, arguments["query"],
@@ -200,6 +240,34 @@ class ToolBox:
             "recent": [{"episode_id": r.episode_id, "text": r.excerpt, "created_at": r.created_at}
                        for r in profile.recent],
         }
+
+    async def _graph(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        """The graph tools read the current projection at one instant and
+        answer with the packet the HTTP route gives."""
+        from ..entities.context import ContextLimits, graph_connections, graph_context
+
+        names = list(arguments.get("names") or ())
+        for side in ("name", "source", "target"):
+            if side in arguments:
+                names.append(arguments[side])
+        if len(names) > MAX_NAMES or any(not 1 <= len(entry) <= MAX_NAME for entry in names):
+            raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
+        when = self.engine.clock()
+        if name == "connect_entities":
+            packet = await graph_connections(self.engine, self.space, arguments["source"], arguments["target"],
+                                             max_hops=arguments.get("max_hops", 3), as_of=when)
+        elif name == "explain_entity":
+            packet = await graph_context(self.engine, self.space, names=[arguments["name"]], as_of=when,
+                                         limits=ContextLimits(max_hops=1))
+        else:
+            question = arguments.get("question")
+            if not names and not question:
+                raise InvalidInput("give names or a question")
+            if question is not None and not 1 <= len(question) <= MAX_QUESTION:
+                raise InvalidInput(f"question must be 1 to {MAX_QUESTION} characters")
+            packet = await graph_context(self.engine, self.space, names=names, question=question, as_of=when,
+                                         limits=ContextLimits(max_bytes=arguments.get("max_bytes", 8_000)))
+        return packet.record(self.space, "current", when)
 
     @staticmethod
     def _fact(fact) -> dict:

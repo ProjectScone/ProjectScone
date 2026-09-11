@@ -1,0 +1,88 @@
+"""The entity graph as tools a model calls through the ToolBox.
+
+The same three reads the MCP server offers: the context around some names
+or a question, one entity explained, and how two connect. Each answers with
+the packet the HTTP route gives, reads only the box's space, and turns a
+mistake into a result the model can read.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.integrations.tools import MEMORY_TOOLS, ToolBox
+from scone_memory.testing import Clock
+
+DAY = "2024-01-01T00:00:00Z"
+NOW = "2025-06-01T00:00:00.000Z"
+
+
+@pytest.fixture
+async def box():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock(NOW)).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from=DAY)
+    await engine.assert_fact("alpha", "alice park", "knows", "Bob", valid_from=DAY)
+    await engine.assert_fact("beta", "zed", "works_at", "Globex", valid_from=DAY)
+    yield ToolBox(engine, "alpha")
+    await engine.close()
+
+
+def test_the_graph_tools_are_offered_with_the_others():
+    assert [tool.name for tool in MEMORY_TOOLS][-3:] == ["graph_context", "explain_entity", "connect_entities"]
+
+
+async def test_graph_context_answers_with_the_packet_the_route_gives(box):
+    result = await box.run("graph_context", {"names": ["alice chen"]})
+    assert result["ok"] is True and result["status"] == "prepared" and result["space"] == "alpha"
+    assert "works_at Acme Robotics" in result["text"] and "based_in Lisbon" in result["text"]
+    assert result["filters"] == {"status": "current", "as_of": NOW} and "reasons" in result["coverage"]
+
+
+async def test_a_question_centres_on_the_entities_it_names(box):
+    result = await box.run("graph_context", {"question": "where is acme robotics based?", "max_bytes": 1024})
+    assert result["ok"] is True and "based_in Lisbon" in result["text"] and len(result["text"].encode()) <= 1024
+
+
+async def test_explain_entity_lists_candidates_for_an_ambiguous_name(box):
+    result = await box.run("explain_entity", {"name": "alice"})
+    assert result["ok"] is True and result["status"] == "ambiguous" and len(result["candidates"]) == 2
+
+
+async def test_connect_entities_gives_each_hop_with_its_facts(box):
+    result = await box.run("connect_entities", {"source": "alice chen", "target": "lisbon"})
+    assert result["ok"] is True
+    assert "path: alice chen -works_at-> Acme Robotics -based_in-> Lisbon" in result["text"]
+
+
+async def test_the_graph_tools_read_their_own_space_only(box):
+    result = await box.run("explain_entity", {"name": "zed"})
+    assert result["ok"] is True and result["status"] == "empty" and "Globex" not in result["text"]
+
+
+@pytest.mark.parametrize("name, arguments, complaint", [
+    ("graph_context", {}, "names or a question"),
+    ("graph_context", {"names": ["x"] * 25}, "at most 24"),
+    ("graph_context", {"question": "q" * 2001}, "question"),
+    ("graph_context", {"names": ["alice chen"], "max_bytes": 100}, "max_bytes"),
+    ("explain_entity", {"name": "x" * 201}, "200"),
+    ("connect_entities", {"source": "alice chen", "target": "lisbon", "max_hops": 5}, "max_hops"),
+    ("connect_entities", {"source": "", "target": "lisbon"}, "source"),
+])
+async def test_a_mistake_is_a_result_the_model_can_read(box, name, arguments, complaint):
+    result = await box.run(name, arguments)
+    assert result["ok"] is False and complaint in result["error"]
+
+
+async def test_connect_entities_looks_no_further_than_max_hops(box):
+    result = await box.run("connect_entities", {"source": "alice chen", "target": "lisbon", "max_hops": 1})
+    assert result["ok"] is True and "no path: none within 1 hops" in result["text"]
+    assert not any(line.startswith("path: ") for line in result["text"].splitlines())
+
+
+async def test_explain_entity_stays_on_the_entitys_own_relations(box):
+    """One hop: Alice's employer, not where her employer is based."""
+    result = await box.run("explain_entity", {"name": "alice chen"})
+    assert "works_at Acme Robotics" in result["text"] and "based_in Lisbon" not in result["text"]

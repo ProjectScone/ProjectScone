@@ -8,8 +8,9 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same four contracts: `search_memory`, `add_memory`, `read_profile`,
-and `trace_memory`. Hosts can allowlist a subset. The host executes returned
+render the same seven contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, and the three entity-graph reads `graph_context`,
+`explain_entity` and `connect_entities`. Hosts can allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
 
@@ -33,6 +34,31 @@ not infer aliases or join merely similar names.
 Contradictions remain separate evidence, never a path continuation or an
 automatically chosen winner. Quote retention is checked; factual accuracy is
 not certified. Source text remains untrusted data for the receiving model.
+
+The graph reads are the ones the MCP server offers as `memory_graph_context`,
+`memory_entity` and `memory_connections`:
+
+- `graph_context` returns what the entity graph records around up to 24
+  names, or around the entities a question names, within `max_bytes`
+  (512 to 64,000).
+- `explain_entity` returns one entity's relations in both directions and
+  its values, or the candidates for an ambiguous name.
+- `connect_entities` returns the shortest paths between two entities,
+  within `max_hops` (1 to 4).
+
+Each reads the current projection of the box's space at one instant. It
+answers with the JSON that `/v1/graph/context` returns: the packet text,
+its status, seeds, candidates and coverage, and the instant it read at.
+Every line cites the facts behind it, re-read at that instant, and
+coverage says what was left out. A name over 200 characters, a question
+over 2,000 characters, or a bound out of range comes back as a result
+with `ok: false`.
+
+```python
+box = ToolBox(engine, "default", tools=["graph_context", "connect_entities"])
+around = await box.run("graph_context", {"question": "who works with Alice Chen?"})
+route = await box.run("connect_entities", {"source": "Alice Chen", "target": "Lisbon"})
+```
 
 The trace is read-only and bounded: 16 facts, 32 edges, 256 traversal store
 calls/candidates, eight paths, and a two-second async timeout. Two additional
