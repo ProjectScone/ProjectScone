@@ -22,6 +22,7 @@ from .archive import SafeArchive
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .table_types import DocumentTableCell
 from .word_tables import word_children, word_table
+from .xlsx_tables import cell_position, spreadsheet_tables, spreadsheet_text_supported
 
 OFFICE_EXTENSIONS = frozenset({'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'epub'})
 _ODF_REVISION_METADATA = frozenset({
@@ -386,16 +387,22 @@ def _xlsx(bundle: SafeArchive, output: _Output) -> None:
         raise InvalidInput('XLSX is missing its workbook')
     relations = _relationships(bundle, source)
     shared: list[str] = []
+    shared_supported: list[bool] = []
     shared_size = 0
     for identifier, (_, kind) in relations.items():
         if kind != 'sharedStrings':
             continue
-        for item in _elements(bundle.xml(_related(source, relations, identifier, kind)), 'si'):
+        strings = bundle.xml(_related(source, relations, identifier, kind))
+        string_namespace = strings.tag.rsplit('}', 1)[0] + '}'
+        declared_strings = {id(item) for item in strings if item.tag == string_namespace + 'si'}
+        for item in _elements(strings, 'si'):
             text = _run_text(item, output)
             shared_size += len(text.encode('utf-8'))
             if shared_size > output.limits.max_archive_bytes:
                 raise InvalidInput('spreadsheet shared strings exceed their byte limit')
             shared.append(text)
+            shared_supported.append(strings.tag == string_namespace + 'sst' and id(item) in declared_strings
+                                    and spreadsheet_text_supported(item))
     for sheet_number, sheet in enumerate(_elements(root, 'sheet'), 1):
         output.check()
         name = sheet.get('name', f'Sheet{sheet_number}')
@@ -403,11 +410,19 @@ def _xlsx(bundle: SafeArchive, output: _Output) -> None:
         worksheet = bundle.xml(path)
         if _local(worksheet.tag) != 'worksheet':
             raise InvalidInput('XLSX relationship is not a worksheet')
+        first_segment, previous_bytes = len(output.segments), output.text_bytes
+        declared_tables = any(child.tag.rsplit('}', 1)[-1] == 'tableParts' for child in worksheet)
+        previous_row = 0
+        sheet_strings_supported = True
         for row_number, row in enumerate(_elements(worksheet, 'row'), 1):
-            actual_row = _positive(row.get('r', str(row_number)), 1_048_576)
+            actual_row = _positive(row.get('r', str(previous_row + 1 if declared_tables else row_number)), 1_048_576)
+            previous_row, next_column = actual_row, 1
             for column, cell in enumerate((child for child in row if _local(child.tag) == 'c'), 1):
                 output.check()
-                reference = cell.get('r', f'{_column(column)}{actual_row}')
+                reference = cell.get('r', f'{_column(next_column if declared_tables else column)}{actual_row}')
+                if declared_tables:
+                    _, current_column = cell_position(reference)
+                    next_column = current_column + 2
                 value = _child(cell, 'v')
                 text = '' if value is None else value.text or ''
                 cell_type = cell.get('t', '')
@@ -419,12 +434,25 @@ def _xlsx(bundle: SafeArchive, output: _Output) -> None:
                     if index < 0 or index >= len(shared):
                         raise InvalidInput('XLSX shared string index is out of range')
                     text = shared[index]
+                    sheet_strings_supported = sheet_strings_supported and shared_supported[index]
                 elif cell_type == 'inlineStr':
                     text = _run_text(cell, output)
                 metadata = {'sheet': name, 'cell': reference}
                 if _child(cell, 'f') is not None:
                     metadata['formula'] = 'cached-value'
                 output.add(text, f'sheet:{name}/cell:{reference}', metadata)
+        if declared_tables:
+            sheet_relations = _relationships(bundle, path)
+            def load_table(identifier: str) -> tuple[str, Element]:
+                target = _related(path, sheet_relations, identifier, 'table')
+                return target, bundle.xml(target)
+            retained = output.segments[first_segment:]
+            del output.segments[first_segment:]
+            output.text_bytes = previous_bytes
+            for segment in spreadsheet_tables(retained, worksheet, prefix=f'sheet:{name}', member=path,
+                                              load=load_table, check=output.check,
+                                              shared_strings_supported=sheet_strings_supported):
+                output.add(segment.text, segment.locator, segment.metadata, table_cells=segment.table_cells)
 
 
 def _drawing(root: Element, output: _Output, prefix: str) -> None:
@@ -703,6 +731,8 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
             raise InvalidInput('document contains no extractable text')
         parser = 'native-xml-word-tables-v1' if extension == 'docx' and any(
             'table_status' in segment.metadata for segment in output.segments) else 'native-xml'
+        if extension == 'xlsx' and any('table_status' in segment.metadata for segment in output.segments):
+            parser = 'native-xml-xlsx-tables-v1'
         parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments))
         validate_document(parsed, limits)
         return parsed

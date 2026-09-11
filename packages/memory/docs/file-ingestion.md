@@ -61,7 +61,8 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
 | DOCX | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
-| XLSX, PPTX | Sheet cell references, slides, table text and notes | No rendered Office layout or macro execution |
+| XLSX | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
+| PPTX | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
@@ -208,7 +209,7 @@ tables. Resource exhaustion fails explicitly: at most 20,000 cells per table,
 operations and 8 MB of serialized cell evidence, within the existing text,
 segment and wall-time limits. The slot and evidence limits also apply across
 the complete document. This does not detect tables in OCR geometry or add typed
-table evidence to spreadsheet, presentation or delimited readers yet.
+table evidence to presentation or delimited readers. XLSX declarations are covered below.
 
 ### Word table merges and context
 
@@ -247,6 +248,50 @@ reconciliation remain open.
 Word extraction applies the same cell, column, occupied-slot, reference and
 evidence bounds. It checks cumulative text and segment limits while constructing
 contextual rows, including preceding document content, before retaining a result.
+
+### Declared spreadsheet tables
+
+XLSX worksheets resolve their `tableParts` relationships to source table
+ranges and column declarations. Each retained cell in a valid declared table
+carries `DocumentTableCell` evidence. Grid coordinates are relative to the table
+range, while the locator retains the actual sheet and A1 reference, including
+ranges near the bottom or right edge of a worksheet.
+
+The declared header row supplies column references to its retained cells. A
+value such as `Revenue: €20` keeps the label and value searchable together;
+its evidence span covers only `€20`. `table_range`, `table_name`, `table_member`,
+`member`, `header_basis=xlsx_table_declaration`, and `table_role` (`header`,
+`data`, or `totals`) preserve the source interpretation. Cached formula values
+keep `formula=cached-value`; formulas are never recalculated. A formula without
+a saved result produces no invented value and adds `missing_cached_formula`
+to the table's extraction notes.
+
+`headerRowCount=0` leaves the first data row as data and records
+`header_row_absent`. Missing header cells add `missing_header_cell`; differing
+column-declaration names add `column_name_mismatch`. Header text always comes
+from the retained worksheet cell, not a replacement label from the declaration.
+Ordinary worksheet cells outside declared tables keep their existing text and
+locators. First-row styling alone does not declare a header.
+
+Malformed declarations, overlapping table ranges, merges intersecting a table,
+contradictory cell coordinates, duplicate cells (including empty cells), or
+unsupported worksheet/shared-string markup retain plain extracted text with
+`table_status=text_fallback` and a reason. Every character used as an inline or
+shared-string header must belong to its supported source string structure.
+Unsafe or missing package relationships remain explicit parser errors.
+
+The declaration reader permits at most 1,000 tables, 100,000 inspected worksheet
+cells and 100,000 declared grid slots per worksheet, within document-wide cell
+and evidence limits. Oversized table ranges and excessive merge comparisons
+fall back explicitly; extracted-text, segment and wall-time limits still apply.
+Header expansion is checked against the cumulative text limit during emission.
+
+Structured XLSX tables use manifest version 4 and parser
+`native-xml-xlsx-tables-v1`. Durable extraction checkpoints and filtered citations
+retain the same header evidence. Use a new run and parser revision to re-extract
+older flattened workbooks. General worksheet header inference, merged layouts
+outside declared tables, number-format rendering, XLS/XLSB table structure and
+spreadsheet image/chart interpretation remain separate gaps.
 
 ## Durable extraction checkpoints
 
