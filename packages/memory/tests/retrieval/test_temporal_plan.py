@@ -1,0 +1,99 @@
+"""Reading a temporal question as an operator over events.
+
+A quarter of what people ask memory is arithmetic over dates: how long
+between two things, how long ago something was, which of them came
+first. Retrieval is good at finding which passage an event phrase means;
+software is exact at subtracting dates. The planner splits the work
+along that line, and refuses anything it cannot read confidently: a
+computed answer arrives stated as fact, so a wrong one is worse than
+none.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from scone_memory.retrieval.temporal import plan
+
+
+def test_how_many_units_between_two_events():
+    asked = plan("How many weeks passed between the time I sold baked goods at the market "
+                 "and the time I ran the charity bake-off?")
+    assert asked.kind == "between" and asked.unit == "week"
+    assert asked.events == ("i sold baked goods at the market", "i ran the charity bake-off")
+
+
+@pytest.mark.parametrize("question, events", [
+    ("How many days after I started the course did I finish it?", ("i started the course", "i finish it")),
+    ("How many months from my move to Lisbon to my first day at Acme?",
+     ("my move to lisbon", "my first day at acme")),
+    ("How long was it between my trip to Rome and my trip to Paris?", ("my trip to rome", "my trip to paris")),
+])
+def test_the_two_events_are_taken_whole(question, events):
+    asked = plan(question)
+    assert asked.kind == "between" and asked.events == events
+
+
+def test_how_long_ago_an_event_was():
+    assert plan("How many days ago did I meet Emma?") == plan("How many days ago did I meet Emma")
+    asked = plan("How many days ago did I meet Emma?")
+    assert (asked.kind, asked.unit, asked.events) == ("since", "day", ("meet emma",))
+    loose = plan("How long ago did I attend the summer nights festival?")
+    assert (loose.kind, loose.unit, loose.events) == ("since", None, ("attend the summer nights festival",))
+    since = plan("How many months has it been since I quit my job?")
+    assert (since.kind, since.unit, since.events) == ("since", "month", ("i quit my job",))
+
+
+@pytest.mark.parametrize("question, kind", [
+    ("Which event happened first, my post about chili or my plank challenge?", "first"),
+    ("Which trip did I take first, the one to Europe or the solo trip to Thailand?", "first"),
+    ("Which came earlier: my move to Porto or my job at Acme?", "first"),
+    ("Which of them happened last, my move to Porto or my job at Acme?", "last"),
+    ("Which did I do most recently, my move to Porto or my job at Acme?", "last"),
+])
+def test_which_of_two_came_first_or_last(question, kind):
+    asked = plan(question)
+    assert asked.kind == kind and len(asked.events) == 2 and all(" " in event for event in asked.events)
+
+
+def test_three_events_put_in_order():
+    asked = plan("Which three events happened in the order from first to last: the day I helped with the "
+                 "nursery, the day I picked the cake, and the day I met Emma?")
+    assert asked.kind == "order"
+    assert asked.events == ("i helped with the nursery", "i picked the cake", "i met emma")
+
+
+def test_the_events_of_an_ordering_question_may_be_quoted():
+    asked = plan("In what order did these happen: 'the summer nights festival', 'the plank challenge'?")
+    assert asked.kind == "order" and asked.events == ("the summer nights festival", "the plank challenge")
+
+
+@pytest.mark.parametrize("question", [
+    "What did I eat yesterday?",
+    "How many books did I read last year?",  # a count of things, not of days
+    "How old was I when I moved to the United States?",  # an age needs a birth date, not two events
+    "What is the order of the six museums I visited?",  # the events are not named
+    "Which event happened first?",  # neither event is named
+    "How many days are in a fortnight?",
+    "How long is the Amazon?",
+    "",
+])
+def test_what_cannot_be_read_confidently_is_not_planned(question):
+    assert plan(question) is None
+
+
+def test_a_plan_says_what_it_read_for_the_answer_to_show():
+    asked = plan("How many weeks between my trip to Rome and my trip to Paris?")
+    assert asked.record() == {"kind": "between", "unit": "week",
+                              "events": ["my trip to rome", "my trip to paris"]}
+
+
+def test_the_last_and_splits_a_pair_so_either_half_may_hold_its_own():
+    asked = plan("How many weeks between the time I met my aunt and received the chandelier "
+                 "and the time I ran the charity bake-off?")
+    assert asked.events == ("i met my aunt and received the chandelier", "i ran the charity bake-off")
+
+
+def test_an_event_a_question_does_not_name_is_not_planned():
+    """One word is a thing, not an event this can ground confidently."""
+    assert plan("How many days between Rome and Paris?") is None

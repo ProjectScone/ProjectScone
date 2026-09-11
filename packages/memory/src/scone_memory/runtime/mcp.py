@@ -42,6 +42,9 @@ from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
 from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
+from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                  MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
+                                  MAX_LIMIT as TEMPORAL_MAX_LIMIT, TemporalError, temporal_answer)
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     DuplicatesError, likely_duplicates)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
@@ -574,6 +577,36 @@ def create_server(engine: MemoryEngine, space: str = "default",
         except DuplicatesError as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
+
+    @tool(server, "memory_temporal_answer")
+    async def memory_temporal_answer(
+        question: Annotated[str, Field(description="A question about dates: how long between two events, how long "
+                                                   "ago one was, which came first, what order they were in")],
+        now: Annotated[
+            Optional[str], Field(description="The moment to answer from (RFC 3339); defaults to now")
+        ] = None,
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Passages read for each event (1..={TEMPORAL_MAX_LIMIT}); "
+                                                   f"defaults to {TEMPORAL_LIMIT}")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description=f"Byte budget for the answer (512..={TEMPORAL_BYTES_LIMIT}); "
+                                                   f"defaults to {TEMPORAL_BYTES}")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """Answer a question about dates by computation rather than guesswork:
+        each event named is grounded to a passage and the day it records, and
+        the arithmetic is shown for checking. It says instead of computing
+        when the question is not one it reads, when an event is not in
+        memory, or when an event's day is not decided."""
+        try:
+            answer = await temporal_answer(engine, space or default_space, question, now=now,
+                                           limit=limit if limit is not None else TEMPORAL_LIMIT,
+                                           max_bytes=max_bytes if max_bytes is not None else TEMPORAL_BYTES)
+        except (TemporalError, InvalidInput) as refused:
+            return tool_error(str(refused))
+        return ok_text(answer.text)
 
     def readable(space: str) -> str:
         """A space named in a resource address, refused with the reason."""

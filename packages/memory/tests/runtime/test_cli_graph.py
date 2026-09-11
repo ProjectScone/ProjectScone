@@ -315,3 +315,25 @@ async def test_duplicates_prints_the_pairs_and_json_on_request(engine):
     assert code == 0 and json.loads(text)["pairs"][0]["score"] == 1.0
     with pytest.raises(InvalidInput, match="min_score"):
         await graph(engine, "duplicates", "--min-score", "2")
+
+
+async def temporal(engine, *arguments: str) -> tuple[int, str]:
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["when", *arguments]), engine, io.StringIO(""), out)
+    return code, out.getvalue()
+
+
+async def test_when_computes_the_answer_and_shows_its_working():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.remember("default", "I met Emma for coffee near the river.", created_at="2023-04-11T12:00:00Z")
+    code, text = await temporal(memory, "How many days ago did I meet Emma?", "--now", "2023-04-20T10:12:00Z")
+    assert code == 0 and "answer: 9 days ago" in text and "event: meet emma → 2023-04-11" in text
+    code, shown = await temporal(memory, "How many days ago did I meet Emma?", "--now", "2023-04-20T10:12:00Z",
+                                 "--json")
+    assert code == 0 and json.loads(shown)["value"]["days"] == 9
+
+
+async def test_when_leaves_a_question_it_cannot_read_to_the_caller():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    code, text = await temporal(memory, "What did I drink?")
+    assert code == 1 and "not a temporal question" in text

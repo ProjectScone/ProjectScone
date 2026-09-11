@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
+    p = sub.add_parser("when", help="a question about dates answered by computation, with its working")
+    p.add_argument("question")
+    p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
+    p.add_argument("--limit", type=int, default=None, help="passages read for each event named")
+    p.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer text")
+
     p = sub.add_parser("recall", help="hybrid recall plus the facts that hold")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=5)
@@ -728,6 +734,19 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             if attachment:
                 print(f"original image linked: {attachment.attachment_id} ({attachment.bytes} bytes)", file=out)
         return 0
+
+    if args.command == "when":
+        from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                          temporal_answer)
+
+        answered = await temporal_answer(engine, space, args.question, now=args.now,
+                                         limit=args.limit if args.limit is not None else TEMPORAL_LIMIT,
+                                         max_bytes=args.max_bytes if args.max_bytes is not None else TEMPORAL_BYTES)
+        if args.json:
+            emit(answered.record(space))
+        else:
+            print(answered.text, file=out)
+        return 0 if answered.status == "computed" else 1
 
     if args.command == "recall":
         result = await engine.recall(

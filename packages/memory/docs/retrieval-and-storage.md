@@ -66,6 +66,58 @@ with the lane off and for all 20 with it on. A single synthetic set
 shows the mechanism works; whether it helps on real questions is for
 the retrieval benchmarks to show before the default changes.
 
+## Questions about dates, answered by computation
+
+Much of what people ask memory is arithmetic over dates: how long between
+two things, how long ago one was, which came first, what order they were
+in. Asking a model to do that means asking it to find the dates inside
+prose and subtract them itself, which is why that class is the weakest in
+every published measurement of this kind of system. Retrieval is good at
+finding which passage an event phrase means, and software is exact at
+subtracting dates, so the work is split along that line.
+
+```bash
+scone when "How many weeks passed between the time I sold baked goods and the time I ran the bake-off?"
+```
+
+`GET /v1/answers/temporal?q=…` (capability `answers.temporal`), the MCP
+tool `memory_temporal_answer`, the ToolBox tool `temporal_answer` and
+`scone when` all give the same answer.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `q` | — | The question |
+| `now` | now | The moment to answer from |
+| `limit` | 5 (1–50) | Passages read for each event named |
+| `max_bytes` | 4,000 (512–64,000) | Byte budget for the text |
+| `as_of` | now | Which moment's memory is read |
+
+- **What it reads.** "How many days/weeks/months between A and B", "how
+  many days after A did B", "from A to B", "how many weeks ago did I X",
+  "how long ago", "how many months has it been since X", "which came
+  first/last, A or B", and an order question that lists its events.
+- **What it refuses**, leaving the question to ordinary recall: anything
+  it cannot read confidently, since a computed answer arrives stated as
+  fact. That includes ages ("how old was I when …", which needs a birth
+  date rather than two events), a category whose members the question
+  does not name ("the order of the six museums I visited"), and events
+  named in one word ("between Rome and Paris"), which are things rather
+  than events.
+- **How an event is grounded.** The passage holding most of the event
+  phrase's words wins, the better-ranked one on a tie, and it must hold
+  at least half of them. The event's day is the day that passage records.
+- **When it does not answer.** `status` says why: `not_temporal` (not a
+  question this reads), `ungrounded` (an event is not in memory), or
+  `ambiguous` (a passage from another day holds the phrase as well, and
+  both days are shown).
+- **What comes back.** Each event cites its episode, chunk, day and a
+  verbatim excerpt; the answer line gives the unit asked for and the
+  exact days; and a working line shows the subtraction, so the answer can
+  be checked instead of believed.
+- Dates named in a question ("in May 2023", "three weeks ago", "last
+  month", "the past two months") are read into windows of whole days by
+  the same module, against the moment asked.
+
 ## What survives a crash
 
 A `remember` marks the episode's identity in the document store before

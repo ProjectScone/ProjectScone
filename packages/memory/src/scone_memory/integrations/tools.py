@@ -30,6 +30,9 @@ from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
 from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
 from ..entities.changes import DEFAULT_CHANGES, MAX_CHANGES  # noqa: E402
 from ..entities.duplicates import DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_PAIRS  # noqa: E402
+from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                  MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
+                                  MAX_LIMIT as TEMPORAL_MAX_LIMIT)
 from ..entities.view import STATUS_MODES  # noqa: E402
 
 
@@ -218,10 +221,27 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
         }, []),
     ),
+    ToolSpec(
+        name="temporal_answer",
+        summary=("A question about dates answered by computation: how long between two events, how long ago one "
+                 "was, which came first, what order they were in. Each event is grounded to a passage and the day "
+                 "it records, and the arithmetic is shown. It answers nothing when the question is not one it "
+                 "reads, an event is not in memory, or an event's day is not decided."),
+        parameters=_schema({
+            "question": {"type": "string", "minLength": 1, "maxLength": 1000,
+                         "description": "The question to answer."},
+            "now": {"type": "string", "description": "The moment to answer from (RFC 3339). Defaults to now."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": TEMPORAL_MAX_LIMIT,
+                      "description": f"Passages read for each event, 1 to {TEMPORAL_MAX_LIMIT}. "
+                                     f"Defaults to {TEMPORAL_LIMIT}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": TEMPORAL_BYTES_LIMIT,
+                          "description": f"Byte budget for the answer text. Defaults to {TEMPORAL_BYTES}."},
+        }, ["question"]),
+    ),
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates"})
+                          "graph_overview", "graph_changes", "find_duplicates", "temporal_answer"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -369,6 +389,17 @@ class ToolBox:
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+        if name == "temporal_answer":
+            from ..retrieval.temporal import TemporalError, temporal_answer
+
+            try:
+                answered = await temporal_answer(self.engine, self.space, arguments["question"],
+                                                 now=arguments.get("now"),
+                                                 limit=arguments.get("limit", TEMPORAL_LIMIT),
+                                                 max_bytes=arguments.get("max_bytes", TEMPORAL_BYTES))
+            except TemporalError as refused:
+                raise InvalidInput(str(refused)) from None
+            return answered.record(self.space)
         if name == "find_duplicates":
             from ..entities.duplicates import MAX_BYTES as DUPLICATES_BYTES, likely_duplicates
 

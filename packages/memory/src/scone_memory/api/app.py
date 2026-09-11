@@ -26,6 +26,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
+from ..core.validation import MAX_QUERY
+from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                  MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
+                                  MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
@@ -336,7 +340,7 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if conversations:
@@ -542,6 +546,25 @@ def create_app(
             raise InvalidInput("confirm must repeat the space name; a whole space is not deleted by accident")
         receipt = await engine.delete_space(space)
         return {"deleted": name, **receipt.model_dump()}
+
+    @app.get("/v1/answers/temporal")
+    async def get_temporal_answer(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        now: Optional[str] = Query(default=None, description="The moment the question is asked from; default now."),
+        limit: int = Query(default=TEMPORAL_LIMIT, ge=1, le=TEMPORAL_MAX_LIMIT,
+                           description="Passages read for each event named in the question."),
+        max_bytes: int = Query(default=TEMPORAL_BYTES, ge=TEMPORAL_MIN_BYTES, le=TEMPORAL_BYTES_LIMIT),
+        as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """A question about dates answered by computation: how long between
+        two events, how long ago one was, which came first, what order they
+        were in. Each event is grounded to a passage and its day, and the
+        arithmetic is shown. ``status`` says why nothing was computed: the
+        question is not one this reads (``not_temporal``), an event is not
+        in memory (``ungrounded``), or its day is not decided
+        (``ambiguous``)."""
+        answer = await temporal_answer(engine, space, q, now=now, limit=limit, max_bytes=max_bytes, as_of=as_of)
+        return answer.record(space)
 
     @app.get("/v1/recall")
     async def get_recall(

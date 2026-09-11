@@ -31,9 +31,9 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-8:] == ["graph_context", "explain_entity", "connect_entities",
+    assert [tool.name for tool in MEMORY_TOOLS][-9:] == ["graph_context", "explain_entity", "connect_entities",
                                                          "graph_schema", "graph_match", "graph_overview",
-                                                         "graph_changes", "find_duplicates"]
+                                                         "graph_changes", "find_duplicates", "temporal_answer"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -195,3 +195,11 @@ async def test_find_duplicates_answers_with_the_routes_pairs(box):
     assert result["filters"] == {"status": "current", "as_of": NOW}
     refused = await box.run("find_duplicates", {"min_score": 1.5})
     assert refused["ok"] is False and "min_score" in refused["error"]
+
+
+async def test_the_temporal_tool_answers_with_the_record_the_route_gives(box):
+    await box.engine.remember("alpha", "I met Emma for coffee near the river.", created_at="2023-04-11T12:00:00Z")
+    result = await box.run("temporal_answer", {"question": "How many days ago did I meet Emma?",
+                                               "now": "2023-04-20T10:12:00Z"})
+    assert result["ok"] is True and result["status"] == "computed" and result["value"]["days"] == 9
+    assert result["space"] == "alpha" and result["plan"]["kind"] == "since"

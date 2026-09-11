@@ -384,3 +384,28 @@ def test_a_forgotten_episode_answers_gone_with_the_date(client):
     assert client.delete(f"/v1/episodes/{episode['episode_id']}", headers=h).status_code == 410
     assert client.get("/v1/episodes/999999", headers=h).status_code == 404, "never existed is still 404"
     assert client.get(f"/v1/episodes/{episode['episode_id']}", headers=auth("key-b")).status_code == 404, "another space learns nothing"
+
+
+def test_a_temporal_question_is_answered_by_computation(client):
+    for when, text in (("2023-03-11T09:00:00Z", "I sold homemade baked goods at the farmers market."),
+                       ("2023-04-01T18:30:00Z", "I ran the charity bake-off at the village hall.")):
+        assert client.post("/v1/episodes", json={"content": text, "created_at": when}, headers=auth()).status_code == 200
+    answer = client.get("/v1/answers/temporal", params={
+        "q": "How many weeks passed between the time I sold homemade baked goods and the time I ran the "
+             "charity bake-off?", "now": "2023-04-20T10:12:00Z"}, headers=auth()).json()
+    assert answer["status"] == "computed" and answer["value"]["asked"] == 3
+    assert answer["plan"]["kind"] == "between" and len(answer["anchors"]) == 2
+    assert "answer: 3 weeks (21 days)" in answer["text"]
+    left = client.get("/v1/answers/temporal", params={"q": "What did I bake?"}, headers=auth()).json()
+    assert left["status"] == "not_temporal" and left["value"] == {}
+    refused = client.get("/v1/answers/temporal", params={"q": "How long ago?", "limit": 0}, headers=auth())
+    assert refused.status_code == 422
+
+
+def test_a_temporal_answer_stays_inside_its_space(client):
+    assert client.post("/v1/episodes", json={"content": "I met Emma for coffee near the river.",
+                                             "created_at": "2023-04-11T12:00:00Z"},
+                       headers=auth("key-a")).status_code == 200
+    answer = client.get("/v1/answers/temporal", params={"q": "How many days ago did I meet Emma?",
+                                                        "now": "2023-04-20T10:12:00Z"}, headers=auth("key-b")).json()
+    assert answer["status"] == "ungrounded" and answer["space"] == "beta"

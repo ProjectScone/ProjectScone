@@ -38,6 +38,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_overview": {"question", "limit", "facts", "max_bytes", "space"},
     "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
     "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
+    "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -572,3 +573,14 @@ async def test_graph_context_can_seed_by_resemblance(server):
     assert not error and " similar " in text
     error, text = await call(server, "memory_graph_context", question="which robotics firm?")
     assert not error and " similar " not in text
+
+
+async def test_the_temporal_tool_computes_the_answer_and_shows_its_working():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
+    await engine.remember("default", "I met Emma for coffee near the river.", created_at="2023-04-11T12:00:00Z")
+    server = create_server(engine, "default")
+    error, answer = await call(server, "memory_temporal_answer", question="How many days ago did I meet Emma?",
+                               now="2023-04-20T10:12:00Z")
+    assert not error and "answer: 9 days ago" in answer and "2023-04-11 → 2023-04-20 is 9 days" in answer
+    error, left = await call(server, "memory_temporal_answer", question="What did I drink?")
+    assert not error and "not a temporal question" in left
