@@ -234,6 +234,32 @@ async def test_a_value_and_a_predicate_of_one_name_never_stand_for_each_other_an
     assert as_value.status == "none" and as_value.coverage["searched"] == 1
 
 
+async def test_a_value_carried_between_patterns_is_found_without_scanning_its_kin(monkeypatch):
+    """Four hundred people joined on one date. Carrying that date into a
+    second pattern looks it up by its exact text, never by filtering every
+    value that shares its key: the work stays linear, and is all charged."""
+    real = match_module._Graph.__init__
+    scanned = []
+
+    class Counted(list):
+        def __iter__(self):
+            scanned.append(len(self))
+            return super().__iter__()
+
+    def counted(self, projection):
+        real(self, projection)
+        self.by_value = {key: Counted(edges) for key, edges in self.by_value.items()}
+
+    monkeypatch.setattr(match_module._Graph, "__init__", counted)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for n in range(400):
+        await engine.assert_fact("alpha", f"person {n}", "joined_on", "May 2021", valid_from=DAY)
+    found = await graph_match(engine, "alpha", where("?person | joined_on | ?day", "?person | ?p | ?day"), limit=1)
+    assert found.status == "matched" and sum(scanned) == 0
+    assert found.coverage["searched"] <= 3 * 400 + 1, "each binding: its candidate, its overlap"
+
+
 async def test_each_pattern_is_matched_from_its_smallest_index():
     engine = await seeded()
     for n in range(10):

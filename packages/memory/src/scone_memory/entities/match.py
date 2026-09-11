@@ -211,7 +211,10 @@ class _Graph:
         self.by_subject: dict[str, list[_Edge]] = defaultdict(list)
         self.by_object: dict[str, list[_Edge]] = defaultdict(list)
         self.by_predicate: dict[str, list[_Edge]] = defaultdict(list)
+        #: Values by key, for a constant matched by the join rule, and by
+        #: exact text, for a value carried from one pattern into another.
         self.by_value: dict[str, list[_Edge]] = defaultdict(list)
+        self.by_text: dict[str, list[_Edge]] = defaultdict(list)
         for edge in edges:
             self.by_subject[edge.subject_id].append(edge)
             self.by_predicate[edge.predicate].append(edge)
@@ -219,6 +222,7 @@ class _Graph:
                 self.by_object[edge.object_id].append(edge)
             else:
                 self.by_value[entity_key(edge.value or "")].append(edge)
+                self.by_text[edge.value or ""].append(edge)
         roles = {role.fact_id: role for role in projection.roles}
         self.stretches: dict[tuple[int, ...], list[_Stretch]] = {}
         for edge in edges:
@@ -337,8 +341,7 @@ def _candidates(pattern: Pattern, binding: Mapping[str, _Bound], graph: _Graph,
     if obj in binding:
         kind, bound = binding[obj]
         pools.append(graph.by_object.get(bound, []) if kind == "entity"
-                     else [edge for edge in graph.by_value.get(entity_key(bound), [])
-                           if kind == "value" and edge.value == bound])
+                     else graph.by_text.get(bound, []) if kind == "value" else [])
     elif not is_variable(obj):
         pools.append(graph.by_object.get(constants.entities.get(obj, ""), []) + constants.values.get(obj, []))
     return min(pools, key=len) if pools else graph.edges
