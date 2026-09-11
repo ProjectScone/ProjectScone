@@ -149,6 +149,8 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
             reasons.append("hub_skipped")
         if cut:
             reasons.append("entity_limit")
+        elif len(shown) < len(counted.entities):
+            reasons.append("outside_walk")  # entities the walk never reached from its seeds
     else:
         shown = counted.entities[offset:offset + limit]
         more = offset + limit < len(counted.entities)
@@ -162,7 +164,8 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
         reasons.append("attribute_limit")
     return {
         "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
-        "filters": {"status": mode, "as_of": as_of, **({"seeds": list(dict.fromkeys(seeds))} if seeds else {})},
+        "filters": {"status": mode, "as_of": as_of,
+                    **({"seeds": list(dict.fromkeys(seeds)), "hub_degree": hub_degree} if seeds else {})},
         "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in shown],
         "relations": [{"id": relation.relation_id, "subject_id": relation.subject_id,
                        "predicate": relation.predicate, "object_id": relation.object_id,

@@ -610,3 +610,36 @@ def test_an_ambiguous_or_unknown_seed_is_refused(city):
     client, _ = city
     assert client.get("/v1/graph/knowledge", params={"seed": "nobody"}, headers=auth()).status_code == 404
     assert client.get("/v1/graph/knowledge", params={"cursor": "not-a-cursor"}, headers=auth()).status_code == 422
+
+
+def test_a_walk_says_what_lies_outside_it_and_how_it_walked(city):
+    client, _ = city
+    view = client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "hub_degree": 10}, headers=auth()).json()
+    assert "carol diaz" not in {entity["key"] for entity in view["entities"]}
+    assert "outside_walk" in view["coverage"]["reasons"] and view["coverage"]["truncated"] is True
+    assert view["filters"]["hub_degree"] == 10
+
+
+def test_too_many_seeds_are_refused_not_dropped(city):
+    client, _ = city
+    response = client.get("/v1/graph/knowledge", params=[("seed", "Lisbon")] * 25, headers=auth())
+    assert response.status_code == 422
+
+
+async def test_an_ambiguous_seed_on_a_capped_read_keeps_the_coverage(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(3):
+        await engine.assert_fact("alpha", f"alice {number}", "knows", "bob", valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/knowledge", params={"seed": "alice"}, headers=auth())
+    assert response.status_code == 409 and response.json()["complete"] is False
+    assert response.json()["truncated"] is True
+
+
+def test_paging_and_seeded_walks_are_advertised(city):
+    client, _ = city
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.knowledge_paging"] is True and features["graph.knowledge_seeds"] is True

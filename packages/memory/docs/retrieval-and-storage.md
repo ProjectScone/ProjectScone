@@ -186,9 +186,15 @@ With `seed`, the view walks out from the named entities breadth first, in
 both directions, taking each entity's neighbours in order of the facts
 behind the relation, until `limit` entities are shown. An entity with
 more than `hub_degree` relations is shown but not walked through, unless
-it is a seed, and `hub_skipped` says so. An unknown seed is a 404, and an
-ambiguous one a 409 listing the candidates. `filters.seeds` gives the
-resolved ids.
+it is a seed, and `hub_skipped` says so. Entities the walk never reaches
+from its seeds are left out as `outside_walk`, so a seeded view is
+always marked truncated when it is not the whole space. Up to 24 seeds
+are taken; more is a 422. An unknown seed is a 404, and an ambiguous one
+a 409 listing the candidates. Both keep the read's coverage, so a capped
+read is never taken for absence or a complete list. `filters.seeds`
+gives the resolved ids and `filters.hub_degree` the degree the walk used.
+Paging and seeded walks are advertised as `graph.knowledge_paging` and
+`graph.knowledge_seeds`: a server without them ignores those parameters.
 
 Status modes:
 

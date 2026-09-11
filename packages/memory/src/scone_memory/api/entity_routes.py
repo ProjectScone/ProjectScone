@@ -102,8 +102,10 @@ class ProjectionMeta(BaseModel):
 class Filters(BaseModel):
     status: StatusMode
     as_of: str
-    #: The entity ids a seeded view walked out from.
+    #: The entity ids a seeded view walked out from, and the hub degree it
+    #: walked under.
     seeds: Optional[list[str]] = None
+    hub_degree: Optional[int] = None
 
 
 class ListFilters(Filters):
@@ -291,12 +293,17 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
                 return JSONResponse(status_code=409, content={
                     "error": "the graph changed since this cursor was issued; start again without it",
                     "code": "cursor_stale"})
+        if len(seed) > 24:
+            raise InvalidInput("at most 24 seeds")
         seeds: list[str] = []
-        for name in seed[:24]:
+        for name in seed:
             found = resolve(projection, name)
             if found.status == "ambiguous":
+                complete, read = _read(coverage)
+                listed = _candidates(found)
                 return JSONResponse(status_code=409, content={
-                    "error": f"{name!r} could mean several entities", "name": name, **_candidates(found)})
+                    "error": f"{name!r} could mean several entities", "name": name, **listed,
+                    "truncated": bool(listed["truncated"]) or not complete, "complete": complete, "coverage": read})
             if found.status == "not_found":
                 complete, read = _read(coverage)
                 where = "" if complete else " in the facts read; the read was capped, so it may exist"
