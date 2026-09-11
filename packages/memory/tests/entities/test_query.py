@@ -85,3 +85,27 @@ def test_a_hub_is_not_a_shortcut():
 def test_a_prefix_must_end_at_a_word_boundary():
     projection = project_entities("alpha", LEDGER, revision=1)
     assert resolve(projection, "ali").status == "not_found"
+
+
+def test_a_spelling_with_titles_or_punctuation_resolves_at_the_variant_tier():
+    projection = project_entities("alpha", [*LEDGER, fact(6, "acme, inc.", "based_in", "Porto")], revision=1)
+    for spelling, key in (("Dr. Alice Chen", "alice chen"), ("the Acme Robotics", "acme robotics"),
+                          ("Acme Inc", "acme, inc."), ("ＡＣＭＥ　ＲＯＢＯＴＩＣＳ’s", "acme robotics")):
+        found = resolve(projection, spelling)
+        assert (found.status, found.tier) == ("resolved", "variant"), spelling
+        assert [c.entity_id for c in found.candidates] == [ids(projection)[key]], spelling
+
+
+def test_two_entities_with_the_same_variant_are_ambiguous_not_guessed():
+    projection = project_entities("alpha", [*LEDGER, fact(6, "acme, inc.", "based_in", "Porto"),
+                                            fact(7, "acme inc", "based_in", "Faro")], revision=1)
+    found = resolve(projection, "Acme Inc.")
+    assert found.status == "ambiguous" and found.tier == "variant" and found.total == 2
+
+
+def test_the_variant_fold_never_changes_an_entity_key():
+    from scone_memory.core.validation import entity_key
+    from scone_memory.entities.query import variant_fold
+
+    assert variant_fold("Dr. Alice Chen") == "alice chen" and entity_key("Dr. Alice Chen") == "dr. alice chen"
+    assert variant_fold("The Beatles") == "beatles" and variant_fold("the") == "the"

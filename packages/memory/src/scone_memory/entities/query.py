@@ -10,14 +10,16 @@ other entities.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
+import re
 from typing import Literal
+import unicodedata
 
 from ..core.validation import entity_key
 from .project import Attribute, Entity, EntityProjection, Relation
 
-ResolveTier = Literal["id", "key", "prefix", "tokens"]
+ResolveTier = Literal["id", "key", "variant", "prefix", "tokens"]
 
 
 @dataclass(frozen=True)
@@ -40,15 +42,53 @@ def _candidate(entity: Entity) -> Candidate:
     return Candidate(entity.entity_id, entity.key, entity.label)
 
 
+#: Words a spelling may lead with that do not name the thing itself.
+_LEADING = frozenset({"the", "a", "an", "dr", "mr", "mrs", "ms", "mx", "miss", "prof", "sir", "dame", "st"})
+_POSSESSIVE = re.compile(r"['\u2019]s\b")
+_WORDS = re.compile(r"\w+")
+
+
+def variant_fold(name: str) -> str:
+    """A spelling reduced for lookup: compatibility forms unified (NFKC),
+    case folded, possessives, punctuation and a leading article or title
+    dropped, so "Dr. Alice Chen" and "ACME Inc." meet "alice chen" and
+    "acme, inc.". Lookup only: identity stays with ``entity_key``."""
+    words = _WORDS.findall(_POSSESSIVE.sub("", unicodedata.normalize("NFKC", name).casefold()))
+    while len(words) > 1 and words[0] in _LEADING:
+        words = words[1:]
+    return " ".join(words)
+
+
+_VARIANTS: OrderedDict[str, dict[str, tuple[Entity, ...]]] = OrderedDict()
+
+
+def _variants(projection: EntityProjection) -> dict[str, tuple[Entity, ...]]:
+    found = _VARIANTS.get(projection.digest)
+    if found is None:
+        grouped: dict[str, list[Entity]] = defaultdict(list)
+        for entity in projection.entities:
+            grouped[variant_fold(entity.key)].append(entity)
+        found = {variant: tuple(items) for variant, items in grouped.items()}
+        _VARIANTS[projection.digest] = found
+        while len(_VARIANTS) > 4:
+            _VARIANTS.popitem(last=False)
+    else:
+        _VARIANTS.move_to_end(projection.digest)
+    return found
+
+
 def resolve(projection: EntityProjection, name: str, *, limit: int = 20) -> Resolution:
     """The entity a name or id means, by the first tier that matches:
-    the id itself; the same key (case and spacing folded); a key the name
+    the id itself; the same key (case and spacing folded); the same
+    variant (titles, possessives and punctuation aside); a key the name
     begins at a word boundary; a key holding every word of the name."""
     wanted = entity_key(name)
     entities = sorted(projection.entities, key=lambda entity: entity.key)
+    variant = variant_fold(name)
     tiers: list[tuple[ResolveTier, list[Entity]]] = [
         ("id", [entity for entity in entities if entity.entity_id == name.strip()]),
         ("key", [entity for entity in entities if entity.key == wanted]),
+        ("variant", sorted(_variants(projection).get(variant, ()), key=lambda entity: entity.key) if variant else []),
         ("prefix", [entity for entity in entities if wanted and entity.key.startswith(wanted + " ")]),
         ("tokens", [entity for entity in entities
                     if wanted and set(wanted.split()) <= set(entity.key.split())]),

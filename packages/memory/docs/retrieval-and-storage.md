@@ -280,6 +280,10 @@ where `coverage` counts the matches.
   that matches:
   - `id`: the id itself;
   - `key`: the same key, with case and spacing folded;
+  - `variant`: the same spelling once compatibility forms are unified
+    and possessives, punctuation and a leading article or title are
+    dropped. So `Dr. Alice Chen` finds `alice chen`, and `ACME Inc` finds
+    `acme, inc.`. This is for lookup only: identity stays with the key;
   - `prefix`: a key that begins with the name at a word boundary, so
     `alice` finds `alice chen` but `ali` finds nothing;
   - `tokens`: a key holding every word of the name.
