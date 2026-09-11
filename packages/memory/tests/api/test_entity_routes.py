@@ -519,6 +519,15 @@ async def test_the_report_can_leave_hubs_out_of_its_central_entities():
     assert "acme corp" not in {item["key"] for item in trimmed["central_entities"]}
     assert [hub["key"] for hub in trimmed["hubs_excluded"]] == ["acme corp"]
     assert trimmed["analysis"]["resolution"] == 1.5 and refused.status_code == 422
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        markdown = client.get("/v1/graph/report", params={"exclude_hubs": 95, "resolution": 1.5, "format": "markdown"},
+                              headers=auth()).text
+        default = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth()).text
+    assert "resolution 1.5" in markdown and "above the 95th percentile" in markdown
+    hubs = markdown.split("## Hubs left out of the ranking")[1].split("##")[0]
+    central = markdown.split("## Central entities")[1].split("##")[0]
+    assert "Acme Corp" in hubs and not any(row.startswith("| Acme Corp |") for row in central.splitlines())
+    assert "## Hubs left out" not in default and "resolution 1" in default
 
 
 

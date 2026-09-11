@@ -111,8 +111,13 @@ def render_markdown(report: Mapping[str, Any]) -> str:
              f"{literal(filters['status'])} facts as of {literal(filters['as_of'])}. Communities, scores and "
              f"questions are computed from recorded facts; they are analysis, not facts._", "", "## Summary", "",
              f"- {summary['entities']} entities, {summary['relations']} relations, {summary['attributes']} attributes",
-             f"- {summary['communities']} communities (modularity {analysis['modularity']}), "
-             f"{summary['isolated_entities']} entities known only by their values", "", "## Communities", ""]
+             f"- {summary['communities']} communities (modularity {analysis['modularity']}, "
+             f"resolution {analysis.get('resolution', 1.0):g}), "
+             f"{summary['isolated_entities']} entities known only by their values"]
+    if analysis.get("exclude_hubs") is not None:
+        lines.append(f"- Central entities leave out entities whose links are above the "
+                     f"{analysis['exclude_hubs']:g}th percentile; they are listed under Hubs left out of the ranking")
+    lines += ["", "## Communities", ""]
     for number, community in enumerate(report["communities"] or [], 1):
         cohesion = "n/a" if community["cohesion"] is None else community["cohesion"]
         lines.append(f"### {number}. {literal(community['label'])}")
@@ -130,6 +135,10 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     for item in report["central_entities"] or []:
         lines.append(f"| {literal(item['label'])} | {literal(item['kind'] or '')} | {item['degree']} | "
                      f"{item['pagerank']} | {item['betweenness']} | {literal(item['community'])} |")
+    if analysis.get("exclude_hubs") is not None:
+        lines += ["", "## Hubs left out of the ranking", ""]
+        lines += [f"- {literal(hub['label'])}: {hub['degree']} links, PageRank {hub['pagerank']}"
+                  for hub in report.get("hubs_excluded") or []] or ["None: no entity is above that percentile."]
     lines += ["", "## Surprising connections", ""]
     for surprise in report["surprising_connections"] or []:
         lines.append(f"- **{literal(surprise['subject']['label'])}** {literal(surprise['predicate'])} "
