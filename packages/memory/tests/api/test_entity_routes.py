@@ -180,7 +180,8 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert all(set(community["members"]) <= shown for community in groupings["communities"])
     assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
                                      "truncated": False, "reasons": [], "betweenness": "exact",
-                                     "betweenness_estimated": False, "levels": groupings["coverage"]["levels"]}
+                                     "betweenness_estimated": False, "levels": groupings["coverage"]["levels"],
+                                     "resolution": 1.0}
 
 
 async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
@@ -500,3 +501,31 @@ def test_the_graph_context_packet_is_served_for_names_or_a_question(quoted):
     assert client.get("/v1/graph/context", headers=auth()).status_code == 422
     assert client.get("/v1/graph/context", params={"q": "x", "max_bytes": 511}, headers=auth()).status_code == 422
     assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context"] is True
+
+
+async def test_the_report_can_leave_hubs_out_of_its_central_entities():
+    """A hub linked to everything tops every ranking; excluding the top
+    percentile by degree lists it apart instead."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(30):
+        await engine.assert_fact("alpha", f"person {number:02d}", "works_at", "Acme Corp", valid_from="2024-01-01T00:00:00Z")
+    for left, right in (("person 01", "person 02"), ("person 02", "person 03"), ("person 03", "person 01")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        plain = client.get("/v1/graph/report", headers=auth()).json()
+        trimmed = client.get("/v1/graph/report", params={"exclude_hubs": 95, "resolution": 1.5}, headers=auth()).json()
+        refused = client.get("/v1/graph/report", params={"resolution": 0}, headers=auth())
+    assert plain["central_entities"][0]["key"] == "acme corp"
+    assert "acme corp" not in {item["key"] for item in trimmed["central_entities"]}
+    assert [hub["key"] for hub in trimmed["hubs_excluded"]] == ["acme corp"]
+    assert trimmed["analysis"]["resolution"] == 1.5 and refused.status_code == 422
+
+
+
+def test_groupings_are_found_at_the_resolution_asked_for(teams):
+    client, _ = teams
+    usual = client.get("/v1/graph/knowledge", params={"groupings": "true"}, headers=auth()).json()["groupings"]
+    fine = client.get("/v1/graph/knowledge", params={"groupings": "true", "resolution": 10},
+                      headers=auth()).json()["groupings"]
+    assert usual["coverage"]["resolution"] == 1.0 and fine["coverage"]["resolution"] == 10.0
+    assert len(fine["communities"]) > len(usual["communities"]) == 2

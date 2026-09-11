@@ -88,6 +88,8 @@ class AnalysisCoverage:
     reasons: tuple[str, ...]
     betweenness: str
     levels: int
+    #: The modularity resolution the communities were found at.
+    resolution: float = 1.0
 
     def record(self) -> dict[str, object]:
         """What the analysis covered, for a caller to show beside its scores:
@@ -95,7 +97,8 @@ class AnalysisCoverage:
         return {"entities_total": self.entities_total, "entities_analysed": self.entities_analysed,
                 "isolated_entities": self.isolated_entities, "truncated": self.truncated,
                 "reasons": list(self.reasons), "betweenness": self.betweenness,
-                "betweenness_estimated": self.betweenness != "exact", "levels": self.levels}
+                "betweenness_estimated": self.betweenness != "exact", "levels": self.levels,
+                "resolution": self.resolution}
 
 
 @dataclass(frozen=True)
@@ -117,7 +120,7 @@ def _round(value: float) -> float:
     return round(value, 9)
 
 
-def _local_moves(graph: Adjacency) -> tuple[dict[str, str], bool]:
+def _local_moves(graph: Adjacency, resolution: float) -> tuple[dict[str, str], bool]:
     total = sum(sum(neighbours.values()) for neighbours in graph.values())
     if total == 0:
         return {node: node for node in graph}, False
@@ -134,9 +137,9 @@ def _local_moves(graph: Adjacency) -> tuple[dict[str, str], bool]:
                 if neighbour != node:
                     links[community[neighbour]] += weight
             totals[current] -= degree[node]
-            best, best_gain = current, links.get(current, 0) - totals[current] * degree[node] / total
+            best, best_gain = current, links.get(current, 0) - resolution * totals[current] * degree[node] / total
             for candidate in sorted(links):
-                gain = links[candidate] - totals[candidate] * degree[node] / total
+                gain = links[candidate] - resolution * totals[candidate] * degree[node] / total
                 if gain > best_gain + 1e-12:
                     best, best_gain = candidate, gain
             totals[best] += degree[node]
@@ -178,11 +181,11 @@ def _components(members: list[str], graph: Adjacency) -> list[list[str]]:
     return parts
 
 
-def _partition(graph: Adjacency) -> tuple[list[list[str]], int]:
+def _partition(graph: Adjacency, resolution: float) -> tuple[list[list[str]], int]:
     assignment = {node: node for node in graph}
     level_graph, levels = graph, 0
     for _ in range(_MAX_LEVELS):
-        moves, moved = _local_moves(level_graph)
+        moves, moved = _local_moves(level_graph, resolution)
         if not moved:
             break
         levels += 1
@@ -195,7 +198,7 @@ def _partition(graph: Adjacency) -> tuple[list[list[str]], int]:
     return sorted(parts, key=lambda part: (-len(part), part[0])), levels
 
 
-def _modularity(graph: Adjacency, membership: dict[str, str]) -> float:
+def _modularity(graph: Adjacency, membership: dict[str, str], resolution: float = 1.0) -> float:
     total = sum(sum(neighbours.values()) for neighbours in graph.values())
     if total == 0:
         return 0.0
@@ -206,7 +209,7 @@ def _modularity(graph: Adjacency, membership: dict[str, str]) -> float:
             degree[membership[node]] += weight
             if membership[node] == membership[neighbour]:
                 inside[membership[node]] += weight
-    return _round(sum(inside[c] / total - (degree[c] / total) ** 2 for c in degree))
+    return _round(sum(inside[c] / total - resolution * (degree[c] / total) ** 2 for c in degree))
 
 
 def _pagerank(graph: Adjacency) -> dict[str, float]:
@@ -275,7 +278,11 @@ def _community_id(members: list[str]) -> str:
 
 
 def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_000,
-                       max_surprises: int = 20, max_suggestions: int = 10) -> GraphAnalysis:
+                       max_surprises: int = 20, max_suggestions: int = 10, resolution: float = 1.0) -> GraphAnalysis:
+    """``resolution`` sets how fine the communities are: above 1 favours
+    smaller ones, below 1 larger ones, as in modularity with a resolution."""
+    if not resolution > 0:
+        raise ValueError("resolution must be positive")
     entities = {entity.entity_id: entity for entity in projection.entities}
     pairs: dict[tuple[str, str], int] = defaultdict(int)
     for relation in projection.relations:
@@ -298,7 +305,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
             graph[left][right] = weight
             graph[right][left] = weight
 
-    parts, levels = _partition(graph)
+    parts, levels = _partition(graph, resolution)
     membership = {node: _community_id(part) for part in parts for node in part}
     rank = _pagerank(graph)
     between, method = _betweenness(graph)
@@ -385,6 +392,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
             suggestions.append(Suggestion("isolated", f"What is {entity.label} connected to?", (entity.entity_id,),
                                           (), tuple(sorted(attributes_by_entity[entity.entity_id]))[:8]))
     return GraphAnalysis(
-        projection.digest, _modularity(graph, membership), tuple(communities), tuple(importance), surprising,
+        projection.digest, _modularity(graph, membership, resolution), tuple(communities), tuple(importance), surprising,
         tuple(suggestions[:max_suggestions]),
-        AnalysisCoverage(len(strength), len(kept), len(isolated), bool(reasons), tuple(reasons), method, levels))
+        AnalysisCoverage(len(strength), len(kept), len(isolated), bool(reasons), tuple(reasons), method, levels,
+                         resolution))

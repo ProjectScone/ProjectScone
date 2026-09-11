@@ -234,6 +234,21 @@ the same `status` and `as_of`:
   what a bridging entity does, what kind a conflicted entity is, and what
   an entity known only by its values connects to.
 
+Two parameters tune the analysis:
+
+- `resolution` (default 1, above 0 and at most 10) sets how fine the
+  communities are, as modularity with a resolution. Above 1 favours
+  smaller communities, below 1 larger ones. The knowledge view's
+  groupings take the same parameter.
+- `exclude_hubs` (a degree percentile, 50 to 100) leaves entities whose
+  number of neighbours is above that percentile out of the central
+  entities, and lists them under `hubs_excluded` instead. A hub that
+  everything links to otherwise leads every ranking. Excluded hubs stay
+  in their communities.
+
+The report echoes both under `analysis`, and `analysis.coverage` carries
+`resolution`.
+
 Results are deterministic: the same facts give the same report. The report
 states the projection digest and analysis version it came from, and
 `coverage` lists every limit that applied. `analysis.coverage` has the

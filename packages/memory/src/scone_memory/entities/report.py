@@ -8,6 +8,7 @@ document a person can read or keep.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping
 
 from .analysis import GraphAnalysis
@@ -22,11 +23,25 @@ def _name(entities: Mapping[str, object], entity_id: str) -> dict[str, object]:
     return {"id": entity_id, "label": getattr(entity, "label"), "key": getattr(entity, "key")}
 
 
+def _hubs(analysis: GraphAnalysis, percentile: float | None) -> set[str]:
+    """Entities whose number of neighbours is above the given percentile:
+    utility hubs a ranking by centrality would otherwise always lead with."""
+    if percentile is None or not analysis.importance:
+        return set()
+    degrees = sorted(item.degree for item in analysis.importance)
+    cut = degrees[max(0, math.ceil(len(degrees) * percentile / 100) - 1)]  # nearest-rank percentile
+    return {item.entity_id for item in analysis.importance if item.degree > cut}
+
+
 def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta: Mapping[str, object],
-                 filters: Mapping[str, object], coverage: Mapping[str, object], central: int = 15) -> dict[str, object]:
+                 filters: Mapping[str, object], coverage: Mapping[str, object], central: int = 15,
+                 exclude_hubs: float | None = None) -> dict[str, object]:
+    """``exclude_hubs`` leaves entities above that degree percentile out of
+    the central ranking and lists them apart; they stay in their communities."""
     entities = {entity.entity_id: entity for entity in projection.entities}
     communities = {community.community_id: community for community in analysis.communities}
-    ranked = analysis.importance[:central]
+    hubs = _hubs(analysis, exclude_hubs)
+    ranked = [item for item in analysis.importance if item.entity_id not in hubs][:central]
     bridging = sorted((item for item in analysis.importance if item.degree >= 2 and item.participation > 0.3),
                       key=lambda item: (-item.participation, -item.betweenness, item.entity_id))[:10]
     return {
@@ -34,6 +49,7 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
         "filters": dict(filters),
         "analysis": {"version": analysis.version, "modularity": analysis.modularity,
                      "levels": analysis.coverage.levels, "betweenness": analysis.coverage.betweenness,
+                     "resolution": analysis.coverage.resolution, "exclude_hubs": exclude_hubs,
                      "basis": "computed", "coverage": analysis.coverage.record()},
         "summary": {"entities": len(projection.entities), "relations": len(projection.relations),
                     "attributes": len(projection.attributes), "communities": len(analysis.communities),
@@ -50,6 +66,8 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
             "community_id": item.community_id, "community": communities[item.community_id].label,
             "degree": item.degree, "weight": item.weight, "pagerank": item.pagerank,
             "betweenness": item.betweenness, "participation": item.participation} for item in ranked],
+        "hubs_excluded": [{**_name(entities, item.entity_id), "degree": item.degree, "pagerank": item.pagerank}
+                          for item in analysis.importance if item.entity_id in hubs],
         "bridging_entities": [{
             **_name(entities, item.entity_id), "community_id": item.community_id,
             "participation": item.participation, "betweenness": item.betweenness} for item in bridging],

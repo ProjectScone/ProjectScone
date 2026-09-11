@@ -152,6 +152,8 @@ class AnalysisCoverage(BaseModel):
     betweenness: str
     betweenness_estimated: bool
     levels: int
+    #: The modularity resolution the communities were found at.
+    resolution: float = 1.0
 
 
 class Groupings(BaseModel):
@@ -242,32 +244,38 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     async def get_knowledge(
         status: StatusMode = "current", as_of: Optional[str] = None,
         limit: int = Query(default=150, ge=1, le=1000), attribute_limit: int = Query(default=300, ge=0, le=5000),
-        groupings: bool = False, space: str = Depends(space_for),
+        groupings: bool = False, resolution: float = Query(default=1.0, gt=0, le=10),
+        space: str = Depends(space_for),
     ) -> dict[str, object]:
         """Entities, the relations between them and their values, as the ledger records them.
 
         With ``groupings=true`` a separate, computed block assigns the shown
-        entities to communities and scores their importance."""
+        entities to communities, found at ``resolution``, and scores their
+        importance."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
                               coverage=coverage)
         if groupings:
-            view["groupings"] = _groupings(analyze_projection(projection), view)
+            view["groupings"] = _groupings(analyze_projection(projection, resolution=resolution), view)
         return view
 
     @app.get("/v1/graph/report", response_model=None)
     async def get_report(
         status: StatusMode = "current", as_of: Optional[str] = None,
-        format: Literal["json", "markdown"] = "json", space: str = Depends(space_for),
+        format: Literal["json", "markdown"] = "json", resolution: float = Query(default=1.0, gt=0, le=10),
+        exclude_hubs: Optional[float] = Query(default=None, ge=50, le=100), space: str = Depends(space_for),
     ) -> dict[str, object] | PlainTextResponse:
         """The space's communities, central entities, surprising connections and
-        questions worth asking, computed from recorded facts and citing them."""
+        questions worth asking, computed from recorded facts and citing them.
+        ``resolution`` sets how fine the communities are; ``exclude_hubs``
+        leaves entities above that degree percentile out of the central ranking."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         view = knowledge_view(projection, mode=status, as_of=when, limit=1, attribute_limit=0, coverage=coverage)
-        report = build_report(projection, analyze_projection(projection), meta=view["projection"],  # type: ignore[arg-type]
-                              filters={"status": status, "as_of": when}, coverage=coverage)
+        report = build_report(projection, analyze_projection(projection, resolution=resolution),
+                              meta=view["projection"], filters={"status": status, "as_of": when},  # type: ignore[arg-type]
+                              coverage=coverage, exclude_hubs=exclude_hubs)
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
         return report

@@ -169,3 +169,32 @@ def test_sampled_betweenness_is_marked_and_never_passes_its_maximum():
 
 def labels_of(rows, entity_id):
     return labels(project_entities("alpha", rows, revision=1))[entity_id]
+
+
+def ring_of_cliques(cliques: int = 6, size: int = 4) -> list[Fact]:
+    """Tight groups joined in a ring by single links."""
+    rows, number = [], 0
+    for group in range(cliques):
+        members = [f"g{group} m{member}" for member in range(size)]
+        for index, left in enumerate(members):
+            for right in members[index + 1:]:
+                number += 1
+                rows.append(fact(number, left, "knows", right))
+        number += 1
+        rows.append(fact(number, members[0], "knows", f"g{(group + 1) % cliques} m1"))
+    return rows
+
+
+def test_resolution_sets_how_fine_the_communities_are():
+    projection = project_entities("alpha", ring_of_cliques(), revision=1)
+    coarse = analyze_projection(projection, resolution=0.05)
+    usual = analyze_projection(projection)
+    # A clique member's three links outweigh the size penalty until about 10.
+    fine = analyze_projection(projection, resolution=10.0)
+    assert len(coarse.communities) < len(usual.communities) == 6 < len(fine.communities)
+    assert usual.coverage.resolution == 1.0 and fine.coverage.resolution == 10.0
+
+
+def test_resolution_must_be_positive():
+    with pytest.raises(ValueError):
+        analyze_projection(project_entities("alpha", ring_of_cliques(), revision=1), resolution=0)
