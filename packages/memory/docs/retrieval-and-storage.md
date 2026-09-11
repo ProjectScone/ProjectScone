@@ -96,6 +96,13 @@ tool `memory_temporal_answer`, the ToolBox tool `temporal_answer` and
   many days after A did B", "from A to B", "how many weeks ago did I X",
   "how long ago", "how many months has it been since X", "which came
   first/last, A or B", and an order question that lists its events.
+- **A question about a day** ("what did I do five days ago", "who did I
+  meet last Tuesday") is answered from that day instead: the days it
+  names bound the search rather than rank it, so nothing from another day
+  answers it, and `status` is `recalled`. It needs one reading of one day
+  and a question word; "the Wednesday two months ago" holds two readings
+  and is left alone, and "how many books did I read last year" asks for a
+  count rather than for the day.
 - **What it refuses**, leaving the question to ordinary recall: anything
   it cannot read confidently, since a computed answer arrives stated as
   fact. That includes ages ("how old was I when …", which needs a birth
@@ -143,8 +150,10 @@ On the 40 temporal questions of `bench-data/temporal-40.json`:
 | Computed | 20 |
 | — right | 16 (80% of what it computed) |
 | — wrong | 4 |
-| Refused: not a question it reads | 16 |
-| Refused: an event not in memory | 2 |
+| Answered from the day named | 6 |
+| — returning a passage the expected answer rests on | 5 |
+| Refused: not a question it reads | 8 |
+| Refused: nothing in memory for the event or the day | 4 |
 | Refused: an event's day undecided | 2 |
 
 The four wrong ones are grounding, not arithmetic: the phrase matched a

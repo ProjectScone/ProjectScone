@@ -42,6 +42,28 @@ ITEMS = [
         "answer_session_ids": ["s1"],
         "haystack_sessions": [[{"role": "user", "content": "I sold baked goods at the market."}]],
     },
+    {
+        "question_id": "lookup-right", "question_type": "temporal-reasoning",
+        "question": "What did I do 40 days ago?", "question_date": "2023/04/20 (Thu) 10:12",
+        "answer": "You sold baked goods at the market.",
+        "haystack_dates": ["2023/03/11 (Sat) 09:00", "2023/04/01 (Sat) 18:30"],
+        "haystack_session_ids": ["s1", "s2"], "answer_session_ids": ["s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "I sold baked goods at the market with my neighbour."}],
+            [{"role": "user", "content": "I ran the bake-off at the village hall."}],
+        ],
+    },
+    {
+        "question_id": "lookup-elsewhere", "question_type": "temporal-reasoning",
+        "question": "What did I do 40 days ago?", "question_date": "2023/04/20 (Thu) 10:12",
+        "answer": "You ran the bake-off at the village hall.",
+        "haystack_dates": ["2023/03/11 (Sat) 09:00", "2023/04/01 (Sat) 18:30"],
+        "haystack_session_ids": ["s1", "s2"], "answer_session_ids": ["s2"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "I sold baked goods at the market with my neighbour."}],
+            [{"role": "user", "content": "I ran the bake-off at the village hall."}],
+        ],
+    },
 ]
 
 
@@ -75,7 +97,8 @@ async def test_a_run_counts_what_was_computed_apart_from_what_was_refused(tmp_pa
     path.write_text(json.dumps(ITEMS), encoding="utf-8")
     score = await run_temporal(path)
     assert isinstance(score, TemporalScore)
-    assert (score.items, score.computed, score.correct, score.wrong) == (3, 1, 1, 0)
+    assert (score.items, score.computed, score.correct, score.wrong) == (5, 1, 1, 0)
     assert score.not_temporal == 1 and score.ungrounded == 1 and score.ambiguous == 0
-    assert score.record()["questions"] == 3 and score.record()["correct_of_computed"] == 1.0
-    assert "computed 1 of 3" in score.text()
+    assert (score.recalled, score.recalled_right) == (2, 1), "a day's passages answer the day the question names"
+    assert score.record()["questions"] == 5 and score.record()["correct_of_computed"] == 1.0
+    assert "computed 1 of 5" in score.text()

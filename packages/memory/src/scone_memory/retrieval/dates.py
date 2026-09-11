@@ -144,7 +144,10 @@ def _read(match: re.Match[str], text: str, today: date) -> tuple[date, date] | N
     before = text[:match.start()].split()
     setter = bool(before) and before[-1] in _SETTERS
     if kind == "weekday":
-        if not found["wlast"] and not (before and before[-1] == "on"):
+        # "on Tuesday" and "on the Tuesday" both name a day; a weekday
+        # alone is as often a name ("Friday Night Lights") as a date.
+        said = before[-2:] if before[-1:] == ["the"] else before[-1:]
+        if not found["wlast"] and said[:1] != ["on"]:
             return None
         back = (today.weekday() - _WEEKDAYS.index(found["wday"]) - 1) % 7 + 1
         day = today - timedelta(days=back)

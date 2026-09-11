@@ -98,6 +98,12 @@ def test_a_weekday_is_the_latest_one_before_today():
     assert spans("Who did I call on Thursday?") == [("2023-04-13", "2023-04-14", "thursday")]
 
 
+def test_a_weekday_may_have_an_article_before_it():
+    assert spans("What did I do on the Wednesday?") == [("2023-04-19", "2023-04-20", "wednesday")]
+    assert spans("What did I do on the Wednesday two months ago?") == [
+        ("2023-04-19", "2023-04-20", "wednesday"), ("2023-02-01", "2023-03-01", "two months ago")]
+
+
 def test_the_longest_reading_wins_and_each_is_kept_in_order():
     assert [w for *_, w in spans("Between May 20, 2023 and June 2023, and yesterday?")] == [
         "may 20, 2023", "june 2023", "yesterday"]

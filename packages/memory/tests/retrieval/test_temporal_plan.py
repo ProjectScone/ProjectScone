@@ -103,3 +103,27 @@ def test_since_one_event_when_another_is_the_span_between_them():
     asked = plan("How many weeks had passed since I recovered from the flu when I went on my 10th jog outdoors?")
     assert asked.kind == "between" and asked.unit == "week"
     assert asked.events == ("i recovered from the flu", "i went on my 10th jog outdoors")
+
+
+@pytest.mark.parametrize("question, words", [
+    ("What did I do 5 days ago?", "5 days ago"),
+    ("Who did I meet with during the lunch last Tuesday?", "last tuesday"),
+    ("What charity event did I participate in a month ago?", "a month ago"),
+    ("I received a piece of jewelry last Saturday from whom?", "last saturday"),
+])
+def test_a_question_about_one_day_asks_what_was_recorded_then(question, words):
+    asked = plan(question, now="2023-04-20T10:12:00Z")
+    assert asked.kind == "on" and asked.window is not None and asked.window.words == words
+    assert asked.events and "ago" not in asked.events[0] and "?" not in asked.events[0]
+
+
+@pytest.mark.parametrize("question", [
+    "How many books did I read last year?",  # a count of things, not what happened
+    "How long was I away last month?",  # a length of time, and no event to date
+    "How old was I in 2019?",
+    "What did I do with Rachel on the Wednesday two months ago?",  # two readings of one day
+    "I may go tomorrow",  # nothing recorded ahead of the moment asked
+])
+def test_a_dated_question_that_is_not_a_lookup_is_not_planned_as_one(question):
+    asked = plan(question, now="2023-04-20T10:12:00Z")
+    assert asked is None or asked.kind != "on"

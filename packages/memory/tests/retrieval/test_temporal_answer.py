@@ -182,3 +182,19 @@ async def test_one_passage_cannot_date_two_events_apart():
                                                     "the time I ran the charity bake-off?", now=NOW)
     assert answer.status == "ambiguous" and answer.value == {}
     assert "one passage holds more than one of the events" in answer.text
+
+
+async def test_what_was_recorded_on_a_day_is_returned_with_the_day_it_read():
+    engine = await diary()
+    answer = await temporal_answer(engine, "alpha", "What did I do 9 days ago?", now=NOW)
+    assert answer.status == "recalled"
+    assert answer.value["window"] == {"start": "2023-04-11", "end": "2023-04-12", "words": "9 days ago"}
+    assert answer.value["passages"][0]["date"] == "2023-04-11" and "Emma" in answer.value["passages"][0]["quote"]
+    assert "on: 2023-04-11, from \"9 days ago\"" in answer.text
+
+
+async def test_a_day_with_nothing_recorded_says_so():
+    engine = await diary()
+    answer = await temporal_answer(engine, "alpha", "What did I do 3 days ago?", now=NOW)
+    assert answer.status == "ungrounded" and answer.value == {}
+    assert "nothing recorded" in answer.text

@@ -46,6 +46,11 @@ class TemporalScore:
 
     items: int = 0
     computed: int = 0
+    #: Questions answered with the passages of the day they name.
+    recalled: int = 0
+    #: Of those, the ones that returned a passage from a session the
+    #: expected answer rests on.
+    recalled_right: int = 0
     correct: int = 0
     wrong: int = 0
     not_temporal: int = 0
@@ -54,7 +59,8 @@ class TemporalScore:
     unscored: tuple[str, ...] = ()
 
     def record(self) -> dict[str, object]:
-        return {"schema_version": 1, "questions": self.items, "computed": self.computed, "correct": self.correct,
+        return {"schema_version": 1, "questions": self.items, "computed": self.computed,
+                "recalled": self.recalled, "recalled_right": self.recalled_right, "correct": self.correct,
                 "wrong": self.wrong, "not_temporal": self.not_temporal, "ungrounded": self.ungrounded,
                 "ambiguous": self.ambiguous,
                 "correct_of_computed": round(self.correct / self.computed, 4) if self.computed else None,
@@ -66,6 +72,8 @@ class TemporalScore:
         return "\n".join([
             f"temporal: {self.items} questions; computed {self.computed} of {self.items}, {share} of them right",
             f"correct: {self.correct}; wrong: {self.wrong}",
+            f"recalled: {self.recalled} questions about a day it named, {self.recalled_right} of them returning a "
+            f"passage the expected answer rests on",
             f"refused: {self.not_temporal} not read, {self.ungrounded} with an event not in memory, "
             f"{self.ambiguous} with an event's day undecided",
             *(f"wrong: {question}" for question in self.unscored),
@@ -105,13 +113,15 @@ def score_answer(value: dict[str, object], events: Optional[Sequence[str]], expe
     return held > max(others, default=0)
 
 
-async def _engine_for(item: BenchItem) -> MemoryEngine:
+async def _engine_for(item: BenchItem) -> tuple[MemoryEngine, dict[int, str]]:
+    """One memory per question, and which session each episode came from."""
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
-    for session, when in zip(item.sessions, item.session_dates):
+    told: dict[int, str] = {}
+    for session, when, session_id in zip(item.sessions, item.session_dates, item.session_ids):
         said = "\n".join(session).strip()
         if said:
-            await engine.remember("default", said, created_at=when)
-    return engine
+            told[(await engine.remember("default", said, created_at=when)).episode_id] = session_id
+    return engine, told
 
 
 async def run_temporal(path: str | Path, *, limit: Optional[int] = None) -> TemporalScore:
@@ -121,14 +131,21 @@ async def run_temporal(path: str | Path, *, limit: Optional[int] = None) -> Temp
     # retrieval is scored on, so they are read here.
     expected = {str(raw.get("question_id", "")): str(raw.get("answer", ""))
                 for raw in json.loads(Path(path).read_text(encoding="utf-8"))}
-    counted = {"computed": 0, "correct": 0, "wrong": 0, "not_temporal": 0, "ungrounded": 0, "ambiguous": 0}
+    counted = {"computed": 0, "recalled": 0, "recalled_right": 0, "correct": 0, "wrong": 0, "not_temporal": 0,
+               "ungrounded": 0, "ambiguous": 0}
     unscored: list[str] = []
     for item in items:
-        engine = await _engine_for(item)
+        engine, told = await _engine_for(item)
         try:
             answer = await temporal_answer(engine, "default", item.question, now=iso_date(item.question_date))
         finally:
             await engine.close()
+        if answer.status == "recalled":
+            counted["recalled"] += 1
+            wanted = set(item.answer_session_ids)
+            shown = {told.get(int(str(passage["episode_id"]))) for passage in answer.anchors}
+            counted["recalled_right"] += 1 if shown & wanted else 0
+            continue
         if answer.status != "computed":
             counted[answer.status] += 1
             continue

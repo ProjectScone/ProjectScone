@@ -347,4 +347,4 @@ def test_bench_temporal_scores_a_file_of_dated_questions(tmp_path):
     path.write_text(json.dumps(ITEMS), encoding="utf-8")
     out = io.StringIO()
     code = cli.main(["bench-temporal", str(path)], env={}, stdin=io.StringIO(""), out=out)
-    assert code == 0 and "temporal: 3 questions; computed 1 of 3" in out.getvalue(), out.getvalue()
+    assert code == 0 and "temporal: 5 questions; computed 1 of 5" in out.getvalue(), out.getvalue()
