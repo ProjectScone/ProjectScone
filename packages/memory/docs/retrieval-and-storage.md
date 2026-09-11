@@ -38,8 +38,9 @@ any word of the question. The lane works in four steps:
    to it. At most 12 entities are used.
 3. It makes one extra lexical search for passages naming any of them,
    under the same filters as the other lanes.
-4. It keeps a passage only if the passage really names one of them as a
-   whole word or phrase.
+4. It keeps a passage only if the passage really names one of them: a run
+   of the passage's words, read the same way names and questions are,
+   must equal one of the entity's spellings.
 
 Passages naming a neighbour but none of the question's entities rank
 first, because the other lanes cannot reach them. The lane is fused at

@@ -12,11 +12,11 @@ The ledger records that Alice Chen works at Acme Robotics. The lane:
    the relation first, at most twelve entities in all;
 3. makes one lexical search for passages naming any of them, under the
    same filter as the other lanes;
-4. keeps a passage only when its text really names one of them, as a
-   whole word or phrase, and ranks first the passages that name a
-   neighbour but no entity of the question: the second hop the other
-   lanes cannot reach, where passages naming the question's own entities
-   are found by them anyway.
+4. keeps a passage only when its text really names one of them: a run of
+   its words, read as names and questions are, equals a spelling of one.
+   Passages naming a neighbour but no entity of the question rank first:
+   the second hop the other lanes cannot reach, while passages naming the
+   question's own entities are found by them anyway.
 
 The lane is fused by reciprocal rank at ``ENTITY_WEIGHT``, so its best
 second-hop passage can stand beside results two lanes agree on. It is
@@ -27,14 +27,13 @@ caller supplies.
 from __future__ import annotations
 
 from collections import defaultdict
-import re
-import unicodedata
 
 from ..core.models import QueryEntity
 from ..core.ports import DocumentStore, TextFilter
 from ..core.validation import MAX_QUERY
 from ..entities.context import mentioned
 from ..entities.project import Entity, EntityProjection
+from ..entities.query import name_words
 
 MAX_SEEDS = 4
 NEIGHBOURS_PER_SEED = 3
@@ -71,20 +70,22 @@ def lane_entities(projection: EntityProjection, query: str) -> list[QueryEntity]
     return chosen
 
 
-def folded(text: str) -> str:
-    """Composed and case folded, so a decomposed accent is part of its letter
-    and "José" never reads as "Jose"."""
-    return unicodedata.normalize("NFC", text).casefold()
+_LONGEST_NAME = 6  # words
 
 
-def names_pattern(spellings: set[str]) -> re.Pattern[str] | None:
-    """Any of the spellings as a whole word or phrase, longest first."""
-    forms = sorted((spelling for spelling in spellings if spelling), key=lambda spelling: (-len(spelling), spelling))
-    return re.compile("|".join(r"(?<!\w)" + re.escape(form) + r"(?!\w)" for form in forms)) if forms else None
+def name_phrases(entity: Entity) -> set[str]:
+    """Every spelling of an entity as its words, the way names are matched."""
+    return {phrase for phrase in (" ".join(name_words(spelling)) for spelling in
+                                  (entity.key, entity.label, *(form.text for form in entity.surface_forms))) if phrase}
 
 
-def _spellings(entity: Entity) -> set[str]:
-    return {folded(entity.key), folded(entity.label), *(folded(form.text) for form in entity.surface_forms)}
+def text_phrases(text: str) -> set[str]:
+    """Every run of up to six words in a passage, read with the same words
+    as names and questions: a combining mark stays with its letter and a
+    symbol inside a word (C++, R&D) stays part of it."""
+    words = name_words(text)
+    return {" ".join(words[start:start + size]) for start in range(len(words))
+            for size in range(1, min(_LONGEST_NAME, len(words) - start) + 1)}
 
 
 async def entity_lane(documents: DocumentStore, projection: EntityProjection, space: str, query: str, depth: int,
@@ -95,25 +96,23 @@ async def entity_lane(documents: DocumentStore, projection: EntityProjection, sp
     if not chosen:
         return [], []
     by_id = {entity.entity_id: entity for entity in projection.entities}
-
-    def pattern(role: str) -> re.Pattern[str] | None:
-        return names_pattern({spelling for item in chosen if item.role == role
-                              for spelling in _spellings(by_id[item.entity_id])})
+    seeds = {phrase for item in chosen if item.role == "seed" for phrase in name_phrases(by_id[item.entity_id])}
+    neighbours = {phrase for item in chosen if item.role == "neighbour"
+                  for phrase in name_phrases(by_id[item.entity_id])}
 
     lane_query = " ".join(dict.fromkeys(item.label for item in chosen))[:MAX_QUERY]
     hits = await documents.search_text(space, lane_query, depth, scope)
     if not hits:
         return [], chosen
-    seeds, neighbours = pattern("seed"), pattern("neighbour")
-    texts = {chunk.chunk_id: folded(chunk.text)
+    texts = {chunk.chunk_id: text_phrases(chunk.text)
              for chunk in await documents.get_chunks(space, [cid for cid, _ in hits])}
     second_hop, first_hop = [], []
     for chunk_id, score in hits:
-        text = texts.get(chunk_id)
-        if text is None:
+        phrases = texts.get(chunk_id)
+        if phrases is None:
             continue
-        names_seed = seeds is not None and seeds.search(text) is not None
-        names_neighbour = neighbours is not None and neighbours.search(text) is not None
+        names_seed = not seeds.isdisjoint(phrases)
+        names_neighbour = not neighbours.isdisjoint(phrases)
         if names_neighbour and not names_seed:
             second_hop.append((chunk_id, score))
         elif names_seed or names_neighbour:

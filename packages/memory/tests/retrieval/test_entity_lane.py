@@ -189,10 +189,15 @@ async def test_symbols_and_accents_that_make_a_name_are_kept():
 
 
 
-def test_a_decomposed_accent_belongs_to_its_letter():
-    """Ingestion keeps "Jose\u0301" as written; the lane composes before
-    matching, so it never reads as the name "jose"."""
-    from scone_memory.retrieval.entity_lane import folded, names_pattern
+def test_a_name_is_matched_as_whole_words_of_the_name_tokenizer():
+    """Passages are read with the same words names and questions are: a
+    combining mark belongs to its letter, and symbols inside a word are
+    part of it, so neither "Jose" nor "C" nor "R" is found where it is not."""
+    from scone_memory.retrieval.entity_lane import text_phrases
 
-    assert names_pattern({"jose"}).search(folded("Jose\u0301 mentions Chen")) is None
-    assert names_pattern({folded("José")}).search(folded("Jose\u0301 mentions Chen")) is not None
+    assert "jose" not in text_phrases("Jose\u0301 mentions Chen")
+    assert "jose" not in text_phrases("Jose\u0338 mentions Chen")
+    assert "c" not in text_phrases("We write C++ daily") and "r" not in text_phrases("The R&D team met")
+    assert "chen" in text_phrases("Jose\u0338 mentions Chen.") and "alice chen" in text_phrases("(Alice Chen) said")
+    assert "c++" in text_phrases("We write C++ daily")
+
