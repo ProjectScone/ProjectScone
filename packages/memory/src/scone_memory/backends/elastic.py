@@ -552,6 +552,18 @@ class ElasticsearchDocumentStore:
         hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
         return [_fact_link(h) for h in hits]
 
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts, never expanding to
+        neighbours: the first 16 ids, at most 49 links, ascending id."""
+        wanted = list(dict.fromkeys(fact_ids[:16]))
+        cap = max(0, min(limit, 49))
+        if not wanted or not cap:
+            return []
+        query = {"bool": {"filter": [{"term": {"space": space}}, {"terms": {"from_fact": wanted}},
+                                     {"terms": {"to_fact": wanted}}]}}
+        hits = await self._search("fact_links", query=query, size=cap, sort=[{"link_id": "asc"}])
+        return [_fact_link(hit) for hit in hits]
+
     async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
         cap = max(0, min(limit, 129))
         if not cap:

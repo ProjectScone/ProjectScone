@@ -505,6 +505,17 @@ class PostgresDocumentStore:
         )
         return [_fact_link(r) for r in rows]
 
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts, never expanding to
+        neighbours: the first 16 ids, at most 49 links, ascending id."""
+        wanted = list(dict.fromkeys(fact_ids[:16]))
+        cap = max(0, min(limit, 49))
+        if not wanted or not cap:
+            return []
+        rows = await self._rows(f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = ANY(%s) "
+                                "AND to_fact = ANY(%s) ORDER BY id LIMIT %s", (space, wanted, wanted, cap))
+        return [_fact_link(row) for row in rows]
+
     async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
         cap = max(0, min(limit, 129))
         rows = await self._rows(
