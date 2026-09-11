@@ -198,6 +198,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
+    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, export")
+    graph = p.add_subparsers(dest="graph_command", required=True)
+    g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
+    g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
+    g.add_argument("--resolution", type=float, default=1.0, help="how fine the communities are (default 1)")
+    g = graph.add_parser("path", help="how two entities connect, each hop with its facts")
+    g.add_argument("source")
+    g.add_argument("target")
+    g.add_argument("--max-hops", type=int, default=3)
+    g = graph.add_parser("context", help="what the graph records around names or a question, for a model")
+    g.add_argument("names", nargs="*")
+    g.add_argument("--question")
+    g.add_argument("--max-bytes", type=int, default=8000)
+    g = graph.add_parser("entity", help="one entity: its relations both ways and its values")
+    g.add_argument("name")
+    g = graph.add_parser("timeline", help="one entity's facts in valid time")
+    g.add_argument("name")
+    g.add_argument("--as-of")
+    g = graph.add_parser("export", help="the whole graph as a file another tool reads")
+    g.add_argument("--format", default="json", choices=["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+    g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
     p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
     p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
     p = sub.add_parser("bench-conflicts",
@@ -437,9 +458,68 @@ def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
     return data, media_type, pathlib.Path(filename).name
 
 
+async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+    """The graph subcommands, on the same projection as the HTTP routes.
+    Exits 1 when a name is ambiguous or unknown."""
+    from ..entities.analysis import analyze_projection
+    from ..entities.context import ContextLimits, graph_connections, graph_context
+    from ..entities.export import export_graph
+    from ..entities.read import load_projection
+    from ..entities.report import build_report, render_markdown
+    from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
+    from ..entities.view import knowledge_view
+
+    space, command = args.space, args.graph_command
+    if command in ("path", "context", "entity"):
+        if command == "path":
+            found = await graph_connections(engine, space, args.source, args.target, max_hops=args.max_hops)
+        elif command == "context":
+            if not args.names and not args.question:
+                raise InvalidInput("give names or --question")
+            found = await graph_context(engine, space, names=args.names, question=args.question,
+                                        limits=ContextLimits(max_bytes=args.max_bytes))
+        else:
+            found = await graph_context(engine, space, names=[args.name], limits=ContextLimits(max_hops=1))
+        print(found.text, file=out)
+        return 0 if found.status == "prepared" else 1
+    if command == "timeline":
+        try:
+            view = await timeline_view(engine, space, args.name, as_of=args.as_of)
+        except TimelineEntityAmbiguous as ambiguous:
+            print(json.dumps({"error": "ambiguous", "candidates": ambiguous.candidates}), file=out)
+            return 1
+        except TimelineEntityMissing:
+            print(json.dumps({"error": f"no entity is named {args.name!r}"}), file=out)
+            return 1
+        print(json.dumps(view, ensure_ascii=False, indent=2), file=out)
+        return 0
+    projection, coverage = await load_projection(engine, space, mode="current")
+    if command == "report":
+        when = engine.clock()
+        view = knowledge_view(projection, mode="current", as_of=when, limit=1, attribute_limit=0, coverage=coverage)
+        report = build_report(projection, analyze_projection(projection, resolution=args.resolution),
+                              meta=view["projection"], filters={"status": "current", "as_of": when},  # type: ignore[arg-type]
+                              coverage=coverage)
+        print(render_markdown(report) if args.markdown else json.dumps(report, ensure_ascii=False, indent=2), file=out)
+        return 0
+    exported = export_graph(projection, args.format, about={"status": "current", "coverage": coverage})
+    if args.out:
+        with open(args.out, "wb") as file:
+            file.write(exported.body)
+        print(json.dumps({"written": args.out, "bytes": len(exported.body), "media_type": exported.media_type}),
+              file=out)
+    elif exported.media_type == "application/zip":
+        raise InvalidInput(f"{args.format} is a zip; give --out FILE")
+    else:
+        print(exported.body.decode("utf-8", "backslashreplace"), file=out)
+    return 0
+
+
 async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
+    if args.command == "graph":
+        return await graph_command(args, engine, out)
 
     if args.command == "remember":
         if args.image is not None and args.jsonl:

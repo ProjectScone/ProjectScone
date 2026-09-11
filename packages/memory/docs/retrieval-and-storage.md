@@ -588,6 +588,23 @@ included. Valid text gets the same id it always had.
 The bytes are deterministic, zip timestamps included, so the same
 projection always exports the same file. Advertised as `graph.export`.
 
+### From the command line
+
+`scone graph` reads the same projection as the routes, on the configured
+store:
+
+| Command | Prints |
+| --- | --- |
+| `scone graph report [--markdown] [--resolution R]` | the report, as JSON or Markdown |
+| `scone graph path SOURCE TARGET [--max-hops N]` | the shortest paths, one `path:` line each |
+| `scone graph context [NAMES…] [--question Q] [--max-bytes N]` | the graph context packet |
+| `scone graph entity NAME` | one entity's relations both ways and its values |
+| `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
+| `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
+
+Every command takes `--space`. A name that is ambiguous or unknown exits
+with status 1, after printing its candidates or the reason.
+
 ### How the ledger is read
 
 Each graph request reads the space's ledger. It never reads it on a
