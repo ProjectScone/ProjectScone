@@ -25,6 +25,10 @@ _ODF_REVISION_METADATA = frozenset({
     '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
     '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
 })
+_ODF_TEXT = '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}'
+_ODF_OFFICE = '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}'
+_ODF_SIDE_CONTENT = frozenset({_ODF_OFFICE + 'annotation', _ODF_TEXT + 'note'})
+_DC = '{http://purl.org/dc/elements/1.1/}'
 _WORD_NAMESPACES = (
     'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
     'http://purl.oclc.org/ooxml/wordprocessingml/main',
@@ -128,13 +132,18 @@ def _related(source: str, relations: dict[str, tuple[str, str]], identifier: str
     return _resolve(source, relation[0])
 
 
-def _blocks(root: Element, names: set[str]) -> Iterator[Element]:
+def _blocks(
+    root: Element, names: set[str], *,
+    include_tags: frozenset[str] = frozenset(), skip_tags: frozenset[str] = frozenset(),
+) -> Iterator[Element]:
     stack = [iter(root)]
     while stack:
         child = next(stack[-1], None)
         if child is None:
             stack.pop()
-        elif _local(child.tag) in names:
+        elif child.tag in skip_tags:
+            continue
+        elif _local(child.tag) in names or child.tag in include_tags:
             yield child
         else:
             stack.append(iter(child))
@@ -306,6 +315,8 @@ def _visible_text(root: Element, output: _Output, *, odf: bool = False) -> str:
                 stack.append(current.tail)
             if name in {'script', 'style', 'head'}:
                 continue
+            if odf and current.tag in _ODF_SIDE_CONTENT:
+                continue
             if odf and name == 's':
                 count = _positive(_attr(current, 'c', '1'), output.limits.max_text_bytes)
                 yield ' ' * count
@@ -326,8 +337,50 @@ def _visible_text(root: Element, output: _Output, *, odf: bool = False) -> str:
 
 
 def _odf_paragraphs(root: Element, output: _Output) -> Iterator[str]:
-    for paragraph in _blocks(root, {'p', 'h'}):
+    for paragraph in _blocks(root, {'p', 'h'}, skip_tags=_ODF_SIDE_CONTENT):
         yield _visible_text(paragraph, output, odf=True)
+
+
+def _odf_side_content(
+    element: Element, output: _Output, parent_locator: str,
+    metadata: dict[str, str], counts: dict[str, int],
+) -> None:
+    details = {key: value for key, value in metadata.items() if key not in {
+        'formula', 'content_role', 'parent_locator', 'note_id', 'citation', 'comment_name', 'author', 'date',
+    }}
+    body = element
+    if element.tag == _ODF_TEXT + 'note':
+        kind = element.get(_ODF_TEXT + 'note-class', 'footnote')
+        if kind not in {'footnote', 'endnote'}:
+            raise InvalidInput('OpenDocument contains an invalid note class')
+        note_body = element.find(_ODF_TEXT + 'note-body')
+        if note_body is None:
+            raise InvalidInput('OpenDocument note is missing its body')
+        body = note_body
+        if identifier := element.get(_ODF_TEXT + 'id'):
+            details['note_id'] = identifier
+        citation = element.find(_ODF_TEXT + 'note-citation')
+        if citation is not None:
+            details['citation'] = output.join(citation.itertext())
+    else:
+        kind = 'comment'
+        if name := element.get(_ODF_OFFICE + 'name'):
+            details['comment_name'] = name
+        for key, tag in (('author', 'creator'), ('date', 'date')):
+            value = element.find(_DC + tag)
+            if value is not None:
+                details[key] = output.join(value.itertext())
+    counts[kind] = counts.get(kind, 0) + 1
+    locator = f'{parent_locator}/{kind}:{counts[kind]}'
+    details.update(content_role=kind, parent_locator=parent_locator)
+    output.add(output.join(_odf_paragraphs(body, output), '\n'), locator, details)
+    _odf_annotations(body, output, locator, details)
+
+
+def _odf_annotations(root: Element, output: _Output, locator: str, metadata: dict[str, str]) -> None:
+    counts: dict[str, int] = {}
+    for element in _blocks(root, set(), include_tags=_ODF_SIDE_CONTENT):
+        _odf_side_content(element, output, locator, metadata, counts)
 
 
 def _ods(root: Element, output: _Output) -> None:
@@ -349,7 +402,9 @@ def _ods(root: Element, output: _Output) -> None:
                 metadata = {'sheet': name, 'cell': reference, 'row_repeat': str(row_repeat), 'column_repeat': str(column_repeat)}
                 if _attr(cell, 'formula'):
                     metadata['formula'] = 'cached-value'
-                output.add(text, f'sheet:{name}/cell:{reference}', metadata)
+                locator = f'sheet:{name}/cell:{reference}'
+                output.add(text, locator, metadata)
+                _odf_annotations(cell, output, locator, metadata)
                 column_number += column_repeat
                 if column_number > 2_147_483_648:
                     raise InvalidInput('ODS column range exceeds its supported range')
@@ -389,15 +444,23 @@ def _odf(bundle: SafeArchive, output: _Output, extension: str) -> None:
 
 def _odf_content(root: Element, output: _Output, prefix: str, metadata: dict[str, str]) -> None:
     paragraphs = tables = 0
-    for block in _blocks(root, {'p', 'h', 'table'}):
+    counts: dict[str, int] = {}
+    for block in _blocks(root, {'p', 'h', 'table'}, include_tags=_ODF_SIDE_CONTENT):
+        if block.tag in _ODF_SIDE_CONTENT:
+            _odf_side_content(block, output, prefix + 'body', metadata, counts)
+            continue
         if _local(block.tag) != 'table':
             paragraphs += 1
-            output.add(_visible_text(block, output, odf=True), f'{prefix}paragraph:{paragraphs}', metadata)
+            locator = f'{prefix}paragraph:{paragraphs}'
+            output.add(_visible_text(block, output, odf=True), locator, metadata)
+            _odf_annotations(block, output, locator, metadata)
             continue
         tables += 1
         for number, row in enumerate(_blocks(block, {'table-row'}), 1):
             text = output.join((output.join(_odf_paragraphs(cell, output), '\n') for cell in row if _local(cell.tag) in {'table-cell', 'covered-table-cell'}), '\t')
-            output.add(text, f'{prefix}table:{tables}/row:{number}', metadata)
+            locator = f'{prefix}table:{tables}/row:{number}'
+            output.add(text, locator, metadata)
+            _odf_annotations(row, output, locator, metadata)
 
 
 def _epub(bundle: SafeArchive, output: _Output) -> None:

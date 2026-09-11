@@ -69,6 +69,15 @@ history and `office:change-info` metadata are omitted. Current text, including
 tracked insertions, remains in its document order. Revision history is not
 emitted as a separate searchable view.
 
+OpenDocument comments, footnotes and endnotes are separate searchable segments.
+Their `content_role` and `parent_locator` identify their relationship to a
+paragraph, table row or spreadsheet cell. Comments retain available author,
+date and name metadata; notes retain their ID and citation label. Those labels
+and author details are not inserted into the document's body text or cell values.
+Annotations outside a paragraph use `body/comment:N` locators (with a slide
+prefix in presentations). Nested annotations carry their own metadata. These
+segments consume the same text and segment budgets as ordinary content.
+
 DOCX extraction likewise omits deleted content and old move locations before
 numbering paragraphs and tables. Current insertions and move destinations remain.
 Directly hidden runs (`w:vanish`) are omitted; inherited style visibility is not

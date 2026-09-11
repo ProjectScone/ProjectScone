@@ -62,6 +62,32 @@ async def test_document_boundary_rejects_oversize_extra_fields_and_reports_forma
     assert (await client.post('/v1/documents', json={'attachment_id': 'a'*64})).status_code == 404
 
 
+async def test_office_annotation_roles_survive_indexing_and_source_citations(service):
+    from ..ingestion.test_office_revisions import odt
+
+    client, engine = service
+    raw = odt('''<text:p>Revenue grew<office:annotation xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:creator>Alice</dc:creator><text:p>Verify this estimate.</text:p></office:annotation> 4%.</text:p>''')
+    uploaded = await client.post('/v1/attachments', content=raw,
+        headers={'content-type': 'application/octet-stream', 'x-filename': 'report.odt'})
+    assert uploaded.status_code == 200, uploaded.text
+    indexed = await client.post('/v1/documents', json={'attachment_id': uploaded.json()['attachment_id']})
+    assert indexed.status_code == 200, indexed.text
+    episode_id = indexed.json()['added']['episode_id']
+    episode = await engine.episode('alpha', episode_id)
+    assert episode.content == 'Revenue grew 4%.\n\nVerify this estimate.'
+    evidence = await client.get(f'/v1/episodes/{episode_id}/document',
+        headers={'authorization': 'Bearer read'})
+    assert evidence.status_code == 200, evidence.text
+    main, comment = evidence.json()['segments']
+    assert main['text'] == 'Revenue grew 4%.'
+    assert comment['locator'] == 'paragraph:1/comment:1'
+    assert comment['metadata'] == {
+        'content_role': 'comment', 'parent_locator': 'paragraph:1', 'author': 'Alice',
+    }
+    assert (await client.get(evidence.json()['download_path'])).content == raw
+
+
 @pytest.mark.parametrize('first_name', [None, 'plan.txt'])
 async def test_extraction_filename_overrides_first_upload_label_without_rewriting_original(service, first_name):
     client, _ = service
