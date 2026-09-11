@@ -357,7 +357,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         result = paths_between(projection, ends[0], ends[1], max_hops=max_hops, limit=limit, hub_degree=hub_degree)
         names = _names(projection)
         state = "not_connected_in_read" if result.status == "disconnected" and not complete else result.status
-        return {"status": state, "complete": complete, "coverage": read, "from": names[ends[0]], "to": names[ends[1]],
+        return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
+                "filters": {"status": status, "as_of": when},
+                "policy": {"max_hops": max_hops, "limit": limit, "hub_degree": hub_degree},
+                "status": state, "complete": complete, "coverage": read, "from": names[ends[0]], "to": names[ends[1]],
                 "hubs_skipped": [names[hub] for hub in result.hubs_skipped], "truncated": result.truncated,
                 "paths": [{"entities": [names[entity] for entity in path.entity_ids],
                            "hops": [{"relation_id": hop.relation_id, "subject": names[hop.subject_id],

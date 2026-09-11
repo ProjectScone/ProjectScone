@@ -476,3 +476,15 @@ async def test_a_slow_view_answers_come_back_shortly(monkeypatch):
         time.sleep(0.6)
         ready = client.get("/v1/graph/knowledge", headers=auth())
     assert ready.status_code == 200 and ready.json()["entities"]
+
+
+def test_a_path_names_its_projection_filters_and_the_bounds_it_applied(quoted):
+    client, _, _ = quoted
+    found = client.get("/v1/graph/path", params={"from": "alice chen", "to": "lisbon", "max_hops": 3, "limit": 2,
+                                                  "hub_degree": 50}, headers=auth()).json()
+    view = client.get("/v1/graph/knowledge", params={"status": "history"}, headers=auth()).json()
+    assert found["schema_version"] == 1 and found["space"] == "alpha"
+    assert found["projection"]["digest"] and found["projection"]["version"] == "scone.entities/1"
+    assert found["filters"]["status"] == "current" and found["filters"]["as_of"]
+    assert found["policy"] == {"max_hops": 3, "limit": 2, "hub_degree": 50}
+    assert view["projection"]["version"] == found["projection"]["version"]

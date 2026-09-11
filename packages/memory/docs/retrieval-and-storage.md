@@ -308,6 +308,9 @@ where `coverage` counts the matches.
     allowed) or `disconnected`.
   - A name that could mean several entities is a 409 listing the
     candidates, and an unknown name is a 404.
+  - A found path names its `schema_version`, `space`, `projection` and
+    `filters`, and echoes the bounds it applied as `policy`
+    (`max_hops`, `limit`, `hub_degree`).
 
   Advertised as `graph.path`.
 
