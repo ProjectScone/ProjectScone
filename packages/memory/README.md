@@ -17,6 +17,9 @@ expose it through HTTP and MCP.
 Retrieval scores are ranking signals. Retained citations prove where evidence
 came from; they do not establish that a generated answer is correct.
 
+See [named agents and model selection](docs/agent-models.md) for explicit per-agent
+LLM choices, scoped tool execution and workflow checkpoint identity.
+
 ## Install
 
 Python **3.14** is the primary development runtime. The base library supports
