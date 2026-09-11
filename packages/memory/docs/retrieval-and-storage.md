@@ -734,6 +734,42 @@ traceable to a fact, and the caller's model reads the digests.
   ToolBox `graph_overview` and `scone graph overview` take the same
   bounds.
 
+#### `GET /v1/graph/changes`
+
+What changed in the graph between two moments. "What changed since we
+last spoke?" is a question about time, and a graph without valid time
+cannot answer it. The graph holding at `since` is set beside the graph
+holding at `until`:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `since` | required | RFC 3339 moment to compare from |
+| `until` | now | RFC 3339 moment to compare to; must be after `since` |
+| `limit` | 50 (1–500) | Most changes listed; more are counted as `changes_cut N` |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+
+- **The kinds of change,** listed in this order:
+  - `moved`: a subject's one claim under a predicate passed from one object
+    to another, `moved: alice chen works_at Acme Robotics → Globex`;
+  - `began` and `ended`: relations holding at one moment and not the
+    other;
+  - `value`: what an entity's values under one predicate were, and are.
+- **Entities.** Those that appeared and those that are gone are counted, and
+  the first 50 of each are named.
+- **Citations.** Every change cites the facts behind each side, re-read at
+  that side's moment: a fact behind what held at `since` must still say
+  it held then, and one behind `until` that it holds then. A change
+  resting on a fact that stopped counting is dropped as
+  `stale_evidence`.
+- **Honesty.**
+  - "No change" is said only when both reads were whole.
+  - A ledger written between the two reads is said as
+    `ledger_moved_between_reads`.
+- Both moments are read as `current` facts, so what held is a matter of
+  valid time, not of when the ledger learned it.
+- Advertised as `graph.changes`. MCP `memory_graph_changes`, the ToolBox
+  `graph_changes` and `scone graph changes` take the same bounds.
+
 #### `GET /v1/graph/sources`
 
 One source followed through (`episode=`, an episode id):
@@ -957,6 +993,7 @@ store:
 | `scone graph schema [--limit N] [--max-bytes N]` | the kinds and predicates the graph holds, as JSON |
 | `scone graph match --pattern S P O [--pattern …] [--returns ?X] [--status S] [--as-of T] [--apart] [--limit N]` | the rows answering a structured question, one `row:` line each; quote the `?` variables in a shell |
 | `scone graph overview [--question Q] [--limit N] [--facts N] [--resolution R]` | each community digested with cited facts |
+| `scone graph changes --since T [--until T] [--limit N]` | what changed between two moments, one line per change; exits 1 when nothing did |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it

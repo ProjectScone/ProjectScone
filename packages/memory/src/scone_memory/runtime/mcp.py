@@ -42,6 +42,7 @@ from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
 from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
+from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, OverviewError, graph_overview)
 from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_PATTERNS, MAX_ROWS, MatchQueryError, graph_match
@@ -76,7 +77,8 @@ INSTRUCTIONS = (
     "says what kinds of entity and which predicates the graph holds, and "
     "memory_graph_match answers a structured question given as triple patterns "
     "joined by ?variables. For a question about the whole graph, "
-    "memory_graph_overview digests each community with cited facts."
+    "memory_graph_overview digests each community with cited facts, and "
+    "memory_graph_changes says what changed since a moment."
 )
 
 
@@ -519,6 +521,30 @@ def create_server(engine: MemoryEngine, space: str = "default",
                 facts_each=facts if facts is not None else DEFAULT_FACTS_EACH,
                 max_bytes=max_bytes if max_bytes is not None else OVERVIEW_BYTES)
         except OverviewError as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
+    @tool(server, "memory_graph_changes")
+    async def memory_graph_changes(
+        since: Annotated[str, Field(description="RFC 3339 moment to compare from, as in '2025-01-01T00:00:00Z'")],
+        until: Annotated[Optional[str], Field(description="RFC 3339 moment to compare to; defaults to now")] = None,
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Changes to list (1..={MAX_CHANGES}); defaults to {DEFAULT_CHANGES}")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """What changed in the entity graph between two moments ("what changed
+        since we last spoke?"): claims that moved from one object to
+        another, relations that began and ended, values that changed and
+        entities that came and went, each citing its facts re-read now."""
+        try:
+            found = await graph_changes(engine, space or default_space, since=since, until=until,
+                                        limit=limit if limit is not None else DEFAULT_CHANGES,
+                                        max_bytes=max_bytes if max_bytes is not None else CHANGES_BYTES)
+        except ChangesError as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 

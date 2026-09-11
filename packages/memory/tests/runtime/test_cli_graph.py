@@ -295,3 +295,13 @@ async def test_overview_prints_the_digests_and_json_on_request(engine):
     assert code == 0 and len(body["communities"]) == 1 and body["communities"][0]["fact_ids"] == []
     with pytest.raises(InvalidInput, match="limit"):
         await graph(engine, "overview", "--limit", "0")
+
+
+async def test_changes_prints_what_changed_and_json_on_request(engine):
+    code, text = await graph(engine, "changes", "--since", "2023-01-01T00:00:00Z")
+    assert code == 0 and text.startswith("changes: space default, ") and "began: alice chen works_at" in text
+    code, text = await graph(engine, "changes", "--since", "2023-01-01T00:00:00Z", "--until", "2023-06-01T00:00:00Z",
+                             "--json")
+    assert code == 1 and json.loads(text)["status"] == "unchanged"
+    with pytest.raises(InvalidInput, match="before"):
+        await graph(engine, "changes", "--since", "2030-01-01T00:00:00Z")

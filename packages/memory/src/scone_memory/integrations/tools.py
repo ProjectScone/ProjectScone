@@ -28,6 +28,7 @@ MAX_ITEMS = 20
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
 from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
 from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
+from ..entities.changes import DEFAULT_CHANGES, MAX_CHANGES  # noqa: E402
 from ..entities.view import STATUS_MODES  # noqa: E402
 
 
@@ -189,10 +190,24 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
         }, []),
     ),
+    ToolSpec(
+        name="graph_changes",
+        summary=("What changed in the entity graph between two moments: claims that moved from one object to "
+                 "another, relations that began and ended, values that changed and entities that came and went, "
+                 "each citing its facts re-read now. Ask it at the start of a session with the last one's time."),
+        parameters=_schema({
+            "since": {"type": "string", "description": "RFC 3339 moment to compare from."},
+            "until": {"type": "string", "description": "RFC 3339 moment to compare to. Defaults to now."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_CHANGES,
+                      "description": f"Changes to list, 1 to {MAX_CHANGES}. Defaults to {DEFAULT_CHANGES}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, ["since"]),
+    ),
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview"})
+                          "graph_overview", "graph_changes"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -340,6 +355,17 @@ class ToolBox:
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+        if name == "graph_changes":
+            from ..entities.changes import MAX_BYTES as CHANGES_BYTES, ChangesError, graph_changes
+
+            try:
+                changed = await graph_changes(self.engine, self.space, since=arguments["since"],
+                                              until=arguments.get("until") or when,
+                                              limit=arguments.get("limit", DEFAULT_CHANGES),
+                                              max_bytes=arguments.get("max_bytes", CHANGES_BYTES))
+            except ChangesError as refused:
+                raise InvalidInput(str(refused)) from None
+            return changed.record(self.space)
         if name == "graph_overview":
             from ..entities.overview import MAX_BYTES as OVERVIEW_BYTES, OverviewError, graph_overview
 

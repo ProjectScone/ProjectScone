@@ -8,10 +8,10 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same ten contracts: `search_memory`, `add_memory`, `read_profile`,
-`trace_memory`, and the six entity-graph reads `graph_context`,
-`explain_entity`, `connect_entities`, `graph_schema`, `graph_match` and
-`graph_overview`. Hosts can
+render the same eleven contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, and the seven entity-graph reads `graph_context`,
+`explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
+`graph_overview` and `graph_changes`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -39,7 +39,7 @@ not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
-`memory_graph_match` and `memory_graph_overview`:
+`memory_graph_match`, `memory_graph_overview` and `memory_graph_changes`:
 
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. `max_bytes` (512 to
@@ -69,6 +69,11 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   community's size, kinds, predicates, central entities and up to `facts`
   of its facts, cited and re-read now, with the communities a `question`
   concerns first. It is the `/v1/graph/overview` JSON.
+- `graph_changes` answers what changed between `since` and `until` (now
+  by default): claims that moved, relations that began and ended, values
+  that changed and entities that came and went, each citing its facts. It
+  is the `/v1/graph/changes` JSON; ask it at the start of a session with
+  the last one's time.
 
 Each reads the current projection of the box's space at one instant. The
 first three answer with the JSON that `/v1/graph/context` returns: the

@@ -36,6 +36,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_schema": {"limit", "max_bytes", "space"},
     "memory_graph_match": {"where", "returns", "limit", "status", "as_of", "together", "max_bytes", "space"},
     "memory_graph_overview": {"question", "limit", "facts", "max_bytes", "space"},
+    "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -498,6 +499,15 @@ async def test_the_overview_tool_digests_the_communities_a_question_concerns(ser
     assert any(line.startswith("community: ") and 'matched "works"' in line for line in text.splitlines())
     error, text = await call(server, "memory_graph_overview", limit=0)
     assert error and "limit" in text
+
+
+async def test_the_changes_tool_says_what_changed_since_a_moment(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_changes", since="2000-01-01T00:00:00Z")
+    assert not error and text.splitlines()[0].startswith("changes: space default, current facts at 2000-01-01")
+    assert any(line.startswith("began: alice chen works_at Acme Robotics [fact ") for line in text.splitlines())
+    error, text = await call(server, "memory_graph_changes", since="soon")
+    assert error and "RFC 3339" in text
 
 
 async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(server):

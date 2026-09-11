@@ -850,3 +850,20 @@ def test_the_graph_exports_as_a_drawing_and_as_a_canvas(seeded):
     canvas = client.get("/v1/graph/export", params={"format": "canvas"}, headers=auth())
     assert canvas.status_code == 200 and 'filename="graph.canvas"' in canvas.headers["content-disposition"]
     assert {node["type"] for node in json.loads(canvas.content)["nodes"]} >= {"group", "text"}
+
+
+def test_the_graph_says_what_changed_between_two_moments(seeded):
+    client, works = seeded
+    answered = client.get("/v1/graph/changes", params={"since": "2023-01-01T00:00:00Z",
+                                                        "until": "2024-06-01T00:00:00Z"}, headers=auth())
+    assert answered.status_code == 200
+    body = answered.json()
+    assert body["status"] == "changed" and body["filters"] == {"since": "2023-01-01T00:00:00.000Z",
+                                                                 "until": "2024-06-01T00:00:00.000Z"}
+    began = [change for change in body["changes"] if change["kind"] == "began"]
+    assert any(works.fact_id in change["fact_ids"] for change in began)
+    assert body["text"].splitlines()[0].startswith("changes: space alpha, current facts at 2023-01-01T00:00:00.000Z")
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.changes"] is True
+    for params in ({}, {"since": "soon"}, {"since": "2024-06-01T00:00:00Z", "until": "2023-01-01T00:00:00Z"},
+                   {"since": "2023-01-01T00:00:00Z", "limit": 0}, {"since": "2023-01-01T00:00:00Z", "max_bytes": 1}):
+        assert client.get("/v1/graph/changes", params=params, headers=auth()).status_code == 422, params

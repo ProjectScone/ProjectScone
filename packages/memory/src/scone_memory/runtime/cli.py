@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, match, "
-                                     "overview, export")
+                                     "overview, changes, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -242,6 +242,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--limit", type=int, default=12, help="communities to digest (1 to 50)")
     g.add_argument("--facts", type=int, default=3, help="facts cited for each (0 to 10)")
     g.add_argument("--resolution", type=float, default=1.0, help="how fine the communities are (above 0, at most 10)")
+    g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("changes", help="what changed in the graph between two moments, cited")
+    g.add_argument("--since", required=True, help="RFC 3339 moment to compare from")
+    g.add_argument("--until", help="RFC 3339 moment to compare to (default: now)")
+    g.add_argument("--limit", type=int, default=50, help="changes to list (1 to 500)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
@@ -584,6 +589,16 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         else:
             print(matched.text, file=out)
         return 0 if matched.status == "matched" else 1
+    if command == "changes":
+        from ..entities.changes import ChangesError, graph_changes
+
+        try:
+            changed = await graph_changes(engine, space, since=args.since, until=args.until or engine.clock(),
+                                          limit=args.limit, max_bytes=args.max_bytes)
+        except ChangesError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(changed.record(space)) if getattr(args, "json", False) else changed.text, file=out)
+        return 0 if changed.status == "changed" else 1
     if command == "overview":
         from ..entities.overview import OverviewError, graph_overview
 

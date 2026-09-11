@@ -31,8 +31,9 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-6:] == ["graph_context", "explain_entity", "connect_entities",
-                                                         "graph_schema", "graph_match", "graph_overview"]
+    assert [tool.name for tool in MEMORY_TOOLS][-7:] == ["graph_context", "explain_entity", "connect_entities",
+                                                         "graph_schema", "graph_match", "graph_overview",
+                                                         "graph_changes"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -175,3 +176,13 @@ async def test_graph_overview_answers_with_the_routes_digests(box):
     assert refused["ok"] is False and "facts" in refused["error"]
     long = await box.run("graph_overview", {"question": "q" * 2001})
     assert long["ok"] is False and "question must be 1 to 2000 characters" in long["error"]
+
+
+async def test_graph_changes_answers_with_the_routes_changes(box):
+    result = await box.run("graph_changes", {"since": "2023-01-01T00:00:00Z"})
+    assert result["ok"] is True and result["status"] == "changed" and result["space"] == "alpha"
+    assert result["filters"] == {"since": "2023-01-01T00:00:00.000Z", "until": NOW}
+    refused = await box.run("graph_changes", {"since": "2026-01-01T00:00:00Z"})
+    assert refused["ok"] is False and "before" in refused["error"]
+    missing = await box.run("graph_changes", {})
+    assert missing["ok"] is False and "since" in missing["error"]

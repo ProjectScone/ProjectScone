@@ -27,6 +27,7 @@ from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits,
 from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
+from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, graph_overview)
 from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_ROWS, MIN_BYTES, MAX_WHERE, MatchQueryError, graph_match
@@ -458,6 +459,23 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         found = await graph_overview(engine, space, question=q, limit=limit, facts_each=facts, status=status,
                                      as_of=when, resolution=resolution, max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when, question=q)
+
+    @app.get("/v1/graph/changes")
+    async def get_changes(
+        since: str = Query(min_length=1, max_length=64), until: Optional[str] = Query(default=None, max_length=64),
+        limit: int = Query(default=DEFAULT_CHANGES, ge=1, le=MAX_CHANGES),
+        max_bytes: int = Query(default=CHANGES_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """What changed in the graph between ``since`` and ``until`` (now by
+        default): claims that moved from one object to another, relations
+        that began and ended, values that changed and entities that came
+        and went, each citing its facts re-read at its own moment."""
+        try:
+            found = await graph_changes(engine, space, since=since, until=until, limit=limit, max_bytes=max_bytes)
+        except ChangesError as refused:
+            raise InvalidInput(str(refused)) from None
+        return found.record(space)
 
     @app.get("/v1/graph/sources")
     async def get_sources(
