@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Callable, Literal, Optional
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
@@ -26,6 +26,7 @@ from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
 from ..entities.read import load_projection
 from ..entities.report import build_report, render_markdown
+from ..entities.service import ProjectionBuilding
 from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
 from ..memory.engine import MemoryEngine
 
@@ -259,6 +260,11 @@ async def _checked_facts(engine: MemoryEngine, space: str, fact_ids: list[int]) 
 
 
 def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object]) -> None:
+    @app.exception_handler(ProjectionBuilding)
+    async def _building(_: Request, error: ProjectionBuilding) -> JSONResponse:
+        return JSONResponse({"error": str(error), "code": "projection_building"}, status_code=503,
+                            headers={"Retry-After": "1"})
+
     @app.get("/v1/graph/knowledge", response_model=KnowledgeView, response_model_exclude_unset=True)
     async def get_knowledge(
         status: StatusMode = "current", as_of: Optional[str] = None,

@@ -17,8 +17,14 @@ it (``engine.entities``):
   forgotten, and the facts held across spaces stay under
   ``MAX_HELD_FACTS``, dropping the least recently used space first.
 
-Requests that arrive together for a space share one read. Nothing on a
-recall path builds a projection; it is built only for a graph request.
+Requests that arrive together for a space share one read, and one view
+asked for at once is built once. A view over more than ``INLINE_FACTS``
+facts is projected in a worker thread, so the event loop keeps serving
+other requests. A caller may give a budget: past it the build carries on
+in the background and the caller gets ``ProjectionBuilding`` (HTTP 503 with
+Retry-After), and the next request finds the view ready. Closing the
+engine cancels what is still building. Nothing on a recall path builds a
+projection; it is built only for a graph request.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import bisect
 import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from functools import partial
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -45,6 +52,18 @@ MAX_HELD_SPACES = 8
 #: Facts held across every cached space; past it, the least recent go.
 MAX_HELD_FACTS = 200_000
 MAX_VIEWS_PER_SPACE = 16
+#: Seconds a graph request waits for a projection before it is told to
+#: come back; the build continues meanwhile.
+BUILD_TIMEOUT = 5.0
+#: Views over more facts than this are projected off the event loop.
+INLINE_FACTS = 2_000
+
+
+class ProjectionBuilding(Exception):
+    """The projection is still being built; the request should come back."""
+
+    def __init__(self, space: str) -> None:
+        super().__init__(f"the entity projection for {space!r} is still being built; try again shortly")
 
 _Key = tuple[str, datetime | None, datetime | None]
 
@@ -84,6 +103,8 @@ class EntityService:
         self._engine = engine
         self._held: OrderedDict[str, _Held] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
+        self._projecting: dict[tuple[str, int, _Key], asyncio.Future[tuple[EntityProjection, int]]] = {}
+        self._background: set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]] = set()
 
     def cached(self, space: str) -> EntityProjection | None:
         """The most recently used view held for the space, of any revision,
@@ -98,23 +119,65 @@ class EntityService:
         self._locks.pop(space, None)
 
     def clear(self) -> None:
+        """Forget every space and cancel whatever is still building."""
+        for task in list(self._background):
+            task.cancel()
+        for pending in list(self._projecting.values()):
+            pending.cancel()
         self._held.clear()
         self._locks.clear()
+        self._projecting.clear()
 
-    async def projection(self, space: str, *, mode: "StatusMode",
-                         when: datetime) -> tuple[EntityProjection, dict[str, object]]:
+    def building(self) -> set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]]:
+        """Builds still running, including those whose caller stopped waiting."""
+        return {task for task in self._background if not task.done()}
+
+    async def projection(self, space: str, *, mode: "StatusMode", when: datetime,
+                         timeout: float | None = None) -> tuple[EntityProjection, dict[str, object]]:
         """The projection of the facts that count in ``mode`` at ``when``,
-        with what the read behind it covered."""
+        with what the read behind it covered. Past ``timeout`` seconds the
+        build continues in the background and ``ProjectionBuilding`` is raised."""
+        task = asyncio.ensure_future(self._view(space, mode, when))
+        self._background.add(task)
+        task.add_done_callback(self._settled)
+        if timeout is None:
+            return await task
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError:
+            raise ProjectionBuilding(space) from None
+
+    def _settled(self, task: asyncio.Task[tuple[EntityProjection, dict[str, object]]]) -> None:
+        self._background.discard(task)
+        if not task.cancelled():
+            task.exception()  # a failure nobody waited for is still retrieved, not logged as lost
+
+    def _projected(self, slot: tuple[str, int, _Key], _done: object) -> None:
+        self._projecting.pop(slot, None)
+
+    async def _project(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
+        if len(facts) > INLINE_FACTS:
+            return await asyncio.to_thread(project_entities, space, facts, revision=revision), len(facts)
+        return project_entities(space, facts, revision=revision), len(facts)
+
+    async def _view(self, space: str, mode: "StatusMode",
+                    when: datetime) -> tuple[EntityProjection, dict[str, object]]:
         from .view import counts
 
         held = await self._ledger(space)
         key = held.key(mode, when)
         found = held.views.get(key)
         if found is None:
-            facts = [fact for fact in held.ledger.facts
-                     if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
-            found = (project_entities(space, facts, revision=held.ledger.revision), len(facts))
-            if self._held.get(space) is held:
+            slot = (space, held.ledger.revision, key)
+            pending = self._projecting.get(slot)
+            if pending is None:
+                facts = [fact for fact in held.ledger.facts
+                         if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
+                pending = asyncio.ensure_future(self._project(space, facts, held.ledger.revision))
+                self._projecting[slot] = pending
+                pending.add_done_callback(partial(self._projected, slot))
+            found = await asyncio.shield(pending)
+            if self._held.get(space) is held and key not in held.views:
                 held.views[key] = found
                 while len(held.views) > MAX_VIEWS_PER_SPACE:
                     held.views.popitem(last=False)

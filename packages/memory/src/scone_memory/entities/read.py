@@ -118,6 +118,8 @@ async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMo
     """
     from .view import counts
 
+    from . import service
+
     check_space(space)
     when = parse_rfc3339(as_of if as_of is not None else engine.clock())
-    return await engine.entities.projection(space, mode=mode, when=when)
+    return await engine.entities.projection(space, mode=mode, when=when, timeout=service.BUILD_TIMEOUT)

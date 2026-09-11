@@ -428,7 +428,15 @@ The engine holds each space's ledger read and the views built from it
   (`ledger_changed_during_read`) is never kept. A deleted space, and a
   closed engine, are forgotten.
 
-Requests that arrive together for one space share a single read.
+Requests that arrive together for one space share a single read, and
+one view asked for at once is built once. A view over more than 2,000
+facts is projected in a worker thread, so the server keeps answering
+other requests while it builds.
+
+A graph request waits at most 5 seconds for a projection. Past that, the
+build continues in the background, and the request gets a 503 with
+`Retry-After: 1` and `{"code": "projection_building"}`. The next request
+finds the view ready. Closing the engine cancels any build still running.
 
 With 20,000 facts on SQLite, a view costs:
 

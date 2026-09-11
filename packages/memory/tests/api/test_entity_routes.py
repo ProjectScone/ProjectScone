@@ -4,6 +4,9 @@ bounded sample could be mistaken for."""
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -453,3 +456,23 @@ async def test_entities_joined_only_beyond_a_capped_read_are_not_called_disconne
         part = client.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth()).json()
     assert whole["status"] == "found" and whole["complete"] is True
     assert part["status"] == "not_connected_in_read" and part["complete"] is False and part["paths"] == []
+
+
+async def test_a_slow_view_answers_come_back_shortly(monkeypatch):
+    from scone_memory.entities import service
+
+    class Slow(InMemoryDocumentStore):
+        async def page_facts(self, space, before_id, limit):
+            await asyncio.sleep(0.3)
+            return await super().page_facts(space, before_id, limit)
+
+    monkeypatch.setattr(service, "BUILD_TIMEOUT", 0.01)
+    engine = await MemoryEngine(Slow(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        busy = client.get("/v1/graph/knowledge", headers=auth())
+        assert busy.status_code == 503 and busy.headers["retry-after"] == "1"
+        assert busy.json()["code"] == "projection_building"
+        time.sleep(0.6)
+        ready = client.get("/v1/graph/knowledge", headers=auth())
+    assert ready.status_code == 200 and ready.json()["entities"]
