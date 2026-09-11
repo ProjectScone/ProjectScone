@@ -144,8 +144,10 @@ class Coverage(BaseModel):
     reasons: list[str]
     #: Pass as ``cursor`` for the next page of the ranking; absent on the last.
     next_cursor: Optional[str] = None
-    #: With ``usage``, which recalls were counted: how many, since when,
-    #: whether more were left unread, and whether the engine keeps events.
+    #: With ``usage``, which recalls were counted: how many, since when and
+    #: the oldest read, whether more were left unread, what the event log
+    #: keeps, which events could not be counted, and whether the engine
+    #: keeps events at all.
     usage: Optional[dict[str, object]] = None
 
 

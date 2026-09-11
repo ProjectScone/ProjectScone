@@ -764,3 +764,18 @@ async def test_the_map_can_show_how_often_recalls_returned_each_part():
         report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth()).json()
         markdown = client.get("/v1/graph/report", params={"usage": "true", "format": "markdown"}, headers=auth()).text
     assert report["recall_usage"]["recalls_read"] == 1 and "## What recall uses" in markdown
+
+
+async def test_a_recall_event_that_holds_no_ids_is_counted_not_answered_with_a_fault():
+    from scone_memory.core.ports import NewEvent
+    from scone_memory.observability.events import InMemoryEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.events.append(NewEvent(ts=engine.clock(), space="alpha", kind="recall", payload={"fact_ids": [None]}))
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"usage": "true"}, headers=auth())
+        report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth())
+    assert view.status_code == report.status_code == 200
+    assert view.json()["coverage"]["usage"]["malformed"] == report.json()["recall_usage"]["malformed"] == 1

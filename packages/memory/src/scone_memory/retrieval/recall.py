@@ -186,7 +186,7 @@ async def recall(
     if len(degraded) == 2:
         latency["total"] = _ms(started)
         await runtime.emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                           "error": "both lanes failed"})
+                                           "error": "both lanes failed", "fact_ids": [], "history_fact_ids": []})
         raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
 
     # The entity lane, only when asked for: passages naming the question's
@@ -394,6 +394,7 @@ async def recall(
         "low_confidence": low_confidence,
         "facts": len(facts),
         "fact_ids": [f.fact_id for f in facts],
+        "history_fact_ids": [f.fact_id for f in previous],
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
     })

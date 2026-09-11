@@ -96,7 +96,8 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
 
 def _recall_usage(projection: EntityProjection, entities: Mapping[str, Entity], ranked: list[Importance],
                   usage: "Usage") -> dict[str, object]:
-    if not usage.available:
+    if not usage.available or not usage.recalls_read:
+        # Unknown, or no recall to read: nothing is named as unreached.
         return usage.record()
     from .usage import recalled_by_entity
 
@@ -106,6 +107,46 @@ def _recall_usage(projection: EntityProjection, entities: Mapping[str, Entity], 
     return {**usage.record(),
             "most_recalled": [{**_name(entities, entity_id), "recalled": counted[entity_id]} for entity_id in most],
             "central_unrecalled": [_name(entities, item.entity_id) for item in ranked if not counted[item.entity_id]]}
+
+
+def _usage_lines(uses: Mapping[str, Any]) -> list[str]:
+    """What the recalls read returned, in words that claim only the window
+    they read: the log keeps what its retention keeps, and a window starts
+    where it was asked to."""
+    if not uses["available"]:
+        return ["The engine keeps no events, so which knowledge recalls return is unknown."]
+    since = f" since {literal(uses['since'])}" if uses.get("since") else ""
+    kept = uses.get("retention") or {}
+    keeps = ([f"It keeps at most {kept['max_events']} events."] if kept.get("max_events") else []) + (
+        [f"It keeps events for {kept['max_age_days']} days."] if kept.get("max_age_days") else [])
+    lines = []
+    if not uses["recalls_read"]:
+        lines.append(f"The event log keeps no recalls{since}, so which knowledge recall returns is unknown.")
+        lines += keeps
+    else:
+        read = uses["recalls_read"]
+        cut = " (older ones were left unread)" if uses["truncated"] else ""
+        oldest = f", the oldest from {literal(uses['oldest'])}" if uses.get("oldest") else ""
+        lines.append(f"Over the {read} recall{'s' if read != 1 else ''} the event log keeps{since}{oldest}{cut}:")
+        most = ", ".join(f"{literal(item['label'])} ({item['recalled']})" for item in uses["most_recalled"])
+        lines.append(f"- Most recalled: {most or 'nothing'}.")
+        if uses["central_unrecalled"]:
+            before = "Recalls before that" if uses.get("since") else "Earlier recalls"
+            lines.append("- Central, and returned by none of them: "
+                         + ", ".join(literal(item["label"]) for item in uses["central_unrecalled"])
+                         + f". {before}, or ones the log no longer keeps, may have returned them.")
+        lines += [f"- {line}" for line in keeps]
+    skipped = uses.get("unsupported", 0) + uses.get("malformed", 0)
+    if skipped:
+        lines.append(f"- {skipped} recall event{'s were' if skipped != 1 else ' was'} not counted: "
+                     f"{uses.get('unsupported', 0)} of another version, "
+                     f"{uses.get('malformed', 0)} whose fact ids are not whole numbers.")
+    if uses.get("history_unrecorded"):
+        count = uses["history_unrecorded"]
+        lines.append(f"- {count} of the recalls read {'was' if count == 1 else 'were'} recorded before recalls "
+                     "kept the history they returned; facts returned only as history are not counted from "
+                     f"{'it' if count == 1 else 'them'}.")
+    return lines
 
 
 def _reasons(coverage: Mapping[str, object]) -> list[str]:
@@ -177,18 +218,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     uses = report.get("recall_usage")
     if uses is not None:
         lines += ["", "## What recall uses", ""]
-        if not uses["available"]:
-            lines.append("The engine keeps no events, so which knowledge recalls return is unknown.")
-        else:
-            since = f" since {literal(uses['since'])}" if uses.get("since") else ""
-            cut = " (more were left unread)" if uses["truncated"] else ""
-            lines.append(f"Over the last {uses['recalls_read']} recalls{since}{cut}:")
-            most = ", ".join(f"{literal(item['label'])} ({item['recalled']})" for item in uses["most_recalled"])
-            lines.append(f"- Most recalled: {most or 'nothing yet'}.")
-            if uses["central_unrecalled"]:
-                lines.append("- Central but never recalled: "
-                             + ", ".join(literal(item["label"]) for item in uses["central_unrecalled"])
-                             + ". No question asked so far reaches them.")
+        lines += _usage_lines(uses)
     coverage = report["coverage"]
     lines += ["", "## Coverage", "", f"- {coverage.get('facts_counted', 0)} facts counted of "
               f"{coverage.get('facts_read', 0)} read; {coverage['entities_analysed']} entities analysed."]

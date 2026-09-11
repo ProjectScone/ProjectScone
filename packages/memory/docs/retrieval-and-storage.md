@@ -218,8 +218,21 @@ This shows which parts of memory answer questions and which sit unread
 (graphify's usage overlay).
 
 - The recalls counted are the most recent 1,000, or those since
-  `usage_since`. `coverage.usage` says how many were read and whether
-  more were left.
+  `usage_since`. `coverage.usage` says how many were read
+  (`recalls_read`), when the oldest was made (`oldest`), and whether
+  more were left (`truncated`).
+- It is a window, never all time. The event log keeps what its
+  retention keeps, and `usage.retention` says what that is when the log
+  says (`max_events`, `max_age_days`). A count of 0 means none of the
+  recalls read returned it.
+- A fact a recall returned as history (`history=true`) counts like one
+  it returned as current, so the history map shows it too. Recalls
+  recorded before recall events kept their history are counted in
+  `history_unrecorded`.
+- Nothing is guessed from an event that cannot be read. One written under
+  another payload version is counted in `unsupported`; one whose fact
+  ids are not whole numbers (`true` is not fact 1, nor is `1.9`) is
+  counted in `malformed`. Neither is counted as a recall.
 - A recall that returned two facts of one entity counts once for it.
 - Only counts leave the event log. No query text is read.
 - An engine that keeps no events answers `recalled: null` with
@@ -337,11 +350,13 @@ Two parameters tune the analysis:
   smaller communities, below 1 larger ones. The knowledge view's
   groupings take the same parameter.
 - `usage=true` (and `usage_since`) adds `recall_usage`: the ten entities
-  recent recalls returned most, and the central entities none of them
-  reached ("Central but never recalled"). These are important parts of
-  memory that no question asked so far reaches. The Markdown adds "What
-  recall uses". Without an event log it says usage is unknown, and never
-  calls anything unrecalled.
+  the recalls read returned most, and the central entities none of them
+  returned. The Markdown adds "What recall uses" and claims only the
+  window it read: "Central, and returned by none of them … Earlier
+  recalls, or ones the log no longer keeps, may have returned them."
+  With no event log, or no recall kept, it says usage is unknown and
+  names nothing as unreached. It also says what the log keeps and which
+  events it could not count.
 - `exclude_hubs` (a degree percentile, 50 to 100) leaves entities whose
   number of neighbours is above that percentile out of the central
   entities, and lists them under `hubs_excluded` instead. A hub that
