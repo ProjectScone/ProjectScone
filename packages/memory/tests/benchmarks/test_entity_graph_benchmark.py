@@ -248,7 +248,7 @@ async def test_a_label_on_a_claim_the_view_does_not_hold_is_refused(tmp_path):
             "kind": "literal", "subject": "future person", "predicate": "age", "object": "40", "value": True}))
     earlier = {"kind": "fact", "subject": "bob stone", "predicate": "lives_in", "object": "Porto",
                "valid_from": "2023-01-01T00:00:00Z"}
-    with pytest.raises(FixtureError, match="does not hold at as_of; the ledger closed it"):
+    with pytest.raises(FixtureError, match="does not hold at as_of; a later row for its subject and predicate supersedes it"):
         await run_entity_graph_benchmark(_with(tmp_path, earlier, {
             "kind": "literal", "subject": "bob stone", "predicate": "lives_in", "object": "Porto", "value": False}))
 
@@ -343,15 +343,14 @@ async def test_a_claim_restated_in_another_interval_is_its_own_fact(tmp_path, as
         {"kind": "literal", "subject": "returning person", "predicate": "age", "object": "34", "value": True},
     ]))
     report = await run_entity_graph_benchmark(path)
-    assert report.facts == 3 and report.claims_out_of_view == 2 and report.claims_missing == 0
+    assert report.facts == 3 and report.claims_out_of_view == 1 and report.claims_missing == 0
     assert report.literal_error_rate == 0.0
 
 
-@pytest.mark.parametrize("years, stored, out_of_view", [((2023, 2024), 1, 0), ((2024, 2023), 2, 1)])
+@pytest.mark.parametrize("years, stored, out_of_view", [((2023, 2024), 1, 0), ((2024, 2023), 2, 0)])
 async def test_a_value_reaffirmed_later_is_the_same_fact_not_a_lost_one(tmp_path, years, stored, out_of_view):
-    """34 from 2023, then 34 again from 2024, is one fact the ledger kept,
-    not a second one it lost; the other way round, the backfill is a closed
-    fact of its own. Rows are scored by the fact the ledger answered with."""
+    """34 from 2023, then 34 again from 2024: one claim, and it holds, in
+    whichever order the ledger was told, however many facts it kept."""
     path = tmp_path / "reaffirmed.jsonl"
     path.write_text("\n".join(json.dumps(row) for row in [
         {"kind": "meta", "name": "reaffirmed", "as_of": "2025-06-01T00:00:00Z"},
@@ -362,3 +361,52 @@ async def test_a_value_reaffirmed_later_is_the_same_fact_not_a_lost_one(tmp_path
     report = await run_entity_graph_benchmark(path)
     assert (report.facts, report.claims_missing, report.claims_out_of_view) == (stored, 0, out_of_view)
     assert report.literal_error_rate == 0.0
+
+
+
+def _rows(tmp_path, *rows, as_of="2025-06-01T00:00:00Z"):
+    path = tmp_path / "timeline.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in [{"kind": "meta", "name": "timeline", "as_of": as_of}, *rows]))
+    return path
+
+
+def _works(year, company, predicate="works_at", subject="alice"):
+    return {"kind": "fact", "subject": subject, "predicate": predicate, "object": company,
+            "valid_from": f"{year}-01-01T00:00:00Z"}
+
+
+@pytest.mark.parametrize("rows, missing", [
+    ((_works(2020, "Acme"), _works(2023, "Acme"), _works(2021, "Globex")), 1),
+    ((_works(2020, "Acme"), _works(2021, "Globex"), _works(2023, "Acme")), 0),
+    ((_works(2021, "Globex"), _works(2023, "Acme")), 0),
+    ((_works(2023, "Globex"), _works(2023, "Acme")), 0),
+])
+async def test_what_holds_is_the_fixtures_latest_claim_whatever_order_it_was_told(tmp_path, rows, missing):
+    """Acme from 2020, Globex from 2021, Acme again from 2023: at 2025 the
+    fixture says Acme. Told in the first order, the ledger folds the 2023
+    Acme into the 2020 one and a late Globex then cuts it short, so the
+    view says Globex; the bench must call that missing, not rightly out of
+    view."""
+    report = await run_entity_graph_benchmark(_rows(tmp_path, *rows))
+    assert (report.claims_missing, report.claims_out_of_view) == (missing, 1)
+
+
+async def test_a_label_in_another_spelling_of_its_claim_is_scored(tmp_path):
+    report = await run_entity_graph_benchmark(_rows(
+        tmp_path, _works(2023, "34", predicate="age"), _works(2024, "34", predicate="Age"),
+        {"kind": "literal", "subject": "Alice", "predicate": " Age", "object": "34 ", "value": True}))
+    assert report.literal_error_rate == 0.0 and report.claims_missing == 0
+
+
+async def test_a_predicate_written_in_another_case_is_still_carried(tmp_path):
+    report = await run_entity_graph_benchmark(_rows(
+        tmp_path, _works(2024, "Acme", predicate="Works_At"),
+        {"kind": "literal", "subject": "alice", "predicate": "Works_At", "object": "Acme", "value": False}))
+    assert (report.claims_missing, report.literal_error_rate, report.connected_claim_share) == (0, 0.0, 1.0)
+
+
+async def test_a_label_on_a_claim_a_later_row_supersedes_is_refused(tmp_path):
+    with pytest.raises(FixtureError, match="a later row for its subject and predicate supersedes it"):
+        await run_entity_graph_benchmark(_rows(
+            tmp_path, _works(2020, "Acme"), _works(2022, "Globex"),
+            {"kind": "literal", "subject": "alice", "predicate": "works_at", "object": "Acme", "value": False}))

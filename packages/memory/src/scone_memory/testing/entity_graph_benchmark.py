@@ -22,15 +22,15 @@ naming each line, instead of scored.
 The report scores what a person would check by hand, from the evidence in
 the projection. Something missing is never counted as right:
 
-- ``claims_missing``: facts the view should hold at ``as_of`` that no
-  relation or attribute carries. A fact is carried only by an item with
-  its own subject, predicate and object (or value), not by any item
-  citing its id. Which facts the view should hold is the view's own rule
-  for the stored fact; a fact the store lost should be held once it has
-  begun;
-- ``claims_out_of_view``: facts that do not hold at ``as_of``, because
-  they begin later or the ledger closed them, so the view rightly leaves
-  them out;
+- ``claims_missing``: claims the fixture says hold at ``as_of`` that no
+  relation or attribute carries. A claim is carried only by an item with
+  its own subject, predicate and object (or value), each as the ledger
+  keeps it. What holds is the fixture's own timeline: for each subject and
+  predicate, the row that began last by ``as_of``, since the ledger keeps
+  one value per pair. It never depends on the order rows were told in, so
+  a ledger that folds or cuts a claim differently is caught;
+- ``claims_out_of_view``: stated claims that do not hold at ``as_of``,
+  because they begin later or a later row superseded them;
 - ``gold_names_missing`` and ``path_ends_missing``: gold names and path
   ends with no entity;
 - ``cluster_fragments`` and ``fragmentation``: entities each gold cluster
@@ -56,7 +56,6 @@ unmeasured, and a threshold on it fails rather than passing on nothing.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import hashlib
@@ -70,11 +69,11 @@ from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space, entity_key
 from ..entities.analysis import analyze_projection
 from ..entities.context import graph_context
-from ..entities.project import Attribute, Relation, project_entities
+from ..entities.project import project_entities
 from ..entities.query import paths_between
 from ..entities.read import load_projection
 from ..entities.report import build_report
-from ..entities.view import counts, knowledge_view
+from ..entities.view import knowledge_view
 
 #: Recorded on fixtures-v1; lower is better for the *_max rows.
 THRESHOLDS_V1: Mapping[str, float] = {
@@ -226,9 +225,13 @@ def _load(path: Path) -> tuple[Row, list[tuple[int, Row]]]:
     return meta, rows
 
 
-def _claim(row: Row) -> tuple[str, str, str]:
-    """A fact row's claim as the store keeps it: the subject by its key."""
-    return entity_key(str(row["subject"])), str(row["predicate"]), str(row["object"])
+Claim = tuple[str, str, str]
+
+
+def _claim(row: Row) -> Claim:
+    """A row's claim as the ledger keeps it: subject and predicate by their
+    key (case and spacing folded), the object without surrounding space."""
+    return entity_key(str(row["subject"])), entity_key(str(row["predicate"])), str(row["object"]).strip()
 
 
 def _begins(row: Row) -> datetime:
@@ -257,6 +260,22 @@ def _checked(rows: list[tuple[int, Row]], when: datetime) -> None:
                          if entity_key(str(row[side])) not in named]
     if problems:
         raise FixtureError("; ".join(problems))
+
+
+def _holding(rows: list[Row], when: datetime) -> dict[Claim, Row]:
+    """The claims the fixture says hold at ``when``, each with the row that
+    says so. The ledger keeps one value per subject and predicate, so for
+    each pair it is the row that began last by then, the later line on a
+    tie. This is the fixture's own timeline, whatever order it is told in:
+    a ledger that folds or cuts a claim differently is measured against it."""
+    latest: dict[tuple[str, str], tuple[datetime, int, Row]] = {}
+    for line, row in enumerate(rows):
+        if row["kind"] != "fact" or _begins(row) > when:
+            continue
+        pair = _claim(row)[:2]
+        if pair not in latest or (_begins(row), line) >= latest[pair][:2]:
+            latest[pair] = (_begins(row), line, row)
+    return {_claim(row): row for _, _, row in latest.values()}
 
 
 def _names(row: Row) -> list[object]:
@@ -298,14 +317,10 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 clock=lambda: moment).open()
     try:
-        # Each fact row is scored by the fact the ledger answered with: a
-        # value restated later is the same fact, a backfill is a new one.
-        made: dict[int, list[Row]] = defaultdict(list)
         for row in rows:
             if row["kind"] == "fact":
-                answer = await engine.assert_fact(space, str(row["subject"]), str(row["predicate"]),
-                                                  str(row["object"]), valid_from=str(row.get("valid_from", _VALID_FROM)))
-                made[answer.fact_id].append(row)
+                await engine.assert_fact(space, str(row["subject"]), str(row["predicate"]), str(row["object"]),
+                                         valid_from=str(row.get("valid_from", _VALID_FROM)))
         projection, coverage = await load_projection(engine, space, mode="current", as_of=moment)
         by_key = {entity.key: entity.entity_id for entity in projection.entities}
 
@@ -314,58 +329,30 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
         fragments = {cluster[0]: len({entity_of[name] or f"missing:{name}" for name in cluster}) for cluster in gold}
 
         facts = await engine.documents.list_facts(space, include_closed=True)
-        by_id = {fact.fact_id: fact for fact in facts}
+        holding = _holding(rows, when)
+        stated = {_claim(row) for row in rows if row["kind"] == "fact"}
+        relations = {(relation.subject_id, relation.predicate, relation.object_id) for relation in projection.relations}
+        attributes = {(attribute.entity_id, attribute.predicate, attribute.value) for attribute in projection.attributes}
 
-        relations_of: dict[int, list[Relation]] = defaultdict(list)
-        attributes_of: dict[int, list[Attribute]] = defaultdict(list)
-        for relation in projection.relations:
-            for fact_id in relation.fact_ids:
-                relations_of[fact_id].append(relation)
-        for attribute in projection.attributes:
-            for fact_id in attribute.fact_ids:
-                attributes_of[fact_id].append(attribute)
-
-        def holds(fact_id: int) -> bool:
-            """Whether the view should hold the fact at as_of, by its own
-            rule; a fact the store lost should, once its row has begun."""
-            fact = by_id.get(fact_id)
-            if fact is None:
-                return min(_begins(row) for row in made[fact_id]) <= when
-            return counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, "current", when)
-
-        def carried(fact_id: int) -> tuple[bool, bool]:
+        def carried(claim: Claim) -> tuple[bool, bool]:
             """Whether a relation, and whether an attribute, carries this very
-            fact, on its own subject, predicate and object."""
-            row = made[fact_id][0]
-            subject, predicate = by_key.get(entity_key(str(row["subject"]))), str(row["predicate"])
-            thing = by_key.get(entity_key(str(row["object"])))
-            return (any(relation.subject_id == subject and relation.predicate == predicate
-                        and relation.object_id == thing for relation in relations_of[fact_id]),
-                    any(attribute.entity_id == subject and attribute.predicate == predicate
-                        and attribute.value == str(row["object"]).strip() for attribute in attributes_of[fact_id]))
+            claim, on its own subject, predicate and object or value."""
+            subject, predicate, value = claim
+            return ((by_key.get(subject), predicate, by_key.get(entity_key(value))) in relations,
+                    (by_key.get(subject), predicate, value) in attributes)
 
-        in_view = [fact_id for fact_id in made if holds(fact_id)]
-        claims_missing = sum(not any(carried(fact_id)) for fact_id in in_view)
-        ids_of: dict[tuple[str, str, str], list[int]] = defaultdict(list)
-        for fact_id, made_by in made.items():
-            ids_of[_claim(made_by[0])].append(fact_id)
-
-        def held(label: Row) -> int | None:
-            """The fact a label is about: of its claim's, the one the view
-            should hold at as_of."""
-            return next((fact_id for fact_id in ids_of[_claim(label)] if holds(fact_id)), None)
-
+        claims_missing = sum(not any(carried(claim)) for claim in holding)
         unheld = [f"line {number}: literal {_said(row)} does not hold at as_of; "
-                  + ("its fact begins later" if all(_begins(made_row) > when for fact_id in ids_of[_claim(row)]
-                                                    for made_row in made[fact_id])
-                     else "the ledger closed it")
-                  for number, row in numbered if row["kind"] == "literal" and held(row) is None]
+                  + ("its fact begins later" if all(_begins(fact) > when for fact in rows
+                                                    if fact["kind"] == "fact" and _claim(fact) == _claim(row))
+                     else "a later row for its subject and predicate supersedes it")
+                  for number, row in numbered if row["kind"] == "literal" and _claim(row) not in holding]
         if unheld:
             raise FixtureError("; ".join(unheld))
-        labels = [(label, held(label)) for label in rows if label["kind"] == "literal"]
+        labels = [(label, _claim(label)) for label in rows if label["kind"] == "literal"]
         wrong, things, connected = 0, 0, 0
-        for label, about in labels:
-            thing, value = carried(about) if about is not None else (False, False)
+        for label, claim in labels:
+            thing, value = carried(claim)
             wrong += (thing, value) != ((False, True) if label["value"] else (True, False))
             if not label["value"]:
                 things += 1
@@ -408,7 +395,7 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
     result = EntityGraphReport(
         fixture=str(meta.get("name", path.name)), facts=len(facts), entities=len(projection.entities),
         relations=len(projection.relations), attributes=len(projection.attributes), claims_missing=claims_missing,
-        claims_out_of_view=len(made) - len(in_view),
+        claims_out_of_view=len(stated - holding.keys()),
         gold_names_missing=sum(entity is None for entity in entity_of.values()), path_ends_missing=ends_missing,
         cluster_fragments=fragments,
         fragmentation=round(sum(fragments.values()) / len(fragments), 6) if fragments else None,

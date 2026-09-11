@@ -18,13 +18,21 @@ missing evidence outright:
 - gold names with no entity;
 - path ends with no entity.
 
-Which facts the view should hold is decided by the view's own rule. A
-fact that begins after `as_of`, or one the ledger closed, is counted
-apart as out of view, not as missing. Each fact row is scored by the
-fact the ledger answered it with. An age of 34, then 35, then 34 again
-is three facts, and a label on 34 is scored against whichever of them
-holds at `as_of`. An age of 34 restated from a later day is the same
-fact, reaffirmed, not a second one lost.
+What should hold is the fixture's own timeline, not the ledger's
+answer. For each subject and predicate, the row that began last by
+`as_of` holds, since the ledger keeps one value per pair; on a tie the
+later line wins. Claims are compared as the ledger keeps them: subject
+and predicate with case and spacing folded, and the object trimmed.
+
+- A claim that begins later, or that a later row supersedes, is counted
+  apart as out of view.
+- An age of 34, then 35, then 34 again holds 34, whichever order the rows
+  were told in.
+- The order still matters for the ledger itself. Told Acme from 2020,
+  Acme again from 2023, then a late Globex from 2021, the ledger folds
+  the second Acme into the first, and the late Globex then cuts it
+  short. The bench reports that as missing, because the fixture says
+  Acme holds.
 
 A fixture is refused (exit 2), naming each line, rather than scored, in
 two cases:
