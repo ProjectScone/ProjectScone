@@ -567,3 +567,14 @@ def test_mermaid_keeps_to_its_text_budget_when_escapes_swell_the_labels():
     text = mermaid(swollen)
     assert len(text) < 45_000 and text.count("-->") < 300
     assert re.search(r"\d+ relations left out of the chart", text.splitlines()[0])
+
+
+def test_mermaid_budgets_the_utf16_units_a_browser_counts():
+    """An emoji is one character in Python and two UTF-16 units in the
+    browser, where Mermaid measures its limit; the whole chart, header
+    included, is kept inside it by that count."""
+    names = [f"person {n:02d} " + "\U0001F600" * 70 for n in range(60)]
+    ledger = [fact(n + 1, names[n % 60], "\U0001F600" * 60 + str(n), names[(n + 1) % 60].title()) for n in range(300)]
+    text = mermaid(ledger)
+    assert len(text.encode("utf-16-le")) // 2 <= 45_000
+    assert re.search(r"\d+ relations left out of the chart", text.splitlines()[0]) and "-->" in text

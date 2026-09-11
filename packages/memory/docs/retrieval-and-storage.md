@@ -683,8 +683,10 @@ How each format places values and escapes its own syntax:
     no page is ever out of reach.
 - **Mermaid** draws at most 60 entities, the most connected, and up to
   300 of the best-supported relations between them. That is well inside
-  Mermaid's own defaults of 500 edges and 50,000 characters, and edges
-  give way further when escaped labels would pass 45,000 characters.
+  Mermaid's own defaults of 500 edges and 50,000 characters. The whole
+  chart, header included, is measured as the browser counts it, in
+  UTF-16 units, where an emoji is two. Edges give way, then entities,
+  until it fits in 45,000.
   Each edge carries its predicate and up to three of its facts. Labels
   are clipped to 80 characters. The first line, a comment, says which
   view the chart draws, what the read left out, what the chart left

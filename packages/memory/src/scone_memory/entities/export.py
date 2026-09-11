@@ -665,6 +665,11 @@ def _mermaid_text(value: object, limit: int = _MERMAID_LABEL) -> str:
     return "".join(_MERMAID_CODES.get(character, character) for character in flat)
 
 
+def _utf16(text: str) -> int:
+    """Length as a browser counts it: UTF-16 code units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _mermaid_cite(fact_ids: tuple[int, ...]) -> str:
     shown = ", ".join(map(str, fact_ids[:3]))
     return (f"(fact {shown})" if len(fact_ids) == 1
@@ -689,18 +694,28 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     edges = [f'  {shown[relation.subject_id]} -->|"{_mermaid_text(relation.predicate, 60)} '
              f'{_mermaid_cite(relation.fact_ids)}"| {shown[relation.object_id]}' for relation in between]
     edges = edges[:_MERMAID_EDGES]
-    budget = _MERMAID_TEXT - sum(len(line) + 1 for line in nodes) - 400  # the header's share
-    while edges and sum(len(line) + 1 for line in edges) > budget:
-        edges.pop()
     coverage = about.get("coverage")
     reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
-    left = (len(projection.entities) - len(shown), len(projection.relations) - len(edges))
-    notes = [f"projection {projection.digest[:12]} at revision {projection.revision}",
-             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
-             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
-             (f"{_many(left[0], 'entity', 'entities')} and {_many(left[1], 'relation')} left out of the chart"
-              if any(left) else "every entity and relation read is drawn"), "values are not drawn"]
-    header = f"%% Knowledge graph {_mermaid_text(projection.space)}: {'; '.join(_mermaid_text(note, 300) for note in notes)}"
+
+    def header_for(drawn_nodes: int, drawn_edges: int) -> str:
+        left = (len(projection.entities) - drawn_nodes, len(projection.relations) - drawn_edges)
+        notes = [f"projection {projection.digest[:12]} at revision {projection.revision}",
+                 *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+                 *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons
+                   else []),
+                 (f"{_many(left[0], 'entity', 'entities')} and {_many(left[1], 'relation')} left out of the chart"
+                  if any(left) else "every entity and relation read is drawn"), "values are not drawn"]
+        return f"%% Knowledge graph {_mermaid_text(projection.space)}: " + "; ".join(
+            _mermaid_text(note, 300) for note in notes)
+
+    # Mermaid counts its limit in the browser's UTF-16 units, where an emoji
+    # is two: the whole chart is measured that way, edges giving way first.
+    sizes = [_utf16(line) + 1 for line in nodes + edges]
+    body = sum(sizes) + _utf16("flowchart LR") + 1
+    while nodes and _utf16(header_for(len(nodes), len(edges))) + body > _MERMAID_TEXT:
+        body -= sizes.pop()
+        (edges if edges else nodes).pop()
+    header = header_for(len(nodes), len(edges))
     return Export("\n".join([header, "flowchart LR", *nodes, *edges]).encode() + b"\n", "text/vnd.mermaid",
                   "graph.mmd")
 
