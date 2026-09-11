@@ -403,9 +403,14 @@ The view's whole graph as a file for another tool. It takes `status` and
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
 block: the filters, and what the read counted and left out. The response
-headers repeat the digest and whether the read was capped
-(`X-Scone-Projection-Digest`, `X-Scone-Truncated`), so a partial export
-says so in the file and in the response.
+headers name the same scope, so a client can bind any format's bytes to
+the view it shows without opening a zip or parsing XML:
+
+- `X-Scone-Space`;
+- `X-Scone-Projection-Digest` and `X-Scone-Projection-Revision`;
+- `X-Scone-Status` and `X-Scone-As-Of`;
+- `X-Scone-Truncated`, true when the read was capped, so a partial
+  export says so in the response as well as in the file.
 
 How each format places values and escapes its own syntax:
 

@@ -295,7 +295,9 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         exported = export_graph(projection, format, about=about)
         return Response(exported.body, media_type=exported.media_type, headers={
             "Content-Disposition": f'attachment; filename="{exported.filename}"',
-            "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false"})
+            "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false",
+            "X-Scone-Space": space, "X-Scone-Projection-Revision": str(projection.revision),
+            "X-Scone-Status": status, "X-Scone-As-Of": when})
 
     @app.get("/v1/graph/context")
     async def get_context(

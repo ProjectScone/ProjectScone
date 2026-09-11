@@ -529,3 +529,19 @@ def test_groupings_are_found_at_the_resolution_asked_for(teams):
                       headers=auth()).json()["groupings"]
     assert usual["coverage"]["resolution"] == 1.0 and fine["coverage"]["resolution"] == 10.0
     assert len(fine["communities"]) > len(usual["communities"]) == 2
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "obsidian"])
+def test_an_export_names_its_scope_in_its_headers(seeded, format):
+    """A client can bind any format's bytes to the view it shows without
+    opening a zip or parsing XML: space, revision, status and moment."""
+    client, _ = seeded
+    moment = "2025-06-01T00:00:00Z"
+    view = client.get("/v1/graph/knowledge", params={"status": "history", "as_of": moment}, headers=auth()).json()
+    response = client.get("/v1/graph/export", params={"format": format, "status": "history", "as_of": moment},
+                          headers=auth())
+    assert response.headers["x-scone-space"] == "alpha"
+    assert response.headers["x-scone-projection-revision"] == str(view["projection"]["revision"])
+    assert response.headers["x-scone-projection-digest"] == view["projection"]["digest"]
+    assert response.headers["x-scone-status"] == "history"
+    assert response.headers["x-scone-as-of"] == view["filters"]["as_of"]
