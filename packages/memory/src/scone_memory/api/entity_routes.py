@@ -15,11 +15,14 @@ from __future__ import annotations
 from typing import Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from ..core.errors import InvalidInput
 from ..core.timeutil import format_rfc3339, parse_rfc3339
+from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.read import load_projection
+from ..entities.report import build_report, render_markdown
 from ..entities.view import StatusMode, entity_listing, knowledge_view
 from ..memory.engine import MemoryEngine
 
@@ -111,6 +114,33 @@ class Coverage(BaseModel):
     reasons: list[str]
 
 
+class GroupingCommunity(BaseModel):
+    id: str
+    label: str
+    #: Shown entities in this community; the community may hold more.
+    members: list[str]
+    size: int
+
+
+class GroupingImportance(BaseModel):
+    entity_id: str
+    community_id: str
+    degree: int
+    pagerank: float
+    betweenness: float
+    participation: float
+
+
+class Groupings(BaseModel):
+    """Computed from the view's recorded relations: analysis, never facts."""
+    basis: Literal["computed"]
+    method: str
+    modularity: float
+    membership: dict[str, str]
+    communities: list[GroupingCommunity]
+    importance: list[GroupingImportance]
+
+
 class KnowledgeView(BaseModel):
     schema_version: int
     space: str
@@ -120,6 +150,7 @@ class KnowledgeView(BaseModel):
     relations: list[RelationOut]
     attributes: list[AttributeOut]
     coverage: Coverage
+    groupings: Optional[Groupings] = None
 
 
 class EntityList(BaseModel):
@@ -140,18 +171,54 @@ def _moment(engine: MemoryEngine, as_of: Optional[str]) -> str:
         raise InvalidInput("as_of must be an RFC 3339 timestamp") from None
 
 
+def _groupings(analysis: GraphAnalysis, view: dict[str, object]) -> dict[str, object]:
+    shown = {str(entity["id"]) for entity in view["entities"]}  # type: ignore[attr-defined]
+    membership = {item.entity_id: item.community_id for item in analysis.importance if item.entity_id in shown}
+    return {
+        "basis": "computed", "method": analysis.version, "modularity": analysis.modularity, "membership": membership,
+        "communities": [{"id": community.community_id, "label": community.label, "size": len(community.members),
+                         "members": [member for member in community.members if member in shown]}
+                        for community in analysis.communities if any(member in shown for member in community.members)],
+        "importance": [{"entity_id": item.entity_id, "community_id": item.community_id, "degree": item.degree,
+                        "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation}
+                       for item in analysis.importance if item.entity_id in shown],
+    }
+
+
 def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object]) -> None:
-    @app.get("/v1/graph/knowledge", response_model=KnowledgeView, response_model_exclude_none=False)
+    @app.get("/v1/graph/knowledge", response_model=KnowledgeView, response_model_exclude_unset=True)
     async def get_knowledge(
         status: StatusMode = "current", as_of: Optional[str] = None,
         limit: int = Query(default=150, ge=1, le=1000), attribute_limit: int = Query(default=300, ge=0, le=5000),
-        space: str = Depends(space_for),
+        groupings: bool = False, space: str = Depends(space_for),
     ) -> dict[str, object]:
-        """Entities, the relations between them and their values, as the ledger records them."""
+        """Entities, the relations between them and their values, as the ledger records them.
+
+        With ``groupings=true`` a separate, computed block assigns the shown
+        entities to communities and scores their importance."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
-        return knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
+        view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
                               coverage=coverage)
+        if groupings:
+            view["groupings"] = _groupings(analyze_projection(projection), view)
+        return view
+
+    @app.get("/v1/graph/report", response_model=None)
+    async def get_report(
+        status: StatusMode = "current", as_of: Optional[str] = None,
+        format: Literal["json", "markdown"] = "json", space: str = Depends(space_for),
+    ) -> dict[str, object] | PlainTextResponse:
+        """The space's communities, central entities, surprising connections and
+        questions worth asking, computed from recorded facts and citing them."""
+        when = _moment(engine, as_of)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        view = knowledge_view(projection, mode=status, as_of=when, limit=1, attribute_limit=0, coverage=coverage)
+        report = build_report(projection, analyze_projection(projection), meta=view["projection"],  # type: ignore[arg-type]
+                              filters={"status": status, "as_of": when}, coverage=coverage)
+        if format == "markdown":
+            return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
+        return report
 
     @app.get("/v1/entities", response_model=EntityList)
     async def get_entities(

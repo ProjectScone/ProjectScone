@@ -128,3 +128,58 @@ async def test_a_view_is_classified_only_from_the_facts_it_counts():
     alice = next(entity for entity in view["entities"] if entity["key"] == "alice")
     assert alice["kind"] is None and hidden.fact_id not in alice["kind_basis"]
     assert [entity["key"] for entity in listed["entities"]] == ["alice"]
+
+
+@pytest.fixture
+async def teams():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for team in (("Ana", "Ben", "Cho", "Dev"), ("Eli", "Fay", "Gus", "Hal")):
+        for left in team:
+            for right in team:
+                if left < right:
+                    await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    bridge = await engine.assert_fact("alpha", "Dev", "mentors", "Eli", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"})) as client:
+        yield client, bridge
+
+
+def test_the_report_names_communities_central_entities_and_surprises(teams):
+    client, bridge = teams
+    report = client.get("/v1/graph/report", headers=auth()).json()
+    assert report["analysis"]["version"] == "scone.analysis/1" and report["analysis"]["modularity"] > 0.3
+    assert len(report["communities"]) == 2 and all(c["label"] for c in report["communities"])
+    assert report["surprising_connections"][0]["fact_ids"] == [bridge.fact_id]
+    assert {e["key"] for e in report["central_entities"][:2]} <= {"dev", "eli", "ana", "ben", "cho", "fay", "gus", "hal"}
+    assert any(q["kind"] == "connection" and q["fact_ids"] == [bridge.fact_id] for q in report["suggestions"])
+    assert report["projection"]["digest"] and report["coverage"]["truncated"] is False
+
+
+def test_the_report_reads_as_markdown(teams):
+    client, _ = teams
+    response = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth())
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/markdown")
+    text = response.text
+    assert text.startswith("# Knowledge report") and "## Communities" in text and "## Surprising connections" in text
+    assert "Dev" in text and "Eli" in text
+
+
+def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
+    client, _ = teams
+    plain = client.get("/v1/graph/knowledge", headers=auth()).json()
+    assert "groupings" not in plain
+    view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 6}, headers=auth()).json()
+    groupings = view["groupings"]
+    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/1"
+    shown = {entity["id"] for entity in view["entities"]}
+    assert set(groupings["membership"]) == shown
+    assert {item["entity_id"] for item in groupings["importance"]} == shown
+    assert all(set(community["members"]) <= shown for community in groupings["communities"])
+
+
+def test_the_report_is_per_space_and_advertised(teams):
+    client, _ = teams
+    assert client.get("/v1/graph/report").status_code == 401
+    beta = client.get("/v1/graph/report", headers=auth("key-b")).json()
+    assert beta["communities"] == [] and beta["surprising_connections"] == []
+    assert client.get("/v1/graph/report", params={"format": "pdf"}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.report"] is True

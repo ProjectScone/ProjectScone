@@ -192,6 +192,48 @@ requests and stores. A client should drop cached selections when
 `projection.version`, `classifier`, `kinds` or `id_scheme` changes. The
 `digest` changes whenever anything in the projection does.
 
+`groupings=true` adds a separate `groupings` block, marked
+`"basis": "computed"`, that is analysis and never facts:
+
+- `membership` maps each shown entity to its community;
+- `communities` gives each community's id, label, size and shown members;
+- `importance` gives each shown entity's degree, PageRank, betweenness and
+  participation across communities.
+
+It is computed from the same counted facts as the view (see the report
+below).
+
+#### `GET /v1/graph/report`
+
+A whole-space analysis, `format=json` (default) or `format=markdown`, for
+the same `status` and `as_of`:
+
+- **Communities**: found by modularity optimisation over recorded
+  relations, weighted by the facts behind each pair, and split into
+  connected parts. Each is named after its most central members, with
+  cohesion, kinds and predicates.
+- **Central entities**: by PageRank, with degree, fact weight,
+  betweenness (exact up to 500 entities, from 64 evenly spaced sources
+  beyond) and participation across communities.
+- **Bridging entities**: those whose links spread across communities.
+- **Surprising connections**: relations between communities, with the
+  rarest link between two communities first. Each carries its fact ids
+  and the reason.
+- **Questions worth asking**: built from real names, each citing its
+  entities, relations and facts. They cover how two communities connect,
+  what a bridging entity does, what kind a conflicted entity is, and what
+  an entity known only by its values connects to.
+
+Results are deterministic: the same facts give the same report. The report
+states the projection digest and analysis version it came from, and
+`coverage` lists every limit that applied. A 50,000-fact space takes about
+two and a half seconds. Advertised as `graph.report`.
+
+A caveat from the ledger itself: a subject and predicate hold one value at
+a time, so a newer `alice knows cho` closes `alice knows ben`. `current`
+therefore shows only the latest object of each predicate, and `history`
+shows them all.
+
 #### `GET /v1/entities`
 
 The same entities as a ranked list. It takes `status`, `as_of`, `limit`
@@ -204,8 +246,7 @@ where `coverage` counts the matches.
 - The projection is built on each request from a whole-ledger read. It is
   never built on a recall path, and it is not yet cached.
 - Identity is key identity only: no merges of different spellings yet.
-- There are no paths, neighbourhoods or communities yet; those come in
-  later slices.
+- There are no paths or neighbourhoods yet; those come in later slices.
 
 ## Which embedder wrote the vectors
 

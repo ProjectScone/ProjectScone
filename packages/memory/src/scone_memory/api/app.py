@@ -334,7 +334,7 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
-            "entities.read": True, "graph.knowledge": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True,
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest

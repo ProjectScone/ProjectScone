@@ -51,7 +51,8 @@
       "recall.structural_context": true,
       "recall.multi_hop": true,
       "entities.read": true,
-      "graph.knowledge": true
+      "graph.knowledge": true,
+      "graph.report": true
     }
   }
 }
