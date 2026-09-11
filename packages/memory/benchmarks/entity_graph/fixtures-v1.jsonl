@@ -1,0 +1,40 @@
+{"kind": "meta", "name": "entity-graph-v1", "space": "bench", "as_of": "2025-06-01T00:00:00Z"}
+{"kind": "fact", "subject": "alice chen", "predicate": "works_at", "object": "Acme Robotics"}
+{"kind": "fact", "subject": "dr. alice chen", "predicate": "leads", "object": "the Robotics Lab"}
+{"kind": "fact", "subject": "acme robotics", "predicate": "based_in", "object": "Lisbon"}
+{"kind": "fact", "subject": "bob stone", "predicate": "lives_in", "object": "Lisbon"}
+{"kind": "fact", "subject": "bob stone", "predicate": "knows", "object": "Alice Chen"}
+{"kind": "fact", "subject": "carol diaz", "predicate": "works_at", "object": "Globex"}
+{"kind": "fact", "subject": "globex", "predicate": "based_in", "object": "Porto"}
+{"kind": "fact", "subject": "project atlas", "predicate": "owned_by", "object": "Carol Diaz"}
+{"kind": "fact", "subject": "alice chen", "predicate": "joined_on", "object": "May 2021"}
+{"kind": "fact", "subject": "alice chen", "predicate": "age", "object": "34"}
+{"kind": "fact", "subject": "alice chen", "predicate": "email", "object": "alice@acme.example"}
+{"kind": "fact", "subject": "acme robotics", "predicate": "storage_quota", "object": "512 MB"}
+{"kind": "fact", "subject": "carol diaz", "predicate": "said", "object": "She said we should meet at noon."}
+{"kind": "fact", "subject": "project atlas", "predicate": "status", "object": "ready"}
+{"kind": "fact", "subject": "project atlas", "predicate": "homepage", "object": "https://atlas.example/start"}
+{"kind": "same_entity", "names": ["alice chen", "dr. alice chen", "Alice Chen"]}
+{"kind": "same_entity", "names": ["acme robotics", "Acme Robotics"]}
+{"kind": "same_entity", "names": ["carol diaz", "Carol Diaz"]}
+{"kind": "same_entity", "names": ["globex", "Globex"]}
+{"kind": "same_entity", "names": ["lisbon", "Lisbon"]}
+{"kind": "literal", "subject": "alice chen", "predicate": "joined_on", "object": "May 2021", "value": true}
+{"kind": "literal", "subject": "alice chen", "predicate": "age", "object": "34", "value": true}
+{"kind": "literal", "subject": "alice chen", "predicate": "email", "object": "alice@acme.example", "value": true}
+{"kind": "literal", "subject": "acme robotics", "predicate": "storage_quota", "object": "512 MB", "value": true}
+{"kind": "literal", "subject": "carol diaz", "predicate": "said", "object": "She said we should meet at noon.", "value": true}
+{"kind": "literal", "subject": "project atlas", "predicate": "status", "object": "ready", "value": true}
+{"kind": "literal", "subject": "project atlas", "predicate": "homepage", "object": "https://atlas.example/start", "value": true}
+{"kind": "literal", "subject": "alice chen", "predicate": "works_at", "object": "Acme Robotics", "value": false}
+{"kind": "literal", "subject": "acme robotics", "predicate": "based_in", "object": "Lisbon", "value": false}
+{"kind": "literal", "subject": "bob stone", "predicate": "lives_in", "object": "Lisbon", "value": false}
+{"kind": "literal", "subject": "bob stone", "predicate": "knows", "object": "Alice Chen", "value": false}
+{"kind": "literal", "subject": "carol diaz", "predicate": "works_at", "object": "Globex", "value": false}
+{"kind": "literal", "subject": "globex", "predicate": "based_in", "object": "Porto", "value": false}
+{"kind": "literal", "subject": "project atlas", "predicate": "owned_by", "object": "Carol Diaz", "value": false}
+{"kind": "literal", "subject": "dr. alice chen", "predicate": "leads", "object": "the Robotics Lab", "value": false}
+{"kind": "path", "from": "alice chen", "to": "lisbon", "hops": 2}
+{"kind": "path", "from": "bob stone", "to": "acme robotics", "hops": 2}
+{"kind": "path", "from": "project atlas", "to": "porto", "hops": 3}
+{"kind": "path", "from": "bob stone", "to": "globex", "hops": 4, "expected": false}

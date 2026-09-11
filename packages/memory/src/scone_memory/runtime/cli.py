@@ -198,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
+    p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
+    p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
     p = sub.add_parser("bench-conflicts",
                        help="MemoryAgentBench Conflict Resolution (FactConsolidation): retrieval of the latest fact, and accuracy with a reader")
     p.add_argument("dataset", help="the Conflict_Resolution parquet (needs pyarrow) or a JSON export of its rows")
@@ -258,6 +260,24 @@ def fact_line(f) -> str:
     origin = "" if f.origin == "stated" else f" [{f.origin}]"
     excluded = f"  excluded: {f.excluded_reason}" if f.excluded_reason else ""
     return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
+
+
+def graph_bench_command(args: argparse.Namespace, out) -> int:
+    """Graph quality on a fixture, in process; the configured store is never
+    opened. Exits 1 when a threshold is breached."""
+    from pathlib import Path
+
+    from ..testing.entity_graph_benchmark import THRESHOLDS_V1, failures, run_entity_graph_benchmark
+
+    report = asyncio.run(run_entity_graph_benchmark(Path(args.fixtures)))
+    breached = failures(report, THRESHOLDS_V1)
+    if getattr(args, "json", False):
+        print(json.dumps({"report": report.record(), "failures": breached}, indent=2, sort_keys=True), file=out)
+    else:
+        for key, value in report.record().items():
+            print(f"{key}: {value}", file=out)
+        print("thresholds: " + ("pass" if not breached else "; ".join(breached)), file=out)
+    return 1 if breached else 0
 
 
 async def bench_command(args: argparse.Namespace, settings: Settings, out) -> int:
@@ -800,6 +820,8 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         return serve_conversations(settings, journal=args.journal,
                                    model_factory=args.model_factory)
+    if args.command == "bench-graph":
+        return graph_bench_command(args, out or sys.stdout)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from ..api.__main__ import main as serve
