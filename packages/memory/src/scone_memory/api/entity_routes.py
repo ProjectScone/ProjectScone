@@ -34,6 +34,7 @@ from ..entities.read import load_projection, read_record
 from ..entities.schema import MAX_BYTES, MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
 from ..entities.report import render_markdown, report_record
 from ..entities.service import ProjectionBuilding
+from ..entities.usage import recall_usage
 from ..entities.view import SeedRefused, StatusMode, WalkDirection, walk_seeds, entity_listing, entity_record, knowledge_view, projection_meta, support
 from ..memory.engine import MemoryEngine
 from .responses import LedgerJSONResponse
@@ -71,6 +72,9 @@ class EntityOut(BaseModel):
     claims: int
     #: In a seeded view, the steps from the nearest seed (0 for a seed).
     hop: Optional[int] = None
+    #: With ``usage``, the recalls that returned one of its facts; None when
+    #: the engine keeps no events.
+    recalled: Optional[int] = None
 
 
 class RelationOut(BaseModel):
@@ -82,6 +86,8 @@ class RelationOut(BaseModel):
     support: Support
     first_valid_from: str
     last_valid_until: Optional[str]
+    #: With ``usage``, the recalls that returned one of its facts.
+    recalled: Optional[int] = None
 
 
 class AttributeOut(BaseModel):
@@ -138,6 +144,9 @@ class Coverage(BaseModel):
     reasons: list[str]
     #: Pass as ``cursor`` for the next page of the ranking; absent on the last.
     next_cursor: Optional[str] = None
+    #: With ``usage``, which recalls were counted: how many, since when,
+    #: whether more were left unread, and whether the engine keeps events.
+    usage: Optional[dict[str, object]] = None
 
 
 class GroupingCommunity(BaseModel):
@@ -277,6 +286,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         groupings: bool = False, resolution: float = Query(default=1.0, gt=0, le=10),
         seed: list[str] = Query(default=[]), hub_degree: int = Query(default=64, ge=1, le=100_000),
         direction: WalkDirection = "both", hops: Optional[int] = Query(default=None, ge=1, le=8),
+        usage: bool = False, usage_since: Optional[str] = None,
         cursor: Optional[str] = Query(default=None, max_length=512), space: str = Depends(space_for),
     ) -> dict[str, object] | LedgerJSONResponse:
         """Entities, the relations between them and their values, as the ledger records them.
@@ -307,9 +317,13 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
             seeds = walk_seeds(projection, seed, coverage)
         except SeedRefused as refused:
             return LedgerJSONResponse(status_code=refused.status, content=refused.answer)
+        recalls = None
+        if usage or usage_since is not None:
+            recalls = await recall_usage(engine, space, since=None if usage_since is None
+                                         else _moment(engine, usage_since))
         view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
                               coverage=coverage, seeds=seeds, hub_degree=hub_degree, offset=offset,
-                              direction=direction, hops=hops)
+                              direction=direction, hops=hops, usage=recalls)
         page = view["coverage"]
         assert isinstance(page, dict)
         next_offset = page.pop("next_offset", None)

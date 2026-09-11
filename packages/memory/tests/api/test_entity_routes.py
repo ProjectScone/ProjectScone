@@ -741,3 +741,22 @@ def test_context_can_seed_by_resemblance_when_asked(seeded):
     assert " similar " in aided["text"]
     assert client.get("/v1/graph/context", params={"q": "x", "min_similarity": 2}, headers=auth()).status_code == 422
     assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context_similar"] is True
+
+
+async def test_the_map_can_show_how_often_recalls_returned_each_part():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Porto", valid_from="2024-01-01T00:00:00Z")
+    await engine.recall("alpha", "alice chen")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"usage": "true"}, headers=auth()).json()
+        plain = client.get("/v1/graph/knowledge", headers=auth()).json()
+        assert client.get("/v1/graph/knowledge", params={"usage_since": "soon"}, headers=auth()).status_code == 422
+        features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    recalled = {entity["key"]: entity["recalled"] for entity in view["entities"]}
+    assert recalled == {"alice chen": 1, "acme robotics": 1, "bob stone": 0, "porto": 0}
+    assert view["coverage"]["usage"]["recalls_read"] == 1 and "usage" not in plain["coverage"]
+    assert features["graph.knowledge_usage"] is True

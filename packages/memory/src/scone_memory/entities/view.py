@@ -19,13 +19,16 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
-from typing import Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 
 from ..core.timeutil import parse_rfc3339
 from .classify import CLASSIFIER_VERSION
 from .ids import ENTITY_ID_SCHEME
 from .kinds import KIND_HINTS_VERSION
 from .project import Entity, EntityProjection, FactRole, PROJECTION_VERSION
+
+if TYPE_CHECKING:
+    from .usage import Usage
 
 StatusMode = Literal["current", "history", "proposed", "all"]
 #: Which way a seeded walk follows a relation: out from its subject to its
@@ -156,7 +159,7 @@ def _walk(counted: "_Counted", seeds: Sequence[str], limit: int, hub_degree: int
 def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str, limit: int,
                    attribute_limit: int, coverage: Mapping[str, object], seeds: Sequence[str] = (),
                    hub_degree: int = 64, offset: int = 0, direction: WalkDirection = "both",
-                   hops: int | None = None) -> dict[str, object]:
+                   hops: int | None = None, usage: "Usage | None" = None) -> dict[str, object]:
     """Entities, the relations among them and their values. Without seeds,
     the entities ranked by the claims they take part in, ``limit`` from
     ``offset``; with seeds, those reached from them breadth first, following
@@ -187,19 +190,37 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
     attributes = [(attribute, roles) for attribute, roles in counted.attributes if attribute.entity_id in ids]
     if len(attributes) > attribute_limit:
         reasons.append("attribute_limit")
+    # How many recalls returned a fact each entity or relation stands on.
+    entity_uses: Counter[str] = Counter()
+    relation_uses: Counter[str] = Counter()
+    if usage is not None and usage.available:
+        relation_of = {fact_id: relation.relation_id for relation, _ in counted.relations for fact_id in relation.fact_ids}
+        for returned in usage.returned:
+            touched = {end for fact_id in returned if (role := counted.roles.get(fact_id)) is not None
+                       for end in (role.subject_id, role.object_id) if end is not None}
+            entity_uses.update(touched)
+            relation_uses.update({relation_of[fact_id] for fact_id in returned if fact_id in relation_of})
+
+    def used(counts: Counter[str], key: str) -> dict[str, object]:
+        if usage is None:
+            return {}
+        return {"recalled": counts[key] if usage.available else None}
+
     return {
         "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
         "filters": {"status": mode, "as_of": as_of,
                     **({"seeds": list(dict.fromkeys(seeds)), "hub_degree": hub_degree, "direction": direction,
                         "hops": hops} if seeds else {})},
         "entities": [{**entity_record(entity, counted.score[entity.entity_id]),
-                      **({"hop": hop_of[entity.entity_id]} if seeds else {})} for entity in shown],
+                      **({"hop": hop_of[entity.entity_id]} if seeds else {}), **used(entity_uses, entity.entity_id)}
+                     for entity in shown],
         "relations": [{"id": relation.relation_id, "subject_id": relation.subject_id,
                        "predicate": relation.predicate, "object_id": relation.object_id,
                        "fact_ids": [role.fact_id for role in roles], "support": support(roles),
                        "first_valid_from": min(role.valid_from for role in roles),
                        "last_valid_until": None if any(role.valid_until is None for role in roles)
-                       else max(role.valid_until for role in roles if role.valid_until)}
+                       else max(role.valid_until for role in roles if role.valid_until),
+                       **used(relation_uses, relation.relation_id)}
                       for relation, roles in relations],
         "attributes": [{"id": attribute.attribute_id, "entity_id": attribute.entity_id,
                         "predicate": attribute.predicate, "value": attribute.value,
@@ -212,7 +233,8 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
                      "attributes_total": len(counted.attributes),
                      "attributes_shown": min(len(attributes), attribute_limit),
                      "truncated": bool(reasons), "reasons": reasons,
-                     **({"next_offset": offset + limit} if more else {})},
+                     **({"next_offset": offset + limit} if more else {}),
+                     **({"usage": usage.record()} if usage is not None else {})},
     }
 
 

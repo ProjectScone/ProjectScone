@@ -182,6 +182,7 @@ capability, named with the route.
 | `hub_degree` | 64 | In a seeded view, an entity with more relations is shown but not walked through |
 | `direction` | `both` | In a seeded view, which way relations are followed: `out` (subject to object), `in` (object to subject) or `both` |
 | `hops` | none (1–8) | In a seeded view, the most steps from a seed |
+| `usage`, `usage_since` | off, all | Count, on each entity and relation, the recent recalls that returned one of its facts |
 
 Without `seed`, the view pages through the ranking. `coverage.next_cursor`
 names the next page and is absent on the last. A cursor encodes the
@@ -210,6 +211,20 @@ have reached more, `hop_limit` is among the reasons. Each entity in a
 seeded view carries its `hop` from the nearest seed (0 for a seed).
 `filters.direction` and `filters.hops` echo the walk. `direction` or
 `hops` without a seed is a 422.
+
+With `usage=true`, every shown entity and relation carries `recalled`:
+how many of the space's recent recalls returned a fact it stands on.
+This shows which parts of memory answer questions and which sit unread
+(graphify's usage overlay).
+
+- The recalls counted are the most recent 1,000, or those since
+  `usage_since`. `coverage.usage` says how many were read and whether
+  more were left.
+- A recall that returned two facts of one entity counts once for it.
+- Only counts leave the event log. No query text is read.
+- An engine that keeps no events answers `recalled: null` with
+  `usage.available: false`.
+- Advertised as `graph.knowledge_usage`.
 
 Paging, seeded walks and walk shapes are advertised as
 `graph.knowledge_paging`, `graph.knowledge_seeds` and
