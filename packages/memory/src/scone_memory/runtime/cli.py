@@ -479,7 +479,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     was read at agree. Exits 1 when a name is ambiguous or unknown."""
     from ..core.timeutil import format_rfc3339, parse_rfc3339
     from ..entities.analysis import analyze_projection
-    from ..entities.context import ContextLimits, graph_connections, graph_context
+    from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
     from ..entities.export import export_graph
     from ..entities.read import load_projection
     from ..entities.report import build_report, render_markdown
@@ -495,8 +495,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     named = {"path": [args.source, args.target] if command == "path" else [],
              "context": args.names if command == "context" else [],
              "entity": [args.name] if command == "entity" else []}.get(command, [])
-    if len(named) > 24 or any(not 1 <= len(name) <= 200 for name in named):
-        raise InvalidInput("names: at most 24, each 1 to 200 characters")
+    if len(named) > MAX_NAMES or any(not 1 <= len(name) <= MAX_NAME for name in named):
+        raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
     if command == "path" and not 1 <= args.max_hops <= 4:
         raise InvalidInput("--max-hops must be from 1 to 4")
     if command == "schema" and not 1 <= args.limit <= MAX_PREDICATES:
@@ -504,8 +504,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     if command == "schema" and not 1_024 <= args.max_bytes <= MAX_BYTES_LIMIT:
         raise InvalidInput(f"--max-bytes must be from 1024 to {MAX_BYTES_LIMIT}")
     if command == "context":
-        if args.question is not None and not 1 <= len(args.question) <= 2000:
-            raise InvalidInput("--question must be 1 to 2000 characters")
+        if args.question is not None and not 1 <= len(args.question) <= MAX_QUESTION:
+            raise InvalidInput(f"--question must be 1 to {MAX_QUESTION} characters")
         try:
             ContextLimits(max_bytes=args.max_bytes)
         except ValueError:

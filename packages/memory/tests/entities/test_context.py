@@ -292,3 +292,54 @@ async def test_each_unknown_name_is_counted_once_per_spelling():
     engine = await seeded()
     packet = await graph_context(engine, "alpha", names=["nobody", "Nobody", "someone else", "Alice Chen"])
     assert "not_found 2" in packet.coverage["reasons"] and packet.status == "prepared"
+
+
+async def test_two_names_for_one_entity_need_no_path_and_cite_nothing():
+    from scone_memory.entities.context import graph_connections
+
+    engine = await seeded()
+    found = await graph_connections(engine, "alpha", "alice chen", "Alice  Chen")
+    assert found.status == "prepared" and len(found.seeds) == 1
+    assert "no path: both names are the same entity" in found.text
+    assert not any(line.startswith("path: ") for line in found.text.splitlines())
+
+
+async def crowded_workplace(workers: int) -> MemoryEngine:
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for name in ["alice chen", "bob stone", *(f"worker {n:02d}" for n in range(workers))]:
+        await engine.assert_fact("alpha", name, "works_at", "Acme Robotics", valid_from=DAY)
+    return engine
+
+
+async def test_a_route_through_a_busy_workplace_is_found_as_the_path_route_finds_it():
+    from scone_memory.entities.context import graph_connections
+
+    engine = await crowded_workplace(68)
+    found = await graph_connections(engine, "alpha", "alice chen", "bob stone")
+    assert any(line.startswith("path: ") and "Acme Robotics" in line for line in found.text.splitlines())
+
+
+async def test_a_route_only_through_a_hub_it_will_not_cross_is_not_called_unconnected():
+    from scone_memory.entities.context import graph_connections
+
+    engine = await crowded_workplace(68)
+    found = await graph_connections(engine, "alpha", "alice chen", "bob stone", hub_degree=10)
+    assert "no path: none without crossing a hub" in found.text and "not connected" not in found.text
+    assert "hubs_not_crossed 1" in found.coverage["reasons"]
+
+
+async def test_a_torn_read_never_says_two_things_are_unconnected(monkeypatch):
+    from scone_memory.entities import context
+
+    engine = await seeded()
+    await engine.assert_fact("alpha", "zed quill", "knows", "Yan Brook", valid_from=DAY)
+    real = context.load_projection
+
+    async def torn(*args, **kwargs):
+        projection, read = await real(*args, **kwargs)
+        return projection, {**read, "reasons": ["ledger_changed_during_read"]}
+
+    monkeypatch.setattr(context, "load_projection", torn)
+    found = await context.graph_connections(engine, "alpha", "alice chen", "zed quill")
+    assert "no path: not connected in the facts read" in found.text

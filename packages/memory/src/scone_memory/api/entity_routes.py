@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from ..core.errors import InvalidInput, NotFound
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
-from ..entities.context import ContextLimits, graph_context
+from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_context
 from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
@@ -373,7 +373,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
 
     @app.get("/v1/graph/context")
     async def get_context(
-        names: list[str] = Query(default=[]), q: Optional[str] = Query(default=None, min_length=1, max_length=2000),
+        names: list[str] = Query(default=[]),
+        q: Optional[str] = Query(default=None, min_length=1, max_length=MAX_QUESTION),
         max_hops: int = Query(default=2, ge=1, le=4), max_bytes: int = Query(default=8_000, ge=512, le=64_000),
         status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
     ) -> dict[str, object]:
@@ -383,8 +384,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         facts re-read now. Cut between lines to ``max_bytes``."""
         if not names and q is None:
             raise InvalidInput("give names or q")
-        if len(names) > 24 or any(not 1 <= len(name) <= 200 for name in names):
-            raise InvalidInput("names: at most 24, each 1..200 characters")
+        if len(names) > MAX_NAMES or any(not 1 <= len(name) <= MAX_NAME for name in names):
+            raise InvalidInput(f"names: at most {MAX_NAMES}, each 1..{MAX_NAME} characters")
         when = _moment(engine, as_of)
         packet = await graph_context(engine, space, names=names, question=q, status=status, as_of=when,
                                      limits=ContextLimits(max_bytes=max_bytes, max_hops=max_hops))

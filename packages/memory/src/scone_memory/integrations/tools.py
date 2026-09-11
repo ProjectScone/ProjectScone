@@ -24,10 +24,8 @@ from ..memory.engine import MemoryEngine
 
 #: The most a search may return however the model asks.
 MAX_ITEMS = 20
-#: The graph tools' bounds, the same as the HTTP routes and the MCP server.
-MAX_NAMES = 24
-MAX_NAME = 200
-MAX_QUESTION = 2000
+#: The graph tools' bounds, shared with the HTTP routes, MCP and the CLI.
+from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
 
 
 @dataclass(frozen=True)

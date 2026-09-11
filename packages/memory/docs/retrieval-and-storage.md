@@ -512,10 +512,24 @@ The MCP server offers the same reads as tools:
 
 - `memory_graph_context`: names or a question;
 - `memory_entity`: one entity, with its relations in both directions;
-- `memory_connections`: the paths between two entities.
+- `memory_connections`: the paths between two entities;
+- `memory_graph_schema`: the kinds and predicates the graph holds.
 
 These sit beside the six tools shared with the Rust server, and none of
-them writes.
+them writes. Every surface that asks the graph by name, whether HTTP,
+MCP, the ToolBox or the CLI, shares one set of bounds: 24 names of 1 to
+200 characters, and a question of 1 to 2,000. The graph tools take
+whole numbers only, so `true` or `"5"` is refused, not read as 1 or 5.
+
+A path answer (`memory_connections`, the ToolBox's `connect_entities`,
+`scone graph path`) says "not connected" only when nothing was left
+out. Otherwise the `no path:` line says why:
+
+- `none within N hops` when a path might be longer than asked for;
+- `none without crossing a hub` when a hub of more than `hub_degree`
+  relations (200, as for `/v1/graph/path`) was not crossed;
+- `not connected in the facts read` after a capped or torn read;
+- `both names are the same entity`, rather than a path citing no facts.
 
 #### `GET /v1/graph/sources`
 

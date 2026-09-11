@@ -473,3 +473,26 @@ async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
     assert error and "limit" in text
     error, text = await call(server, "memory_graph_schema", max_bytes=100)
     assert error and "max_bytes" in text
+
+
+async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(server):
+    error, text = await call(server, "memory_graph_context", question="who? " * 300)
+    assert not error, text
+    error, text = await call(server, "memory_graph_context", question="q" * 2001)
+    assert error and "2000" in text
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("memory_graph_schema", {"limit": True}), ("memory_graph_schema", {"limit": "5"}),
+    ("memory_graph_schema", {"max_bytes": "2048"}), ("memory_connections", {"source": "a", "target": "b", "max_hops": True}),
+    ("memory_graph_context", {"names": ["a"], "max_bytes": True}),
+])
+async def test_graph_tools_take_whole_numbers_only_as_the_toolbox_and_http_do(server, tool, arguments):
+    """Refused either way the SDK refuses: an error result, or the argument
+    error it raises in process and turns into one over the protocol."""
+    try:
+        result = await server.call_tool(tool, arguments)
+    except Exception as refused:
+        assert "valid integer" in str(refused)
+    else:
+        assert result.is_error

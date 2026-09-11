@@ -29,7 +29,7 @@ from typing import Annotated, Awaitable, Callable, Mapping, Optional, Sequence
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from .. import __version__
 from ..core.errors import InvalidInput
@@ -38,7 +38,7 @@ from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
 from ..core.errors import SconeError
 from ..core.models import Added, Episode, Fact, RecallResult
-from ..entities.context import ContextLimits, graph_connections, graph_context
+from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
 
 MAX_CONTENT = 100_000
@@ -341,11 +341,11 @@ def create_server(engine: MemoryEngine, space: str = "default",
             Optional[list[str]], Field(description="Entities to centre on, by name or id (at most 24)")
         ] = None,
         question: Annotated[
-            Optional[str], Field(description="A question; the entities its words name become the centre (1..=1000 chars)")
+            Optional[str], Field(description=f"A question; the entities its words name become the centre (1..={MAX_QUESTION} chars)")
         ] = None,
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
         max_bytes: Annotated[
-            Optional[int], Field(description="Byte budget for the packet (512..=64000); defaults to 8000")
+            Optional[StrictInt], Field(description="Byte budget for the packet (512..=64000); defaults to 8000")
         ] = None,
     ) -> CallToolResult:
         """What the entity graph records around some names or the entities a
@@ -354,10 +354,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
         facts, re-read now; quotes appear only when they still verify."""
         if not names and not question:
             return tool_error("give names or a question")
-        if len(names or ()) > 24 or any(not 1 <= len(name) <= MAX_ENTITY for name in names or ()):
-            return tool_error(f"names: at most 24, each 1..={MAX_ENTITY} chars")
-        if question is not None and not 1 <= len(question) <= MAX_QUERY:
-            return tool_error(f"question must be 1..={MAX_QUERY} chars")
+        if len(names or ()) > MAX_NAMES or any(not 1 <= len(name) <= MAX_NAME for name in names or ()):
+            return tool_error(f"names: at most {MAX_NAMES}, each 1..={MAX_NAME} chars")
+        if question is not None and not 1 <= len(question) <= MAX_QUESTION:
+            return tool_error(f"question must be 1..={MAX_QUESTION} chars")
         budget = max_bytes if max_bytes is not None else 8_000
         if not 512 <= budget <= 64_000:
             return tool_error("max_bytes must be 512..=64000")
@@ -381,7 +381,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
     async def memory_connections(
         source: Annotated[str, Field(description="One entity, by name or id")],
         target: Annotated[str, Field(description="The other entity, by name or id")],
-        max_hops: Annotated[Optional[int], Field(description="Longest path to look for (1..=4); defaults to 3")] = None,
+        max_hops: Annotated[Optional[StrictInt], Field(description="Longest path to look for (1..=4); defaults to 3")] = None,
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
     ) -> CallToolResult:
         """How two entities connect: the shortest paths between them, each hop
@@ -397,10 +397,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
     @tool(server, "memory_graph_schema")
     async def memory_graph_schema(
         limit: Annotated[
-            Optional[int], Field(description=f"Predicates to list, most used first (1..={MAX_PREDICATES}); defaults to 200")
+            Optional[StrictInt], Field(description=f"Predicates to list, most used first (1..={MAX_PREDICATES}); defaults to 200")
         ] = None,
         max_bytes: Annotated[
-            Optional[int], Field(description="Byte budget for the listed predicates (1024..=64000); defaults to 8000")
+            Optional[StrictInt], Field(description="Byte budget for the listed predicates (1024..=64000); defaults to 8000")
         ] = None,
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
     ) -> CallToolResult:

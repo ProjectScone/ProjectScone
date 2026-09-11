@@ -37,7 +37,7 @@ from ..retrieval.lexical import STOPWORDS
 from .grounding import checked_facts
 from .project import Entity, EntityProjection, Relation
 from .query import Candidate, Path, name_words, paths_between, resolve
-from .read import load_projection
+from .read import load_projection, read_record
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -101,6 +101,11 @@ def one_line(text: object, limit: int = 120) -> str:
 def _plain(text: str) -> str:
     return " ".join(name_words(text))
 
+
+#: One set of bounds for every surface that asks the graph by name.
+MAX_NAMES = 24
+MAX_NAME = 200
+MAX_QUESTION = 2_000
 
 _INDEXES: OrderedDict[str, dict[str, tuple[Entity, ...]]] = OrderedDict()
 
@@ -425,7 +430,7 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
 
 
 async def graph_connections(engine: "MemoryEngine", space: str, source: str, target: str, *, max_hops: int = 3,
-                            limit: int = 3, max_bytes: int = 8_000, hub_degree: int = 64,
+                            limit: int = 3, max_bytes: int = 8_000, hub_degree: int = 200,
                             status: "StatusMode" = "current", as_of: str | None = None) -> GraphContext:
     """How two entities connect, as packet lines: up to ``limit`` shortest
     paths, each hop's facts re-read so a path resting on a fact that no
@@ -463,6 +468,13 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
                             {"reasons": reasons})
     if len(ends) < 2:
         return GraphContext("empty", _fit([*header, coverage(), note], max_bytes), (), (), {"reasons": reasons})
+    if ends[0].entity_id == ends[1].entity_id:
+        # A zero-hop path cites no facts; there is nothing to connect.
+        entity = ends[0]
+        lines = [*header, coverage(), note,
+                 f"entity: {one_line(entity.label, 80)} ({entity.kind or 'unknown kind'}) {entity.entity_id}",
+                 "no path: both names are the same entity"]
+        return GraphContext("prepared", _fit(lines, max_bytes), (entity.entity_id,), (), {"reasons": reasons, "read": read})
     result = paths_between(projection, ends[0].entity_id, ends[1].entity_id, max_hops=limits.max_hops,
                            limit=max(1, min(limit, 5)), hub_degree=hub_degree)
     evidence = _Evidence(engine, space, status, parse_rfc3339(when), 128)
@@ -485,10 +497,18 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
     if result.hubs_skipped:
         reasons.append(f"hubs_not_crossed {len(result.hubs_skipped)}")
     if not path_lines:
-        complete = not any(reason in ("fact_limit", "store_read_cap_reached") for reason in reasons)
-        state = {"none_within_limit": f"none within {limits.max_hops} hops",
-                 "disconnected": "not connected" if complete else "not connected in the facts read"}
-        path_lines.append(f"no path: {state.get(result.status, 'none found')}")
+        # Unconnected is said only when nothing was left out: no hub the
+        # walk would not cross, and a read that held every fact.
+        complete, _ = read_record(read)
+        if result.status == "none_within_limit":
+            state = f"none within {limits.max_hops} hops"
+        elif result.hubs_skipped:
+            state = "none without crossing a hub"
+        elif result.status == "disconnected":
+            state = "not connected" if complete else "not connected in the facts read"
+        else:
+            state = "none found"
+        path_lines.append(f"no path: {state}")
     seed_lines = [f"entity: {one_line(entity.label, 80)} ({entity.kind or 'unknown kind'}) {entity.entity_id}"
                   for entity in ends]
     lines = [*header, coverage(), note, *seed_lines, *path_lines]
