@@ -331,7 +331,10 @@ def gexf_items(projection):
 
     def item(element):
         values = {names[value.get("for")]: value.get("value") for value in element.iterfind("g:attvalues/g:attvalue", GEXF)}
-        return {"label": element.get("label"), "start": element.get("start"), "end": element.get("end"), **values}
+        spells = [(spell.get("start"), spell.get("end"), spell.get("endopen"))
+                  for spell in element.iterfind("g:spells/g:spell", GEXF)]
+        return {"label": element.get("label"), "spells": spells, "timed": element.get("start") or element.get("end"),
+                **values}
 
     nodes = {node.get("id"): item(node) for node in graph.iterfind("g:nodes/g:node", GEXF)}
     edges = {edge.get("id"): {**item(edge), "source": edge.get("source"), "target": edge.get("target")}
@@ -350,13 +353,15 @@ def test_gexf_is_a_dynamic_graph_where_each_relation_holds_for_its_valid_time():
     assert root.get("version") == "1.2"
     assert (graph.get("mode"), graph.get("timeformat"), graph.get("defaultedgetype")) == ("dynamic", "dateTime", "directed")
     by_label = {node["label"]: node for node in nodes.values()}
-    assert by_label["alice"]["start"] == "2020-01-01T00:00:00.000Z" and by_label["alice"]["end"] is None
-    assert by_label["Acme"]["end"] == "2023-01-01T00:00:00.000Z" and by_label["Beta"]["start"] == "2023-01-01T00:00:00.000Z"
-    assert by_label["34"]["type"] == "value" and by_label["34"]["start"] == "2021-06-01T00:00:00.000Z"
-    spans = {(nodes[edge["target"]]["label"], edge["start"], edge["end"]) for edge in edges.values()
+    assert by_label["alice"]["spells"] == [("2020-01-01T00:00:00.000Z", None, None)]
+    assert by_label["Acme"]["spells"] == [("2020-01-01T00:00:00.000Z", "2023-01-01T00:00:00.000Z", "true")]
+    assert by_label["Beta"]["spells"] == [("2023-01-01T00:00:00.000Z", None, None)]
+    assert by_label["34"]["type"] == "value" and by_label["34"]["spells"] == [("2021-06-01T00:00:00.000Z", None, None)]
+    spans = {(nodes[edge["target"]]["label"], *edge["spells"][0]) for edge in edges.values()
              if edge["predicate"] == "works_at"}
-    assert spans == {("Acme", "2020-01-01T00:00:00.000Z", "2023-01-01T00:00:00.000Z"),
-                     ("Beta", "2023-01-01T00:00:00.000Z", None)}
+    assert spans == {("Acme", "2020-01-01T00:00:00.000Z", "2023-01-01T00:00:00.000Z", "true"),
+                     ("Beta", "2023-01-01T00:00:00.000Z", None, None)}
+    assert not any(item["timed"] for item in [*nodes.values(), *edges.values()]), "presence is in spells alone"
     assert {(edge["link"], edge["fact_ids"]) for edge in edges.values()} == {("relation", "1"), ("relation", "2"),
                                                                              ("value", "3")}
 
@@ -372,3 +377,19 @@ def test_gexf_keeps_hostile_names_as_text_and_what_xml_cannot_hold_exactly(proje
     shown = next(node for node in nodes.values() if node["label"].startswith("nul"))
     assert shown["label"] == "nul\u2400here\rline" and shown["key"] == "nul\u2400here line"
     assert json.loads(shown["exact"]) == {"label": "nul\x00here\rline", "key": "nul\x00here line"}
+
+
+def test_gexf_keeps_each_stretch_a_relation_held_not_one_envelope():
+    """Acme from 2020, Globex from 2021, Acme again from 2023: Acme's edge
+    and node are absent between 2021 and 2023, and Alice, present all the
+    while, is one stretch. Each end is exclusive, as valid_until is."""
+    projection = project_entities("alpha", [
+        timed(1, "alice", "works_at", "Acme", "2020-01-01T00:00:00Z", "2021-01-01T00:00:00Z"),
+        timed(2, "alice", "works_at", "Globex", "2021-01-01T00:00:00Z", "2023-01-01T00:00:00Z"),
+        timed(3, "alice", "works_at", "Acme", "2023-01-01T00:00:00Z")], revision=1)
+    _, _, nodes, edges = gexf_items(projection)
+    by_label = {node["label"]: node for node in nodes.values()}
+    acme = [("2020-01-01T00:00:00.000Z", "2021-01-01T00:00:00.000Z", "true"), ("2023-01-01T00:00:00.000Z", None, None)]
+    assert by_label["Acme"]["spells"] == acme
+    assert next(edge for edge in edges.values() if nodes[edge["target"]]["label"] == "Acme")["spells"] == acme
+    assert by_label["alice"]["spells"] == [("2020-01-01T00:00:00.000Z", None, None)]

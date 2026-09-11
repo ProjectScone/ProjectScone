@@ -4,8 +4,8 @@
   and d3 read it, with each node's values and degree for layout.
 - ``graphml``: GraphML XML for Gephi, yEd and NetworkX.
 - ``gexf``: a dynamic GEXF 1.2 graph for Gephi's timeline. Every entity,
-  value and relation carries the valid time it holds for, so scrubbing the
-  timeline shows the graph as the ledger says it stood.
+  value and relation carries a spell for each stretch it held, so
+  scrubbing the timeline shows the graph as the ledger says it stood.
 - ``cypher``: MERGE statements to load the graph into Neo4j or Memgraph,
   one per line. Relations are ``RELATES`` edges carrying their predicate as
   a property, so no predicate becomes query syntax.
@@ -178,26 +178,43 @@ def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     return Export(body, "application/graphml+xml", "graph.graphml")
 
 
-def _held(projection: EntityProjection) -> dict[str, tuple[str, str | None]]:
-    """When each entity and value holds: from its earliest fact's start to
-    its latest fact's end, and open (None) while any of its facts still
-    holds. Instants are the projection's own, already in one format."""
-    spans: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+Span = tuple[str, str | None]
+
+
+def _merged(spans: list[Span]) -> list[Span]:
+    """The union of half-open intervals [start, end), as few as cover it:
+    overlapping or touching ones join, and None is an end still open. The
+    projection writes every instant in one fixed format, so text order is
+    time order."""
+    merged: list[Span] = []
+    for start, end in sorted(spans, key=lambda span: span[0]):
+        if merged and (merged[-1][1] is None or start <= merged[-1][1]):
+            last_start, last_end = merged[-1]
+            merged[-1] = (last_start, None if last_end is None or end is None else max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _held(projection: EntityProjection) -> dict[str, list[Span]]:
+    """When each entity, value and relation holds: the stretches its facts
+    cover, each apart from the next where none of them held."""
+    spans: dict[str, list[Span]] = defaultdict(list)
     value_of = {fact_id: attribute.attribute_id for attribute in projection.attributes for fact_id in attribute.fact_ids}
+    relation_of = {fact_id: relation.relation_id for relation in projection.relations for fact_id in relation.fact_ids}
     for role in projection.roles:
-        for item in (role.subject_id, role.object_id, value_of.get(role.fact_id)):
+        for item in (role.subject_id, role.object_id, value_of.get(role.fact_id), relation_of.get(role.fact_id)):
             if item is not None:
                 spans[item].append((role.valid_from, role.valid_until))
-    held: dict[str, tuple[str, str | None]] = {}
-    for item, found in spans.items():
-        ends = [end for _, end in found]
-        held[item] = (min(start for start, _ in found), None if None in ends else max(e for e in ends if e))
-    return held
+    return {item: _merged(found) for item, found in spans.items()}
 
 
 def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
-    """A dynamic graph: nodes and edges carry ``start`` and, once they
-    stopped holding, ``end``. Like GraphML, entities and values are both
+    """A dynamic graph: each node and edge carries one ``spell`` per
+    stretch it held, so a relation that lapsed and resumed is absent in
+    between. An end is exclusive (``endopen``), as ``valid_until`` is, so
+    at a switch the old edge is gone when the new one appears. Like
+    GraphML, entities and values are both
     nodes (``type``), a value hangs off its entity by an edge (``link``),
     and text XML cannot hold is shown with a stand-in beside an ``exact``
     JSON copy. The default namespace is written as a plain attribute, so
@@ -217,7 +234,7 @@ def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         for title in titles:
             ElementTree.SubElement(declared, "attribute", {"id": f"{target}-{title}", "title": title, "type": "string"})
 
-    def item(parent: ElementTree.Element, tag: str, ident: str, label: str, span: tuple[str, str | None],
+    def item(parent: ElementTree.Element, tag: str, ident: str, label: str, spells: list[Span],
              values: tuple[tuple[str, str], ...], extra: dict[str, str] | None = None) -> None:
         exact: dict[str, str] = {}
 
@@ -227,33 +244,33 @@ def _gexf(projection: EntityProjection, about: Mapping[str, object]) -> Export:
                 exact[key] = text
             return safe
 
-        timing = {"start": span[0], **({"end": span[1]} if span[1] is not None else {})}
-        element = ElementTree.SubElement(parent, tag, {"id": ident, **(extra or {}), "label": shown("label", label),
-                                                       **timing})
+        element = ElementTree.SubElement(parent, tag, {"id": ident, **(extra or {}), "label": shown("label", label)})
         attvalues = ElementTree.SubElement(element, "attvalues")
         for key, value in values:
             ElementTree.SubElement(attvalues, "attvalue", {"for": f"{tag}-{key}", "value": shown(key, value)})
         if exact:
             ElementTree.SubElement(attvalues, "attvalue", {"for": f"{tag}-exact",
                                                            "value": json.dumps(exact, sort_keys=True)})
+        stretches = ElementTree.SubElement(element, "spells")
+        for start, end in spells:
+            ElementTree.SubElement(stretches, "spell", {"start": start, **({"end": end, "endopen": "true"}
+                                                                         if end is not None else {})})
 
-    unknown = ("", None)
     nodes, edges = ElementTree.SubElement(graph, "nodes"), ElementTree.SubElement(graph, "edges")
     for entity in projection.entities:
-        item(nodes, "node", entity.entity_id, entity.label, held.get(entity.entity_id, unknown),
+        item(nodes, "node", entity.entity_id, entity.label, held.get(entity.entity_id, []),
              (("type", "entity"), ("key", entity.key), ("kind", entity.kind or "")))
     for attribute in projection.attributes:
-        item(nodes, "node", attribute.attribute_id, attribute.value, held.get(attribute.attribute_id, unknown),
+        item(nodes, "node", attribute.attribute_id, attribute.value, held.get(attribute.attribute_id, []),
              (("type", "value"), ("literal_kind", attribute.literal_kind or "")))
     for relation in projection.relations:
-        item(edges, "edge", relation.relation_id, relation.predicate,
-             (relation.first_valid_from, relation.last_valid_until),
+        item(edges, "edge", relation.relation_id, relation.predicate, held.get(relation.relation_id, []),
              (("link", "relation"), ("predicate", relation.predicate),
               ("fact_ids", " ".join(map(str, relation.fact_ids)))),
              {"source": relation.subject_id, "target": relation.object_id})
     for attribute in projection.attributes:
         item(edges, "edge", f"{attribute.attribute_id}:has", attribute.predicate,
-             held.get(attribute.attribute_id, unknown),
+             held.get(attribute.attribute_id, []),
              (("link", "value"), ("predicate", attribute.predicate),
               ("fact_ids", " ".join(map(str, attribute.fact_ids)))),
              {"source": attribute.entity_id, "target": attribute.attribute_id})

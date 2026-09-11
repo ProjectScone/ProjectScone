@@ -629,11 +629,12 @@ How each format places values and escapes its own syntax:
   Control Pictures symbol (U+0001 as ␁) and anything else as U+FFFD, and
   that element gains an `exact` field holding its original values as JSON.
 - **GEXF** is a dynamic graph (`mode="dynamic"`, `timeformat="dateTime"`).
-  Each relation's edge starts where its first fact begins and ends where
-  its last fact stopped holding. The end is absent while any fact still
-  holds. Each entity and value spans the facts it takes part in. On
-  Gephi's timeline, a person who changed employer keeps their node, the
-  old employer's edge ends and the new one begins. Nodes, values and
+  Each node and edge carries one `spell` per stretch its facts held, so
+  a relation that lapsed and resumed is absent in between, not drawn
+  across the gap. Every end is exclusive (`endopen="true"`), as
+  `valid_until` is. A stretch still holding has no end. On Gephi's
+  timeline, a person who changed employer keeps their node, and the old
+  employer's edge is gone at the moment the new one appears. Nodes, values and
   escaping are laid out as in GraphML, and the file's description holds
   the projection digest and `about`.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
