@@ -31,9 +31,10 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-9:] == ["graph_context", "explain_entity", "connect_entities",
-                                                         "graph_schema", "graph_match", "graph_overview",
-                                                         "graph_changes", "find_duplicates", "temporal_answer"]
+    assert [tool.name for tool in MEMORY_TOOLS][-10:] == ["graph_context", "explain_entity", "connect_entities",
+                                                          "graph_schema", "graph_match", "graph_overview",
+                                                          "graph_changes", "find_duplicates", "graph_health",
+                                                          "temporal_answer"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -203,3 +204,10 @@ async def test_the_temporal_tool_answers_with_the_record_the_route_gives(box):
                                                "now": "2023-04-20T10:12:00Z"})
     assert result["ok"] is True and result["status"] == "computed" and result["value"]["days"] == 9
     assert result["space"] == "alpha" and result["plan"]["kind"] == "since"
+
+
+async def test_the_health_tool_answers_with_the_record_the_route_gives(box):
+    result = await box.run("graph_health", {"limit": 3})
+    assert result["ok"] is True and result["space"] == "alpha"
+    assert result["status"] in ("clean", "concerns") and isinstance(result["concerns"], list)
+    assert result["totals"]["entities"] >= 1

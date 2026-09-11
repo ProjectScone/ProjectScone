@@ -222,6 +222,18 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         }, []),
     ),
     ToolSpec(
+        name="graph_health",
+        summary=("What in the knowledge graph wants attention: claims resting on nothing, kinds that disagree or "
+                 "are missing, entities nothing links to, predicates used once, and names that may be one thing. "
+                 "Counts with examples; it changes nothing."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                      "description": "Examples shown for each concern, 1 to 100. Defaults to 10."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
         name="temporal_answer",
         summary=("A question about dates answered by computation: how long between two events, how long ago one "
                  "was, which came first, what order they were in. Each event is grounded to a passage and the day "
@@ -241,7 +253,8 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates", "temporal_answer"})
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health",
+                          "temporal_answer"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -389,6 +402,13 @@ class ToolBox:
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+        if name == "graph_health":
+            from ..entities.health import DEFAULT_EXAMPLES, MAX_BYTES as HEALTH_BYTES, graph_health
+
+            health = await graph_health(self.engine, self.space, as_of=when,
+                                        limit=arguments.get("limit", DEFAULT_EXAMPLES),
+                                        max_bytes=arguments.get("max_bytes", HEALTH_BYTES))
+            return health.record(self.space, status="current", as_of=when)
         if name == "temporal_answer":
             from ..retrieval.temporal import TemporalError, temporal_answer
 

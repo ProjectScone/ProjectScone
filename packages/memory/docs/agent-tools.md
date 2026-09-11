@@ -8,11 +8,11 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same thirteen contracts: `search_memory`, `add_memory`, `read_profile`,
+render the same fourteen contracts: `search_memory`, `add_memory`, `read_profile`,
 `trace_memory`, the eight entity-graph reads `graph_context`,
 `explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
-`graph_overview`, `graph_changes` and `find_duplicates`, and the computed
-`temporal_answer`. Hosts can
+`graph_overview`, `graph_changes` and `find_duplicates`, the graph's own
+`graph_health`, and the computed `temporal_answer`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -79,6 +79,10 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 - `find_duplicates` suggests pairs of entities that may be one thing under
   two names, each saying why and citing the neighbours they share. It is
   the `/v1/entities/duplicates` JSON. It merges nothing.
+- `graph_health` counts what in the graph wants attention: claims resting
+  on nothing, kinds that disagree or are missing, entities nothing links
+  to, predicates used once, and names that may be one thing. It is the
+  `/v1/graph/health` JSON, and changes nothing.
 - `temporal_answer` answers a question about dates by computation: how long
   between two events, how long ago one was, which came first, what order
   they were in. Each event is grounded to a passage and the day it records,

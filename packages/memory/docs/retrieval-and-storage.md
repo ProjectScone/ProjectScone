@@ -682,6 +682,35 @@ found, but never claim that something is absent. Each response carries
 - an entity page adds `fact_limit` to its coverage reasons, since its
   incoming relations may be missing.
 
+#### `GET /v1/graph/health`
+
+What in the graph wants attention, counted with examples. A knowledge
+graph goes wrong quietly, and each way it does is countable. Advertised
+as `graph.health`; `scone graph health`, the MCP tool
+`memory_graph_health` and the ToolBox tool `graph_health` give the same
+answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 10 (1–100) | Examples shown for each concern |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+- **ungrounded**: claims whose source cannot be checked against them (no
+  quote), or that have no source at all. Each example names the claim,
+  its fact and which of the two it is.
+- **contested_kind**: entities whose kind hints disagree, so they have no
+  kind. **kind_unknown**: entities nothing implies a kind for.
+- **unconnected**: entities nothing links to and that link to nothing.
+- **thin_predicate**: predicates exactly one claim uses, which is what a
+  bad extraction looks like.
+- **likely_duplicate**: pairs from `/v1/entities/duplicates` at its
+  default score, carried in so one read shows everything; the detail
+  stays on that route, and anything it cut is said here with a
+  `duplicates:` prefix.
+- A graph with none of these says `nothing to fix`, and a capped read
+  says `among the facts read` instead of claiming the whole space.
+
 #### `GET /v1/entities/duplicates`
 
 Entities that may be one thing under two names, suggested with why. The

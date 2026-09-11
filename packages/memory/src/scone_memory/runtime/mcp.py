@@ -45,6 +45,8 @@ from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
 from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
                                   MAX_LIMIT as TEMPORAL_MAX_LIMIT, TemporalError, temporal_answer)
+from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as HEALTH_BYTES,
+                               MAX_EXAMPLES as HEALTH_MAX_EXAMPLES, HealthError, graph_health)
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     DuplicatesError, likely_duplicates)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
@@ -575,6 +577,29 @@ def create_server(engine: MemoryEngine, space: str = "default",
                                             min_score=min_score if min_score is not None else DEFAULT_MIN_SCORE,
                                             max_bytes=max_bytes if max_bytes is not None else DUPLICATES_BYTES)
         except DuplicatesError as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
+    @tool(server, "memory_graph_health")
+    async def memory_graph_health(
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Examples per concern (1..={HEALTH_MAX_EXAMPLES}); "
+                                                   f"defaults to {HEALTH_EXAMPLES}")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """What in the knowledge graph wants attention: claims resting on
+        nothing, kinds that disagree or are missing, entities nothing links
+        to, predicates used once, and names that may be one thing. Counts
+        with examples; it changes nothing."""
+        try:
+            found = await graph_health(engine, space or default_space,
+                                       limit=limit if limit is not None else HEALTH_EXAMPLES,
+                                       max_bytes=max_bytes if max_bytes is not None else HEALTH_BYTES)
+        except (HealthError, InvalidInput) as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 

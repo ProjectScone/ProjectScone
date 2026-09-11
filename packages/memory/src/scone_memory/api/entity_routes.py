@@ -29,6 +29,8 @@ from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, 
 from ..entities.grounding import checked_facts
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     likely_duplicates)
+from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as HEALTH_BYTES, MAX_EXAMPLES,
+                               graph_health)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, graph_overview)
@@ -505,6 +507,21 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
             return LedgerJSONResponse(status_code=409, content=ambiguous.record(entity))
         except TimelineEntityMissing as missing:
             return LedgerJSONResponse(status_code=404, content=missing.record(entity))
+
+    @app.get("/v1/graph/health")
+    async def get_health(
+        limit: int = Query(default=HEALTH_EXAMPLES, ge=1, le=MAX_EXAMPLES,
+                           description="Examples shown for each concern."),
+        max_bytes: int = Query(default=HEALTH_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """What in the graph wants attention: claims resting on nothing,
+        kinds that disagree or are missing, entities nothing links to,
+        predicates used once, and names that may be one thing. Each concern
+        is counted with examples. It reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_health(engine, space, limit=limit, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
 
     @app.get("/v1/entities/duplicates")
     async def get_duplicates(

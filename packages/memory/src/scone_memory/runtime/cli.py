@@ -254,6 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--until", help="RFC 3339 moment to compare to (default: now)")
     g.add_argument("--limit", type=int, default=50, help="changes to list (1 to 500)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
+    g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
+    g.add_argument("--max-bytes", type=int, default=None)
+
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
     g.add_argument("--min-score", type=float, default=0.5, help="suggest only pairs at least this likely (0 to 1)")
@@ -651,6 +655,20 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         else:
             print(matched.text, file=out)
         return 0 if matched.status == "matched" else 1
+    if command == "health":
+        from ..entities.health import DEFAULT_EXAMPLES, HealthError, MAX_BYTES as HEALTH_BYTES, graph_health
+
+        when = engine.clock()
+        try:
+            found_health = await graph_health(
+                engine, space, limit=args.limit if args.limit is not None else DEFAULT_EXAMPLES, as_of=when,
+                max_bytes=args.max_bytes if args.max_bytes is not None else HEALTH_BYTES)
+        except HealthError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_health.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_health.text, file=out)
+        return 0
+
     if command == "duplicates":
         from ..entities.duplicates import DuplicatesError, likely_duplicates
 

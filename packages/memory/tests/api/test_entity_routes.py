@@ -884,3 +884,15 @@ def test_likely_duplicates_are_suggested_with_their_reasons():
     assert (body["pairs"][0]["a"]["key"], body["pairs"][0]["b"]["key"]) == ("alice chen", "dr. alice chen")
     assert refused == [422, 422, 422] and features["entities.duplicates"] is True
     assert proposals["status"] == "none", "the status asked for is the one read"
+
+
+def test_health_counts_what_wants_attention(seeded):
+    client, _ = seeded
+    found = client.get("/v1/graph/health", params={"limit": 2}, headers=auth()).json()
+    assert found["status"] == "concerns" and found["space"] == "alpha"
+    kinds = {concern["kind"]: concern["count"] for concern in found["concerns"]}
+    assert kinds["ungrounded"] >= 1 and set(kinds) <= {"ungrounded", "contested_kind", "kind_unknown",
+                                                       "unconnected", "thin_predicate", "likely_duplicate"}
+    assert all(len(concern["examples"]) <= 2 for concern in found["concerns"])
+    assert client.get("/v1/graph/health", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2

@@ -39,6 +39,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
     "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
     "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
+    "memory_graph_health": {"limit", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -54,6 +55,12 @@ async def server():
 async def call(server, name: str, **arguments) -> tuple[bool, str]:
     result = await server.call_tool(name, arguments)
     return result.is_error, "\n".join(block.text for block in result.content)
+
+
+async def _episode(server) -> int:
+    error, text = await call(server, "memory_store", content="Project Atlas is ready for the review.")
+    assert not error, text
+    return int(text.split("episode ")[1].split(" ")[0])
 
 
 async def store_and_distill(server, content: str, subject: str, predicate: str, object: str) -> int:
@@ -584,3 +591,11 @@ async def test_the_temporal_tool_computes_the_answer_and_shows_its_working():
     assert not error and "answer: 9 days ago" in answer and "2023-04-11 → 2023-04-20 is 9 days" in answer
     error, left = await call(server, "memory_temporal_answer", question="What did I drink?")
     assert not error and "not a temporal question" in left
+
+
+async def test_the_health_tool_counts_what_wants_attention(server):
+    error, text = await call(server, "memory_store_facts", episode_id=(await _episode(server)),
+                             facts=[{"subject": "project atlas", "predicate": "status", "object": "ready"}])
+    assert not error, text
+    error, health = await call(server, "memory_graph_health")
+    assert not error and "health: space default" in health and "unconnected" in health

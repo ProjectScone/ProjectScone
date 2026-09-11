@@ -318,6 +318,14 @@ async def test_duplicates_prints_the_pairs_and_json_on_request(engine):
         await graph(engine, "duplicates", "--min-score", "2")
 
 
+async def test_health_prints_what_wants_attention(engine):
+    code, text = await graph(engine, "health", "--limit", "2")
+    assert code == 0 and "health: space default" in text
+    assert "ungrounded:" in text and "(claims whose source cannot be checked" in text
+    code, shown = await graph(engine, "health", "--json")
+    assert code == 0 and json.loads(shown)["status"] == "concerns"
+
+
 async def temporal(engine, *arguments: str) -> tuple[int, str]:
     out = io.StringIO()
     code = await run(build_parser().parse_args(["when", *arguments]), engine, io.StringIO(""), out)
