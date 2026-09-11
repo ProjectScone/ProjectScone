@@ -30,7 +30,8 @@ from ..entities.grounding import checked_facts
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
-from ..entities.read import load_projection
+from ..entities.read import load_projection, read_record
+from ..entities.schema import MAX_PREDICATES, schema_record
 from ..entities.report import build_report, render_markdown
 from ..entities.service import ProjectionBuilding
 from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
@@ -227,11 +228,7 @@ def _read_reasons(coverage: dict[str, object]) -> list[str]:
     return [str(reason) for reason in found] if isinstance(found, list) else []
 
 
-def _read(coverage: dict[str, object]) -> tuple[bool, dict[str, object]]:
-    """Whether the read held every fact, and its coverage for the response.
-    A capped read can show what it found, never that something is absent."""
-    reasons = _read_reasons(coverage)
-    return not reasons, {**coverage, "truncated": bool(reasons)}
+_read = read_record
 
 
 def _candidates(found: Resolution) -> dict[str, object]:
@@ -340,6 +337,16 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
         return report
+
+    @app.get("/v1/graph/schema")
+    async def get_schema(
+        status: StatusMode = "current", as_of: Optional[str] = None,
+        limit: int = Query(default=200, ge=1, le=MAX_PREDICATES), space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """What the space's graph is made of: the kinds its entities have, the
+        predicates its facts use and which kinds each joins, most used first.
+        Read it to know what the graph could be asked."""
+        return await schema_record(engine, space, status=status, as_of=_moment(engine, as_of), limit=limit)
 
     @app.get("/v1/graph/export", response_model=None)
     async def get_export(

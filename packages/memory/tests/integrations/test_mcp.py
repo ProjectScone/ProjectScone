@@ -33,6 +33,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_context": {"names", "question", "space", "max_bytes"},
     "memory_entity": {"name", "space"},
     "memory_connections": {"source", "target", "max_hops", "space"},
+    "memory_graph_schema": {"limit", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -459,3 +460,14 @@ async def test_the_graph_tools_read_an_entity_both_ways_and_the_paths_between_tw
     assert not error and any(line.startswith("entity: Lisbon") for line in packet.splitlines())
     error, text = await call(server, "memory_graph_context")
     assert error and "names or a question" in text
+
+
+async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_schema")
+    lines = text.splitlines()
+    assert not error and lines[0].startswith("schema: space default, current facts as of ")
+    assert lines[1] == "coverage: complete" and "kind: person, 1 entity (1 inferred)" in lines
+    assert "predicate: works_at, 1 fact: (person) -> (organisation) x1" in lines
+    error, text = await call(server, "memory_graph_schema", limit=0)
+    assert error and "limit" in text

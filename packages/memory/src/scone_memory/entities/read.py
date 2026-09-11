@@ -108,6 +108,14 @@ async def read_ledger(engine: "MemoryEngine", space: str, *, max_facts: int | No
     return LedgerRead(space, before, tuple(facts), (*reasons, "ledger_changed_during_read"), mode, False, limit)
 
 
+def read_record(coverage: dict[str, object]) -> tuple[bool, dict[str, object]]:
+    """Whether a read held every fact, and its coverage as answered. A
+    capped read can show what it found, never that something is absent."""
+    reasons = coverage.get("reasons")
+    capped = isinstance(reasons, list) and bool(reasons)
+    return not capped, {**coverage, "truncated": capped}
+
+
 async def load_projection(engine: "MemoryEngine", space: str, *, mode: "StatusMode" = "all",
                           as_of: str | None = None) -> tuple[EntityProjection, dict[str, object]]:
     """Project the facts that count in ``mode`` at ``as_of``.

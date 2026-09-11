@@ -330,6 +330,38 @@ a time, so a newer `alice knows cho` closes `alice knows ben`. `current`
 therefore shows only the latest object of each predicate, and `history`
 shows them all.
 
+#### `GET /v1/graph/schema`
+
+What the space's graph is made of: its vocabulary, not its contents.
+Read it before asking the graph anything, to know what it could be
+asked. It is LlamaIndex's schema introspection, taken from the ledger
+as it is rather than declared ahead of the facts. Advertised as
+`graph.schema`.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `status`, `as_of` | `current`, now | Which facts count, as for the view |
+| `limit` | 200 (1–1000) | Most predicates listed, most used first |
+
+The answer has four parts:
+
+- `kinds`: each entity kind, with how many entities have it and how
+  many of those were inferred. Entities with no kind are counted under
+  `null`.
+- `predicates`: each predicate with its fact, relation and attribute
+  counts. `joins` lists the kind pairs it connects, such as `person` to
+  `organisation`, with counts. `values` lists the value kinds it takes,
+  such as a `person`'s `quantity`.
+- `totals`: the whole view's counts.
+- `predicates_total` and `truncated`: how many predicates there are, and
+  whether `limit` cut the list.
+
+Like every read, it carries `projection`, `filters`, `complete` and
+`coverage`. A kind is only as known as the entity's `kind_status` says.
+The MCP tool `memory_graph_schema` gives the same as lines for a model:
+`kind:` lines, then one `predicate:` line per predicate, with its
+shapes, such as `(person) -> (organisation) x2`.
+
 #### `GET /v1/entities`
 
 The same entities as a ranked list. It takes `status`, `as_of`, `limit`
@@ -603,6 +635,7 @@ store:
 | `scone graph context [NAMES…] [--question Q] [--max-bytes N]` | the graph context packet |
 | `scone graph entity NAME` | one entity's relations both ways and its values |
 | `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
+| `scone graph schema [--limit N]` | the kinds and predicates the graph holds, as JSON |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
@@ -622,6 +655,7 @@ status 2 and the option named:
 - more than 24 names, or a name outside 1 to 200 characters;
 - `--question` outside 1 to 2,000 characters;
 - `--max-hops` outside 1 to 4;
+- `--limit` outside 1 to 1,000;
 - `--resolution` outside (0, 10], or not a number;
 - `--max-bytes` outside 512 to 64,000;
 - an `--as-of` that is not an RFC 3339 timestamp, or whose UTC

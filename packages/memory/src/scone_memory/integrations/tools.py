@@ -129,9 +129,18 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                          "description": "Longest path to look for, 1 to 4. Defaults to 3."},
         }, ["source", "target"]),
     ),
+    ToolSpec(
+        name="graph_schema",
+        summary=("What the entity graph is made of: the kinds its entities have, the predicates its "
+                 "facts use and which kinds each joins, most used first. Read it to know what to ask."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "How many predicates to list, 1 to 1000. Defaults to 200."},
+        }, []),
+    ),
 )
 
-_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities"})
+_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -245,6 +254,7 @@ class ToolBox:
         """The graph tools read the current projection at one instant and
         answer with the packet the HTTP route gives."""
         from ..entities.context import ContextLimits, graph_connections, graph_context
+        from ..entities.schema import schema_record
 
         names = list(arguments.get("names") or ())
         for side in ("name", "source", "target"):
@@ -253,6 +263,8 @@ class ToolBox:
         if len(names) > MAX_NAMES or any(not 1 <= len(entry) <= MAX_NAME for entry in names):
             raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
         when = self.engine.clock()
+        if name == "graph_schema":
+            return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200))
         if name == "connect_entities":
             packet = await graph_connections(self.engine, self.space, arguments["source"], arguments["target"],
                                              max_hops=arguments.get("max_hops", 3), as_of=when)

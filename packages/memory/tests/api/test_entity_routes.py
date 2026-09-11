@@ -118,6 +118,26 @@ def test_capabilities_advertise_the_entity_routes(seeded):
     client, _ = seeded
     features = client.get("/v1/capabilities", headers=auth()).json()["features"]
     assert features["entities.read"] is True and features["graph.knowledge"] is True
+    assert features["graph.schema"] is True
+
+
+def test_the_schema_counts_the_kinds_and_predicates_a_view_holds(seeded):
+    client, _ = seeded
+    body = client.get("/v1/graph/schema", headers=auth()).json()
+    assert body["schema_version"] == 1 and body["space"] == "alpha" and body["filters"]["status"] == "current"
+    by_name = {entry["predicate"]: entry for entry in body["predicates"]}
+    assert set(by_name) == {"works_at", "based_in", "joined_on"}, "closed, proposed and excluded facts are not current"
+    assert by_name["works_at"]["joins"] == [{"subject": "person", "object": "organisation", "relations": 1, "facts": 1}]
+    assert by_name["joined_on"]["values"] == [{"subject": "person", "kind": "date", "attributes": 1, "facts": 1}]
+    assert body["projection"]["version"] == "scone.entities/1" and body["complete"] is True
+    assert body["coverage"]["truncated"] is False and body["truncated"] is False
+    history = client.get("/v1/graph/schema", params={"status": "history"}, headers=auth()).json()
+    assert "lived_in" in {entry["predicate"] for entry in history["predicates"]}
+    cut = client.get("/v1/graph/schema", params={"limit": 1}, headers=auth()).json()
+    assert len(cut["predicates"]) == 1 and cut["predicates_total"] == 3 and cut["truncated"] is True
+    assert client.get("/v1/graph/schema", headers=auth("key-b")).json()["totals"]["facts"] == 1
+    assert client.get("/v1/graph/schema", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/schema").status_code == 401
 
 
 async def test_a_view_is_classified_only_from_the_facts_it_counts():

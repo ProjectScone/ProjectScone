@@ -164,6 +164,7 @@ def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
     (("path", "alice", "x" * 201), "names"),
     (("path", "alice", "bob", "--max-hops", "5"), "--max-hops"),
     (("context", "--question", "q" * 2001), "--question"),
+    (("schema", "--limit", "0"), "--limit"),
     (("timeline", "alice", "--as-of", "0001-01-01T00:00:00+01:00"), "--as-of"),
     (("timeline", "alice", "--as-of", "9999-12-31T23:59:59-01:00"), "--as-of"),
 ])
@@ -173,3 +174,11 @@ def test_a_value_past_the_routes_bounds_is_an_input_error(arguments, named, caps
     code = main(["graph", *arguments], env={"SCONE_DOCUMENTS": "memory", "SCONE_VECTORS": "memory"},
                 out=io.StringIO(), stdin=io.StringIO())
     assert code == 2 and named in capsys.readouterr().err
+
+
+async def test_schema_prints_the_kinds_and_predicates_as_json(engine):
+    code, text = await graph(engine, "schema")
+    body = json.loads(text)
+    assert code == 0 and {entry["predicate"] for entry in body["predicates"]} == {"works_at", "based_in", "knows"}
+    code, text = await graph(engine, "schema", "--limit", "1")
+    assert code == 0 and json.loads(text)["truncated"] is True

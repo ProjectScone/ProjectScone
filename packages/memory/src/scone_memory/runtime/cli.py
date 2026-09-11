@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
-    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, export")
+    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, schema, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -216,6 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("timeline", help="one entity's facts in valid time")
     g.add_argument("name")
     g.add_argument("--as-of")
+    g = graph.add_parser("schema", help="the kinds of entity and the predicates the graph holds")
+    g.add_argument("--limit", type=int, default=200, help="predicates to list, most used first (default 200)")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
@@ -473,6 +475,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     from ..entities.export import export_graph
     from ..entities.read import load_projection
     from ..entities.report import build_report, render_markdown
+    from ..entities.schema import MAX_PREDICATES, schema_record
     from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
     from ..entities.view import knowledge_view
 
@@ -488,6 +491,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         raise InvalidInput("names: at most 24, each 1 to 200 characters")
     if command == "path" and not 1 <= args.max_hops <= 4:
         raise InvalidInput("--max-hops must be from 1 to 4")
+    if command == "schema" and not 1 <= args.limit <= MAX_PREDICATES:
+        raise InvalidInput(f"--limit must be from 1 to {MAX_PREDICATES}")
     if command == "context":
         if args.question is not None and not 1 <= len(args.question) <= 2000:
             raise InvalidInput("--question must be 1 to 2000 characters")
@@ -528,6 +533,10 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(json.dumps(view, ensure_ascii=False, indent=2), file=out)
         return 0
     when = engine.clock()
+    if command == "schema":
+        print(json.dumps(await schema_record(engine, space, as_of=when, limit=args.limit), ensure_ascii=False,
+                         indent=2), file=out)
+        return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
     if command == "report":
         view = knowledge_view(projection, mode="current", as_of=when, limit=1, attribute_limit=0, coverage=coverage)

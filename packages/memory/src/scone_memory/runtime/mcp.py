@@ -39,6 +39,7 @@ from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
 from ..core.errors import SconeError
 from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import ContextLimits, graph_connections, graph_context
+from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
 
 MAX_CONTENT = 100_000
 MAX_QUERY = 1_000
@@ -64,7 +65,8 @@ INSTRUCTIONS = (
     "model and no API key is needed. To see how things connect, call "
     "memory_entity for one entity (its relations both ways), "
     "memory_connections for the paths between two, or memory_graph_context "
-    "with names or a question; every line cites its facts."
+    "with names or a question; every line cites its facts. memory_graph_schema "
+    "says what kinds of entity and which predicates the graph holds."
 )
 
 
@@ -391,6 +393,21 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error("max_hops must be 1..=4")
         found = await graph_connections(engine, space or default_space, source, target, max_hops=hops)
         return ok_text(found.text)
+
+    @tool(server, "memory_graph_schema")
+    async def memory_graph_schema(
+        limit: Annotated[
+            Optional[int], Field(description=f"Predicates to list, most used first (1..={MAX_PREDICATES}); defaults to 200")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """What the entity graph is made of: the kinds its entities have, the
+        predicates its facts use and which kinds each joins. Read it first to
+        know what the graph could be asked."""
+        listed = limit if limit is not None else 200
+        if not 1 <= listed <= MAX_PREDICATES:
+            return tool_error(f"limit must be 1..={MAX_PREDICATES}")
+        return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed)))
 
     @tool(server, "memory_pending")
     async def memory_pending(

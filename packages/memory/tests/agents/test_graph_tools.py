@@ -31,7 +31,8 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-3:] == ["graph_context", "explain_entity", "connect_entities"]
+    assert [tool.name for tool in MEMORY_TOOLS][-4:] == ["graph_context", "explain_entity", "connect_entities",
+                                                         "graph_schema"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -86,3 +87,11 @@ async def test_explain_entity_stays_on_the_entitys_own_relations(box):
     """One hop: Alice's employer, not where her employer is based."""
     result = await box.run("explain_entity", {"name": "alice chen"})
     assert "works_at Acme Robotics" in result["text"] and "based_in Lisbon" not in result["text"]
+
+
+async def test_graph_schema_says_what_the_space_could_be_asked(box):
+    result = await box.run("graph_schema", {})
+    by_name = {entry["predicate"]: entry for entry in result["predicates"]}
+    assert result["ok"] is True and result["space"] == "alpha" and set(by_name) == {"works_at", "based_in", "knows"}
+    assert result["filters"] == {"status": "current", "as_of": NOW} and result["complete"] is True
+    assert (await box.run("graph_schema", {"limit": 1}))["truncated"] is True
