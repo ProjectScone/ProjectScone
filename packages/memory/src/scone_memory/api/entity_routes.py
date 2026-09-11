@@ -107,6 +107,8 @@ class Coverage(BaseModel):
     #: projected from these alone.
     facts_counted: int
     facts_limit: int
+    #: "paged" when the store paged its ledger newest first, else "unpaged".
+    read_mode: Optional[Literal["paged", "unpaged"]] = None
     entities_total: int
     entities_shown: int
     relations_total: Optional[int] = None

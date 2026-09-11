@@ -52,6 +52,7 @@ def test_the_knowledge_map_shows_things_and_the_facts_behind_each_relation(seede
     assert view["projection"]["version"] == "scone.entities/1" and len(view["projection"]["digest"]) == 64
     assert view["filters"] == {"status": "current", "as_of": view["filters"]["as_of"]}
     assert view["coverage"]["truncated"] is False and view["coverage"]["reasons"] == []
+    assert view["coverage"]["read_mode"] == "paged"
 
 
 @pytest.mark.parametrize(("status", "shown", "hidden"), [
@@ -408,15 +409,21 @@ async def test_a_quote_is_verified_only_against_its_own_source():
 
 
 class WritesAfterListing(InMemoryDocumentStore):
-    """Runs a write just after the whole-ledger read returns its rows."""
+    """Runs a write just after the whole-ledger read returns its rows,
+    paged or listed."""
     after = None
 
-    async def list_facts(self, space, **options):
-        rows = await super().list_facts(space, **options)
+    async def _then(self, rows):
         if self.after is not None:
             after, self.after = self.after, None
             await after()
         return rows
+
+    async def list_facts(self, space, **options):
+        return await self._then(await super().list_facts(space, **options))
+
+    async def page_facts(self, space, before_id, limit):
+        return await self._then(await super().page_facts(space, before_id, limit))
 
 
 async def test_a_write_right_after_the_ledger_read_is_not_mistaken_for_the_read():

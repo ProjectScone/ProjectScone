@@ -5,15 +5,20 @@ from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorInde
 from scone_memory.entities import read
 
 
-async def engine_with(count: int) -> MemoryEngine:
-    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+class Unpaged(InMemoryDocumentStore):
+    """A store without a ledger pager, read by one whole-ledger list."""
+    page_facts = None
+
+
+async def engine_with(count: int, store: InMemoryDocumentStore | None = None) -> MemoryEngine:
+    engine = await MemoryEngine(store or InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     for number in range(count):
         await engine.assert_fact("alpha", f"team {number}", "based_in", "Lisbon")
     return engine
 
 
 async def test_a_store_that_may_have_cut_the_read_short_is_named(monkeypatch) -> None:
-    engine = await engine_with(3)
+    engine = await engine_with(3, Unpaged())
     monkeypatch.setattr(read, "_SILENT_CAPS", {"memory": 3})
     _, coverage = await read.load_projection(engine, "alpha")
     assert "store_read_cap_reached" in coverage["reasons"]

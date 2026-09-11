@@ -378,10 +378,31 @@ included. Valid text gets the same id it always had.
 The bytes are deterministic, zip timestamps included, so the same
 projection always exports the same file. Advertised as `graph.export`.
 
+### How the ledger is read
+
+Each graph request reads the space's ledger. It never reads it on a
+recall path.
+
+- **Paged**, when the store can page its ledger (in-memory and SQLite
+  today). `page_facts` returns the newest facts first, in every status,
+  below a cursor, at most 1,000 at a time. The read stops one row past
+  the 50,000-fact cap, so a capped read never touches older facts.
+- **Unpaged** otherwise: one whole-ledger list, then the newest 50,000.
+  Elasticsearch returns at most 10,000 rows, so a read that hits that is
+  reported as `store_read_cap_reached`.
+- **Refused pages:** a page with another space's rows, ids out of order,
+  rows at or past the cursor, or too many rows is refused. The read falls
+  back to one list and reports `pager_rejected`.
+- **Fenced:** the space's revision is read before and after. A write
+  during the read makes it read again. If the space is still changing on
+  the second attempt, the view reports `ledger_changed_during_read`.
+
+`coverage.read_mode` says which way a view was read: `paged` or
+`unpaged`.
+
 ### Limits of this first version
 
-- The projection is built on each request from a whole-ledger read. It is
-  never built on a recall path, and it is not yet cached.
+- The projection is built on each request. It is not yet cached.
 - Identity is key identity only: no merges of different spellings yet.
 - Resolution uses key identity only; merges of different spellings come with identity decisions.
 

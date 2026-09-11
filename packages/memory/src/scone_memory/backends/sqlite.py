@@ -529,6 +529,20 @@ class SqliteDocumentStore:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import ledger_page_limit
+
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []
+        if before_id is None:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_space_id WHERE space = ? '
+                                     'ORDER BY id DESC LIMIT ?', (space, cap))
+        else:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_space_id WHERE space = ? AND id < ? '
+                                     'ORDER BY id DESC LIMIT ?', (space, before_id, cap))
+        return [_fact(row) for row in rows]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)

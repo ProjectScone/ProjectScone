@@ -9,6 +9,7 @@ means.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections import defaultdict
 from itertools import count
@@ -342,6 +343,14 @@ class InMemoryDocumentStore:
             for f in self._facts.values()
             if f.space == space and (include_closed or f.status == "active")
         ]
+
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import ledger_page_limit
+
+        cap = ledger_page_limit(limit)
+        rows = (fact for fact in self._facts.values()
+                if fact.space == space and (before_id is None or fact.fact_id < before_id))
+        return heapq.nlargest(cap, rows, key=lambda fact: fact.fact_id) if cap else []
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         return [
