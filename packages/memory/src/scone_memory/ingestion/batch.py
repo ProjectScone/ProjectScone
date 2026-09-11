@@ -89,26 +89,55 @@ class IngestionRuntime:
     embedding_checkpoint: EmbeddingCheckpoint | None = None
 
 
+def validated_record(space: str, record: Record, when: str) -> NewEpisode:
+    """Validate and snapshot caller input before any source can be removed."""
+    content = record.content
+    if not isinstance(content, str) or not content.strip():
+        raise InvalidInput("content must not be empty")
+    if len(content.encode()) > MAX_CONTENT_BYTES:
+        raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
+    kind = record.kind
+    if kind not in KINDS:
+        raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
+    if record.source is not None and not isinstance(record.source, str):
+        raise InvalidInput("source must be a string or None")
+    clean_tags = normalise_tags(record.tags)
+    clean_meta = normalise_metadata(record.metadata or {})
+    try:
+        for value in (record.source or '', *clean_tags, *clean_meta.values()):
+            value.encode('utf-8')
+    except UnicodeError as error:
+        raise InvalidInput("record source, tags and metadata must be valid UTF-8") from error
+    happened = normalise_time(record.created_at) if record.created_at else when
+    digest = record.content_hash or content_hash(space, content, record.dedup_key)
+    if not digest or len(digest) > 128:
+        raise InvalidInput("content_hash must be 1..=128 chars")
+    return NewEpisode(space=space, kind=kind, content=content, content_hash=digest,
+                      created_at=happened, ingested_at=when, source=record.source,
+                      tags=clean_tags, metadata=clean_meta)
+
+
+def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
+    spans = chunk_spans(new.content, runtime.chunk_target)
+    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
+                    spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
+
+
+async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
+    texts = [runtime.embed_text(p.new, text) for p in fresh for text in p.texts]
+    binding = '' if runtime.embedding_checkpoint is None else json.dumps(
+        [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
+    return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
+
+
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
     when = runtime.clock()
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
     for record in records:
-        content = record.content
-        if not isinstance(content, str) or not content.strip():
-            raise InvalidInput("content must not be empty")
-        if len(content.encode()) > MAX_CONTENT_BYTES:
-            raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-        kind = record.kind
-        if kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
-        clean_tags = normalise_tags(record.tags)
-        clean_meta = normalise_metadata(record.metadata or {})
-        happened = normalise_time(record.created_at) if record.created_at else when
-        digest = record.content_hash or content_hash(space, content, record.dedup_key)
-        if not digest or len(digest) > 128:
-            raise InvalidInput("content_hash must be 1..=128 chars")
+        new = validated_record(space, record, when)
+        digest = new.content_hash
         if digest in seen:
             results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
             fresh_or_dup = seen[digest]
@@ -121,31 +150,10 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             continue
         seen[digest] = len(results)
         results.append(None)
-        spans = chunk_spans(content, runtime.chunk_target)
-        fresh.append(
-            _Pending(
-                slot=len(results) - 1,
-                texts=[content[sp.start : sp.end] for sp in spans],
-                new=NewEpisode(
-                    space=space,
-                    kind=kind,
-                    content=content,
-                    content_hash=digest,
-                    created_at=happened,
-                    ingested_at=when,
-                    source=record.source,
-                    tags=clean_tags,
-                    metadata=clean_meta,
-                ),
-                spans=[(sp.start, sp.end) for sp in byte_spans(content, spans)],
-            )
-        )
+        fresh.append(chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
-        texts = [runtime.embed_text(p.new, t) for p in fresh for t in p.texts]
-        binding = '' if runtime.embedding_checkpoint is None else json.dumps(
-            [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
-        vectors = await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
+        vectors = await embed_pending(runtime, space, fresh)
         await write_batch(runtime, space, fresh, vectors, results)
         await runtime.documents.bump_revision(space)
 

@@ -303,30 +303,70 @@ class MemoryEngine:
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
         the key named is forgotten (its receipt returned; the claims that
-        cited it stand) and the new one stored. The forget lands before
-        the store, so a failure between them leaves the key empty rather
-        than pointing at stale text; the error says so."""
+        cited it stand) and the new one stored. Validation, chunking and
+        embedding finish before forgetting, so preparation failure leaves
+        the old source available. The subsequent forget/store is not an
+        atomic swap: a storage failure between them can leave the key empty,
+        and its error reports the removed source. Competing writers still
+        need caller serialization across the commit phase."""
         await self._living(space)
         check_space(space)
         if not record.dedup_key:
             raise InvalidInput("replace needs a dedup_key: it is the key that names what is being replaced")
-        digest = content_hash(space, record.content, record.dedup_key)
-        existing = await self.documents.episode_by_hash(space, digest)
-        if existing is not None and existing.content == record.content:
-            added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
-            return Replaced(added=added, outcome="duplicate", replaced=None)
+        if record.content_hash is not None:
+            raise InvalidInput("replace derives its identity from dedup_key; content_hash is only for import")
+        started = time.perf_counter()
+        runtime = self._ingestion_runtime()
+        configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target)
+        try:
+            new = ingestion_batch.validated_record(space, record, self.clock())
+            digest = new.content_hash
+            prior_tombstone = await self.documents.tombstone_by_hash(space, digest)
+            existing = await self.documents.episode_by_hash(space, digest)
+            if existing is not None and existing.content == new.content:
+                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+                return Replaced(added=added, outcome="duplicate", replaced=None)
+            pending = ingestion_batch.chunk_record(runtime, new)
+            vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
+            # Embedding can yield for a long time. Never revoke a different source
+            # or recreate one that the user forgot during preparation.
+            await self._living(space)
+            if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
+                    or self.vectors is not runtime.vectors
+                    or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target) != configuration):
+                raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
+            current = await self.documents.episode_by_hash(space, digest)
+            current_tombstone = await self.documents.tombstone_by_hash(space, digest)
+            if ((current.episode_id if current else None) != (existing.episode_id if existing else None)
+                    or current_tombstone != prior_tombstone):
+                raise InvalidInput("source changed while preparing replacement; inspect its current state and retry")
+        except Exception as error:
+            await self._emit(space, "remember", {
+                "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
+            })
+            raise
         receipt = None
         if existing is not None:
             receipt = await self.forget(space, existing.episode_id)
         try:
-            [added] = await self.remember_many(space, [record])
+            results: list[Added | _DupOf | None] = [None]
+            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
+            await self.documents.bump_revision(space)
+            added = cast(Added, results[0])
         except Exception as error:
+            await self._emit(space, "remember", {
+                "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
+            })
             if receipt is not None:
                 raise InvalidInput(
-                    f"replace forgot episode {receipt.episode_id} and the new record then failed to land "
-                    f"({type(error).__name__}); the key {record.dedup_key!r} names nothing now, so send it again"
+                    f"replace forgot episode {receipt.episode_id}, then its storage or receipt stage failed "
+                    f"({type(error).__name__}); inspect the current record under {record.dedup_key!r} before retrying"
                 ) from error
             raise
+        await self._emit(space, "remember", {
+            "records": 1, "fresh": 1, "deduplicated": 0, "chunks": added.chunks,
+            "bytes": len(new.content.encode()), "embedder": runtime.embedder.id, "latency_ms": _ms(started),
+        })
         outcome = "updated" if receipt is not None else added.outcome
         added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
         return Replaced(added=added, outcome=outcome, replaced=receipt)

@@ -401,3 +401,48 @@ raises `ValueError` and cannot produce a searchable receipt. Recovery performs
 the same checks and keeps the interrupted-write marker until indexing succeeds,
 so a corrected provider can retry. These structural checks cannot detect a
 provider that returns the right number of valid vectors in the wrong order.
+
+## Preparing keyed source updates
+
+For caller-managed source text, `MemoryEngine.replace(space, Record(...,
+dedup_key=...))` and `remember(..., dedup_key=..., replace=True)` prepare the new
+record before removing the old one. The HTTP `/v1/episodes` replacement option
+and CLI `remember --key ... --replace` use this same path.
+
+Validation, chunking and all embedding batches finish first. Invalid input,
+provider failure, invalid embedding vectors or cancellation during preparation
+leave the old episode, its chunks, vectors and linked originals available.
+Even a same-text duplicate validates its input. A replacement key determines
+its identity; the import-only `Record.content_hash` override is refused here.
+Source strings, tags and metadata must be valid UTF-8 on every backend.
+
+```python
+from scone_memory import Record
+
+result = await memory.replace(
+    "research",
+    Record("The observatory moved to Porto.", kind="file",
+           source="observatory.txt", dedup_key="document:observatory"),
+)
+print(result.outcome)  # accepted, duplicate, or updated
+```
+
+An update checks the key's current episode and latest forget receipt again after
+embedding. A source changed or forgotten during preparation causes refusal,
+including an initially absent key that another caller created and forgot in the
+meantime. Changing the engine's embedding/chunk configuration or store references
+during preparation also causes refusal. A new intentional attempt after a forget
+is allowed. Mutable caller tags and metadata are copied during validation.
+
+The final forget/store phase is **not an atomic swap**. Serialize competing
+commits for a key; storage failure after forgetting can leave no current record
+or an incompletely reported new record. The error names the removed episode and
+asks the caller to inspect the current key before retrying. It does not claim a
+key is empty when only its revision receipt failed. Claims citing the old source
+continue to stand under the existing forget policy.
+
+This improves the existing keyed text-update API. Automatic file revision
+tracking, directory reconciliation, retaining inspectable revision history,
+metadata-only updates and transactional attachment transfer remain separate gaps;
+content-addressed document ingestion does not yet maintain an external source's
+current revision automatically.
