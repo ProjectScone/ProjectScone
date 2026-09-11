@@ -9,8 +9,9 @@ taken after NFKC normalisation and case folding, so "Zürich", "हिन्द�
 "ＡＢＣ" arrive whole. Underscores still separate words, which keeps a
 predicate such as ``works_at`` findable as "works". Scripts written without
 spaces between words have no boundaries to find without a dictionary, so a
-run of them is indexed as overlapping pairs of characters: a query pair
-matches wherever the same two characters stand together.
+run of them is indexed as each character and each overlapping pair: a query
+pair matches wherever the same two characters stand together, and a single
+character still finds the longer word that holds it.
 
 Anything that stores tokens, or values derived from them, records
 ``TOKENIZER_VERSION`` so that output of an older rule is never silently
@@ -82,13 +83,19 @@ def _patterns() -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
             re.compile(f"[{marks}]+|[^{marks}][{marks}]*"))
 
 
-def _pairs(run: str, mark: re.Pattern[str], graphemes: re.Pattern[str]) -> list[str]:
-    # Pair whole characters, a base with its marks, never half of one. Most
-    # runs carry no marks, and then every code point is a character.
+def _grams(run: str, mark: re.Pattern[str], graphemes: re.Pattern[str]) -> list[str]:
+    # Each character and each overlapping pair: pairs rank a run that holds
+    # the whole query word, single characters let a one-character query
+    # find the longer word it is part of. A character is a base with its
+    # marks, never half of one; most runs carry no marks, and then every
+    # code point is a character.
     units: str | list[str] = graphemes.findall(run) if mark.search(run) else run
-    if len(units) == 1:
-        return [run]
-    return [units[index] + units[index + 1] for index in range(len(units) - 1)]
+    grams: list[str] = []
+    for index, unit in enumerate(units):
+        grams.append(unit)
+        if index + 1 < len(units):
+            grams.append(unit + units[index + 1])
+    return grams
 
 
 def tokenize(text: str) -> list[str]:
@@ -105,7 +112,7 @@ def tokenize(text: str) -> list[str]:
             continue
         for segment in _SEGMENT.findall(word):
             if _UNSPACED_CHAR.match(segment):
-                tokens.extend(_pairs(segment, mark, graphemes))
+                tokens.extend(_grams(segment, mark, graphemes))
             elif (plain := segment.strip("'")) and plain not in STOPWORDS:
                 tokens.append(plain)
     return tokens

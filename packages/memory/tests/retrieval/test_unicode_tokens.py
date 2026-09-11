@@ -48,16 +48,16 @@ def test_combining_marks_do_not_break_words(text: str, tokens: list[str]) -> Non
 
 
 @pytest.mark.parametrize(("text", "tokens"), [
-    ("東京タワー", ["東京", "京タ", "タワ", "ワー"]),
+    ("東京タワー", ["東", "東京", "京", "京タ", "タ", "タワ", "ワ", "ワー", "ー"]),
     ("猫", ["猫"]),
-    ("iPhone15を買った", ["iphone15", "を買", "買っ", "った"]),
-    ("서울에서", ["서울", "울에", "에서"]),
-    ("東京・大阪", ["東京", "大阪"]),
-    # Thai vowel signs are combining marks: pairs are whole characters,
-    # never a mark cut from the letter it sits on.
-    ("สวัสดี", ["สวั", "วัส", "สดี"]),
+    ("iPhone15を買った", ["iphone15", "を", "を買", "買", "買っ", "っ", "った", "た"]),
+    ("서울에서", ["서", "서울", "울", "울에", "에", "에서", "서"]),
+    ("東京・大阪", ["東", "東京", "京", "大", "大阪", "阪"]),
+    # Thai vowel signs are combining marks: a character is a base with its
+    # marks, and no pair cuts a mark from the letter it sits on.
+    ("สวัสดี", ["ส", "สวั", "วั", "วัส", "ส", "สดี", "ดี"]),
 ])
-def test_unspaced_scripts_index_overlapping_character_pairs(text: str, tokens: list[str]) -> None:
+def test_unspaced_scripts_index_each_character_and_each_overlapping_pair(text: str, tokens: list[str]) -> None:
     assert tokenize(text) == tokens
 
 
@@ -84,6 +84,13 @@ def test_chinese_and_japanese_text_can_be_found() -> None:
     index.add(3, "我住在里斯本")
     assert [doc for doc, _ in index.search("東京", limit=5)] == [1]
     assert [doc for doc, _ in index.search("里斯本", limit=5)] == [3]
+
+
+def test_one_character_finds_the_longer_word_it_is_part_of() -> None:
+    index = Bm25()
+    index.add(1, "黑猫")
+    index.add(2, "白狗")
+    assert [doc for doc, _ in index.search("猫", limit=5)] == [1]
 
 
 def test_hash_vectors_name_the_tokenizer_that_made_them() -> None:
