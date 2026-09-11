@@ -194,11 +194,11 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
     entity_uses: Counter[str] = Counter()
     relation_uses: Counter[str] = Counter()
     if usage is not None and usage.available:
+        from .usage import recalled_by_entity
+
+        entity_uses = recalled_by_entity(usage, counted.roles)
         relation_of = {fact_id: relation.relation_id for relation, _ in counted.relations for fact_id in relation.fact_ids}
         for returned in usage.returned:
-            touched = {end for fact_id in returned if (role := counted.roles.get(fact_id)) is not None
-                       for end in (role.subject_id, role.object_id) if end is not None}
-            entity_uses.update(touched)
             relation_uses.update({relation_of[fact_id] for fact_id in returned if fact_id in relation_of})
 
     def used(counts: Counter[str], key: str) -> dict[str, object]:

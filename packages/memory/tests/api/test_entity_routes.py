@@ -760,3 +760,7 @@ async def test_the_map_can_show_how_often_recalls_returned_each_part():
     assert recalled == {"alice chen": 1, "acme robotics": 1, "bob stone": 0, "porto": 0}
     assert view["coverage"]["usage"]["recalls_read"] == 1 and "usage" not in plain["coverage"]
     assert features["graph.knowledge_usage"] is True
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth()).json()
+        markdown = client.get("/v1/graph/report", params={"usage": "true", "format": "markdown"}, headers=auth()).text
+    assert report["recall_usage"]["recalls_read"] == 1 and "## What recall uses" in markdown

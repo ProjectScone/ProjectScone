@@ -73,3 +73,33 @@ async def test_without_usage_the_view_is_as_before():
     shown = knowledge_view(projection, mode="current", as_of=engine.clock(), limit=50, attribute_limit=50,
                            coverage=coverage)
     assert "usage" not in shown["coverage"] and all("recalled" not in entity for entity in shown["entities"])
+
+
+async def test_the_report_says_what_recall_uses_and_what_it_never_reaches():
+    from scone_memory.entities.report import render_markdown, report_record
+
+    engine = await recalled()
+    report = await report_record(engine, "alpha", usage=True)
+    uses = report["recall_usage"]
+    assert uses["recalls_read"] == 3 and uses["available"] is True
+    assert [(item["label"].lower(), item["recalled"]) for item in uses["most_recalled"]][:2] == [
+        ("acme robotics", 2), ("alice chen", 2)]
+    assert {item["label"].lower() for item in uses["central_unrecalled"]} >= {"carol diaz", "lisbon"}
+    text = render_markdown(report)
+    assert "## What recall uses" in text and "Central but never recalled" in text
+
+
+async def test_a_report_without_events_says_recall_use_is_unknown():
+    from scone_memory.entities.report import render_markdown, report_record
+
+    report = await report_record(await recalled(events=False), "alpha", usage=True)
+    assert report["recall_usage"]["available"] is False
+    assert "central_unrecalled" not in report["recall_usage"], "unknown is not never"
+    assert "keeps no events" in render_markdown(report)
+
+
+async def test_a_report_without_usage_is_as_before():
+    from scone_memory.entities.report import render_markdown, report_record
+
+    report = await report_record(await recalled(), "alpha")
+    assert "recall_usage" not in report and "## What recall uses" not in render_markdown(report)

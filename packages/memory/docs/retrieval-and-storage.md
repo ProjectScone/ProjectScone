@@ -336,6 +336,12 @@ Two parameters tune the analysis:
   communities are, as modularity with a resolution. Above 1 favours
   smaller communities, below 1 larger ones. The knowledge view's
   groupings take the same parameter.
+- `usage=true` (and `usage_since`) adds `recall_usage`: the ten entities
+  recent recalls returned most, and the central entities none of them
+  reached ("Central but never recalled"). These are important parts of
+  memory that no question asked so far reaches. The Markdown adds "What
+  recall uses". Without an event log it says usage is unknown, and never
+  calls anything unrecalled.
 - `exclude_hubs` (a degree percentile, 50 to 100) leaves entities whose
   number of neighbours is above that percentile out of the central
   entities, and lists them under `hubs_excluded` instead. A hub that
@@ -773,7 +779,7 @@ store:
 
 | Command | Prints |
 | --- | --- |
-| `scone graph report [--markdown] [--resolution R]` | the report, as JSON or Markdown |
+| `scone graph report [--markdown] [--resolution R] [--usage]` | the report, as JSON or Markdown |
 | `scone graph path SOURCE TARGET [--max-hops N]` | the shortest paths, one `path:` line each |
 | `scone graph context [NAMES…] [--question Q] [--max-bytes N]` | the graph context packet |
 | `scone graph entity NAME` | one entity's relations both ways and its values |

@@ -236,3 +236,15 @@ async def test_walk_names_an_unknown_or_ambiguous_seed(engine):
 async def test_context_can_seed_by_resemblance(engine):
     code, text = await graph(engine, "context", "--question", "which robotics firm?", "--similar")
     assert code == 0 and " similar " in text
+
+
+async def test_report_can_say_what_recall_uses():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await memory.recall("default", "alice chen")
+    code, text = await graph(memory, "report", "--markdown", "--usage")
+    await memory.close()
+    assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")

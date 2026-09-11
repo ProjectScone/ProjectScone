@@ -337,14 +337,16 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     async def get_report(
         status: StatusMode = "current", as_of: Optional[str] = None,
         format: Literal["json", "markdown"] = "json", resolution: float = Query(default=1.0, gt=0, le=10),
-        exclude_hubs: Optional[float] = Query(default=None, ge=50, le=100), space: str = Depends(space_for),
+        exclude_hubs: Optional[float] = Query(default=None, ge=50, le=100), usage: bool = False,
+        usage_since: Optional[str] = None, space: str = Depends(space_for),
     ) -> dict[str, object] | PlainTextResponse:
         """The space's communities, central entities, surprising connections and
         questions worth asking, computed from recorded facts and citing them.
         ``resolution`` sets how fine the communities are; ``exclude_hubs``
         leaves entities above that degree percentile out of the central ranking."""
         report = await report_record(engine, space, status=status, as_of=_moment(engine, as_of), resolution=resolution,
-                                     exclude_hubs=exclude_hubs)
+                                     exclude_hubs=exclude_hubs, usage=usage,
+                                     usage_since=None if usage_since is None else _moment(engine, usage_since))
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
         return report

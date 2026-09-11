@@ -10,11 +10,13 @@ facts of one entity counts once for it.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
+    from .project import FactRole
 
 #: Recall events read, newest first; more than this is reported as cut.
 MAX_RECALLS = 1_000
@@ -33,6 +35,16 @@ class Usage:
     def record(self) -> dict[str, object]:
         return {"available": self.available, "recalls_read": self.recalls_read, "truncated": self.truncated,
                 "since": self.since}
+
+
+def recalled_by_entity(usage: Usage, roles: Mapping[int, "FactRole"]) -> Counter[str]:
+    """Per entity, the recalls that returned a fact it takes part in, each
+    recall counted once however many of its facts it returned."""
+    counted: Counter[str] = Counter()
+    for returned in usage.returned:
+        counted.update({end for fact_id in returned if (role := roles.get(fact_id)) is not None
+                        for end in (role.subject_id, role.object_id) if end is not None})
+    return counted
 
 
 async def recall_usage(engine: "MemoryEngine", space: str, *, since: str | None = None) -> Usage:

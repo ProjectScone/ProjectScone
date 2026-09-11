@@ -11,12 +11,13 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, Mapping, cast
 
-from .analysis import GraphAnalysis
+from .analysis import GraphAnalysis, Importance
 from .markdown import literal
-from .project import EntityProjection
+from .project import Entity, EntityProjection
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
+    from .usage import Usage
     from .view import StatusMode
 
 REPORT_SCHEMA_VERSION = 1
@@ -39,9 +40,11 @@ def _hubs(analysis: GraphAnalysis, percentile: float | None) -> set[str]:
 
 def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta: Mapping[str, object],
                  filters: Mapping[str, object], coverage: Mapping[str, object], central: int = 15,
-                 exclude_hubs: float | None = None) -> dict[str, object]:
+                 exclude_hubs: float | None = None, usage: "Usage | None" = None) -> dict[str, object]:
     """``exclude_hubs`` leaves entities above that degree percentile out of
-    the central ranking and lists them apart; they stay in their communities."""
+    the central ranking and lists them apart; they stay in their communities.
+    With ``usage``, ``recall_usage`` names the entities recent recalls
+    returned most, and the central ones none of them reached."""
     entities = {entity.entity_id: entity for entity in projection.entities}
     communities = {community.community_id: community for community in analysis.communities}
     hubs = _hubs(analysis, exclude_hubs)
@@ -87,7 +90,22 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
         "coverage": {**dict(coverage), "entities_analysed": analysis.coverage.entities_analysed,
                      "truncated": bool(_reasons(coverage)) or analysis.coverage.truncated,
                      "reasons": [*_reasons(coverage), *analysis.coverage.reasons]},
+        **({"recall_usage": _recall_usage(projection, entities, ranked, usage)} if usage is not None else {}),
     }
+
+
+def _recall_usage(projection: EntityProjection, entities: Mapping[str, Entity], ranked: list[Importance],
+                  usage: "Usage") -> dict[str, object]:
+    if not usage.available:
+        return usage.record()
+    from .usage import recalled_by_entity
+
+    counted = recalled_by_entity(usage, {role.fact_id: role for role in projection.roles})
+    most = sorted((entity_id for entity_id, times in counted.items() if times and entity_id in entities),
+                  key=lambda entity_id: (-counted[entity_id], entities[entity_id].label, entity_id))[:10]
+    return {**usage.record(),
+            "most_recalled": [{**_name(entities, entity_id), "recalled": counted[entity_id]} for entity_id in most],
+            "central_unrecalled": [_name(entities, item.entity_id) for item in ranked if not counted[item.entity_id]]}
 
 
 def _reasons(coverage: Mapping[str, object]) -> list[str]:
@@ -156,6 +174,21 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.append(f"- {literal(suggestion['text'])}{cited}")
     if not report["suggestions"]:
         lines.append("None yet.")
+    uses = report.get("recall_usage")
+    if uses is not None:
+        lines += ["", "## What recall uses", ""]
+        if not uses["available"]:
+            lines.append("The engine keeps no events, so which knowledge recalls return is unknown.")
+        else:
+            since = f" since {literal(uses['since'])}" if uses.get("since") else ""
+            cut = " (more were left unread)" if uses["truncated"] else ""
+            lines.append(f"Over the last {uses['recalls_read']} recalls{since}{cut}:")
+            most = ", ".join(f"{literal(item['label'])} ({item['recalled']})" for item in uses["most_recalled"])
+            lines.append(f"- Most recalled: {most or 'nothing yet'}.")
+            if uses["central_unrecalled"]:
+                lines.append("- Central but never recalled: "
+                             + ", ".join(literal(item["label"]) for item in uses["central_unrecalled"])
+                             + ". No question asked so far reaches them.")
     coverage = report["coverage"]
     lines += ["", "## Coverage", "", f"- {coverage.get('facts_counted', 0)} facts counted of "
               f"{coverage.get('facts_read', 0)} read; {coverage['entities_analysed']} entities analysed."]
@@ -167,8 +200,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
 
 
 async def report_record(engine: "MemoryEngine", space: str, *, status: "StatusMode" = "current",
-                        as_of: str | None = None, resolution: float = 1.0,
-                        exclude_hubs: float | None = None) -> dict[str, object]:
+                        as_of: str | None = None, resolution: float = 1.0, exclude_hubs: float | None = None,
+                        usage: bool = False, usage_since: str | None = None) -> dict[str, object]:
     """The report of one view, as every surface answers it: read at one
     instant, analysed, and labelled with that same instant."""
     from .analysis import analyze_projection
@@ -178,6 +211,9 @@ async def report_record(engine: "MemoryEngine", space: str, *, status: "StatusMo
     when = as_of if as_of is not None else engine.clock()
     projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
     view = knowledge_view(projection, mode=status, as_of=when, limit=1, attribute_limit=0, coverage=coverage)
+    from .usage import recall_usage
+
+    recalls = await recall_usage(engine, space, since=usage_since) if usage or usage_since is not None else None
     return build_report(projection, analyze_projection(projection, resolution=resolution),
                         meta=cast(Mapping[str, object], view["projection"]), filters={"status": status, "as_of": when},
-                        coverage=coverage, exclude_hubs=exclude_hubs)
+                        coverage=coverage, exclude_hubs=exclude_hubs, usage=recalls)
