@@ -190,3 +190,14 @@ async def test_an_episode_from_another_space_is_never_shown():
     with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
         response = client.get("/v1/graph/sources", params={"episode": mine.episode_id}, headers=auth())
     assert response.status_code == 404 and "beta" not in response.text.casefold()
+
+
+async def test_a_claim_about_one_thing_and_itself_names_it_once():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Alice trusts Alice.")
+    trusts = await engine.assert_fact("alpha", "alice", "trusts", "Alice", source_episode_id=note.episode_id,
+                                      quote="Alice trusts Alice.", valid_from="2024-01-01T00:00:00Z")
+    view = await sources_view(engine, "alpha", note.episode_id)
+    claim = view["claims"][0]
+    assert len(claim["entities"]) == 1
+    assert [entity["claims"] for entity in view["entities"]] == [[trusts.fact_id]]

@@ -117,7 +117,8 @@ async def _once(engine: "MemoryEngine", space: str, episode_id: int, *, max_chun
                 span = {"start": start, "end": start + len(quote)}
                 occurrences = body.count(quote)
         role = roles.get(fact.fact_id)
-        ids = [entity_id for entity_id in (role.subject_id, role.object_id) if entity_id] if role else []
+        # A claim relating a thing to itself names it once.
+        ids = list(dict.fromkeys(entity_id for entity_id in (role.subject_id, role.object_id) if entity_id)) if role else []
         for entity_id in ids:
             named.setdefault(entity_id, []).append(fact.fact_id)
         claims.append({
