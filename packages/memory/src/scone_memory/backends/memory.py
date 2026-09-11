@@ -48,6 +48,8 @@ class InMemoryDocumentStore:
         self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
+        #: Fact writes per space, only ever growing: the ledger stamp.
+        self._fact_writes: dict[str, int] = defaultdict(int)
         self._inflight: set[tuple[str, str]] = set()
         self._deleted: dict[str, str] = {}
         self._jobs: dict[tuple[str, str], IngestJob] = {}
@@ -81,6 +83,8 @@ class InMemoryDocumentStore:
         for key in [key for key in self._chunks_by_episode if key[0] == space]:
             del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
+        if fact_ids:
+            self._fact_writes[space] += 1
         for fact_id in fact_ids:
             del self._facts[fact_id]
             self._fact_subject_keys.pop(fact_id, None)
@@ -286,6 +290,7 @@ class InMemoryDocumentStore:
     async def insert_fact(self, new: NewFact) -> Fact:
         fact = Fact(fact_id=next(self._fact_ids), **new.__dict__)
         self._facts[fact.fact_id] = fact
+        self._fact_writes[fact.space] += 1
         key = (fact.space, fact.subject)
         self._facts_by_subject[key].append(fact.fact_id)
         self._fact_subject_keys[fact.fact_id] = key
@@ -304,6 +309,7 @@ class InMemoryDocumentStore:
             insort(self._facts_by_subject[new_key], fact.fact_id)
             self._fact_subject_keys[fact.fact_id] = new_key
         self._facts[fact.fact_id] = fact
+        self._fact_writes[fact.space] += 1
 
         self._index_graph_fact(fact)
 
@@ -342,6 +348,9 @@ class InMemoryDocumentStore:
             for f in self._facts.values()
             if f.space == space and (include_closed or f.status == "active")
         ]
+
+    async def ledger_stamp(self, space: str) -> str:
+        return str(self._fact_writes[space])
 
     async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import ledger_page_limit

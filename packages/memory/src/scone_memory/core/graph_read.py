@@ -69,3 +69,13 @@ def checked_ledger_page(rows: list[Fact], *, space: str, before_id: int | None, 
     if before_id is not None and ids and ids[0] >= before_id:
         return "not_before_cursor"
     return None
+
+
+@runtime_checkable
+class LedgerStamp(Protocol):
+    async def ledger_stamp(self, space: str) -> str:
+        """A value that changes whenever any fact row of the space is
+        written, and never otherwise: storing an episode leaves it alone.
+        Cheap to read, so a cache can tell an unchanged ledger from a moved
+        revision without reading the facts."""
+        ...

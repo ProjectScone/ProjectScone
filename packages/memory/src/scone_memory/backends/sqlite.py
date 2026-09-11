@@ -124,6 +124,16 @@ CREATE INDEX IF NOT EXISTS facts_space_id ON facts(space, id);
 CREATE INDEX IF NOT EXISTS facts_source_id ON facts(space, source_episode_id, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
+CREATE TABLE IF NOT EXISTS fact_writes (space TEXT PRIMARY KEY, writes INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS fact_writes_insert AFTER INSERT ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (NEW.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
+CREATE TRIGGER IF NOT EXISTS fact_writes_update AFTER UPDATE ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (NEW.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
+CREATE TRIGGER IF NOT EXISTS fact_writes_delete AFTER DELETE ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (OLD.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
 COMMIT;""")
     initialize_fact_search(conn)
     return conn
@@ -528,6 +538,12 @@ class SqliteDocumentStore:
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
+
+    async def ledger_stamp(self, space: str) -> str:
+        """A per-space count of fact row writes, kept by triggers in the file
+        itself, so every writer bumps it, whatever build it runs."""
+        row = self.conn.execute("SELECT writes FROM fact_writes WHERE space = ?", (space,)).fetchone()
+        return str(row[0] if row else 0)
 
     async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import ledger_page_limit

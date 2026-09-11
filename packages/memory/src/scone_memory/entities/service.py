@@ -38,7 +38,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from functools import partial
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from ..core.errors import SconeError
 from ..core.models import Fact
@@ -47,6 +47,7 @@ from .project import EntityProjection, project_entities
 from . import read as reading
 from .read import LedgerRead, read_ledger
 from .roles import RoleIndex, role_index
+from ..core.graph_read import LedgerStamp
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -110,6 +111,8 @@ class _Held:
     boundaries: list[datetime]
     views: OrderedDict[_Key, tuple[EntityProjection, int]]
     roles: RoleIndex | None = None
+    #: The store's ledger stamp read before this ledger was, when it has one.
+    stamp: str | None = None
 
     def key(self, mode: "StatusMode", when: datetime) -> _Key:
         if mode not in ("current", "history"):
@@ -283,9 +286,19 @@ class EntityService:
             return held
         async with self._locks.setdefault(space, asyncio.Lock()):
             previous = self._held.get(space)
-            held = self._current(space, await self._engine.revision(space))
+            revision = await self._engine.revision(space)
+            held = self._current(space, revision)
             if held is not None:
                 return held
+            stamper = getattr(self._engine.documents, "ledger_stamp", None)
+            # The revision is read before the stamp: a fact written between the
+            # two moves the stamp, never slips under the new revision unseen.
+            stamp = await cast(LedgerStamp, self._engine.documents).ledger_stamp(space) if callable(stamper) else None
+            if (previous is not None and stamp is not None and previous.stamp == stamp
+                    and previous.ledger.limit == reading.MAX_FACTS and previous.ledger.consistent):
+                kept = self._restamped(previous, revision)
+                self._keep(space, kept)
+                return kept
             await self._admit(space, timed)
             try:
                 ledger = await read_ledger(self._engine, space)
@@ -299,9 +312,18 @@ class EntityService:
                               previous.roles.restamped(ledger.revision) if previous.roles else None)
             else:
                 fresh = _Held(ledger, digest, _boundaries(ledger.facts), OrderedDict())
+            fresh.stamp = stamp
             if ledger.consistent:
                 self._keep(space, fresh)
             return fresh
+
+    def _restamped(self, previous: _Held, revision: int) -> _Held:
+        """The held read and its views under a new revision, every fact as it was."""
+        ledger = replace(previous.ledger, revision=revision)
+        views = OrderedDict((key, (replace(projection, revision=revision), counted))
+                            for key, (projection, counted) in previous.views.items())
+        return _Held(ledger, previous.digest, previous.boundaries, views,
+                     previous.roles.restamped(revision) if previous.roles else None, previous.stamp)
 
     def _current(self, space: str, revision: int) -> _Held | None:
         held = self._held.get(space)

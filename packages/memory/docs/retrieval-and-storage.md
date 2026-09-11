@@ -608,9 +608,13 @@ The engine holds each space's ledger read and the views built from it
 
 - **Same revision:** a view is returned after one revision check, with
   no other store call.
-- **New revision:** the ledger is read again. If every fact is as it was
-  (an episode was stored, say), the views are kept and restamped with the
-  new revision. Otherwise they are rebuilt when next asked for.
+- **New revision:** if the store keeps a ledger stamp (in-memory and
+  SQLite do), the stamp is compared first. The stamp is a count of fact
+  row writes, which triggers keep in SQLite, so every writer bumps it. If
+  it has not moved (an episode was stored, say), the views are restamped
+  with the new revision and nothing is read. Otherwise the ledger is read
+  again. If every fact is still as it was, the views are kept and
+  restamped; if not, they are rebuilt when next asked for.
 - **Moments:** `current` and `history` count facts by their `valid_from`
   and `valid_until`. A view built for a moment is exact until the next
   such boundary, so time passing costs a rebuild but no read.
@@ -648,7 +652,8 @@ With 20,000 facts on SQLite, a view costs:
 | --- | --- |
 | First read | 1.0 s |
 | Same revision | 0.1 ms |
-| Revision moved, facts unchanged | 0.2 s |
+| Revision moved, facts unchanged, with a ledger stamp | 0.1 ms |
+| Revision moved, facts unchanged, without one | 0.2 s |
 
 ### Limits of this first version
 
