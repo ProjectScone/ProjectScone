@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+import math
 from typing import cast
 
 from ..core.errors import InvalidInput
@@ -17,6 +18,29 @@ from .chunker import byte_spans, chunk_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 
 EMBED_BATCH = 64
+
+
+async def _embed_chunks(embedder: Embedder, texts: Sequence[str]) -> list[list[float]]:
+    """Require complete, valid provider responses before accepting any chunk vectors."""
+    vectors: list[list[float]] = []
+    for offset in range(0, len(texts), EMBED_BATCH):
+        batch = texts[offset:offset + EMBED_BATCH]
+        response = await embedder.embed(batch)
+        if not isinstance(response, list) or len(response) != len(batch):
+            raise ValueError('embedding response must contain one vector per input text')
+        for vector in response:
+            if not isinstance(vector, list) or len(vector) != embedder.dim:
+                raise ValueError('embedding vector does not match the configured dimension')
+            try:
+                valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                            and math.isfinite(value) for value in vector)
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise ValueError('embedding vector must contain finite numeric values')
+            # Providers may reuse their response buffers on the next call.
+            vectors.append(list(vector))
+    return vectors
 
 
 @dataclass(frozen=True)
@@ -86,9 +110,7 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
 
     if fresh:
         texts = [runtime.embed_text(p.new, t) for p in fresh for t in p.texts]
-        vectors: list[list[float]] = []
-        for i in range(0, len(texts), EMBED_BATCH):
-            vectors.extend(await runtime.embedder.embed(texts[i : i + EMBED_BATCH]))
+        vectors = await _embed_chunks(runtime.embedder, texts)
         await write_batch(runtime, space, fresh, vectors, results)
         await runtime.documents.bump_revision(space)
 
@@ -196,9 +218,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 tags=episode.tags, metadata=episode.metadata,
             )
             texts = [runtime.embed_text(as_new, c.text) for c in chunks]
-            vectors: list[list[float]] = []
-            for i in range(0, len(texts), EMBED_BATCH):
-                vectors.extend(await runtime.embedder.embed(texts[i : i + EMBED_BATCH]))
+            vectors = await _embed_chunks(runtime.embedder, texts)
             await runtime.vectors.upsert(
                 [
                     VectorPoint(

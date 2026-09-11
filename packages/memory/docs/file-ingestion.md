@@ -119,3 +119,11 @@ transaction across independent stores. Python workers use isolated startup
 and this installation's package root. Child environments include only
 execution/locale/temp settings and explicitly supported converter/Tesseract
 settings. These controls are not an OS sandbox or native-memory quota.
+
+The shared indexing path checks each embedding response before writing new
+episodes: it must contain exactly one vector per requested chunk, with the
+configured dimension and finite numeric values. A malformed provider response
+raises `ValueError` and cannot produce a searchable receipt. Recovery performs
+the same checks and keeps the interrupted-write marker until indexing succeeds,
+so a corrected provider can retry. These structural checks cannot detect a
+provider that returns the right number of valid vectors in the wrong order.
