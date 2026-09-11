@@ -40,8 +40,10 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections` and `memory_graph_schema`:
 
 - `graph_context` returns what the entity graph records around up to 24
-  names, or around the entities a question names, within `max_bytes`
-  (512 to 64,000).
+  names, or around the entities a question names. `max_bytes` (512 to
+  64,000) bounds the packet text. The candidates and ids around it are
+  capped on their own: 24 candidates at most, with names clipped to 120
+  characters.
 - `explain_entity` returns one entity's relations in both directions and
   its values, or the candidates for an ambiguous name.
 - `connect_entities` returns the shortest paths between two entities,

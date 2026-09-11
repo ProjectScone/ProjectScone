@@ -470,8 +470,12 @@ A path resting on a hop whose facts have all stopped counting is not
 shown. A fact left unread when the budget runs out is kept but counted
 as `unverified`, never as stale. A quote is shown only when it still
 verifies against its own source. When a name matches more candidates
-than are listed, `candidates_cut N` says how many were left out. At
-most 24 entities are centred on. Names and the entities a question
+than are listed, `candidates_cut N` says how many were left out. A name
+asked twice, in any case or spacing, is looked up once. At most 24
+candidates are listed across all names, with the rest counted in
+`candidates_cut`. A candidate's name, key and label are clipped to 120
+characters like its line, while its id stays exact. At most 24 entities
+are centred on. Names and the entities a question
 mentions are counted together, and `seeds_cut N` says how many past
 24 were left out. An entity with more than 64 relations is reached
 but never walked through. Names are folded onto one line, with control
@@ -479,6 +483,9 @@ characters shown as symbols, so no stored text can start a line of its
 own. The text fits `max_bytes` (512–64,000, default 8,000). It is cut
 only between lines, with an `omitted:` footer counting what was left
 out, and it is byte-identical for the same ledger and moment.
+`max_bytes` bounds the text alone. The JSON around it is bounded on its
+own terms: at most 24 clipped candidates, 24 seed ids, and one hub id
+per relation walked.
 
 The response carries `status` (`prepared`, `ambiguous` or `empty`),
 `text`, `seeds`, `candidates` and `coverage`. Advertised as

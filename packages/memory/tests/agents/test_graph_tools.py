@@ -95,3 +95,18 @@ async def test_graph_schema_says_what_the_space_could_be_asked(box):
     assert result["ok"] is True and result["space"] == "alpha" and set(by_name) == {"works_at", "based_in", "knows"}
     assert result["filters"] == {"status": "current", "as_of": NOW} and result["complete"] is True
     assert (await box.run("graph_schema", {"limit": 1}))["truncated"] is True
+
+
+async def test_the_whole_answer_stays_small_when_many_names_are_ambiguous():
+    """max_bytes bounds the packet text; the JSON around it is bounded on its
+    own: a repeated name is one lookup, candidates are capped and clipped."""
+    import json
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock(NOW)).open()
+    for n in range(30):
+        await engine.assert_fact("alpha", f"alice {n:02d} " + "x" * 500, "works_at", "Acme", valid_from=DAY)
+    result = await ToolBox(engine, "alpha").run("graph_context", {"names": ["alice"] * 24, "max_bytes": 512})
+    await engine.close()
+    assert result["ok"] is True and len(result["text"].encode()) <= 512 and len(result["candidates"]) == 24
+    assert len(json.dumps(result).encode()) < 12_000

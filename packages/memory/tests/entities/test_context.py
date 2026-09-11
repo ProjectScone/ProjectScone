@@ -242,3 +242,36 @@ async def test_seeds_past_the_entity_cap_are_reported_not_dropped_silently():
     assert "coverage: limited: seeds_cut 2" in packet.text
     asked = await graph_context(engine, "alpha", question=" and ".join(f"person {n:02d}" for n in range(26)))
     assert len(asked.seeds) == 24 and "seeds_cut 2" in asked.coverage["reasons"]
+
+
+async def crowded(count: int, label_length: int = 10) -> MemoryEngine:
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    for n in range(count):
+        await engine.assert_fact("alpha", f"alice {n:02d} " + "x" * label_length, "works_at", "Acme", valid_from=DAY)
+    return engine
+
+
+async def test_a_name_asked_twice_is_resolved_once():
+    engine = await crowded(30)
+    once = await graph_context(engine, "alpha", names=["alice"])
+    repeated = await graph_context(engine, "alpha", names=["alice", "Alice", " alice "] * 8)
+    assert repeated.candidates == once.candidates and len(once.candidates) == 24
+    assert "candidates_cut 6" in repeated.coverage["reasons"]
+
+
+async def test_candidates_across_names_are_capped_and_the_rest_counted():
+    engine = await crowded(30)
+    await engine.assert_fact("alpha", "alicia", "works_at", "Acme", valid_from=DAY)
+    for n in range(30):
+        await engine.assert_fact("alpha", f"bob {n:02d}", "works_at", "Acme", valid_from=DAY)
+    packet = await graph_context(engine, "alpha", names=["alice", "bob"])
+    assert len(packet.candidates) == 24 and "candidates_cut 36" in packet.coverage["reasons"]
+
+
+async def test_a_candidates_stored_text_is_clipped_like_its_line():
+    engine = await crowded(2, label_length=500)
+    packet = await graph_context(engine, "alpha", names=["alice"])
+    assert all(len(c["label"]) <= 120 and len(c["key"]) <= 120 and c["label"].endswith("…")
+               for c in packet.candidates)
+    assert all(c["id"].startswith("ent:") for c in packet.candidates)

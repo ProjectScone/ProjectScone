@@ -107,7 +107,8 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                       "description": f"Entities to centre on, by name or id; at most {MAX_NAMES}."},
             "question": {"type": "string", "description": "A question; the entities it names become the centre."},
             "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
-                          "description": "Byte budget for the answer, 512 to 64000. Defaults to 8000."},
+                          "description": ("Byte budget for the packet text, 512 to 64000. Defaults to 8000. "
+                                          "Candidates and ids around it are capped separately.")},
         }, []),
     ),
     ToolSpec(

@@ -32,10 +32,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 
 from ..core.timeutil import parse_rfc3339
+from ..core.validation import entity_key
 from ..retrieval.lexical import STOPWORDS
 from .grounding import checked_facts
 from .project import Entity, EntityProjection, Relation
-from .query import Path, name_words, paths_between, resolve
+from .query import Candidate, Path, name_words, paths_between, resolve
 from .read import load_projection
 
 if TYPE_CHECKING:
@@ -141,6 +142,12 @@ def mentioned(projection: EntityProjection, question: str, *, limit: int) -> lis
         else:
             position += 1
     return found[:limit]
+
+
+def _candidate(name: str, found: Candidate) -> dict[str, str]:
+    """A candidate as answered: its id exact, its text clipped as its line
+    is, so no stored name makes the answer outgrow its packet."""
+    return {"name": one_line(name), "id": found.entity_id, "key": one_line(found.key), "label": one_line(found.label)}
 
 
 def _reasons(read: Mapping[str, object]) -> list[str]:
@@ -266,7 +273,12 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     candidates: list[dict[str, str]] = []
     unknown: list[str] = []
     cut_candidates = 0
+    asked: set[str] = set()
     for name in names:
+        # A name asked again, in any case or spacing, resolves the same way.
+        if entity_key(name) in asked:
+            continue
+        asked.add(entity_key(name))
         found = resolve(projection, name, limit=limits.max_entities)
         cut_candidates += found.total - len(found.candidates)
         if found.status == "resolved":
@@ -274,7 +286,10 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
             if entity not in seeds:
                 seeds.append(entity)
         elif found.status == "ambiguous":
-            candidates += [{"name": name, "id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates]
+            # At most max_entities candidates across every name.
+            listed = found.candidates[:max(0, limits.max_entities - len(candidates))]
+            cut_candidates += len(found.candidates) - len(listed)
+            candidates += [_candidate(name, c) for c in listed]
         else:
             unknown.append(name)
     if question:
@@ -430,7 +445,7 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
         if found.status == "resolved":
             ends.append(entities[found.candidates[0].entity_id])
         elif found.status == "ambiguous":
-            candidates += [{"name": name, "id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates]
+            candidates += [_candidate(name, c) for c in found.candidates]
         else:
             reasons.append(f"not_found \"{one_line(name, 60)}\"")
 
