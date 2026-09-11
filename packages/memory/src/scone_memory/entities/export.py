@@ -502,15 +502,8 @@ def _cite(fact_ids: tuple[int, ...]) -> str:
     return "(fact " + str(fact_ids[0]) + ")" if len(fact_ids) == 1 else "(facts " + ", ".join(map(str, fact_ids)) + ")"
 
 
-def _section(title: str, lines: Sequence[tuple[object, str]]) -> list[str]:
-    """A titled list, most supported first, cut at ``_WIKI_SECTION`` lines
-    with the rest counted rather than dropped in silence."""
-    if not lines:
-        return []
-    ordered = [line for _, line in sorted(lines, key=lambda item: item[0])]  # type: ignore[arg-type, return-value]
-    shown = ordered[:_WIKI_SECTION]
-    more = [f"- and {len(ordered) - len(shown)} more, not listed here"] if len(ordered) > len(shown) else []
-    return [f"## {title}", "", *shown, *more, ""]
+def _ordered(lines: Sequence[tuple[object, str]]) -> list[str]:
+    return [line for _, line in sorted(lines, key=lambda item: item[0])]  # type: ignore[arg-type, return-value]
 
 
 def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -563,6 +556,36 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
                                             f"{_cite(attribute.fact_ids)}"))
 
     files: dict[str, str] = {}
+    taken = {"entities/": {_folded(name) for name in notes.values()} | {"index"},
+             "topics/": {_folded(name) for name in topics.values()} | {"index"}, "": {"index"}}
+
+    def section(folder: str, page: str, heading: str, title: str, lines: Sequence[tuple[object, str]]) -> list[str]:
+        """A titled list, most supported first. Past ``_WIKI_SECTION`` lines
+        it continues on numbered pages beside the page, each linking the
+        next, so nothing a list leads to is left unreachable."""
+        ordered = _ordered(lines)
+        if not ordered:
+            return []
+        chunks = [ordered[start:start + _WIKI_SECTION] for start in range(0, len(ordered), _WIKI_SECTION)]
+        names = [page]
+        for number in range(2, len(chunks) + 1):
+            name, extra = f"{page} · {title} {number}", 2
+            while _folded(name) in taken[folder]:
+                name, extra = f"{page} · {title} {number}.{extra}", extra + 1
+            taken[folder].add(_folded(name))
+            names.append(name)
+
+        def onward(index: int) -> list[str]:
+            return ([f"- continued on [{_wiki_text(title)}, part {index + 2}]({quote(names[index + 1] + '.md')})"]
+                    if index + 1 < len(chunks) else [])
+
+        for index in range(1, len(chunks)):
+            files[f"{folder}{names[index]}.md"] = "\n".join([
+                f"# {heading}: {_wiki_text(title)}, part {index + 1}", "",
+                f"Continued from [{heading}]({quote(page + '.md')}).", "", *chunks[index], *onward(index), ""])
+        more = [f"- and {len(ordered) - len(chunks[0])} more:"] if len(chunks) > 1 else []
+        return [f"## {title}", "", *chunks[0], *more, *onward(0), ""]
+
     for entity in projection.entities:
         forms = [form.text for form in entity.surface_forms if form.text != entity.label]
         home = topic_of.get(entity.entity_id)
@@ -571,9 +594,12 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
                  f"topic {topic_page(home, '../topics/')}" if home else "in no topic"]
         files[f"entities/{notes[entity.entity_id]}.md"] = "\n".join([
             f"# {_wiki_text(entity.label)}", "", " · ".join(facts), "", f"Id `{entity.entity_id}`.", "",
-            *_section("Relations", outgoing[entity.entity_id]),
-            *_section("Referenced by", incoming[entity.entity_id]),
-            *_section("Values", values[entity.entity_id])])
+            *section("entities/", notes[entity.entity_id], _wiki_text(entity.label), "Relations",
+                     outgoing[entity.entity_id]),
+            *section("entities/", notes[entity.entity_id], _wiki_text(entity.label), "Referenced by",
+                     incoming[entity.entity_id]),
+            *section("entities/", notes[entity.entity_id], _wiki_text(entity.label), "Values",
+                     values[entity.entity_id])])
     for community in analysis.communities:
         kinds = ", ".join(f"{_wiki_text(kind)} {count}" for kind, count in community.kinds) or "none known"
         predicates = ", ".join(f"{_wiki_text(predicate)} {count}" for predicate, count in community.predicates) or "none"
@@ -585,8 +611,12 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
             f"{_many(len(community.members), 'entity', 'entities')}, "
             f"{_many(community.internal_links, 'relation')} inside, {community.boundary_links} leading out. "
             f"Kinds: {kinds}. Predicates: {predicates}.", "",
-            *_section("Entities", members), *_section("Inside", inside[community.community_id]),
-            *_section("Leading out", leading[community.community_id])])
+            *section("topics/", topics[community.community_id], f"Topic: {_wiki_text(community.label)}", "Entities",
+                     members),
+            *section("topics/", topics[community.community_id], f"Topic: {_wiki_text(community.label)}", "Inside",
+                     inside[community.community_id]),
+            *section("topics/", topics[community.community_id], f"Topic: {_wiki_text(community.label)}",
+                     "Leading out", leading[community.community_id])])
     ranked = sorted(analysis.importance, key=lambda item: (-item.pagerank, item.entity_id))
     loose = [entity_id for entity_id in entities if entity_id not in topic_of]
     coverage = analysis.coverage
@@ -601,54 +631,78 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         *_about_lines(about),
         *([f"", f"Topics cover {coverage.entities_analysed} of {coverage.entities_total} entities: "
            f"{_wiki_text(', '.join(coverage.reasons))}."] if coverage.truncated else []), "",
-        *_section("Topics", [((-len(community.members), community.community_id),
+        *section("", "index", "Knowledge wiki", "Topics", [((-len(community.members), community.community_id),
                               f"- {topic_page(community.community_id, 'topics/')}: "
                               f"{_many(len(community.members), 'entity', 'entities')}, "
                               f"{_many(community.internal_links, 'relation')} inside, {community.boundary_links} "
                               f"leading out") for community in analysis.communities]),
-        *_section("Most connected", [((index,), f"- {page(item.entity_id, 'entities/')}: "
+        *section("", "index", "Knowledge wiki", "Most connected", [((index,), f"- {page(item.entity_id, 'entities/')}: "
                                                f"{_many(degree[item.entity_id], 'relation')}")
                                      for index, item in enumerate(ranked[:20])]),
-        *_section("In no topic", [((entities[entity_id].label, entity_id), f"- {page(entity_id, 'entities/')}")
+        *section("", "index", "Knowledge wiki", "In no topic", [((entities[entity_id].label, entity_id), f"- {page(entity_id, 'entities/')}")
                                   for entity_id in loose])]) + "\n"
     return Export(_zip(files), "application/zip", "graph-wiki.zip")
 
 
-#: Entities a Mermaid chart draws: a picture past this is unreadable.
+#: Entities and edges a Mermaid chart draws, and the characters it may
+#: take: well inside what Mermaid itself will render (500 edges, 50,000
+#: characters by default), and past which a picture is unreadable anyway.
 _MERMAID_NODES = 60
+_MERMAID_EDGES = 300
+_MERMAID_TEXT = 45_000
+_MERMAID_LABEL = 80
 # Characters that could close a quoted label, start markup or read as an
 # entity code, written as Mermaid's own entity codes.
 _MERMAID_CODES = {"#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;", "&": "#amp;", "`": "#96;", "|": "#124;"}
 
 
-def _mermaid_text(value: object) -> str:
-    """Stored text as a quoted Mermaid label: one line, controls shown as
-    symbols, and nothing in it able to end the label or add an edge."""
+def _mermaid_text(value: object, limit: int = _MERMAID_LABEL) -> str:
+    """Stored text as a quoted Mermaid label: one line, clipped, controls
+    shown as symbols, and nothing in it able to end the label or add an
+    edge."""
     flat = _NOT_XML.sub(lambda match: _visible(match.group()), " ".join(str(value).split()))
+    flat = flat if len(flat) <= limit else flat[:limit - 1] + "…"
     return "".join(_MERMAID_CODES.get(character, character) for character in flat)
 
 
+def _mermaid_cite(fact_ids: tuple[int, ...]) -> str:
+    shown = ", ".join(map(str, fact_ids[:3]))
+    return (f"(fact {shown})" if len(fact_ids) == 1
+            else f"(facts {shown}{f' +{len(fact_ids) - 3}' if len(fact_ids) > 3 else ''})")
+
+
 def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Export:
-    """The most connected entities, up to ``_MERMAID_NODES``, and every
-    relation between them, each edge naming its predicate and facts. Node
-    ids are the chart's own (n1, n2, ...), so no stored text is ever
-    syntax, and the first line says what was left out."""
+    """The most connected entities, up to ``_MERMAID_NODES``, and the best
+    supported relations between them, up to ``_MERMAID_EDGES`` and the text
+    budget, each edge naming its predicate and facts. Node ids are the
+    chart's own (n1, n2, ...), so no stored text is ever syntax. The first
+    line says what view it draws, what the read left out and what the
+    chart left out."""
     degree = _degrees(projection)
     ranked = sorted(projection.entities, key=lambda entity: (-degree[entity.entity_id], entity.label, entity.entity_id))
     shown = {entity.entity_id: f"n{index}" for index, entity in enumerate(ranked[:_MERMAID_NODES], start=1)}
-    drawn = sorted((relation for relation in projection.relations
-                    if relation.subject_id in shown and relation.object_id in shown),
-                   key=lambda relation: (int(shown[relation.subject_id][1:]), relation.predicate,
-                                         int(shown[relation.object_id][1:])))
-    left = (len(projection.entities) - len(shown), len(projection.relations) - len(drawn))
-    scope = (f"{_many(left[0], 'entity', 'entities')} and {_many(left[1], 'relation')} left out" if any(left)
-             else "nothing left out")
-    lines = [f"%% Knowledge graph {_mermaid_text(projection.space)}: projection {projection.digest[:12]} at revision "
-             f"{projection.revision}; {scope}; values are not drawn", "flowchart LR"]
-    lines += [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
-    lines += [f'  {shown[relation.subject_id]} -->|"{_mermaid_text(relation.predicate)} {_cite(relation.fact_ids)}"| '
-              f'{shown[relation.object_id]}' for relation in drawn]
-    return Export("\n".join(lines).encode() + b"\n", "text/vnd.mermaid", "graph.mmd")
+    between = sorted((relation for relation in projection.relations
+                      if relation.subject_id in shown and relation.object_id in shown),
+                     key=lambda relation: (-len(relation.fact_ids), int(shown[relation.subject_id][1:]),
+                                           relation.predicate, int(shown[relation.object_id][1:])))
+    nodes = [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
+    edges = [f'  {shown[relation.subject_id]} -->|"{_mermaid_text(relation.predicate, 60)} '
+             f'{_mermaid_cite(relation.fact_ids)}"| {shown[relation.object_id]}' for relation in between]
+    edges = edges[:_MERMAID_EDGES]
+    budget = _MERMAID_TEXT - sum(len(line) + 1 for line in nodes) - 400  # the header's share
+    while edges and sum(len(line) + 1 for line in edges) > budget:
+        edges.pop()
+    coverage = about.get("coverage")
+    reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
+    left = (len(projection.entities) - len(shown), len(projection.relations) - len(edges))
+    notes = [f"projection {projection.digest[:12]} at revision {projection.revision}",
+             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
+             (f"{_many(left[0], 'entity', 'entities')} and {_many(left[1], 'relation')} left out of the chart"
+              if any(left) else "every entity and relation read is drawn"), "values are not drawn"]
+    header = f"%% Knowledge graph {_mermaid_text(projection.space)}: {'; '.join(_mermaid_text(note, 300) for note in notes)}"
+    return Export("\n".join([header, "flowchart LR", *nodes, *edges]).encode() + b"\n", "text/vnd.mermaid",
+                  "graph.mmd")
 
 
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {

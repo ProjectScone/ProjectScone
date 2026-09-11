@@ -503,4 +503,67 @@ def test_mermaid_shows_the_most_connected_and_counts_the_rest():
     ledger = [fact(n, f"worker {n:03d}", "works_at", "zenith corp") for n in range(1, 80)]
     text = mermaid(ledger)
     assert len(re.findall(r'^  n\d+\[', text, re.M)) == 60 and '  n1["zenith corp"]' in text
-    assert text.splitlines()[0].endswith("20 entities and 20 relations left out; values are not drawn")
+    assert text.splitlines()[0].endswith("20 entities and 20 relations left out of the chart; values are not drawn")
+
+
+def _reachable(files, links):
+    import posixpath
+    from urllib.parse import unquote
+
+    reached, frontier = {"index.md"}, ["index.md"]
+    while frontier:
+        page = frontier.pop()
+        for target in links(files[page]):
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(page), unquote(target)))
+            assert resolved in files, (page, target)
+            if resolved not in reached:
+                reached.add(resolved)
+                frontier.append(resolved)
+    return reached
+
+
+def _commonmark_links(text):
+    markdown_it = pytest.importorskip("markdown_it")
+    return [token.attrGet("href") for block in markdown_it.MarkdownIt().parse(text)
+            for token in block.children or [] if token.type == "link_open"]
+
+
+@pytest.mark.parametrize("ledger", [
+    [fact(n, f"person {n:03d}", "age", "34") for n in range(1, 251)],
+    [fact(n, f"worker {n:03d}", "works_at", "Acme") for n in range(1, 251)],
+], ids=["in_no_topic", "one_big_topic"])
+def test_every_wiki_page_is_reachable_however_long_a_list_grows(ledger):
+    """A list longer than a page continues on numbered pages linking each
+    other, so a capped section never leaves an article unreachable."""
+    files = wiki(ledger)
+    assert _reachable(files, _LINK.findall) == set(files)
+    assert _reachable(files, _commonmark_links) == set(files)
+    assert any("part 2" in text for text in files.values())
+
+
+def test_mermaid_says_what_the_read_left_out_and_when_it_was_read():
+    about = {"status": "history", "as_of": "2025-01-01T00:00:00.000Z",
+             "coverage": {"facts_read": 1, "facts_counted": 1, "truncated": True, "reasons": ["fact_limit"]}}
+    head = export_graph(project_entities("alpha", LEDGER, revision=1), "mermaid", about=about).body.decode().splitlines()[0]
+    assert "; history facts as of 2025-01-01T00:00:00.000Z; read limited by fact_limit;" in head
+    assert head.endswith("every entity and relation read is drawn; values are not drawn")
+
+
+def test_mermaid_stays_within_what_mermaid_will_draw():
+    """Mermaid refuses a chart over 500 edges or 50,000 characters by
+    default; the export stays well inside both and says what it left."""
+    many = [fact(n, "alice", f"relation_{n:03d}", "Bob") for n in range(1, 502)]
+    text = mermaid(many)
+    assert text.count("-->") == 300 and "201 relations left out" in text.splitlines()[0]
+    long = [fact(n, f"person {n:02d} " + "x" * 5_000, "knows", "Bob " + "y" * 5_000) for n in range(1, 70)]
+    text = mermaid(long)
+    assert len(text) < 45_000 and max(len(label) for label in re.findall(r'\["([^"]*)"\]', text)) <= 80
+
+
+def test_mermaid_keeps_to_its_text_budget_when_escapes_swell_the_labels():
+    """A '#' is written as '#35;', so clipped labels can still swell four
+    times over; edges give way until the chart fits, and it says so."""
+    swollen = [fact(n, "alice", f"p{n:03d}" + "#" * 200, "Bob") for n in range(1, 300)]
+    text = mermaid(swollen)
+    assert len(text) < 45_000 and text.count("-->") < 300
+    assert re.search(r"\d+ relations left out of the chart", text.splitlines()[0])

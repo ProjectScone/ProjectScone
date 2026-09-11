@@ -677,11 +677,17 @@ How each format places values and escapes its own syntax:
     and every page is reachable from the index. Stored text is escaped,
     parentheses included, so a stored `[x](url)` cannot pass for a link
     even to a crawler that reads links with a pattern.
-  - A section longer than 200 lines lists the first 200 and says how many
-    more there are.
-- **Mermaid** draws at most 60 entities, the most connected, and every
-  relation between them. Each edge carries its predicate and facts. The
-  first line, a comment, says how many entities and relations were left
+  - A section longer than 200 lines continues on numbered pages beside
+    its article, each linking the next. Every topic is listed from the
+    index, and every entity from its topic or from "In no topic", so
+    no page is ever out of reach.
+- **Mermaid** draws at most 60 entities, the most connected, and up to
+  300 of the best-supported relations between them. That is well inside
+  Mermaid's own defaults of 500 edges and 50,000 characters, and edges
+  give way further when escaped labels would pass 45,000 characters.
+  Each edge carries its predicate and up to three of its facts. Labels
+  are clipped to 80 characters. The first line, a comment, says which
+  view the chart draws, what the read left out, what the chart left
   out, and that values are not drawn.
   - Node ids are the chart's own (`n1`, `n2`, ...).
   - A name is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
