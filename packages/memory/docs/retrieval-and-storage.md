@@ -89,6 +89,120 @@ index on MongoDB and a clock-driven sweep elsewhere. No store migrates
 another build's data: each stamps a schema version and refuses a
 mismatch, SQLite excepted for the one recorded step.
 
+## Knowledge graph: entities and how they relate
+
+A space's knowledge map is derived from its fact ledger. It is never a
+second store: the same facts always give the same entities, ids and digest,
+and every item points back to the facts behind it.
+
+- **Entities** are what claims are about. Every subject is an entity. An
+  object is an entity or a value, and `entities.classify` decides which by
+  ordered rules. Each decision names its rule: a name shape, a determiner
+  name, a key some subject carries, a predicate whose object is a thing, and
+  so on. Dates, amounts, identifiers, prose and pronouns are values.
+- **Relations** are entity-to-entity claims grouped by
+  `(subject, predicate, object)`, with direction kept.
+- **Attributes** are value claims grouped by `(entity, predicate, exact value)`.
+  Values keep their exact text: `3 MB` and `3 mb` are two attributes.
+- **Names** are the entity's recorded spellings. The label is the most
+  common one, and casing is recovered from the source quote, so `alice chen`
+  is labelled `Alice Chen`.
+- **Kinds** (person, organisation, place, project, product, event, concept)
+  are inferred hints from the predicates around an entity. They carry
+  `kind_status: "inferred"` and list the fact ids that suggested them. Hints
+  that disagree give `"conflict"` and no kind, never a guess.
+
+Names are one entity when their keys match: case folded and spacing
+collapsed, nothing looser. `Lisbon` and `Lisboa` stay two entities. A value
+whose case can carry meaning (`MB` against `mb`, versions, paths) never joins
+by folding in either direction. The same rule, `memory.identity.join_match`,
+decides every join in retrieval too.
+
+### Routes
+
+Both routes are read-only and scoped to the caller's key. They are
+advertised as the capabilities `graph.knowledge` and `entities.read`.
+
+#### `GET /v1/graph/knowledge`
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `status` | `current` | Which facts count (see below) |
+| `as_of` | now | RFC 3339 moment for `current` and `history`; anything else is a 422 |
+| `limit` | 150 (1–1000) | Most entities shown, ranked by claims in this view |
+| `attribute_limit` | 300 (0–5000) | Most attributes shown |
+
+Status modes:
+
+- `current`: facts that hold at `as_of` within their validity interval, and are not excluded.
+- `history`: every fact that ever held and had begun by `as_of`, not excluded.
+- `proposed`: proposals awaiting review, not excluded.
+- `all`: everything, excluded facts included.
+
+A relation or attribute appears when at least one of its facts counts in the
+mode. Its `fact_ids` and `support` then cover only those facts. Relations are
+shown only when both ends are among the shown entities.
+
+The response (`api.entity_routes.KnowledgeView`):
+
+```json
+{
+  "schema_version": 1,
+  "space": "alpha",
+  "projection": {"version": "scone.entities/1", "classifier": "objects/1", "kinds": "kinds/1",
+                 "id_scheme": "scone.entity/1", "digest": "<sha256>", "revision": 12},
+  "filters": {"status": "current", "as_of": "2026-09-11T11:00:00.000Z"},
+  "entities": [{"id": "ent:…", "key": "alice chen", "label": "Alice Chen",
+                "names": [{"text": "Alice Chen", "count": 2}], "kind": "person",
+                "kind_status": "inferred", "kind_basis": [1, 7], "flags": [], "claims": 3}],
+  "relations": [{"id": "rel:…", "subject_id": "ent:…", "predicate": "works_at", "object_id": "ent:…",
+                 "fact_ids": [1], "support": {"facts": 1, "active": 1, "closed": 0, "proposed": 0,
+                 "excluded": 0, "quoted": 1, "unquoted": 0, "unsourced": 0, "stated": 0,
+                 "extracted": 1, "inferred": 0},
+                 "first_valid_from": "…", "last_valid_until": null}],
+  "attributes": [{"id": "att:…", "entity_id": "ent:…", "predicate": "joined_on", "value": "May 2021",
+                  "literal_kind": "date", "fact_ids": [2], "support": {"…": 0}}],
+  "coverage": {"facts_read": 9, "facts_limit": 50000, "entities_total": 6, "entities_shown": 6,
+               "relations_total": 4, "relations_shown": 4, "attributes_total": 3,
+               "attributes_shown": 3, "truncated": false, "reasons": []}
+}
+```
+
+`support` counts the facts by status, grounding (`quoted`: a source quote,
+checked against the source when the claim was recorded and not re-read by
+this route; `unquoted`: a source with no quote; `unsourced`: stated with no
+source) and origin. Inspect a relation by reading its `fact_ids` through
+the fact routes.
+
+`coverage.reasons` names every limit that applied:
+
+- `entity_limit` or `attribute_limit`: the view's budget.
+- `fact_limit`: more than 50,000 facts, so only the newest were projected.
+- `store_read_cap_reached`: the store may have cut its read short
+  (Elasticsearch stops at 10,000 rows).
+
+When `truncated` is true, what is drawn is a sample, not the graph.
+
+Ids are hashes of the space and the item, so they are stable across
+requests and stores. A client should drop cached selections when
+`projection.version`, `classifier`, `kinds` or `id_scheme` changes. The
+`digest` changes whenever anything in the projection does.
+
+#### `GET /v1/entities`
+
+The same entities as a ranked list. It takes `status`, `as_of`, `limit`
+(default 100, 1–1000) and an optional `q`, which matches keys and recorded
+spellings case-insensitively. It returns `api.entity_routes.EntityList`,
+where `coverage` counts the matches.
+
+### Limits of this first version
+
+- The projection is built on each request from a whole-ledger read. It is
+  never built on a recall path, and it is not yet cached.
+- Identity is key identity only: no merges of different spellings yet.
+- There are no paths, neighbourhoods or communities yet; those come in
+  later slices.
+
 ## Which embedder wrote the vectors
 
 A cosine means something only between vectors that one embedder made under

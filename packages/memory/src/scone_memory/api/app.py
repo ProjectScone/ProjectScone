@@ -334,6 +334,7 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
+            "entities.read": True, "graph.knowledge": True,
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
@@ -351,6 +352,8 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
+    from .entity_routes import mount_entity_routes
+    mount_entity_routes(app, engine, space_for)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:
