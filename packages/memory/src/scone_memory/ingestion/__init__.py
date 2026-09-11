@@ -17,10 +17,11 @@ __all__ += ["HtmlImageContext", "image_contexts_from_html"]
 from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
 from .formats.registry import BuiltinDocumentParser, DocumentParser
 from .formats.types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument
+from .formats.table_types import DocumentTableCell, DocumentTableHeader
 
 __all__ += ['DocumentIngested', 'DocumentProvenance', 'document_provenance', 'ingest_document',
             'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'DocumentTextRegion', 'ParsedDocument',
-            'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested']
+            'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested', 'DocumentTableCell', 'DocumentTableHeader']
 
 
 def __getattr__(name: str) -> object:

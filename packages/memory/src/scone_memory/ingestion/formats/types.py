@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, SerializerFunctionWrapHandler, model_serializer
 
 from ...core.errors import InvalidInput
 from ...ocr.types import OrderedOcrRegion
 from ...ocr.layout import ReadingOrderReceipt, validate_reading_order
+from .table_types import DocumentTableCell, validate_tables
 
 
 class DocumentTextRegion(OrderedOcrRegion):
@@ -34,6 +35,14 @@ class DocumentSegment(BaseModel):
     locator: str = Field(min_length=1, max_length=4096)
     metadata: dict[str, str] = Field(default_factory=dict)
     regions: tuple[DocumentTextRegion, ...] = Field(default=(), max_length=50_000)
+    table_cells: tuple[DocumentTableCell, ...] = Field(default=(), max_length=20_000)
+
+    @model_serializer(mode='wrap')
+    def serialize_evidence(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result: dict[str, object] = handler(self)
+        if not self.table_cells:
+            result.pop('table_cells', None)
+        return result
 
 
 class ParsedDocument(BaseModel):
@@ -57,6 +66,7 @@ def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
         _metadata(segment.metadata)
         _regions(segment)
     _metadata(parsed.metadata)
+    validate_tables(parsed.segments)
 
 
 def _regions(segment: DocumentSegment) -> None:

@@ -17,6 +17,7 @@ from xml.etree.ElementTree import Element
 
 from ...core.errors import InvalidInput
 from .bounded_xml import parse_xml
+from .html_tables import HtmlTables
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 TEXT_EXTENSIONS = frozenset({
@@ -196,6 +197,7 @@ class _HTML(HTMLParser):
         self.line = 1
         self.has_content = False
         self.title_parts: list[str] = []
+        self.tables = HtmlTables(out, prefix)
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -217,8 +219,12 @@ class _HTML(HTMLParser):
                   or 'display:none' in style or 'visibility:hidden' in style)
         if tag in _BLOCKS:
             self.flush()
+            if not hidden:
+                self.tables.boundary()
+        self.tables.start(tag, values, hidden)
         if tag == 'br' and not hidden:
             self.parts.append('\n')
+            self.tables.data('\n')
         if tag in {'td', 'th'} and self.parts and not hidden:
             self.parts.append(' ')
         if tag not in _VOID:
@@ -228,12 +234,14 @@ class _HTML(HTMLParser):
         for index in range(len(self.stack) - 1, -1, -1):
             tag = self.stack[index][0]
             if tag in targets:
-                del self.stack[index:]
+                self.remove_elements(index)
                 return
             if tag in boundaries:
                 return
 
     def close_implied_elements(self, tag: str) -> None:
+        if tag != 'col':
+            self.close_in_scope(frozenset({'colgroup'}), frozenset({'table', 'template'}))
         if tag in _P_CLOSERS or tag == 'li':
             self.close_in_scope(frozenset({'p'}), _SCOPE_BOUNDARIES | {'button'})
         if tag == 'li':
@@ -256,10 +264,17 @@ class _HTML(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in _BLOCKS:
             self.flush()
+            if not any(hidden for _, hidden in self.stack):
+                self.tables.boundary()
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] == tag:
-                del self.stack[index:]
+                self.remove_elements(index)
                 break
+
+    def remove_elements(self, index: int) -> None:
+        for tag, _ in reversed(self.stack[index:]):
+            self.tables.end(tag)
+        del self.stack[index:]
 
     def handle_data(self, data: str) -> None:
         self.out.check()
@@ -273,7 +288,9 @@ class _HTML(HTMLParser):
                 self.line += data[:first.start()].count('\n')
         self.has_content = self.has_content or bool(data.strip())
         # PRE retains source whitespace; normal flow collapses only ASCII space.
-        self.parts.append(data if self.preformatted() else re.sub(r'[ \t\n\r\f]+', ' ', data))
+        normalized = data if self.preformatted() else re.sub(r'[ \t\n\r\f]+', ' ', data)
+        self.parts.append(normalized)
+        self.tables.data(normalized, self.preformatted())
 
 
 def _html(text: str, out: _Collector, prefix: str = '') -> str:
@@ -281,6 +298,7 @@ def _html(text: str, out: _Collector, prefix: str = '') -> str:
     parser.feed(text)
     parser.close()
     parser.flush()
+    parser.remove_elements(0)
     return ' '.join(''.join(parser.title_parts).split())
 
 
@@ -380,7 +398,8 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
             _lines(text, out)
     if not out.segments:
         raise InvalidInput('document contains no extractable text')
-    parsed = ParsedDocument(format=suffix[1:], parser='scone-text-v1',
+    version = 'scone-text-tables-v1' if any(s.table_cells or 'table_status' in s.metadata for s in out.segments) else 'scone-text-v1'
+    parsed = ParsedDocument(format=suffix[1:], parser=version,
                             segments=tuple(out.segments), metadata=metadata)
     validate_document(parsed, limits)
     return parsed

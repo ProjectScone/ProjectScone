@@ -47,7 +47,7 @@ is recorded. Those regions also retain `provider_index` and `reading_column`;
 the segment's `metadata.ocr_reading_order` describes the whole page strategy,
 column count and limitations even when chunk citations return fewer regions.
 See [column reading order](pdf-ocr.md#estimate-column-reading-order).
-Documents without regions retain version 1 and their
+Documents without regions or table cells retain version 1 and their
 existing serialized attachment identities; existing version 1 evidence stays
 readable. Re-extract an old OCR document to obtain typed regions. When using a
 workflow, change its `parser_revision` and use a new run for that re-extraction.
@@ -59,7 +59,7 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | Text, Markdown and code files | Line locators | Source text only; no AST or semantic code graph |
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
-| HTML | Visible extracted text | Bounded parser; no browser execution, stylesheets or remote resource fetching |
+| HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
 | DOCX, XLSX, PPTX | Paragraphs/tables, sheet cell references, slides and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
@@ -157,6 +157,57 @@ without renumbering later row locators or their physical line ranges. HTML `pre`
 content preserves source indentation, tabs and newlines. Normal HTML flow
 collapses ASCII whitespace and preserves nonbreaking spaces; external CSS is not
 interpreted.
+
+### HTML table evidence
+
+HTML and HTML MIME bodies retain typed `DocumentTableCell` evidence in
+`segment.table_cells`. Cells record a table locator, source cell locator,
+zero-based grid row/column, row/column spans, header status and exact value text.
+`start` and `end` are half-open offsets in the segment's UTF-8 bytes, not HTML
+source offsets. Cell locators count source cells, including hidden cells; they
+remain stable when footer rows are placed after the body.
+
+Each header reference carries the header cell's locator, text and association
+(`explicit`, `row`, `column`, `rowgroup` or `colgroup`). The reader resolves
+`headers` IDs within the table, scoped headers, and automatic row/column headers,
+including multiple header levels and spanning cells. An explicit empty `headers`
+attribute disables inference. Hidden headers never supply text. Unresolved IDs
+are disclosed through `metadata.table_notes=unresolved_headers`.
+Tracking is limited to 20,000 source IDs of at most 4,096 characters. If that
+budget prevents resolving a later explicit reference, `header_id_limit` is also
+reported; unrelated visible text remains extractable.
+
+Data-cell text includes its associated labels before the value. For example,
+`Europe / 2026 / Sales: €20` indexes the declared row and column context together.
+The cell's byte span covers only `€20`; its header references identify the
+original source cells. Header-only rows, captions, empty cells within nonempty
+rows, PRE whitespace and ordinary inline whitespace are retained. Wholly empty
+rows produce no text segment; later grid coordinates are not renumbered.
+
+```python
+evidence = await document_provenance(memory, "team", result.added.episode_id)
+for segment in evidence.segments:
+    for cell in segment.table_cells:
+        print(cell.locator, cell.text, [(h.text, h.locator) for h in cell.headers])
+```
+
+These documents use manifest version 4 and parser `scone-text-tables-v1`.
+Versions 1–3 remain readable, and documents without table evidence keep their
+existing serialization. Chunk-filtered citations return overlapping value cells
+with their full header references; header source rows can lie outside the chunk.
+The complete retained manifest validates those references before filtering.
+Change a durable workflow's `parser_revision` and use a new run to re-extract
+previously flattened tables.
+
+Nested tables, overlapping cells, spans outside a row group and malformed
+table placement retain the previous visible text with `table_status=text_fallback`
+and a specific `table_notes` reason. No structured cells are claimed for those
+tables. Resource exhaustion fails explicitly: at most 20,000 cells per table,
+1,000 columns, 100,000 occupied slots, 128 headers per cell, one million table
+operations and 8 MB of serialized cell evidence, within the existing text,
+segment and wall-time limits. The slot and evidence limits also apply across
+the complete document. This does not detect tables in OCR geometry or add typed
+table evidence to Office and delimited readers yet.
 
 ## Durable extraction checkpoints
 

@@ -36,7 +36,7 @@ FILE_MEDIA_TYPES = {
 
 class DocumentManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
@@ -49,6 +49,8 @@ class DocumentManifest(BaseModel):
 
 
 def _validate_manifest_version(manifest: DocumentManifest) -> None:
+    if manifest.schema_version < 4 and any(s.table_cells for s in manifest.parsed.segments):
+        raise ValueError('document table cells require manifest version four')
     if manifest.schema_version == 1 and any(segment.regions for segment in manifest.parsed.segments):
         raise ValueError('document regions require manifest version two')
     if manifest.schema_version < 3 and any('ocr_reading_order' in segment.metadata
@@ -113,7 +115,8 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
         raise InvalidInput('document parser exceeded its wall time limit') from None
     validate_document(parsed, limits)
     has_order = any('ocr_reading_order' in s.metadata for s in parsed.segments)
-    return DocumentManifest(schema_version=3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
+    has_tables = any(s.table_cells for s in parsed.segments)
+    return DocumentManifest(schema_version=4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
                             original_sha256=digest(data), filename=filename, parsed=parsed)
 
 
@@ -196,7 +199,9 @@ async def document_provenance(memory: MemoryEngine, space: str, episode_id: int,
         if offset < end and stop > start:
             regions = tuple(region for region in segment.regions
                             if offset + region.start < end and offset + region.end > start)
-            selected.append(segment.model_copy(update={'regions': regions}))
+            cells = segment.table_cells if chunk_id is None else tuple(cell for cell in segment.table_cells
+                          if offset + cell.start < end and offset + cell.end > start)
+            selected.append(segment.model_copy(update={'regions': regions, 'table_cells': cells}))
         offset = stop + 2
     return DocumentProvenance(original, retained, manifest.filename, manifest.parsed.format,
                               manifest.parsed.parser, tuple(selected))
