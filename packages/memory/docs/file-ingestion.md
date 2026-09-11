@@ -90,6 +90,16 @@ that supply no extractable text, including image-only results. Notebook image
 attachments and interactive widgets remain in the retained original. Saved
 outputs are observations from the file, not results executed or verified by Scone.
 
+Text and MIME line locators count LF, CRLF and bare CR terminators; Unicode
+separators and form feeds remain inside their source line. JSONL records split
+only at LF (including CRLF), so Unicode separators inside strings remain data.
+CSV supports quoted multiline fields. TSV uses literal quotes and tab delimiters;
+it does not use the Excel quoted-tab dialect. Empty delimited records are skipped
+without renumbering later row locators or their physical line ranges. HTML `pre`
+content preserves source indentation, tabs and newlines. Normal HTML flow
+collapses ASCII whitespace and preserves nonbreaking spaces; external CSS is not
+interpreted.
+
 ## Durable extraction checkpoints
 
 `DocumentIngestionWorkflow` reuses the shared encrypted workflow journal:

@@ -90,24 +90,32 @@ def _decode(data: bytes) -> str:
 
 
 def _lines(text: str, out: _Collector, prefix: str = '') -> None:
-    for line, value in enumerate(text.splitlines(), 1):
-        out.add(value, f'{prefix}line:{line}')
+    for line, value in enumerate(StringIO(text, newline=None), 1):
+        out.add(value.removesuffix('\n'), f'{prefix}line:{line}')
 
 
 def _table(text: str, delimiter: str, out: _Collector) -> None:
-    reader = csv.reader(StringIO(text, newline=''), delimiter=delimiter, strict=True)
+    reader = csv.reader(StringIO(text, newline=''), delimiter=delimiter, strict=True,
+                        quoting=csv.QUOTE_NONE if delimiter == '\t' else csv.QUOTE_MINIMAL)
     try:
-        headers = next(reader, [])
+        header_record = 0
+        headers: list[str] = []
+        for header_record, headers in enumerate(reader, 1):
+            out.check()
+            if headers:
+                break
         counts = Counter(headers)
         labels = [f'{h} [column {i}]' if h and counts[h] > 1 else h or f'column {i}'
                   for i, h in enumerate(headers, 1)]
         previous_end = reader.line_num
-        for row_number, row in enumerate(reader, 2):
+        for row_number, row in enumerate(reader, header_record + 1):
             out.check()
             end = reader.line_num
             # line_num is the last physical source line, including quoted newlines.
             start = previous_end + 1
             previous_end = end
+            if not row:
+                continue
             if len(row) != len(headers):
                 raise InvalidInput('delimited row has a different column count than its header')
             out.add('\n'.join(f'{label}: {value}' for label, value in zip(labels, row)),
@@ -187,10 +195,15 @@ class _HTML(HTMLParser):
         self.title_parts: list[str] = []
 
     def flush(self) -> None:
-        text = re.sub(r'[^\S\n]+', ' ', ''.join(self.parts)).strip()
+        text = ''.join(self.parts)
+        if not self.preformatted():
+            text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
         self.out.add(text, f'{self.prefix}line:{self.line}')
+
+    def preformatted(self) -> bool:
+        return any(tag == 'pre' for tag, _ in self.stack)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.close_implied_elements(tag)
@@ -253,9 +266,11 @@ class _HTML(HTMLParser):
             self.title_parts.append(data)
         if not self.has_content:
             self.line = self.getpos()[0]
+            if not self.preformatted() and (first := re.search(r'[^ \t\r\n\f]', data)):
+                self.line += data[:first.start()].count('\n')
         self.has_content = self.has_content or bool(data.strip())
-        # HTML collapses source whitespace; only explicit BR adds a line break.
-        self.parts.append(re.sub(r'\s+', ' ', data))
+        # PRE retains source whitespace; normal flow collapses only ASCII space.
+        self.parts.append(data if self.preformatted() else re.sub(r'[ \t\n\r\f]+', ' ', data))
 
 
 def _html(text: str, out: _Collector, prefix: str = '') -> str:
@@ -357,9 +372,9 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
         elif suffix == '.json':
             _json(text, out)
         elif suffix in {'.jsonl', '.ndjson', '.ldjson'}:
-            for line, value in enumerate(text.splitlines(), 1):
+            for line, value in enumerate(StringIO(text, newline='\n'), 1):
                 out.check()
-                if value.strip():
+                if value.strip(' \t\r\n'):
                     _json(value, out, f'line:{line}')
         elif suffix in {'.html', '.htm'}:
             metadata['title'] = _html(text, out)
