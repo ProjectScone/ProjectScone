@@ -1229,8 +1229,17 @@ With 20,000 facts on SQLite, a view costs:
 
 ### Limits of this first version
 
-- Identity is key identity only: no merges of different spellings yet.
-- Resolution uses key identity only; merges of different spellings come with identity decisions.
+- Identity is key identity only: two spellings of one thing ("Dr. Alice
+  Chen" and "alice chen") stay two entities until identity decisions
+  exist to record a merge. `/v1/entities/duplicates` suggests the pairs
+  worth that decision, but merges nothing.
+- Every predicate is single-valued in the ledger. A new object under the
+  same subject and predicate closes the one before it, so "alice knows
+  Carol" from 2021 ends "alice knows Bob" from 2020. A graph of many-valued
+  relations (knowing, owning, attending) needs a cardinality per
+  predicate.
+- The drawings show at most 200 entities and 600 relations, and say what
+  they left out.
 
 ## Which embedder wrote the vectors
 
