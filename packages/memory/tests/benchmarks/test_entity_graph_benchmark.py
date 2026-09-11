@@ -326,3 +326,20 @@ async def test_a_lost_claim_that_begins_after_as_of_is_still_out_of_view(monkeyp
         "kind": "fact", "subject": "future person", "predicate": "works_at", "object": "Future Company",
         "valid_from": "2030-01-01T00:00:00Z"}))
     assert report.claims_missing == 0 and report.claims_out_of_view == 1
+
+
+@pytest.mark.parametrize("as_of", ["2023-06-01T00:00:00Z", "2025-06-01T00:00:00Z"])
+async def test_a_claim_restated_in_another_interval_is_its_own_fact(tmp_path, as_of):
+    """34, then 35, then 34 again: three facts, not two. The label on 34 is
+    about whichever of its facts holds at as_of, and each fact is in view or
+    out of it by its own interval."""
+    path = tmp_path / "restated.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in [
+        {"kind": "meta", "name": "restated", "as_of": as_of},
+        *({"kind": "fact", "subject": "returning person", "predicate": "age", "object": value,
+           "valid_from": f"{year}-01-01T00:00:00Z"} for year, value in ((2023, "34"), (2024, "35"), (2025, "34"))),
+        {"kind": "literal", "subject": "returning person", "predicate": "age", "object": "34", "value": True},
+    ]))
+    report = await run_entity_graph_benchmark(path)
+    assert report.facts == 3 and report.claims_out_of_view == 2 and report.claims_missing == 0
+    assert report.literal_error_rate == 0.0
