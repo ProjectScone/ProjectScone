@@ -35,6 +35,7 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core.validation import (
+    entity_key as entity_key,
     ORIGINS as ORIGINS,
     STATUSES as STATUSES,
     SPACE_NAME as SPACE_NAME,
@@ -1046,8 +1047,7 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
 
-    def key(name: str) -> str:
-        return name.strip().casefold()
+    key = entity_key
 
     def find(x: str) -> str:
         parent.setdefault(x, x)

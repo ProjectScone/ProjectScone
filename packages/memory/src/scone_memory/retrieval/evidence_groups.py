@@ -1,8 +1,12 @@
-"""Pure grouping of supplied facts by exact directed object-to-subject joins.
+"""Pure grouping of supplied facts by directed object-to-subject joins.
 
-Components preserve branches and cycles; a join asserts literal equality only,
-not a semantic, causal, or transitive conclusion. No retrieval or model calls
-occur here. Every input is represented exactly once, or the whole call fails.
+A fact joins another when its object and the other's subject name the same
+entity under ``entity_key``: case folded and spacing collapsed, nothing looser.
+Each join records whether the two names were literally equal or met only after
+that folding, so a reader can tell the two apart. Components preserve branches
+and cycles; a join asserts shared naming only, not a semantic, causal, or
+transitive conclusion. No retrieval or model calls occur here. Every input is
+represented exactly once, or the whole call fails.
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 
+from ..core.validation import entity_key
 from .adaptive import EvidenceCandidate
 
 
@@ -55,7 +60,8 @@ def _joins(candidates: tuple[EvidenceCandidate, ...]) -> list[tuple[int, int]]:
             continue
         for target_index, target in enumerate(candidates):
             if (source_index == target_index or not target.id.startswith("fact:")
-                    or target.subject is None or not target.subject.strip() or source.object != target.subject):
+                    or target.subject is None or not target.subject.strip()
+                    or entity_key(source.object) != entity_key(target.subject)):
                 continue
             if len(joins) >= 2048:
                 raise ValueError("evidence grouping exceeds directed edge limit")
@@ -105,12 +111,14 @@ def build_evidence_groups(candidates: tuple[EvidenceCandidate, ...], *, max_byte
             continue
         component_joins = [(source, target) for source, target in joins if source in component]
         edges: list[dict[str, object]] = [
-            {"kind": "exact_object_subject", "from_id": candidates[source].id, "to_id": candidates[target].id}
+            {"kind": "object_subject",
+             "match": "literal" if candidates[source].object == candidates[target].subject else "normalised",
+             "from_id": candidates[source].id, "to_id": candidates[target].id}
             for source, target in component_joins]
         canonical = {"members": [originals[index] for index in sorted(component, key=lambda index: candidates[index].id)],
                      "joins": sorted(edges, key=lambda edge: (str(edge["from_id"]), str(edge["to_id"])))}
         group_id = "group:" + hashlib.sha256(_serialize(canonical)).hexdigest()
-        records.append({"id": group_id, "kind": "exact_fact_component",
+        records.append({"id": group_id, "kind": "fact_component",
                         "members": [originals[index] for index in ordered], "joins": edges})
         members[group_id] = groups[group_id] = ids
     if len(_serialize(records)) > max_bytes:

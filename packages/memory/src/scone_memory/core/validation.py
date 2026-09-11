@@ -68,8 +68,24 @@ def normalise_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
         clean[key] = value
     return clean
 
+def entity_key(name: str) -> str:
+    """The one rule for when two names denote the same thing.
+
+    Case is folded, including the cases lower() misses ("Straße" and
+    "STRASSE" are one name), and runs of whitespace become one space.
+    Nothing else: this is identity, not resemblance. Deciding that two
+    different spellings are one entity is a resolution decision with
+    evidence behind it, and must never happen silently inside a join.
+
+    Every join, grouping and traversal compares names through this, and so
+    does storing a subject. Four join sites once each had their own rule;
+    one compared raw strings, so a claim never met the claim naming its
+    object, and the graph came out in pieces that should have connected.
+    """
+    return " ".join(name.casefold().split())
+
 def normalise_term(value: str, what: str) -> str:
-    clean = " ".join(value.strip().casefold().split())
+    clean = entity_key(value)
     if not clean:
         raise InvalidInput(f"{what} must not be empty")
     return clean
