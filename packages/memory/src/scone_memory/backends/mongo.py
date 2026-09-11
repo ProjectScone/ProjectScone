@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Mapping, Optional, Sequence
 
-from ..core.affirmations import Affirmation, NewAffirmation
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -440,7 +440,7 @@ class MongoDocumentStore:
         key = {"space": new.space, "fact_id": new.fact_id, "valid_from": new.valid_from}
         existing = await self._affirmations.find_one(key)
         if existing is None:
-            doc = {"_id": await self._next_id("fact_affirmations"), **new.__dict__}
+            doc = {"_id": await self._next_id("fact_affirmations"), **new.__dict__, "links": stored_links(new.links)}
             try:
                 await self._affirmations.insert_one(doc)
                 return _affirmation(doc)
@@ -521,4 +521,4 @@ def _affirmation(doc: Mapping) -> Affirmation:
     return Affirmation(affirmation_id=doc["_id"], space=doc["space"], fact_id=doc["fact_id"],
                        valid_from=doc["valid_from"], recorded_at=doc["recorded_at"],
                        confidence=doc.get("confidence", 1.0), source_episode_id=doc.get("source_episode_id"),
-                       origin=doc.get("origin", "stated"), quote=doc.get("quote"))
+                       origin=doc.get("origin", "stated"), quote=doc.get("quote"), links=read_links(doc["links"]))

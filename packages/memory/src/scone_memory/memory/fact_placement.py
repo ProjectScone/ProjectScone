@@ -8,12 +8,13 @@ from __future__ import annotations
 import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
-from typing import AsyncIterator, Awaitable, Callable, Optional, cast
+from datetime import datetime
+from typing import AsyncIterator, Awaitable, Callable, Optional, Sequence, cast
 
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput, NotFound
 from ..core.models import Fact
-from ..core.ports import DocumentStore, NewFact
+from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import ORIGINS, check_space, normalise_term, normalise_time
 
@@ -62,6 +63,7 @@ async def assert_placed(
     origin: str = "stated",
     proposed: bool = False,
     quote: Optional[str] = None,
+    links: Sequence[tuple[str, int]] = (),
 ) -> Fact:
     """Record that ``subject predicate object`` holds from ``valid_from``.
 
@@ -90,10 +92,12 @@ async def assert_placed(
       fact is stored closed at that point. A stale record arriving late
       never overwrites a fresher one;
     - a restatement from a later day than the fact it restates is kept
-      as an affirmation of that fact. Should a fact with another object
-      later cut the restated fact short before that day, the claim
-      resumes from it as a new fact and bounds the one that cut it, so
-      the order facts arrive in never decides what held.
+      as an affirmation of that fact, with ``links``, the (kind, fact id)
+      dependency links it was stated with. Should a fact with another
+      object later cut the restated fact short before that day, the claim
+      resumes from it as a new fact resting on those links, and bounds
+      the one that cut it, so the order facts arrive in never decides
+      what held.
     """
     check_space(space)
     subject = normalise_term(subject, "subject")
@@ -140,7 +144,7 @@ async def assert_placed(
         async with atomic(runtime.documents):
             affirmed = await affirm(runtime.documents, space, placement.restates, start, runtime.clock(),
                                     confidence=confidence, source_episode_id=source_episode_id, origin=origin,
-                                    quote=quote)
+                                    quote=quote, links=links)
             if affirmed:
                 await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_assert", {
@@ -186,14 +190,11 @@ async def place(documents: DocumentStore, space: str, subject: str, predicate: s
     later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
     successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
     resumes = None
-    store = affirmation_store(documents)
-    if store is not None and restates is None:
+    if restates is None:
         # A covering fact's claim stated again after the new start resumes
         # there; it lies inside the covering fact, so before any successor.
         for rival in covering:
-            after = [a for a in await store.affirmations(space, rival.fact_id) if parse_rfc3339(a.valid_from) > start_dt]
-            if after:
-                resumes = Resumption(rival, after[0], tuple(after[1:]))
+            if (resumes := await resumption(documents, space, rival, start_dt)) is not None:
                 break
     if resumes is not None:
         return Placement(covering=covering, restates=None, bound=resumes.first.valid_from, bound_reason=None,
@@ -220,7 +221,8 @@ async def _alone() -> AsyncIterator[None]:
 
 
 async def affirm(documents: DocumentStore, space: str, held: Fact, start: str, recorded_at: str, *,
-                 confidence: float, source_episode_id: Optional[int], origin: str, quote: Optional[str]) -> bool:
+                 confidence: float, source_episode_id: Optional[int], origin: str, quote: Optional[str],
+                 links: Sequence[tuple[str, int]] = ()) -> bool:
     """Keep a restatement's later start beside the fact it restates, with
     its evidence. True only when that day was not kept already; one at the
     fact's own start adds nothing."""
@@ -231,8 +233,22 @@ async def affirm(documents: DocumentStore, space: str, held: Fact, start: str, r
         return False
     await store.add_affirmation(NewAffirmation(
         space=space, fact_id=held.fact_id, valid_from=start, recorded_at=recorded_at, confidence=confidence,
-        source_episode_id=source_episode_id, origin=origin, quote=quote))
+        source_episode_id=source_episode_id, origin=origin, quote=quote, links=tuple(links)))
     return True
+
+
+async def resumption(documents: DocumentStore, space: str, held: Fact, after: datetime) -> Optional[Resumption]:
+    """How ``held``'s claim resumes once it is cut at ``after``: from its
+    first affirmation after that moment and before the fact's own end. One
+    at or past the end resumes nothing, since the claim would end before
+    it began."""
+    store = affirmation_store(documents)
+    if store is None:
+        return None
+    end = parse_rfc3339(held.valid_until) if held.valid_until is not None else None
+    inside = [a for a in await store.affirmations(space, held.fact_id)
+              if parse_rfc3339(a.valid_from) > after and (end is None or parse_rfc3339(a.valid_from) < end)]
+    return Resumption(held, inside[0], tuple(inside[1:])) if inside else None
 
 
 async def resume(documents: DocumentStore, space: str, placement: Placement) -> Placement:
@@ -243,7 +259,14 @@ async def resume(documents: DocumentStore, space: str, placement: Placement) -> 
     affirmations move to it, and the placement is bounded by it."""
     if placement.resumes is None:
         return placement
-    held, first, later = placement.resumes.covering, placement.resumes.first, placement.resumes.later
+    resumed = await write_resumption(documents, space, placement.resumes)
+    return replace(placement, bound_reason=f"superseded by fact {resumed.fact_id}", bound_by=resumed.fact_id)
+
+
+async def write_resumption(documents: DocumentStore, space: str, resumes: Resumption) -> Fact:
+    """The fact a resumption resumes as, written with the links its first
+    affirmation was stated with; the later affirmations move to it."""
+    held, first, later = resumes.covering, resumes.first, resumes.later
     store = affirmation_store(documents)
     assert store is not None, "a resumption is only found on a store that keeps affirmations"
     resumed = await documents.insert_fact(NewFact(
@@ -254,13 +277,18 @@ async def resume(documents: DocumentStore, space: str, placement: Placement) -> 
         superseded_by=held.superseded_by if held.valid_until is not None else None,
         source_episode_id=first.source_episode_id, origin=first.origin, quote=first.quote,
         excluded_reason=held.excluded_reason))
+    # A new fact has nothing depending on it, so no link from it closes a cycle.
+    for kind, to_fact in first.links:
+        await documents.insert_fact_link(NewFactLink(space=space, from_fact=resumed.fact_id, to_fact=to_fact,
+                                                     kind=kind, created_at=first.recorded_at))
     for affirmation in later:
         await store.add_affirmation(NewAffirmation(
             space=space, fact_id=resumed.fact_id, valid_from=affirmation.valid_from,
             recorded_at=affirmation.recorded_at, confidence=affirmation.confidence,
-            source_episode_id=affirmation.source_episode_id, origin=affirmation.origin, quote=affirmation.quote))
+            source_episode_id=affirmation.source_episode_id, origin=affirmation.origin, quote=affirmation.quote,
+            links=tuple(affirmation.links)))
     await store.drop_affirmations(space, [first.affirmation_id, *(a.affirmation_id for a in later)])
-    return replace(placement, bound_reason=f"superseded by fact {resumed.fact_id}", bound_by=resumed.fact_id)
+    return resumed
 
 
 async def truncate(documents: DocumentStore, covering: list[Fact], start: str, by_fact_id: int) -> None:

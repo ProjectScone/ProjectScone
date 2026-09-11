@@ -135,7 +135,7 @@ async def test_every_operation_leaves_one_event_with_measured_latency():
     assert first.payload["outcome"] == "new_active"
     assert restated.payload["outcome"] == "restated" and restated.payload["fact_id"] == fact.fact_id
     assert superseding.payload["outcome"] == "new_active" and superseding.payload["superseded"] == [fact.fact_id]
-    assert close.payload == {"fact_id": newer.fact_id, "reason_kind": "manual", "actor": None}
+    assert close.payload == {"fact_id": newer.fact_id, "reason_kind": "manual", "actor": None, "resumed": None}
     assert forget.payload["chunks_removed"] == 1
 
 

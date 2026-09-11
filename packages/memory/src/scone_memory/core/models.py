@@ -267,6 +267,10 @@ class ForgetReceipt(BaseModel):
     attachments_kept: list[str] = Field(default_factory=list)
     facts_citing: list[int] = Field(default_factory=list)
     links_citing: list[int] = Field(default_factory=list)
+    #: Restatements kept beside their facts that cite the episode. They
+    #: stand as claims do, and one that later resumes as a fact brings its
+    #: source id and quote with it.
+    affirmations_citing: list[int] = Field(default_factory=list)
     #: Set once the deed is done; a preview has none.
     forgotten_at: Optional[str] = None
 

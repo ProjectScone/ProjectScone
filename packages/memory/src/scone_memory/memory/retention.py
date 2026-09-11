@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Optional
 
 from ..backends.blobs import BlobStore
+from ..core.affirmations import affirmation_store
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, SpaceReceipt, Tombstone
 from ..core.ports import DocumentStore, EventLog, NewTombstone, VectorIndex
@@ -145,8 +146,9 @@ async def expire(runtime: RetentionRuntime, space: str, policy: Mapping[str, flo
 
 async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> ForgetReceipt:
     """What forgetting the episode would take with it and leave, with
-    nothing removed. The claims and links that cite it are reported,
-    not closed: a source being gone is a fact about the evidence."""
+    nothing removed. The claims, links and kept restatements that cite it
+    are reported, not closed: a source being gone is a fact about the
+    evidence."""
     check_space(space)
     await runtime.episode_or_gone(space, episode_id)
     carried = [a.attachment_id for a in await runtime.blobs.for_episode(space, episode_id)]
@@ -157,6 +159,8 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         for link in await runtime.documents.fact_links(space, fact.fact_id):
             if link.source_episode_id == episode_id:
                 citing_links[link.link_id] = link.link_id
+    store = affirmation_store(runtime.documents)
+    kept = await store.space_affirmations(space) if store is not None else []
     return ForgetReceipt(
         episode_id=episode_id,
         chunks=len(await runtime.documents.chunks_of(space, episode_id)),
@@ -164,6 +168,7 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         attachments_kept=[a for a in carried if a not in released],
         facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
         links_citing=sorted(citing_links),
+        affirmations_citing=sorted(a.affirmation_id for a in kept if a.source_episode_id == episode_id),
     )
 
 
@@ -193,7 +198,7 @@ async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         "episode_id": episode_id, "chunks_removed": len(removed),
         "attachments_released": len(receipt.attachments_released),
         "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
-        "latency_ms": _ms(started),
+        "affirmations_citing": len(receipt.affirmations_citing), "latency_ms": _ms(started),
     })
     return receipt
 

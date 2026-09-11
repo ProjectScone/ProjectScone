@@ -279,7 +279,8 @@ def space_line(receipt) -> str:
 
 def receipt_line(r) -> str:
     return (f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, "
-            f"{len(r.facts_citing)} claim(s) and {len(r.links_citing)} link(s) cite it and stand")
+            f"{len(r.facts_citing)} claim(s), {len(r.links_citing)} link(s) and "
+            f"{len(r.affirmations_citing)} restatement(s) cite it and stand")
 
 
 def link_line(link) -> str:

@@ -12,7 +12,7 @@ from typing import Optional
 
 from ..core.affirmations import NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
-from ..core.models import Added, Fact, LINK_KINDS
+from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact
 from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
 from ..ingestion.records import Record, content_hash
@@ -181,18 +181,29 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
     store = affirmation_store(runtime.documents)
     for record in affirmations:
         fact_id = fact_map.get(int(record["fact_id"]))
-        if store is None or fact_id is None:
+        valid_from = normalise_time(str(record["valid_from"]))
+        if store is None or fact_id is None or any(
+                kept.valid_from == valid_from for kept in await store.affirmations(space, fact_id)):
             summary.affirmations_skipped += 1
             continue
+        # A premise is named by its new id; one not in the archive is
+        # dropped, like a link to it, and counted with them.
+        premises = []
+        for kind, to_fact in record.get("links") or ():
+            target = fact_map.get(int(to_fact))
+            if kind in DEPENDENCY_KINDS and target is not None:
+                premises.append((str(kind), target))
+            else:
+                summary.links_skipped += 1
         source = record.get("source_episode_id")
         await store.add_affirmation(NewAffirmation(
-            space=space, fact_id=fact_id, valid_from=normalise_time(str(record["valid_from"])),
+            space=space, fact_id=fact_id, valid_from=valid_from,
             recorded_at=normalise_time(str(record["recorded_at"])) if record.get("recorded_at") else runtime.clock(),
             confidence=float(record.get("confidence", 1.0)),
             source_episode_id=id_map.get(int(source)) if source is not None else None,
-            origin=str(record.get("origin", "stated")), quote=record.get("quote")))
+            origin=str(record.get("origin", "stated")), quote=record.get("quote"), links=tuple(premises)))
         summary.affirmations += 1
-    if summary.facts or summary.links:
+    if summary.facts or summary.links or summary.affirmations:
         await runtime.documents.bump_revision(space)
     return summary
 

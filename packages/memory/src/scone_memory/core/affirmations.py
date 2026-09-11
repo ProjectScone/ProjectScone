@@ -15,9 +15,9 @@ simply returned.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence, cast, runtime_checkable
+from typing import Mapping, Optional, Protocol, Sequence, cast, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,10 @@ class NewAffirmation:
     source_episode_id: Optional[int] = None
     origin: str = "stated"
     quote: Optional[str] = None
+    #: The restatement's own dependency links, as (kind, fact id): what it
+    #: extends and was derived from. Should the claim resume from this
+    #: day, the fact it resumes as rests on these, not on the first fact's.
+    links: tuple[tuple[str, int], ...] = ()
 
 
 class Affirmation(BaseModel):
@@ -44,6 +48,17 @@ class Affirmation(BaseModel):
     source_episode_id: Optional[int] = None
     origin: str = "stated"
     quote: Optional[str] = None
+    links: list[tuple[str, int]] = Field(default_factory=list)
+
+
+def stored_links(links: Sequence[tuple[str, int]]) -> list[dict[str, object]]:
+    """Links as a document store keeps them: named fields, one per link."""
+    return [{"kind": kind, "to_fact": to_fact} for kind, to_fact in links]
+
+
+def read_links(stored: Sequence[Mapping[str, object]]) -> list[tuple[str, int]]:
+    """Links back from ``stored_links``."""
+    return [(str(link["kind"]), int(cast(int, link["to_fact"]))) for link in stored]
 
 
 @runtime_checkable

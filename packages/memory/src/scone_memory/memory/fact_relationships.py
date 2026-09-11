@@ -20,7 +20,7 @@ class PlaceFact(Protocol):
         self, space: str, subject: str, predicate: str, object: str,
         valid_from: Optional[str] = None, confidence: float = 1.0,
         source_episode_id: Optional[int] = None, origin: str = "stated",
-        proposed: bool = False, quote: Optional[str] = None,
+        proposed: bool = False, quote: Optional[str] = None, links: Sequence[tuple[str, int]] = (),
     ) -> Fact: ...
 
 
@@ -86,8 +86,13 @@ async def assert_fact(
         targets[target_id] = target
     if extends is not None and (targets[extends].subject, targets[extends].predicate) == (subject, predicate):
         raise InvalidInput("an extension cannot supersede what it extends; assert an update instead")
+    # Placement keeps them too, beside a restatement it keeps as an
+    # affirmation, so a claim that resumes from it rests on its own.
+    links = [("extends", extends)] if extends is not None else []
+    links += [("derived_from", premise) for premise in premises]
     fact = await runtime.assert_placed(space, subject, predicate, object, valid_from=valid_from, confidence=confidence,
-                                     source_episode_id=source_episode_id, origin=origin, proposed=proposed, quote=quote)
+                                     source_episode_id=source_episode_id, origin=origin, proposed=proposed, quote=quote,
+                                     links=links)
     if extends is not None:
         await runtime.link_facts(space, fact.fact_id, extends, "extends")
     for premise in premises:

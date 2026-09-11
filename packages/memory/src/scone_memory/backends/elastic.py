@@ -25,7 +25,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from ..core.affirmations import Affirmation, NewAffirmation
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -115,7 +115,7 @@ def _affirmation(doc: Mapping) -> Affirmation:
     return Affirmation(affirmation_id=int(doc["affirmation_id"]), space=doc["space"], fact_id=int(doc["fact_id"]),
                        valid_from=doc["valid_from"], recorded_at=doc["recorded_at"],
                        confidence=float(doc.get("confidence", 1.0)), source_episode_id=doc.get("source_episode_id"),
-                       origin=doc.get("origin", "stated"), quote=doc.get("quote"))
+                       origin=doc.get("origin", "stated"), quote=doc.get("quote"), links=read_links(doc["links"]))
 
 
 def _fact_link(doc: Mapping) -> FactLink:
@@ -177,7 +177,7 @@ FACT_LINK_MAPPINGS = {"properties": {
 AFFIRMATION_MAPPINGS = {"properties": {
     "affirmation_id": LONG, "space": KEYWORD, "fact_id": LONG, "valid_from": KEYWORD, "recorded_at": KEYWORD,
     "confidence": {"type": "double"}, "source_episode_id": LONG, "origin": KEYWORD,
-    "quote": {"type": "text", "index": False},
+    "quote": {"type": "text", "index": False}, "links": {"type": "object", "enabled": False},
 }}
 ERASED_SPACE_MAPPINGS = {"properties": {"space": {"type": "keyword"}, "erased_at": {"type": "keyword"}}}
 TOMBSTONE_MAPPINGS = {"properties": {
@@ -549,7 +549,8 @@ class ElasticsearchDocumentStore:
         doc_id = f"{new.space}|{new.fact_id}|{new.valid_from}"
         existing = await self._doc("fact_affirmations", doc_id)
         if existing is None:
-            doc = {"affirmation_id": await self.shared.next_id("fact_affirmations"), **new.__dict__}
+            doc = {"affirmation_id": await self.shared.next_id("fact_affirmations"), **new.__dict__,
+                   "links": stored_links(new.links)}
             try:
                 await self.client.index(index=self._idx("fact_affirmations"), id=doc_id, document=doc,
                                         op_type="create", refresh=self.shared.refresh)

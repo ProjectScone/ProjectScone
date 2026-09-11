@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
-from ..core.affirmations import Affirmation, NewAffirmation
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -112,7 +112,7 @@ def _affirmation(row: Mapping) -> Affirmation:
     return Affirmation(affirmation_id=int(row["id"]), space=row["space"], fact_id=int(row["fact_id"]),
                        valid_from=row["valid_from"], recorded_at=row["recorded_at"],
                        confidence=float(row["confidence"]), source_episode_id=row["source_episode_id"],
-                       origin=row["origin"], quote=row["quote"])
+                       origin=row["origin"], quote=row["quote"], links=read_links(json.loads(row["links"])))
 
 
 def _fact(row: Mapping) -> Fact:
@@ -179,7 +179,7 @@ class PostgresDocumentStore:
     CREATE TABLE IF NOT EXISTS {s}.fact_affirmations (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, fact_id BIGINT NOT NULL, valid_from TEXT NOT NULL,
         recorded_at TEXT NOT NULL, confidence DOUBLE PRECISION NOT NULL, source_episode_id BIGINT,
-        origin TEXT NOT NULL, quote TEXT, UNIQUE (space, fact_id, valid_from));
+        origin TEXT NOT NULL, quote TEXT, links TEXT NOT NULL DEFAULT '[]', UNIQUE (space, fact_id, valid_from));
     CREATE TABLE IF NOT EXISTS {s}.tombstones (
         space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
         reason TEXT, PRIMARY KEY (space, episode_id));
@@ -526,10 +526,10 @@ class PostgresDocumentStore:
     async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
         row = await self._row(
             f"INSERT INTO {self.schema}.fact_affirmations (space, fact_id, valid_from, recorded_at, confidence,"
-            " source_episode_id, origin, quote) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            " source_episode_id, origin, quote, links) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
             " ON CONFLICT (space, fact_id, valid_from) DO NOTHING RETURNING *",
             (new.space, new.fact_id, new.valid_from, new.recorded_at, new.confidence, new.source_episode_id,
-             new.origin, new.quote),
+             new.origin, new.quote, json.dumps(stored_links(new.links))),
         )
         if row is None:
             row = await self._required_row(

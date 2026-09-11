@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional, Sequence
 
-from ..core.affirmations import Affirmation, NewAffirmation
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS fact_writes (space TEXT PRIMARY KEY, writes INTEGER N
 CREATE TABLE IF NOT EXISTS fact_affirmations (
   id INTEGER PRIMARY KEY, space TEXT NOT NULL, fact_id INTEGER NOT NULL, valid_from TEXT NOT NULL,
   recorded_at TEXT NOT NULL, confidence REAL NOT NULL, source_episode_id INTEGER, origin TEXT NOT NULL,
-  quote TEXT, UNIQUE(space, fact_id, valid_from));
+  quote TEXT, links TEXT NOT NULL DEFAULT '[]', UNIQUE(space, fact_id, valid_from));
 DROP TRIGGER IF EXISTS fact_writes_insert;
 DROP TRIGGER IF EXISTS fact_writes_update;
 DROP TRIGGER IF EXISTS fact_writes_delete;
@@ -310,7 +310,8 @@ def _fact_link(row: sqlite3.Row) -> FactLink:
 def _affirmation(row: sqlite3.Row) -> Affirmation:
     return Affirmation(affirmation_id=row["id"], space=row["space"], fact_id=row["fact_id"],
                        valid_from=row["valid_from"], recorded_at=row["recorded_at"], confidence=row["confidence"],
-                       source_episode_id=row["source_episode_id"], origin=row["origin"], quote=row["quote"])
+                       source_episode_id=row["source_episode_id"], origin=row["origin"], quote=row["quote"],
+                       links=read_links(json.loads(row["links"])))
 
 
 def _fact(row: sqlite3.Row) -> Fact:
@@ -770,9 +771,9 @@ class SqliteDocumentStore:
     async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
         self.conn.execute(
             "INSERT OR IGNORE INTO fact_affirmations (space, fact_id, valid_from, recorded_at, confidence,"
-            " source_episode_id, origin, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " source_episode_id, origin, quote, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (new.space, new.fact_id, new.valid_from, new.recorded_at, new.confidence, new.source_episode_id,
-             new.origin, new.quote))
+             new.origin, new.quote, json.dumps(stored_links(new.links))))
         self._commit()
         row = self.conn.execute("SELECT * FROM fact_affirmations WHERE space = ? AND fact_id = ? AND valid_from = ?",
                                 (new.space, new.fact_id, new.valid_from)).fetchone()

@@ -476,8 +476,9 @@ class MemoryEngine:
 
     async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
         """What forgetting the episode would take with it and leave, with
-        nothing removed. The claims and links that cite it are reported,
-        not closed: a source being gone is a fact about the evidence."""
+        nothing removed. The claims, links and kept restatements that cite
+        it are reported, not closed: a source being gone is a fact about
+        the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
 
     async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
@@ -901,11 +902,12 @@ class MemoryEngine:
         origin: str = "stated",
         proposed: bool = False,
         quote: Optional[str] = None,
+        links: Sequence[tuple[str, int]] = (),
     ) -> Fact:
         """Place a claim using the temporal ledger component."""
         return await fact_placement.assert_placed(self._placement_runtime(), space, subject, predicate, object,
             valid_from=valid_from, confidence=confidence, source_episode_id=source_episode_id,
-            origin=origin, proposed=proposed, quote=quote)
+            origin=origin, proposed=proposed, quote=quote, links=links)
 
     async def _place(self, space: str, subject: str, predicate: str, object: str, start: str, exclude_id: Optional[int] = None) -> "_Placement":
         return await fact_placement.place(self.documents, space, subject, predicate, object, start, exclude_id)

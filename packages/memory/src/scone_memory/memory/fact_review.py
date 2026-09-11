@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Protocol, Sequence
 
 from ..core.errors import Conflict, InvalidInput, NotFound
-from ..core.models import BatchDecision, DecisionOutcome, Fact
+from ..core.models import DEPENDENCY_KINDS, BatchDecision, DecisionOutcome, Fact
 from ..core.ports import DocumentStore
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space
@@ -64,12 +64,15 @@ async def approve(runtime: FactReviewRuntime, space: str, fact_id: int, actor: O
     placement = await runtime.place(space, fact.subject, fact.predicate, fact.object, fact.valid_from, exclude_id=fact.fact_id)
     if placement.restates is not None:
         # Approved, the proposal restates what holds; its later start is
-        # kept as an affirmation, as an assertion's would be.
+        # kept as an affirmation, as an assertion's would be, with the
+        # dependency links it was proposed with.
+        links = [(link.kind, link.to_fact) for link in await runtime.documents.fact_links(space, fact.fact_id)
+                 if link.from_fact == fact.fact_id and link.kind in DEPENDENCY_KINDS]
         async with fact_placement.atomic(runtime.documents):
             await fact_placement.affirm(runtime.documents, space, placement.restates, fact.valid_from,
                                         runtime.clock(), confidence=fact.confidence,
                                         source_episode_id=fact.source_episode_id, origin=fact.origin,
-                                        quote=fact.quote)
+                                        quote=fact.quote, links=links)
             await runtime.documents.update_fact(
                 fact.model_copy(update={"status": "declined",
                                         "closed_reason": f"duplicate of fact {placement.restates.fact_id}"}))
@@ -234,12 +237,20 @@ async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reaso
         return fact
     if not fact.in_ledger:
         raise InvalidInput(f"fact {fact_id} is {fact.status}; decline a proposal instead of closing it")
-    closed = fact.model_copy(
-        update={"status": "closed", "valid_until": runtime.clock(), "closed_reason": reason}
-    )
-    await runtime.documents.update_fact(closed)
-    await runtime.documents.bump_revision(space)
-    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor})
+    end = runtime.clock()
+    if parse_rfc3339(end) < parse_rfc3339(fact.valid_from):
+        raise InvalidInput(f"fact {fact_id} begins at {fact.valid_from}, after now; "
+                           "closing it now would end it before it begins")
+    closed = fact.model_copy(update={"status": "closed", "valid_until": end, "closed_reason": reason})
+    # The claim stated again from a day after the close resumes there, as
+    # it would had it been stated after the close.
+    resumes = await fact_placement.resumption(runtime.documents, space, fact, parse_rfc3339(end))
+    async with fact_placement.atomic(runtime.documents):
+        resumed = await fact_placement.write_resumption(runtime.documents, space, resumes) if resumes else None
+        await runtime.documents.update_fact(closed)
+        await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor,
+                                             "resumed": resumed.fact_id if resumed else None})
     return closed
 
 

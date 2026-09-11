@@ -817,8 +817,9 @@ status 2 and the option named:
 Asserting a claim that already holds returns the fact that holds
 (`restated`). When the restatement starts on a later day than that fact,
 the day is kept as an affirmation. It carries the assertion's
-confidence, origin, source and quote, and the space's revision moves
-once; saying the same again moves nothing. Readers still see one fact.
+confidence, origin, source and quote, and the facts it extends or was
+derived from. The space's revision moves once; saying the same again
+moves nothing. Readers still see one fact.
 
 The affirmation matters when a backfill arrives afterwards with another
 object and cuts the fact short before that day. Told Acme from 2020,
@@ -828,18 +829,41 @@ Acme again from 2023, then Globex from 2021:
   2023, and Acme again from 2023;
 - the resumed Acme ends where the first one ended and keeps any
   exclusion;
-- its evidence is the restatement's;
-- later affirmations move to it.
+- its evidence is the restatement's, and it rests on the restatement's
+  own premises, not on the first fact's;
+- later affirmations move to it, with their premises.
+
+Only an affirmation inside the fact it restates resumes. One at or past
+where that fact ended resumes nothing, since the claim would end before
+it began.
+
+A person's close works the same way. Closing Acme now (2025) when it was
+stated again from 2030 ends it now, and the claim resumes in 2030, just
+as it would had it been stated after the close. The `fact_close` event
+names the resumed fact (`resumed`). A restatement from the moment of the
+close ends with it, since the close is the later word. A fact that has
+not begun cannot be closed now: it would end before it begins.
 
 The same history told in any order leaves the same partition of time;
 a property test checks random histories in random orders. An approved
-proposal that restates what holds is kept as an affirmation too.
+proposal that restates what holds is kept as an affirmation too, with
+what the proposal extends or was derived from.
 
 All five document stores keep affirmations (`fact_affirmations`), and
-archives carry them. SQLite adds the table without changing the shared
-schema version, so older readers ignore it. On SQLite, a placement's
-writes commit together or not at all. The other stores write them in
-turn, as before. The Rust core does not keep affirmations yet.
+archives carry them with their premises renamed to the new ids. A
+premise missing from the archive is dropped and counted in
+`links_skipped`. Importing an affirmation the store already keeps counts
+it in `affirmations_skipped`, and an import that adds any moves the
+revision. SQLite adds the table without changing the shared schema
+version, so older readers ignore it. On SQLite and PostgreSQL, a
+placement's writes commit together or not at all. The other stores
+write them in turn, as before. The Rust core does not keep affirmations
+yet.
+
+Forgetting a source leaves its affirmations standing, as it leaves
+claims. `impact` and `forget` name them in `affirmations_citing`: an
+affirmation that later resumes as a fact brings the forgotten source's
+id and quote with it.
 
 ### How the ledger is read
 
