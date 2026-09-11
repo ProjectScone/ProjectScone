@@ -90,8 +90,17 @@ Directly hidden runs (`w:vanish`) are omitted; inherited style visibility is not
 resolved. Formatting properties do not supply text or tabs. Word ruby and Excel
 phonetic hints are omitted while their base text remains. Word nonbreaking
 hyphens and position tabs remain in extracted text. This is a text view, not a
-rendered preview; comments, footnotes and other separate DOCX parts are not yet
-extracted.
+rendered preview; headers, footers and text-box layout remain open coverage gaps.
+
+Referenced DOCX footnotes, endnotes and comments are extracted after the main
+body, in first-reference order. Each part is emitted once, with its `member`,
+`content_role`, note/comment ID and first current `parent_locator`; this does not
+enumerate every cross-reference or the full range covered by a comment. Comments
+also retain available author, date and initials. Deleted and hidden references,
+unreferenced annotations and separator notes do not become searchable content.
+Current-text filtering also applies inside notes. Dangling, ambiguous and invalid
+part references are rejected. All extracted parts share the document's text and
+segment budgets, and nested reference locators are bounded.
 
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths

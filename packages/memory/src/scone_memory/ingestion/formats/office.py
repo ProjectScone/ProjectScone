@@ -6,6 +6,7 @@ interpreted. Repeated ODS cells/rows carry repeat metadata rather than expanding
 """
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Iterator
 from pathlib import PurePosixPath
 import posixpath
@@ -43,12 +44,19 @@ _RUN_METADATA = frozenset(
     '{http://purl.oclc.org/ooxml/spreadsheetml/main}rPh',
 })
 _WORD_RUNS = frozenset(f'{{{namespace}}}r' for namespace in _WORD_NAMESPACES)
+_WORD_REFERENCES = {
+    f'{{{namespace}}}{tag}': kind
+    for namespace in _WORD_NAMESPACES
+    for tag, kind in (('footnoteReference', 'footnote'), ('endnoteReference', 'endnote'),
+                      ('commentRangeStart', 'comment'), ('commentReference', 'comment'))
+}
 _RUN_CHARACTERS = {'tab': '\t', 'ptab': '\t', 'br': '\n', 'cr': '\n', 'noBreakHyphen': '\u2011'}
 _PACKAGE_RELATIONSHIPS = '{http://schemas.openxmlformats.org/package/2006/relationships}'
-_MAIN_PART_TYPES = frozenset({
-    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
-    'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument',
+_OFFICE_RELATIONSHIP_NAMESPACES = frozenset({
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'http://purl.oclc.org/ooxml/officeDocument/relationships',
 })
+_MAIN_PART_TYPES = frozenset(namespace + '/officeDocument' for namespace in _OFFICE_RELATIONSHIP_NAMESPACES)
 
 
 def _local(tag: str) -> str:
@@ -103,6 +111,11 @@ class _Output:
 
 
 def _resolve(source: str, target: str) -> str:
+    if '?' in target or '#' in target:
+        raise InvalidInput('document relationship cannot have a query or fragment')
+    if (any(ord(character) <= 32 or ord(character) == 127 for character in target)
+            or any(ord(character) < 32 or ord(character) == 127 for character in unquote(target))):
+        raise InvalidInput('document relationship contains invalid whitespace or controls')
     parsed = urlsplit(target)
     if parsed.scheme or parsed.netloc or parsed.query or '\\' in target or not parsed.path:
         raise InvalidInput('document relationship is not a local archive member')
@@ -115,19 +128,32 @@ def _resolve(source: str, target: str) -> str:
     return resolved
 
 
+def _relationship_entries(bundle: SafeArchive, path: str) -> Iterator[Element]:
+    root = bundle.xml(path)
+    if root.tag != _PACKAGE_RELATIONSHIPS + 'Relationships':
+        raise InvalidInput('OOXML has invalid package relationships')
+    identifiers: set[str] = set()
+    for entry in root:
+        if entry.tag != _PACKAGE_RELATIONSHIPS + 'Relationship':
+            continue
+        identifier = entry.get('Id', '')
+        if not identifier or identifier in identifiers:
+            raise InvalidInput('OOXML has invalid package relationship identifiers')
+        identifiers.add(identifier)
+        yield entry
+
+
 def _relationships(bundle: SafeArchive, source: str) -> dict[str, tuple[str, str]]:
     path = PurePosixPath(source)
     relpath = str(path.parent / '_rels' / (path.name + '.rels'))
     if relpath not in bundle.names:
         return {}
     result: dict[str, tuple[str, str]] = {}
-    for entry in _elements(bundle.xml(relpath), 'Relationship'):
-        identifier = entry.get('Id', '')
-        if not identifier or identifier in result:
-            raise InvalidInput('document contains invalid relationship identifiers')
-        if entry.get('TargetMode') == 'External':
+    for entry in _relationship_entries(bundle, relpath):
+        if entry.get('TargetMode', 'Internal') != 'Internal':
             continue
-        result[identifier] = (entry.get('Target', ''), entry.get('Type', '').rsplit('/', 1)[-1])
+        namespace, _, kind = entry.get('Type', '').rpartition('/')
+        result[entry.get('Id', '')] = (entry.get('Target', ''), kind if namespace in _OFFICE_RELATIONSHIP_NAMESPACES else '')
     return result
 
 
@@ -141,31 +167,14 @@ def _related(source: str, relations: dict[str, tuple[str, str]], identifier: str
 def _main_part(bundle: SafeArchive) -> str:
     if '_rels/.rels' not in bundle.names:
         raise InvalidInput('OOXML is missing its package relationships')
-    root = bundle.xml('_rels/.rels')
-    if root.tag != _PACKAGE_RELATIONSHIPS + 'Relationships':
-        raise InvalidInput('OOXML has invalid package relationships')
-    identifiers: set[str] = set()
-    candidates: list[Element] = []
-    for relation in root:
-        if relation.tag != _PACKAGE_RELATIONSHIPS + 'Relationship':
-            continue
-        identifier = relation.get('Id', '')
-        if not identifier or identifier in identifiers:
-            raise InvalidInput('OOXML has invalid package relationship identifiers')
-        identifiers.add(identifier)
-        if relation.get('Type') in _MAIN_PART_TYPES:
-            candidates.append(relation)
+    candidates = [relation for relation in _relationship_entries(bundle, '_rels/.rels')
+                  if relation.get('Type') in _MAIN_PART_TYPES]
     if len(candidates) != 1:
         raise InvalidInput('OOXML requires exactly one main document relationship')
     selected = candidates[0]
     if selected.get('TargetMode', 'Internal') != 'Internal':
         raise InvalidInput('OOXML main document relationship must be internal')
     target = selected.get('Target', '')
-    if '?' in target or '#' in target:
-        raise InvalidInput('OOXML main document relationship cannot have a query or fragment')
-    if (any(ord(character) <= 32 or ord(character) == 127 for character in target)
-            or any(ord(character) < 32 or ord(character) == 127 for character in unquote(target))):
-        raise InvalidInput('OOXML main document relationship contains invalid whitespace or controls')
     return _resolve('', target)
 
 
@@ -219,24 +228,108 @@ def _run_text(root: Element, output: _Output) -> str:
 
 def _table(root: Element, output: _Output, locator: str) -> None:
     for row_number, row in enumerate((child for child in root if _local(child.tag) == 'tr'), 1):
-        text = output.join((output.join((_run_text(paragraph, output) for paragraph in _elements(cell, 'p')), '\n') for cell in row if _local(cell.tag) == 'tc'), '\t')
-        output.add(text, f'{locator}/row:{row_number}')
+        output.add(_row_text(row, output), f'{locator}/row:{row_number}')
+
+
+def _row_text(row: Element, output: _Output) -> str:
+    return output.join((output.join((_run_text(paragraph, output) for paragraph in _elements(cell, 'p')), '\n')
+                        for cell in row if _local(cell.tag) == 'tc'), '\t')
+
+
+def _word_content(
+    root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+) -> Iterator[tuple[Element, str]]:
+    _prune_run_metadata(root, output)
+    paragraphs = tables = 0
+    for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
+        if block.tag in _WORD_REFERENCES:
+            yield block, prefix.rstrip('/') or 'body'
+            continue
+        if _local(block.tag) == 'tbl':
+            tables += 1
+            for number, row in enumerate((child for child in block if _local(child.tag) == 'tr'), 1):
+                locator = f'{prefix}table:{tables}/row:{number}'
+                output.add(_row_text(row, output), locator, metadata)
+                yield row, locator
+        else:
+            paragraphs += 1
+            locator = f'{prefix}paragraph:{paragraphs}'
+            output.add(_run_text(block, output), locator, metadata)
+            yield block, locator
+
+
+def _word_attribute(element: Element, name: str, default: str = '') -> str:
+    namespace = element.tag.rsplit('}', 1)[0] + '}'
+    return element.get(namespace + name, default)
+
+
+def _word_note_id(element: Element) -> str:
+    value = _word_attribute(element, 'id')
+    if re.fullmatch(r'[+-]?[0-9]{1,32}', value) is None:
+        raise InvalidInput('DOCX contains an invalid note or comment identifier')
+    return str(int(value))
+
+
+def _word_note_part(
+    bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]], kind: str,
+) -> tuple[str, dict[str, Element]]:
+    identifiers = [key for key, (_, relationship_kind) in relations.items() if relationship_kind == kind + 's']
+    if len(identifiers) != 1:
+        raise InvalidInput('DOCX reference requires exactly one note or comment relationship')
+    path = _related(source, relations, identifiers[0], kind + 's')
+    root = bundle.xml(path)
+    if root.tag not in {f'{{{namespace}}}{kind}s' for namespace in _WORD_NAMESPACES}:
+        raise InvalidInput('DOCX note or comment relationship has the wrong part type')
+    entry_tag = root.tag[:-1]
+    entries: dict[str, Element] = {}
+    for entry in root:
+        identifier = _word_note_id(entry) if entry.tag == entry_tag else None
+        if identifier is None:
+            continue
+        if identifier in entries:
+            raise InvalidInput('DOCX contains duplicate note or comment identifiers')
+        entries[identifier] = entry
+    return path, entries
 
 
 def _docx(bundle: SafeArchive, output: _Output) -> None:
-    root = bundle.xml(_main_part(bundle))
+    source = _main_part(bundle)
+    root = bundle.xml(source)
     body = _child(root, 'body')
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
-    _prune_run_metadata(body, output)
-    paragraphs = tables = 0
-    for block in _blocks(body, {'p', 'tbl'}):
-        if _local(block.tag) == 'tbl':
-            tables += 1
-            _table(block, output, f'table:{tables}')
-        else:
-            paragraphs += 1
-            output.add(_run_text(block, output), f'paragraph:{paragraphs}')
+    relations = _relationships(bundle, source)
+    parts: dict[str, tuple[str, dict[str, Element]]] = {}
+    emitted: set[tuple[str, str]] = set()
+    pending = deque([(body, '', {'member': source})])
+    while pending:
+        content, prefix, metadata = pending.popleft()
+        for block, locator in _word_content(content, output, prefix, metadata):
+            for reference in block.iter():
+                output.check()
+                kind = _WORD_REFERENCES.get(reference.tag)
+                if kind is None:
+                    continue
+                identifier = _word_note_id(reference)
+                if (kind, identifier) in emitted:
+                    continue
+                if kind not in parts:
+                    parts[kind] = _word_note_part(bundle, source, relations, kind)
+                path, entries = parts[kind]
+                note = entries.get(identifier)
+                if note is None or _word_attribute(note, 'type', 'normal') != 'normal':
+                    raise InvalidInput('DOCX reference has no ordinary note or comment target')
+                emitted.add((kind, identifier))
+                details = {'member': path, 'content_role': kind, 'parent_locator': locator,
+                           'comment_id' if kind == 'comment' else 'note_id': identifier}
+                if kind == 'comment':
+                    for key in ('author', 'date', 'initials'):
+                        if value := _word_attribute(note, key):
+                            details[key] = value
+                suffix = f'/{kind}:{identifier}/'
+                if len(locator) + len(suffix) > 4096:
+                    raise InvalidInput('document source locator exceeds its limit')
+                pending.append((note, locator + suffix, details))
 
 
 def _xlsx(bundle: SafeArchive, output: _Output) -> None:

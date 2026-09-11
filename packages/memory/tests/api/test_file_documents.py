@@ -88,6 +88,38 @@ async def test_office_annotation_roles_survive_indexing_and_source_citations(ser
     assert (await client.get(evidence.json()['download_path'])).content == raw
 
 
+async def test_docx_note_citation_retains_relocated_source_part_and_original(service):
+    from ..ingestion.test_docx_parts import document, relation
+    from ..ingestion.test_office_formats import W
+
+    client, engine = service
+    raw = document('<w:p><w:r><w:t>Revenue grew 4%.</w:t><w:footnoteReference w:id="2"/></w:r></w:p>',
+        relationships=relation('footnotes', '../notes/financial.xml'), extra={
+            'notes/financial.xml': f'<w:footnotes xmlns:w="{W}"><w:footnote w:id="2"><w:p><w:r><w:t>Unaudited café estimate.</w:t></w:r></w:p></w:footnote></w:footnotes>',
+        })
+    uploaded = await client.post('/v1/attachments', content=raw,
+        headers={'content-type': 'application/octet-stream', 'x-filename': 'report.docx'})
+    assert uploaded.status_code == 200, uploaded.text
+    indexed = await client.post('/v1/documents', json={'attachment_id': uploaded.json()['attachment_id']})
+    assert indexed.status_code == 200, indexed.text
+    episode_id = indexed.json()['added']['episode_id']
+    episode = await engine.episode('alpha', episode_id)
+    assert episode.content == 'Revenue grew 4%.\n\nUnaudited café estimate.'
+    recalled = (await client.get('/v1/recall', params={'q': 'Unaudited café estimate'})).json()['items']
+    chunk = next(item for item in recalled if item['episode_id'] == episode_id)
+    evidence = await client.get(f'/v1/episodes/{episode_id}/document',
+        params={'chunk_id': chunk['chunk_id']}, headers={'authorization': 'Bearer read'})
+    assert evidence.status_code == 200, evidence.text
+    note = next(segment for segment in evidence.json()['segments'] if segment['metadata'].get('content_role') == 'footnote')
+    assert note['text'] == 'Unaudited café estimate.'
+    assert note['locator'] == 'paragraph:1/footnote:2/paragraph:1'
+    assert note['metadata'] == {
+        'member': 'notes/financial.xml', 'content_role': 'footnote',
+        'parent_locator': 'paragraph:1', 'note_id': '2',
+    }
+    assert (await client.get(evidence.json()['download_path'])).content == raw
+
+
 @pytest.mark.parametrize('first_name', [None, 'plan.txt'])
 async def test_extraction_filename_overrides_first_upload_label_without_rewriting_original(service, first_name):
     client, _ = service
