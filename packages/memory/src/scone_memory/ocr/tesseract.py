@@ -30,7 +30,10 @@ def png_dimensions(image: bytes, max_pixels: int) -> tuple[int, int]:
 
 def parse_tsv(raw: bytes, *, width: int, height: int, max_regions: int, engine: str) -> OcrResult:
     try:
-        rows = raw.decode('utf-8').splitlines()
+        rows = raw.decode('utf-8').split('\n')
+        if rows and rows[-1] == '':
+            rows.pop()
+        rows = [row.removesuffix('\r') for row in rows]
         if not rows or rows[0] != HEADER:
             raise ValueError('invalid header')
         regions: list[OcrRegion] = []
@@ -83,6 +86,6 @@ class TesseractOcr:
             raise InvalidInput('OCR region limit must be between 1 and 50000')
         raw = await run_bounded([self.executable, 'stdin', 'stdout', '-l', self.language,
             '--psm', str(self.page_segmentation), 'tsv'], image, timeout=timeout_seconds,
-            max_output=min(8_000_000, max_regions * 1024 + 4096))
+            max_output=min(8_000_000, max_regions * 1024 + 4096), label='OCR process')
         return parse_tsv(raw, width=width, height=height, max_regions=max_regions,
             engine=f'tesseract:{self.language}:psm{self.page_segmentation}')

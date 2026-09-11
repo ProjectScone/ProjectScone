@@ -4,14 +4,13 @@ from __future__ import annotations
 import asyncio
 from importlib.util import find_spec
 import json
-import sys
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import InvalidInput
 from ..ocr.types import OcrRegion
-from ..ocr.process import run_bounded
+from ..ocr.process import python_worker, run_bounded
 
 
 class PdfLimits(BaseModel):
@@ -73,11 +72,11 @@ class PypdfParser:
             raise InvalidInput('input does not have a PDF header')
         if find_spec('pypdf') is None:
             raise InvalidInput('PDF parsing requires the optional scone-memory[pdf] extra')
-        output = await run_bounded([
-            sys.executable, '-m', 'scone_memory.ingestion._pdf_worker', limits.model_dump_json(),
+        output = await run_bounded(python_worker(
+            'scone_memory.ingestion._pdf_worker', limits.model_dump_json(),
             *(['--allow-empty'] if allow_empty else []),
             *(['--metadata-only'] if metadata_only else []),
-        ], data, timeout=limits.timeout_seconds,
+        ), data, timeout=limits.timeout_seconds, label='PDF parser',
             max_output=limits.max_text_bytes * 6 + limits.max_pages * 2048 + 4096)
         try:
             envelope = json.loads(output)

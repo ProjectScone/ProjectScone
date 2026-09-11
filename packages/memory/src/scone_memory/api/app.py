@@ -30,7 +30,7 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
-from . import pdf_documents
+from . import file_documents, pdf_documents
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -329,6 +329,7 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
+            "documents.files": True, "documents.provenance": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -351,6 +352,7 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
+    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:

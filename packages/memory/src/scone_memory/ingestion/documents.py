@@ -81,6 +81,8 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
         parser=parsed.parser, pages=parsed.pages)
     encoded = manifest.model_dump_json(exclude=None if has_ocr else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
+    if len(encoded) > memory.max_attachment_bytes:
+        raise InvalidInput('PDF manifest exceeds its attachment byte limit')
     # Include actual output and parser version: new source bytes or new parser
     # output must never inherit another source's deduplicated episode metadata.
     identity = f'pdf-v1:{_sha(data)}:{_sha(encoded)}'

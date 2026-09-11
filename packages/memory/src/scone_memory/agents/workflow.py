@@ -58,6 +58,15 @@ class WorkflowResult:
     reused_steps: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WorkflowStatus:
+    status: str
+    completed_steps: tuple[str, ...]
+    inflight: str | None
+    attempts: dict[str, int]
+    error_class: str | None
+
+
 def _name(value: str) -> None:
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise WorkflowError('invalid_identifier')
@@ -244,6 +253,31 @@ class WorkflowRunner:
         payload: JSONValue = {'scope': scope, 'inputs': inputs, 'completed': state['results']}
         clean = cast(dict[str, JSONValue], _copy(payload, self._maximum))
         return StepContext(run_id, space, cast(dict[str, JSONValue], clean['scope']), clean['inputs'], cast(dict[str, JSONValue], clean['completed']))
+
+    def status(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowStatus | None:
+        """Read committed progress with the same binding as run; expose no source text."""
+        _name(run_id)
+        _name(space)
+        if self._closed:
+            raise WorkflowError('closed')
+        if not isinstance(scope, Mapping):
+            raise WorkflowError('invalid_payload')
+        binding: JSONValue = {'space': space, 'scope': dict(scope), 'inputs': inputs, 'revision': self._revision}
+        signature = hashlib.sha256(_encode(binding, self._maximum)).hexdigest()
+        token = hmac.new(self._key, run_id.encode(), hashlib.sha256).hexdigest()
+        try:
+            row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (token,)).fetchone()
+        except sqlite3.Error:
+            raise WorkflowError('journal_unavailable') from None
+        if row is None:
+            return None
+        state = cast(dict[str, JSONValue], json.loads(self._unseal(token, row[0])))
+        if state['binding'] != signature:
+            raise WorkflowError('binding_mismatch')
+        results = cast(dict[str, JSONValue], state['results'])
+        return WorkflowStatus(str(state['status']), tuple(s.step_id for s in self._steps if s.step_id in results),
+                              cast(str | None, state['inflight']), dict(cast(dict[str, int], state['attempts'])),
+                              cast(str | None, state['error_class']))
 
     async def run(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
         _name(run_id)

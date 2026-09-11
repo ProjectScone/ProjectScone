@@ -13,3 +13,18 @@ __all__ += ["ImageAttribute", "ImageContext", "ImageEntity", "ImageIngested", "I
 
 from .image_html import HtmlImageContext, image_contexts_from_html
 __all__ += ["HtmlImageContext", "image_contexts_from_html"]
+
+from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
+from .formats.registry import BuiltinDocumentParser, DocumentParser
+from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument
+
+__all__ += ['DocumentIngested', 'DocumentProvenance', 'document_provenance', 'ingest_document',
+            'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'ParsedDocument',
+            'DocumentIngestionWorkflow']
+
+
+def __getattr__(name: str) -> object:
+    if name == 'DocumentIngestionWorkflow':
+        from .file_workflow import DocumentIngestionWorkflow
+        return DocumentIngestionWorkflow
+    raise AttributeError(name)

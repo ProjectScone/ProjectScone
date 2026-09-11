@@ -101,6 +101,15 @@ ATTACHMENT_TYPES = (
     "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
     "application/pdf", "application/json", "text/plain", "text/markdown", "text/csv",
     "audio/mpeg", "audio/wav", "audio/webm", "video/mp4", "video/webm",
+    "application/octet-stream", "text/html", "application/xml", "text/xml", "application/x-ndjson",
+    "text/tab-separated-values", "message/rfc822", "application/rtf", "application/vnd.ms-outlook",
+    "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation", "application/epub+zip",
 )
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024

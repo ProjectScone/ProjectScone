@@ -68,6 +68,11 @@ deduplication identity remain unchanged. Existing v1 manifests stay readable.
 
 - PDF rendering and Tesseract run in separate child processes; there is no shell
   interpolation. Tesseract's language selection cannot inject paths or flags.
+- Python workers use isolated startup and this installation's package root,
+  excluding the working directory and inherited `PYTHONPATH`. Child processes
+  receive an allowlist of execution, locale, temporary-directory and configured
+  Tesseract/converter settings, rather than the server's entire environment.
+  Rendered PNGs record their actual DPI for the recognizer.
 - The whole document has one wall deadline. Timeout or caller cancellation stops
   processing before ingestion writes. POSIX workers run in dedicated process
   groups, so wrapper descendants are terminated too. On Windows only direct child
@@ -76,6 +81,9 @@ deduplication identity remain unchanged. Existing v1 manifests stay readable.
   recognized regions per page. DPI is bounded to 72–300; the region ceiling is
   50,000. Rendering checks dimensions before allocating the bitmap. Input, output,
   extracted text, page counts and subprocess output have explicit bounds.
+  The serialized provenance manifest must fit the attachment byte limit; direct
+  ingestion checks it before retaining the original. Recognition-provider
+  timeouts and invalid results are classified separately from document expiry.
 - Pages run sequentially, limiting simultaneous raster allocations. These bounds
   are not a native-library memory quota or OS sandbox. Compressed PDF/image inputs
   still require patched dependencies and deployment-level memory/concurrency

@@ -49,7 +49,9 @@
       "integrity.read": true,
       "profile.read": true,
       "recall.structural_context": true,
-      "recall.multi_hop": true
+      "recall.multi_hop": true,
+      "documents.files": true,
+      "documents.provenance": true
     }
   }
 }

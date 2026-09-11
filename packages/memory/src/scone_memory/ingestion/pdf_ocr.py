@@ -5,20 +5,26 @@ import asyncio
 from importlib.util import find_spec
 import json
 import logging
-import sys
 import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..core.errors import InvalidInput
-from ..ocr.process import run_bounded
+from ..ocr.process import python_worker, run_bounded
 from ..ocr.tesseract import png_dimensions
 from ..ocr.types import OcrEngine, OcrResult
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfTextRegion, PypdfParser, validate_pdf
 
 
 logger = logging.getLogger(__name__)
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise InvalidInput('PDF OCR exceeded its wall time limit')
+    return remaining
 
 
 class OcrPdfOptions(BaseModel):
@@ -94,15 +100,23 @@ class OcrPdfParser:
         if find_spec('pypdfium2') is None:
             raise InvalidInput('PDF OCR rendering requires scone-memory[pdf-ocr]')
         payload = json.dumps({'page': page, 'dpi': self.options.dpi, 'max_pixels': self.options.max_pixels})
-        image = await run_bounded([sys.executable, '-m', 'scone_memory.ingestion._pdf_render_worker', payload],
-            data, timeout=deadline - time.monotonic(), max_output=80_000_000)
+        image = await run_bounded(python_worker('scone_memory.ingestion._pdf_render_worker', payload),
+            data, timeout=_remaining(deadline), max_output=80_000_000, label='PDF renderer')
         if image.startswith(b'{'):
             raise InvalidInput(str(json.loads(image).get('error', 'PDF rendering failed')))
         dimensions = png_dimensions(image, self.options.max_pixels)
         started = time.monotonic()
-        result = await self.engine.recognize(image, max_pixels=self.options.max_pixels,
-            max_regions=self.options.max_regions, timeout_seconds=max(.000001, deadline - time.monotonic()))
-        result = OcrResult.model_validate_json(result.model_dump_json())
+        try:
+            result = await self.engine.recognize(image, max_pixels=self.options.max_pixels,
+                max_regions=self.options.max_regions, timeout_seconds=_remaining(deadline))
+        except TimeoutError as error:
+            raise InvalidInput('PDF OCR recognition provider timed out') from error
+        if not isinstance(result, OcrResult):
+            raise InvalidInput('OCR recognizer returned invalid output')
+        try:
+            result = OcrResult.model_validate_json(result.model_dump_json(warnings=False))
+        except (ValidationError, ValueError, TypeError) as error:
+            raise InvalidInput('OCR recognizer returned invalid output') from error
         logger.debug('PDF OCR page=%d engine=%s regions=%d recognition_ms=%.1f',
             page, result.engine, len(result.regions), (time.monotonic() - started) * 1000.)
         if (result.width, result.height) != dimensions or len(result.regions) > self.options.max_regions:
