@@ -21,6 +21,7 @@ async def service():
     ('launch.csv', b'task,day\nlaunch,Friday\n', 'row:2'),
     ('launch.html', b'<title>Launch</title><p>Friday launch</p>', 'line:'),
     ('launch.md', b'# Launch\nFriday\n', 'line:'),
+    ('launch.ipynb', b'{"nbformat":4,"cells":[{"cell_type":"markdown","source":"Friday launch"}]}', '#/cells/0/source'),
 ])
 async def test_upload_index_recall_cite_repeat_and_delete(service, filename, raw, locator):
     client, engine = service
@@ -54,7 +55,7 @@ async def test_document_boundary_rejects_oversize_extra_fields_and_reports_forma
     response = await client.get('/v1/documents/formats')
     assert response.status_code == 200
     formats = response.json()['formats']
-    for suffix in ('.docx', '.xlsx', '.pptx', '.json', '.csv', '.eml', '.epub'):
+    for suffix in ('.docx', '.xlsx', '.pptx', '.json', '.csv', '.eml', '.epub', '.ipynb'):
         assert suffix in formats
     assert (await client.post('/v1/documents', content=b'x'*4097)).status_code == 413
     assert (await client.post('/v1/documents', json={'attachment_id': 'a'*64, 'url': 'http://example.com'})).status_code == 400

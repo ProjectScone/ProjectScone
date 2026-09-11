@@ -26,7 +26,7 @@ FILE_MEDIA_TYPES = {
     '.xlsb': 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
     '.odt': 'application/vnd.oasis.opendocument.text', '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
     '.odp': 'application/vnd.oasis.opendocument.presentation', '.epub': 'application/epub+zip',
-    '.pdf': 'application/pdf', '.json': 'application/json', '.jsonl': 'application/x-ndjson',
+    '.pdf': 'application/pdf', '.json': 'application/json', '.ipynb': 'application/json', '.jsonl': 'application/x-ndjson',
     '.ndjson': 'application/x-ndjson', '.xml': 'application/xml', '.html': 'text/html', '.htm': 'text/html',
     '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822',
     '.msg': 'application/vnd.ms-outlook', '.rtf': 'application/rtf',

@@ -25,7 +25,7 @@ TEXT_EXTENSIONS = frozenset({
     '.swift', '.kt', '.kts', '.scala', '.sh', '.bash', '.zsh', '.sql', '.css',
     '.scss', '.sass', '.less', '.r', '.lua', '.pl', '.ex', '.exs', '.erl', '.hs',
     '.vue', '.svelte', '.graphql', '.gql', '.csv', '.tsv', '.json', '.jsonl',
-    '.ndjson', '.xml', '.html', '.htm', '.eml',
+    '.ndjson', '.xml', '.html', '.htm', '.eml', '.ipynb',
     '.ldjson', '.qmd', '.skill', '.mts', '.cts', '.mjs', '.cjs', '.ejs', '.ets',
     '.groovy', '.gradle', '.cxx', '.cu', '.cuh', '.metal', '.rake', '.luau', '.toc',
     '.zig', '.ps1', '.psm1', '.psd1', '.m', '.mm', '.ml', '.mli', '.jl', '.astro',
@@ -343,6 +343,9 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
         raise InvalidInput('unsupported text document extension')
     if len(data) > limits.max_input_bytes:
         raise InvalidInput('document exceeds its input byte limit')
+    if suffix == '.ipynb':
+        from .notebook import parse_notebook
+        return parse_notebook(data, limits)
     out = _Collector(limits)
     metadata: dict[str, str] = {}
     if suffix == '.eml':

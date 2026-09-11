@@ -46,6 +46,7 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 |---|---|---|
 | Text, Markdown and code files | Line locators | Source text only; no AST or semantic code graph |
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
+| IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible extracted text | Bounded parser; no browser execution, stylesheets or remote resource fetching |
 | DOCX, XLSX, PPTX | Paragraphs/tables, sheet cell references, slides and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
@@ -62,11 +63,20 @@ does not guarantee that every valid variant of a format is supported.
 Media readers must be registered explicitly on a `BuiltinDocumentParser`;
 the default HTTP route does not configure OCR or transcription providers.
 
-The local LlamaIndex reference also advertises HWP, PPTM, MBOX and IPYNB
+The local LlamaIndex reference also advertises HWP, PPTM and MBOX
 readers, which remain gaps. Table understanding, semantic chunking, layout
 reconstruction, directory synchronization and general connector ingestion
 also remain open. The [PDF OCR guide](pdf-ocr.md) describes separate OCR
 geometry, recognition limits and model-quality caveats.
+
+Notebook segments distinguish `cell_source` from `saved_output` in metadata.
+Code, Markdown and raw cells keep their cell index and any valid cell id.
+Saved stream/error outputs and plain-text display results are extracted;
+visible HTML is a fallback when plain text is absent or empty. Alternative
+representations are not indexed twice. `outputs_without_text` counts outputs
+that supply no extractable text, including image-only results. Notebook image
+attachments and interactive widgets remain in the retained original. Saved
+outputs are observations from the file, not results executed or verified by Scone.
 
 ## Durable extraction checkpoints
 

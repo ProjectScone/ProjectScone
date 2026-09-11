@@ -12,6 +12,7 @@ from .text import TEXT_EXTENSIONS
 
 def document_formats() -> dict[str, dict[str, object]]:
     formats = {suffix: {'available': True, 'parser': 'text'} for suffix in TEXT_EXTENSIONS}
+    formats['.ipynb'] = {'available': True, 'parser': 'notebook-v4'}
     formats['.xml'] = {'available': find_spec('defusedxml') is not None, 'parser': 'xml', 'requires': 'documents extra'}
     formats.update({'.'+suffix: {'available': find_spec('defusedxml') is not None,
                                 'parser': 'office-xml', 'requires': 'documents extra'} for suffix in OFFICE_EXTENSIONS})
