@@ -654,14 +654,20 @@ class MemoryEngine:
             await self.check_vectors()
         projection = None
         unavailable = None
+        notes: list[str] = []
         if graph_boost:
             from ..entities.read import load_projection
             from ..entities.service import ProjectionBuilding
 
-            try:
-                projection, _ = await load_projection(self, space, mode="current", as_of=as_of)
+            try:  # an invalid moment degrades the lane here, and recall then refuses it as always
+                projection, read = await load_projection(self, space, mode="current", as_of=as_of)
+                capped = read.get("reasons")
+                if isinstance(capped, list) and capped:
+                    notes.append("entity: graph_read_capped " + " ".join(map(str, capped)))
             except ProjectionBuilding:
                 unavailable = "projection_building"
+            except Exception as error:  # noqa: BLE001 - the optional lane degrades, recall answers
+                unavailable = f"{type(error).__name__}: {error}"
         runtime = RecallRuntime(
             documents=self.documents, vectors=self.vectors, embedder=self.embedder,
             clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
@@ -673,7 +679,8 @@ class MemoryEngine:
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
-                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable)
+                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable,
+                            entity_notes=notes)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its

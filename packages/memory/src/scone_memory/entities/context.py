@@ -35,14 +35,13 @@ from ..core.timeutil import parse_rfc3339
 from ..retrieval.lexical import STOPWORDS
 from .grounding import checked_facts
 from .project import Entity, EntityProjection, Relation
-from .query import Path, paths_between, resolve
+from .query import Path, name_words, paths_between, resolve
 from .read import load_projection
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
     from .view import StatusMode
 
-_WORD = re.compile(r"\w+")
 _LONGEST_NAME = 6  # words
 _MAX_PAIRS = 6
 
@@ -92,7 +91,7 @@ def _one_line(text: object, limit: int = 120) -> str:
 
 
 def _plain(text: str) -> str:
-    return " ".join(_WORD.findall(text.casefold()))
+    return " ".join(name_words(text))
 
 
 _INDEXES: OrderedDict[str, dict[str, tuple[Entity, ...]]] = OrderedDict()
@@ -121,7 +120,7 @@ def mentioned(projection: EntityProjection, question: str, *, limit: int) -> lis
     """Entities a question names: the longest run of its words that is an
     entity's name, at each position, case and punctuation aside."""
     index = name_index(projection)
-    words = _WORD.findall(question.casefold())
+    words = name_words(question)
     found: list[Entity] = []
     position = 0
     while position < len(words) and len(found) < limit:

@@ -140,3 +140,59 @@ async def test_the_bridge_benchmark_shows_the_lane_reaching_the_second_hop():
     report = await run_bridge_benchmark(count=6)
     assert report.second_hop_recall_on > report.second_hop_recall_off
     assert report.first_hop_recall_on >= report.first_hop_recall_off
+
+
+async def test_an_invalid_moment_is_refused_the_same_with_the_lane_on(bridged):
+    from fastapi.testclient import TestClient
+
+    from scone_memory.api import create_app
+
+    engine, _, _, _ = bridged
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        auth = {"Authorization": "Bearer key-a"}
+        for boost in ("false", "true"):
+            response = client.get("/v1/recall", params={"q": QUESTION, "as_of": "yesterday", "graph_boost": boost},
+                                  headers=auth)
+            assert response.status_code == 422, boost
+
+
+async def test_a_store_failure_building_the_graph_degrades_only_the_lane(bridged, monkeypatch):
+    engine, store, _, _ = bridged
+
+    async def broken(*args, **kwargs):
+        raise ConnectionError("store unreachable")
+
+    monkeypatch.setattr(store, "page_facts", broken)  # the graph's ledger read; recall's own reads still work
+    result = await engine.recall("alpha", QUESTION, limit=5, tags=["public"], graph_boost=True)
+    assert result.items and any(note.startswith("entity: ConnectionError") for note in result.degraded)
+
+
+async def test_a_capped_graph_read_is_named_in_degraded(bridged, monkeypatch):
+    from scone_memory.entities import read
+
+    engine, _, _, _ = bridged
+    monkeypatch.setattr(read, "MAX_FACTS", 1)
+    result = await engine.recall("alpha", QUESTION, limit=5, tags=["public"], graph_boost=True)
+    assert "entity: graph_read_capped fact_limit" in result.degraded
+
+
+async def test_symbols_and_accents_that_make_a_name_are_kept():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
+    await engine.assert_fact("alpha", "c++ labs", "based_in", "Lisbon", valid_from=DAY)
+    await engine.assert_fact("alpha", "c# labs", "based_in", "Porto", valid_from=DAY)
+    await engine.assert_fact("alpha", "jose", "knows", "Ana", valid_from=DAY)
+    accented = await engine.remember("alpha", "Jose\u0301 visited the old market alone.")  # decomposed e-acute
+    result = await engine.recall("alpha", "Where is C++ Labs based?", limit=5, graph_boost=True)
+    assert {entity.key for entity in result.entities} == {"c++ labs", "lisbon"}
+    other = await engine.recall("alpha", "Who does Jose know?", limit=10, graph_boost=True)
+    assert not any(item.episode_id == accented.episode_id and "entity" in dict(item.lanes) for item in other.items)
+
+
+
+def test_a_decomposed_accent_belongs_to_its_letter():
+    """Ingestion keeps "Jose\u0301" as written; the lane composes before
+    matching, so it never reads as the name "jose"."""
+    from scone_memory.retrieval.entity_lane import folded, names_pattern
+
+    assert names_pattern({"jose"}).search(folded("Jose\u0301 mentions Chen")) is None
+    assert names_pattern({folded("José")}).search(folded("Jose\u0301 mentions Chen")) is not None

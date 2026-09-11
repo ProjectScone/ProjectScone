@@ -54,17 +54,25 @@ _CLOSING = ".,;:!?\"')]}\u2019\u201d\u00bb"
 _POSSESSIVE = re.compile(r"['\u2019]s$")
 
 
-def variant_fold(name: str) -> str:
-    """A spelling reduced for lookup: compatibility forms unified (NFKC),
-    case folded, opening and closing punctuation and a possessive stripped
-    from their sides of each word, and a leading article or title dropped,
-    so "Dr. Alice Chen" and "ACME, Inc." meet "alice chen" and "acme inc".
-    Lookup only: identity stays with ``entity_key``."""
+def name_words(text: str) -> list[str]:
+    """The words of a name or a question as names are matched: compatibility
+    forms unified (NFKC), case folded, opening and closing punctuation and a
+    possessive stripped from their sides of each word. Symbols inside a
+    word (C#, C++, node.js, ../config) are part of it and kept."""
     words = []
-    for word in unicodedata.normalize("NFKC", name).casefold().split():
+    for word in unicodedata.normalize("NFKC", text).casefold().split():
         word = _POSSESSIVE.sub("", word.lstrip(_OPENING).rstrip(_CLOSING)).rstrip(_CLOSING)
         if word:
             words.append(word)
+    return words
+
+
+def variant_fold(name: str) -> str:
+    """A spelling reduced for lookup: its ``name_words`` with a leading
+    article or title dropped, so "Dr. Alice Chen" and "ACME, Inc." meet
+    "alice chen" and "acme inc". Lookup only: identity stays with
+    ``entity_key``."""
+    words = name_words(name)
     while len(words) > 1 and words[0] in _LEADING:
         words = words[1:]
     return " ".join(words)

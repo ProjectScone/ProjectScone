@@ -48,8 +48,15 @@ response lists the entities searched under `entities`.
 
 The projection is built for it within the graph budget and then kept. If
 it is not ready in time, `degraded` says `entity: projection_building`
-and the other lanes answer. The lane is off by default; with it off,
-recall is unchanged. Advertised as `recall.graph_boost`.
+and the other lanes answer. The same holds if building it fails (a store
+error, say): `degraded` names the error, and the lane is the only thing
+lost. If the projection's read was capped, `degraded` also says
+`entity: graph_read_capped fact_limit`, because the lane then saw only
+part of the ledger. Names are matched by the same words the variant tier
+uses. Symbols that make a name (`C++` against `C#`) and accents
+(`José` against `Jose`, however the accent is encoded) keep names apart.
+The lane is off by default; with it off, recall is unchanged. Advertised
+as `recall.graph_boost`.
 
 On the synthetic bridge set (`bridge-v1`: 20 people, their employers and
 where those are based, with distractors repeating the question's words),

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import re
+import unicodedata
 
 from ..core.models import QueryEntity
 from ..core.ports import DocumentStore, TextFilter
@@ -70,8 +71,20 @@ def lane_entities(projection: EntityProjection, query: str) -> list[QueryEntity]
     return chosen
 
 
+def folded(text: str) -> str:
+    """Composed and case folded, so a decomposed accent is part of its letter
+    and "José" never reads as "Jose"."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def names_pattern(spellings: set[str]) -> re.Pattern[str] | None:
+    """Any of the spellings as a whole word or phrase, longest first."""
+    forms = sorted((spelling for spelling in spellings if spelling), key=lambda spelling: (-len(spelling), spelling))
+    return re.compile("|".join(r"(?<!\w)" + re.escape(form) + r"(?!\w)" for form in forms)) if forms else None
+
+
 def _spellings(entity: Entity) -> set[str]:
-    return {entity.key, entity.label.casefold(), *(form.text.casefold() for form in entity.surface_forms)}
+    return {folded(entity.key), folded(entity.label), *(folded(form.text) for form in entity.surface_forms)}
 
 
 async def entity_lane(documents: DocumentStore, projection: EntityProjection, space: str, query: str, depth: int,
@@ -84,17 +97,15 @@ async def entity_lane(documents: DocumentStore, projection: EntityProjection, sp
     by_id = {entity.entity_id: entity for entity in projection.entities}
 
     def pattern(role: str) -> re.Pattern[str] | None:
-        forms = sorted({spelling for item in chosen if item.role == role
-                        for spelling in _spellings(by_id[item.entity_id]) if spelling},
-                       key=lambda spelling: (-len(spelling), spelling))
-        return re.compile("|".join(r"(?<!\w)" + re.escape(form) + r"(?!\w)" for form in forms)) if forms else None
+        return names_pattern({spelling for item in chosen if item.role == role
+                              for spelling in _spellings(by_id[item.entity_id])})
 
     lane_query = " ".join(dict.fromkeys(item.label for item in chosen))[:MAX_QUERY]
     hits = await documents.search_text(space, lane_query, depth, scope)
     if not hits:
         return [], chosen
     seeds, neighbours = pattern("seed"), pattern("neighbour")
-    texts = {chunk.chunk_id: chunk.text.casefold()
+    texts = {chunk.chunk_id: folded(chunk.text)
              for chunk in await documents.get_chunks(space, [cid for cid, _ in hits])}
     second_hop, first_hop = [], []
     for chunk_id, score in hits:

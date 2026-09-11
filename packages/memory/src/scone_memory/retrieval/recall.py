@@ -78,6 +78,7 @@ async def recall(
     graph_boost: bool = False,
     entity_projection: "EntityProjection | None" = None,
     entity_unavailable: str | None = None,
+    entity_notes: Sequence[str] = (),
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -193,6 +194,7 @@ async def recall(
     entity_hits: list[tuple[int, float]] = []
     query_entities: list[QueryEntity] = []
     if graph_boost:
+        degraded.extend(entity_notes)
         if entity_projection is None:
             degraded.append(f"entity: {entity_unavailable or 'index_unavailable'}")
         else:
