@@ -21,6 +21,10 @@ from .archive import SafeArchive
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 OFFICE_EXTENSIONS = frozenset({'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'epub'})
+_ODF_REVISION_METADATA = frozenset({
+    '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
+    '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
+})
 
 
 def _local(tag: str) -> str:
@@ -327,6 +331,13 @@ def _odf(bundle: SafeArchive, output: _Output, extension: str) -> None:
     content = _child(body, expected)
     if content is None:
         raise InvalidInput('OpenDocument content does not match its extension')
+    for element in content.iter():
+        output.check()
+        if element.tag in _ODF_REVISION_METADATA:
+            # A tail belongs to the surrounding live content, not this subtree.
+            tail = element.tail
+            element.clear()
+            element.tail = tail
     if extension == 'ods':
         _ods(content, output)
         return

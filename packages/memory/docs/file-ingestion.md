@@ -50,6 +50,11 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | HTML | Visible extracted text | Bounded parser; no browser execution, stylesheets or remote resource fetching |
 | DOCX, XLSX, PPTX | Paragraphs/tables, sheet cell references, slides and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
+
+OpenDocument extraction uses current content: `text:tracked-changes` revision
+history and `office:change-info` metadata are omitted. Current text, including
+tracked insertions, remains in its document order. Revision history is not
+emitted as a separate searchable view.
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
