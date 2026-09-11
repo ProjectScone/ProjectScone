@@ -33,12 +33,25 @@ class WorkflowError(Exception):
 
 
 @dataclass(frozen=True)
+class StepCheckpoints:
+    """Opaque work receipts valid only while their owning step attempt runs.
+
+    The journal encrypts bytes and binds keys to the run, invocation and step.
+    Callbacks must validate receipt contents before reuse. This is intermediate
+    work, not a completed step or evidence that an external write succeeded.
+    """
+    get: Callable[[str], bytes | None]
+    put: Callable[[str, bytes], None]
+
+
+@dataclass(frozen=True)
 class StepContext:
     run_id: str
     space: str
     scope: dict[str, JSONValue]
     inputs: JSONValue
     completed: dict[str, JSONValue]
+    checkpoints: StepCheckpoints | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,7 @@ class WorkflowStatus:
     inflight: str | None
     attempts: dict[str, int]
     error_class: str | None
+    checkpoint_count: int = 0
 
 
 def _name(value: str) -> None:
@@ -182,6 +196,7 @@ class WorkflowRunner:
         self._key = key
         self._running = False
         self._closed = False
+        self._checkpoint_attempt: object | None = None
         revision: JSONValue = [{'id': s.step_id, 'version': s.version, 'idempotent': s.idempotent, 'retryable': s.retryable} for s in steps]
         self._revision = hashlib.sha256(_encode(revision, 32768)).hexdigest()
         self._lock_fd = -1
@@ -251,11 +266,54 @@ class WorkflowRunner:
         payload = self._seal(token, _encode(state, self._maximum + 32768))
         self._db.execute('INSERT INTO workflow_runs VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET payload=excluded.payload', (token, payload))
 
-    def _context(self, run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue, state: dict[str, JSONValue]) -> StepContext:
+    def _context(self, run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue, state: dict[str, JSONValue],
+                 checkpoints: StepCheckpoints | None = None) -> StepContext:
         # Fresh copies stop callbacks from mutating future steps or bindings.
         payload: JSONValue = {'scope': scope, 'inputs': inputs, 'completed': state['results']}
         clean = cast(dict[str, JSONValue], _copy(payload, self._maximum))
-        return StepContext(run_id, space, cast(dict[str, JSONValue], clean['scope']), clean['inputs'], cast(dict[str, JSONValue], clean['completed']))
+        return StepContext(run_id, space, cast(dict[str, JSONValue], clean['scope']), clean['inputs'], cast(dict[str, JSONValue], clean['completed']), checkpoints)
+
+    def _checkpoint_count(self, token: str) -> int:
+        return int(self._db.execute('SELECT COUNT(*) FROM workflow_runs WHERE token LIKE ?',
+                                    (token + ':checkpoint:%',)).fetchone()[0])
+
+    def _clear_checkpoints(self, token: str) -> None:
+        self._db.execute('DELETE FROM workflow_runs WHERE token LIKE ?', (token + ':checkpoint:%',))
+
+    def _checkpoints(self, token: str, binding: str, step_id: str) -> StepCheckpoints:
+        attempt = object()
+        self._checkpoint_attempt = attempt
+
+        def identity(key: str) -> str:
+            if not self._running or self._checkpoint_attempt is not attempt:
+                raise WorkflowError('checkpoint_inactive')
+            _name(key)
+            encoded = _encode([binding, step_id, key], 1024)
+            return token + ':checkpoint:' + hmac.new(self._key, encoded, hashlib.sha256).hexdigest()
+
+        def get(key: str) -> bytes | None:
+            identifier = identity(key)
+            row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (identifier,)).fetchone()
+            return None if row is None else self._unseal(identifier, row[0])
+
+        def put(key: str, value: bytes) -> None:
+            identifier = identity(key)
+            if type(value) is not bytes:
+                raise WorkflowError('invalid_checkpoint')
+            if len(value) > 16 * 1024 * 1024:
+                raise WorkflowError('checkpoint_limit')
+            # The run owns the file lock. Budget checks and the following write
+            # cannot race another supported writer to this journal.
+            count, total = self._db.execute(
+                'SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0) FROM workflow_runs WHERE token LIKE ? AND token != ?',
+                (token + ':checkpoint:%', identifier)).fetchone()
+            if count >= 4096 or total + len(value) + 28 > 128 * 1024 * 1024:
+                raise WorkflowError('checkpoint_limit')
+            payload = self._seal(identifier, value)
+            self._db.execute('INSERT INTO workflow_runs VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET payload=excluded.payload',
+                             (identifier, payload))
+
+        return StepCheckpoints(get, put)
 
     def status(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowStatus | None:
         """Read committed progress with the same binding as run; expose no source text."""
@@ -280,7 +338,7 @@ class WorkflowRunner:
         results = cast(dict[str, JSONValue], state['results'])
         return WorkflowStatus(str(state['status']), tuple(s.step_id for s in self._steps if s.step_id in results),
                               cast(str | None, state['inflight']), dict(cast(dict[str, int], state['attempts'])),
-                              cast(str | None, state['error_class']))
+                              cast(str | None, state['error_class']), self._checkpoint_count(token))
 
     async def run(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
         _name(run_id)
@@ -328,6 +386,7 @@ class WorkflowRunner:
         except sqlite3.Error:
             raise WorkflowError('journal_unavailable') from None
         finally:
+            self._checkpoint_attempt = None
             self._running = False
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
 
@@ -345,10 +404,12 @@ class WorkflowRunner:
         if valid is not True:
             state.update(status='sources_invalid', results={}, error_class=None)
             self._save(token, state)
+            self._clear_checkpoints(token)
             raise WorkflowError('sources_invalid')
 
     async def _execute(self, token: str, state: dict[str, JSONValue], run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
         if state['status'] == 'sources_invalid':
+            self._clear_checkpoints(token)
             raise WorkflowError('sources_invalid')
         await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
         results = cast(dict[str, JSONValue], state['results'])
@@ -371,7 +432,8 @@ class WorkflowRunner:
                 attempts[step.step_id] = attempt
                 self._save(token, state)
                 try:
-                    value = await step.run(self._context(run_id, space, scope, inputs, state))
+                    checkpoints = self._checkpoints(token, cast(str, state['binding']), step.step_id)
+                    value = await step.run(self._context(run_id, space, scope, inputs, state, checkpoints))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -380,6 +442,8 @@ class WorkflowRunner:
                     if not step.retryable or attempt == maximum:
                         raise WorkflowError('step_failed') from None
                     continue
+                finally:
+                    self._checkpoint_attempt = None
                 try:
                     clean = _copy(value, self._maximum)
                     # Enforce an aggregate input/scope/results budget.
@@ -395,4 +459,5 @@ class WorkflowRunner:
         await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
         state.update(status='completed', inflight=None, error_class=None)
         self._save(token, state)
+        self._clear_checkpoints(token)
         return WorkflowResult(run_id, 'completed', cast(dict[str, JSONValue], _copy(results, self._maximum)), reused)
