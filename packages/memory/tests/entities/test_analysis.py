@@ -7,6 +7,7 @@ any order give the same communities, ranks and suggestions.
 from __future__ import annotations
 
 import random
+from collections import Counter
 
 import pytest
 
@@ -131,3 +132,25 @@ def test_a_rare_link_between_communities_outranks_a_common_one(funder, funded):
     assert {names[top.subject_id], names[top.object_id]} == {funder.casefold(), funded.casefold()}
     links = [s.links_between_communities for s in analysis.surprising_connections]
     assert links == sorted(links) and links[0] == 1 and set(links) == {1, 3}
+
+
+def test_a_budget_that_strands_a_kept_hub_still_analyses():
+    """A hub heavier than every other entity keeps its place in the budget
+    while all its light leaves fall out, leaving it with no neighbours. The
+    groups around it must still merge over several levels without losing it."""
+    rng, pairs, strength = random.Random(0), [], Counter()
+    for i in range(14):
+        for j in range(i + 1, 14):
+            if rng.random() < 0.2:
+                weight = rng.randint(1, 10) * 10
+                pairs.append((f"person{chr(97 + i)}", f"person{chr(97 + j)}", weight))
+                strength[i] += weight
+                strength[j] += weight
+    pairs += [("hub", f"leaf{chr(97 + n // 26)}{chr(97 + n % 26)}", 1) for n in range(min(strength.values()) + 1)]
+    rows = [fact(0, left, "knows", right) for left, right, weight in pairs for _ in range(weight)]
+    rows = [row.model_copy(update={"fact_id": number}) for number, row in enumerate(rows, 1)]
+    projection = project_entities("alpha", rows, revision=1)
+    analysis = analyze_projection(projection, max_entities=len(strength) + 1)
+    kept = {member for community in analysis.communities for member in community.members}
+    hub = next(entity.entity_id for entity in projection.entities if entity.key == "hub")
+    assert hub in kept and len(kept) == len(strength) + 1 and analysis.coverage.truncated

@@ -141,7 +141,11 @@ def _local_moves(graph: Adjacency) -> tuple[dict[str, str], bool]:
 
 
 def _aggregate(graph: Adjacency, community: dict[str, str]) -> Adjacency:
+    # Every community is a node of the next level, including one with no
+    # links (a kept entity whose neighbours all fell outside the budget).
     merged: Adjacency = defaultdict(lambda: defaultdict(int))
+    for node in graph:
+        merged[community[node]]
     for node, neighbours in graph.items():
         for neighbour, weight in neighbours.items():
             merged[community[node]][community[neighbour]] += weight
