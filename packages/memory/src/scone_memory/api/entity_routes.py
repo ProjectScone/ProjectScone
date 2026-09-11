@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-from ..core.errors import InvalidInput, NotFound
+from ..core.errors import InvalidInput
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_context
@@ -32,7 +32,7 @@ from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
 from ..entities.read import load_projection, read_record
 from ..entities.schema import MAX_BYTES, MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
-from ..entities.report import build_report, render_markdown
+from ..entities.report import render_markdown, report_record
 from ..entities.service import ProjectionBuilding
 from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
 from ..memory.engine import MemoryEngine
@@ -329,12 +329,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         questions worth asking, computed from recorded facts and citing them.
         ``resolution`` sets how fine the communities are; ``exclude_hubs``
         leaves entities above that degree percentile out of the central ranking."""
-        when = _moment(engine, as_of)
-        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
-        view = knowledge_view(projection, mode=status, as_of=when, limit=1, attribute_limit=0, coverage=coverage)
-        report = build_report(projection, analyze_projection(projection, resolution=resolution),
-                              meta=view["projection"], filters={"status": status, "as_of": when},  # type: ignore[arg-type]
-                              coverage=coverage, exclude_hubs=exclude_hubs)
+        report = await report_record(engine, space, status=status, as_of=_moment(engine, as_of), resolution=resolution,
+                                     exclude_hubs=exclude_hubs)
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
         return report

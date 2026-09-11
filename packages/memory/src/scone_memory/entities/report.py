@@ -9,11 +9,15 @@ document a person can read or keep.
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, cast
 
 from .analysis import GraphAnalysis
 from .markdown import literal
 from .project import EntityProjection
+
+if TYPE_CHECKING:
+    from ..memory.engine import MemoryEngine
+    from .view import StatusMode
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -160,3 +164,20 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     if coverage["reasons"]:
         lines.append(f"- Limited by: {literal(', '.join(coverage['reasons']))}. This is a sample, not the whole space.")
     return "\n".join(lines) + "\n"
+
+
+async def report_record(engine: "MemoryEngine", space: str, *, status: "StatusMode" = "current",
+                        as_of: str | None = None, resolution: float = 1.0,
+                        exclude_hubs: float | None = None) -> dict[str, object]:
+    """The report of one view, as every surface answers it: read at one
+    instant, analysed, and labelled with that same instant."""
+    from .analysis import analyze_projection
+    from .read import load_projection
+    from .view import knowledge_view
+
+    when = as_of if as_of is not None else engine.clock()
+    projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+    view = knowledge_view(projection, mode=status, as_of=when, limit=1, attribute_limit=0, coverage=coverage)
+    return build_report(projection, analyze_projection(projection, resolution=resolution),
+                        meta=cast(Mapping[str, object], view["projection"]), filters={"status": status, "as_of": when},
+                        coverage=coverage, exclude_hubs=exclude_hubs)

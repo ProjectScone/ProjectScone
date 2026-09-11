@@ -516,7 +516,18 @@ The MCP server offers the same reads as tools:
 - `memory_graph_schema`: the kinds and predicates the graph holds.
 
 These sit beside the six tools shared with the Rust server, and none of
-them writes. Every surface that asks the graph by name, whether HTTP,
+them writes.
+
+The server also offers read-only resources, which a client can attach
+as context without calling a tool:
+
+- `scone://graph/report`: the knowledge report of the server's space,
+  in Markdown;
+- `scone://graph/schema`: its graph schema, as lines;
+- `scone://{space}/graph/report` and `scone://{space}/graph/schema`: the
+  same for any space by name.
+
+A space name that cannot exist is refused, and the refusal says why. Every surface that asks the graph by name, whether HTTP,
 MCP, the ToolBox or the CLI, shares one set of bounds: 24 names of 1 to
 200 characters, and a question of 1 to 2,000. The graph tools take
 whole numbers only, so `true` or `"5"` is refused, not read as 1 or 5.

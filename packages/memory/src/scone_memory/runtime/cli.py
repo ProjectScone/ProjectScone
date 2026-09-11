@@ -479,14 +479,12 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     Each reads the clock once, so what it shows and the instant it says it
     was read at agree. Exits 1 when a name is ambiguous or unknown."""
     from ..core.timeutil import format_rfc3339, parse_rfc3339
-    from ..entities.analysis import analyze_projection
     from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
     from ..entities.export import export_graph
     from ..entities.read import load_projection
-    from ..entities.report import build_report, render_markdown
+    from ..entities.report import render_markdown, report_record
     from ..entities.schema import MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
     from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
-    from ..entities.view import knowledge_view
 
     space, command = args.space, args.graph_command
     # Refused here as the HTTP routes refuse them, before anything is read;
@@ -548,14 +546,11 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(await schema_record(engine, space, as_of=when, limit=args.limit, max_bytes=args.max_bytes)),
               file=out)
         return 0
-    projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
     if command == "report":
-        view = knowledge_view(projection, mode="current", as_of=when, limit=1, attribute_limit=0, coverage=coverage)
-        report = build_report(projection, analyze_projection(projection, resolution=args.resolution),
-                              meta=view["projection"], filters={"status": "current", "as_of": when},  # type: ignore[arg-type]
-                              coverage=coverage)
+        report = await report_record(engine, space, as_of=when, resolution=args.resolution)
         print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
+    projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
     reasons = coverage.get("reasons") or []
     exported = export_graph(projection, args.format, about={"status": "current", "as_of": when,
                                                            "coverage": {**coverage, "truncated": bool(reasons)}})

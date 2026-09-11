@@ -496,3 +496,24 @@ async def test_graph_tools_take_whole_numbers_only_as_the_toolbox_and_http_do(se
         assert "valid integer" in str(refused)
     else:
         assert result.is_error
+
+
+async def test_the_graph_report_and_schema_are_resources_a_client_can_attach(server):
+    """Read-only context a client can attach without calling a tool: the
+    server space's report and schema, and the same for any space by name."""
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    uris = {str(resource.uri) for resource in await server.list_resources()}
+    templates = {template.uri_template for template in await server.list_resource_templates()}
+    assert {"scone://graph/report", "scone://graph/schema"} <= uris
+    assert {"scone://{space}/graph/report", "scone://{space}/graph/schema"} <= templates
+    report = list(await server.read_resource("scone://graph/report"))[0]
+    assert report.mime_type == "text/markdown" and str(report.content).startswith("# Knowledge report")
+    schema = list(await server.read_resource("scone://graph/schema"))[0]
+    assert str(schema.content).startswith("schema: space default,") and "works_at" in str(schema.content)
+    other = list(await server.read_resource("scone://elsewhere/graph/schema"))[0]
+    assert str(other.content).startswith("schema: space elsewhere,") and "totals: 0 entities" in str(other.content)
+
+
+async def test_a_resource_for_a_space_that_cannot_exist_is_refused(server):
+    with pytest.raises(Exception, match="space"):
+        list(await server.read_resource("scone://BAD%20SPACE/graph/report"))

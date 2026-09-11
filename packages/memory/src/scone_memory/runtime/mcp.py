@@ -28,6 +28,7 @@ import sys
 from typing import Annotated, Awaitable, Callable, Mapping, Optional, Sequence
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictInt
 
@@ -39,6 +40,7 @@ from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
 from ..core.errors import SconeError
 from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
+from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
 
 MAX_CONTENT = 100_000
@@ -415,6 +417,38 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error("max_bytes must be 1024..=64000")
         return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed,
                                                        max_bytes=budget)))
+
+    def readable(space: str) -> str:
+        """A space named in a resource address, refused with the reason."""
+        try:
+            check_space(space)
+        except InvalidInput as refused:
+            raise ResourceError(f"space: {refused}") from None
+        return space
+
+    async def report_markdown(space: str) -> str:
+        return render_markdown(await report_record(engine, readable(space)))
+
+    async def schema_lines_of(space: str) -> str:
+        return schema_text(await schema_record(engine, readable(space), max_bytes=8_000))
+
+    # The report and schema as resources a client can attach as context:
+    # the server's own space at a fixed address, any other by name.
+    @server.resource("scone://graph/report", name="graph-report", mime_type="text/markdown",
+                     description="The knowledge report of the server's space: communities, central entities, "
+                                 "surprising links and questions, each citing its facts.")
+    async def own_report() -> str:
+        return await report_markdown(default_space)
+
+    @server.resource("scone://graph/schema", name="graph-schema", mime_type="text/plain",
+                     description="What the server's space's graph is made of: kinds and predicates.")
+    async def own_schema() -> str:
+        return await schema_lines_of(default_space)
+
+    server.resource("scone://{space}/graph/report", name="space-graph-report", mime_type="text/markdown",
+                    description="The knowledge report of one space.")(report_markdown)
+    server.resource("scone://{space}/graph/schema", name="space-graph-schema", mime_type="text/plain",
+                    description="What one space's graph is made of.")(schema_lines_of)
 
     @tool(server, "memory_pending")
     async def memory_pending(
