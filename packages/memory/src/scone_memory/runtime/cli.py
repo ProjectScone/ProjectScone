@@ -132,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("links", help="show the relations a fact takes part in, from either end")
     p.add_argument("fact_id", type=int)
     sub.add_parser("doctor", help="what references what across the stores, read only: orphans by id, nothing repaired")
+    p = sub.add_parser("vectors", help="which embedder wrote the stored vectors, and whether recall can compare them")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--reembed", action="store_true",
+                        help="re-embed every stored chunk with this embedder and record it as the writer")
+    action.add_argument("--adopt", action="store_true",
+                        help="vouch that vectors stored before writers were recorded came from this embedder")
     p = sub.add_parser("expire", help="forget episodes older than a retention policy (oldest first, bounded); facts never expire")
     p.add_argument("--keep", action="append", default=[], metavar="KIND=DAYS", required=True,
                    help="keep this kind for this many days by the episode's own time (repeatable)")
@@ -586,6 +592,31 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     print(f"  {name}: {', '.join(str(i) for i in found)}", file=out)
             if report.not_inspected:
                 print(f"  not inspected: {', '.join(report.not_inspected)}", file=out)
+        return 0
+
+    if args.command == "vectors":
+        reembedded = None
+        if args.reembed:
+            reembedded = await engine.reembed_vectors()
+        elif args.adopt:
+            await engine.adopt_vector_identity()
+        identity = engine.vector_identity
+        vector_state: dict[str, object] = {
+            "state": identity.state if identity else "unsettled", "writer": identity.writer if identity else None,
+            "recorded": identity.recorded if identity else None, "blocked": engine.vector_block}
+        if reembedded is not None:
+            vector_state.update(spaces=list(reembedded.spaces), chunks=reembedded.chunks,
+                                orphans_removed=reembedded.orphans_removed)
+        if args.json:
+            emit(vector_state)
+        else:
+            print(f"vectors {vector_state['state']}: written by {vector_state['recorded'] or 'unrecorded'}, "
+                  f"this engine writes {vector_state['writer']}", file=out)
+            if reembedded is not None:
+                print(f"  re-embedded {reembedded.chunks} chunk(s) in {len(reembedded.spaces)} space(s); "
+                      f"removed {reembedded.orphans_removed} orphan vector(s)", file=out)
+            if vector_state["blocked"]:
+                print(f"  vector lane off: {vector_state['blocked']}", file=out)
         return 0
 
     if args.command == "expire":

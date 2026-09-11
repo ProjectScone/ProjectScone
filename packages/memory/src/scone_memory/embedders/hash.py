@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import unicodedata
 from typing import Sequence
 
 from ..retrieval.lexical import TOKENIZER_VERSION, tokenize
@@ -14,13 +15,18 @@ class HashEmbedder:
     overlap. Unrelated texts land near-orthogonal, which is why tests
     that need a refusal must not rely on this embedder to trigger it.
 
-    The id names the tokenizer version. A vector is only its hashed
-    tokens, so vectors hashed under different token rules are not
-    comparable and must not pass for the same embedder.
+    The id names the tokenizer version and the Unicode tables it read. A
+    vector is only its hashed tokens, so vectors hashed under different
+    token rules are not comparable and must not pass for the same embedder.
+    Rebuilding costs nothing but time, so a store it wrote under other
+    rules is re-embedded when it opens.
     """
 
+    #: Local, free and deterministic: see memory.vector_identity.
+    cheap_to_rebuild = True
+
     def __init__(self, dim: int = 256) -> None:
-        self.id = f"hash-{dim}-t{TOKENIZER_VERSION}"
+        self.id = f"hash-{dim}-t{TOKENIZER_VERSION}-u{unicodedata.unidata_version}"
         self.dim = dim
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:

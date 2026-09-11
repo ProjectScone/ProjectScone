@@ -9,7 +9,6 @@ import json
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.bench import load_items, run
 from scone_memory.bench.runner import ItemResult, iso_date
-from scone_memory.retrieval.lexical import TOKENIZER_VERSION
 
 
 def item(qid, qtype, question, sessions, answer_ids, dates=None):
@@ -76,7 +75,7 @@ async def test_run_scores_under_the_stated_definitions(tmp_path):
     report = await run(make, items, ks=(1, 2, 3), dataset="unit", progress=lambda n, t: seen.append((n, t)))
     assert seen == [(1, 3), (2, 3), (3, 3)]
     assert report.items == 3 and report.scored == 2, "the abstention item is outside the denominator by default"
-    assert report.errors == 0 and report.embedder == f"hash-256-t{TOKENIZER_VERSION}"
+    assert report.errors == 0 and report.embedder == HashEmbedder(256).id
     # q1: s0 is the only session mentioning Lisbon; q2: s0 and s1 both mention the launch.
     assert report.recall_any[3] == 1.0
     assert report.recall_all[3] == 1.0

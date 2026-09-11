@@ -48,6 +48,8 @@ class RecallRuntime:
     contextual_embeddings: bool = False
     demote_restated: bool = True
     similarity_floor: float | None = None
+    #: Why stored vectors cannot be compared with this embedder's, if so.
+    vector_block: str | None = None
 
 
 def _ms(since: float) -> float:
@@ -143,15 +145,18 @@ async def recall(
     }
 
     vector_lane: list[tuple[int, float]] = []
-    try:
-        t0 = time.perf_counter()
-        [qvec] = await runtime.embedder.embed([query])
-        latency["embed"] = _ms(t0)
-        t0 = time.perf_counter()
-        vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
-        latency["vector"] = _ms(t0)
-    except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
-        degraded.append(f"vectors: {type(e).__name__}: {e}")
+    if runtime.vector_block is not None:
+        degraded.append(f"vectors: {runtime.vector_block}")
+    else:
+        try:
+            t0 = time.perf_counter()
+            [qvec] = await runtime.embedder.embed([query])
+            latency["embed"] = _ms(t0)
+            t0 = time.perf_counter()
+            vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
+            latency["vector"] = _ms(t0)
+        except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
+            degraded.append(f"vectors: {type(e).__name__}: {e}")
 
     if candidate_limit is not None or active_reranker is not None:
         vector_lane = vector_lane[:depth]

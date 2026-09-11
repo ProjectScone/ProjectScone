@@ -414,10 +414,20 @@ class InMemoryVectorIndex:
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
         self.dim: Optional[int] = None
+        self._writer: tuple[str, str] | None = None
 
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
         return sorted(p.chunk_id for p in self._points.values() if p.space == space)
+
+    async def written_by(self) -> tuple[str, str] | None:
+        return self._writer
+
+    async def record_writer(self, writer: str, basis: str) -> None:
+        self._writer = (writer, basis)
+
+    async def spaces_with_vectors(self) -> list[str]:
+        return sorted({p.space for p in self._points.values()})
 
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:

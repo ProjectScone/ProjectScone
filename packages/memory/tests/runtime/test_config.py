@@ -4,7 +4,7 @@ import pytest
 
 from scone_memory import InvalidInput
 from scone_memory.runtime.config import Settings, build_engine, parse_keys
-from scone_memory.retrieval.lexical import TOKENIZER_VERSION
+from scone_memory.embedders.hash import HashEmbedder
 
 
 def test_keys_parse_and_refuse_duplicates():
@@ -30,7 +30,7 @@ async def test_build_engine_wires_the_named_parts(tmp_path):
     added = await engine.remember("default", "wired through the environment")
     assert (await engine.recall("default", "environment")).items[0].episode_id == added.episode_id
     status = await engine.status("default")
-    assert (status.document_store, status.vector_index, status.embedder) == ("sqlite", "memory", f"hash-256-t{TOKENIZER_VERSION}")
+    assert (status.document_store, status.vector_index, status.embedder) == ("sqlite", "memory", HashEmbedder(256).id)
 
 
 def test_missing_url_is_a_configuration_error():

@@ -89,6 +89,47 @@ index on MongoDB and a clock-driven sweep elsewhere. No store migrates
 another build's data: each stamps a schema version and refuses a
 mismatch, SQLite excepted for the one recorded step.
 
+## Which embedder wrote the vectors
+
+A cosine means something only between vectors that one embedder made under
+one set of settings, and a vector's width cannot tell two embedders apart.
+SQLite and in-memory vector indexes record their writer: the embedder id
+plus whether contextual prefixes were embedded. The hash embedder's id also
+names the tokenizer version and Python's Unicode tables, because its vectors
+are hashed tokens. `MemoryEngine.open()` settles `engine.vector_identity`:
+
+| State | Meaning | Vector lane |
+| --- | --- | --- |
+| `verified` | The index records this engine's writer, or held no vectors | on |
+| `rebuilt` | This engine re-embedded every stored chunk and recorded itself | on |
+| `declared` | An operator vouched for vectors stored before writers were recorded | on |
+| `mismatch` | Another writer is recorded | off |
+| `unknown` | Vectors exist and no writer is recorded | off |
+| `unverifiable` | The index cannot record a writer | on, as before |
+
+With the lane off, recall still answers from the lexical lane and reports
+`vectors: embedder mismatch …` or `vectors: embedder unknown …` in `degraded`,
+and semantic duplicate detection refuses rather than comparing. Nothing is
+mixed. The hash embedder is local, free and deterministic, so a store it
+wrote under other rules is re-embedded on open, like a derived index. Any
+other embedder may be slow or paid, so it is rebuilt only on request:
+
+```bash
+scone vectors            # state, recorded writer, this engine's writer
+scone vectors --reembed  # re-embed every stored chunk, drop orphan vectors, record the writer
+scone vectors --adopt    # vouch for unrecorded vectors (recorded as declared)
+```
+
+The same operations are `MemoryEngine.reembed_vectors()` and
+`MemoryEngine.adopt_vector_identity()`. A rebuild records its writer last,
+so an interrupted rebuild is simply run again. `--adopt` applies only to
+vectors with no recorded writer; a different recorded writer can only be
+rebuilt. Other vector indexes (Qdrant, Chroma, LanceDB, Milvus, PostgreSQL,
+Redis, Elasticsearch, OpenSearch, ElastiCache and bridged LangChain stores)
+do not yet record a writer. They report `unverifiable` and keep their
+previous behaviour, so switching embedders on them still requires emptying
+or rebuilding the index yourself.
+
 ## Indexed fact recall
 
 SQLite accelerates lexical fact lookup with a derived token index. Query token

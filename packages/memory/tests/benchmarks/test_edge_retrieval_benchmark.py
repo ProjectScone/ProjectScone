@@ -8,7 +8,7 @@ import socket
 
 import pytest
 
-from scone_memory.retrieval.lexical import TOKENIZER_VERSION
+from scone_memory.embedders.hash import HashEmbedder
 
 FIXTURE = TESTS_ROOT / "fixtures/edge_rag/v1.json"
 
@@ -57,7 +57,7 @@ async def test_actual_sqlite_benchmark_runs_with_network_blocked(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
     monkeypatch.setattr(socket, "create_connection", blocked)
     report = await run(FIXTURE, [0, 3], 1)
-    assert report["embedder"] == f"hash-256-t{TOKENIZER_VERSION}"
+    assert report["embedder"] == HashEmbedder(256).id
     assert len(report["results"]) == 4
     for row in report["results"]:
         assert row["repeats"] == 1

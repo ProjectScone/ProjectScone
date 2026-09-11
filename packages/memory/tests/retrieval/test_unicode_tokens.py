@@ -7,6 +7,8 @@ tokens at all. These tests pin what a token is now.
 """
 from __future__ import annotations
 
+import unicodedata
+
 import pytest
 
 from scone_memory.retrieval.lexical import Bm25, tokenize
@@ -90,7 +92,7 @@ def test_hash_vectors_name_the_tokenizer_that_made_them() -> None:
     from scone_memory.embedders.hash import HashEmbedder
     from scone_memory.retrieval.lexical import TOKENIZER_VERSION
     assert TOKENIZER_VERSION >= 2
-    assert HashEmbedder(64).id == f"hash-64-t{TOKENIZER_VERSION}"
+    assert HashEmbedder(64).id == f"hash-64-t{TOKENIZER_VERSION}-u{unicodedata.unidata_version}"
 
 
 @pytest.mark.parametrize("text", [

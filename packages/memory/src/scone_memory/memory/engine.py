@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention
+from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, vector_identity
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -166,6 +166,9 @@ class MemoryEngine:
         #: nothing across a restart rather than writing somewhere unasked.
         self.blobs = blobs if blobs is not None else InMemoryBlobStore()
         self._closed = False
+        #: Whether this engine's vectors can be compared with the stored
+        #: ones; settled by open(). See memory.vector_identity.
+        self.vector_identity: vector_identity.VectorIdentity | None = None
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
         self.clock = clock
@@ -214,8 +217,29 @@ class MemoryEngine:
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
+        self.vector_identity = await vector_identity.settle(self)
         await self.recover()
         return self
+
+    @property
+    def vector_block(self) -> str | None:
+        """Why stored vectors must not be compared with this engine's, or None."""
+        return None if self.vector_identity is None else self.vector_identity.blocked
+
+    async def reembed_vectors(self) -> vector_identity.ReembedReport:
+        """Re-embed every stored chunk with this engine's embedder and record it
+        as the writer, which turns a disabled vector lane back on."""
+        report = await vector_identity.rebuild(self)
+        self.vector_identity = vector_identity.VectorIdentity(
+            "rebuilt", vector_identity.writer_of(self), vector_identity.writer_of(self))
+        return report
+
+    async def adopt_vector_identity(self) -> vector_identity.VectorIdentity:
+        """Vouch that vectors stored before writers were recorded came from this
+        engine's embedder and settings. The declaration is recorded as such."""
+        current = self.vector_identity or await vector_identity.settle(self)
+        self.vector_identity = await vector_identity.declare(self, current)
+        return self.vector_identity
 
     async def close(self) -> None:
         """Release every store this engine holds.
@@ -608,6 +632,7 @@ class MemoryEngine:
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
             demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
+            vector_block=self.vector_block,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank)

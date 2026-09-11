@@ -826,6 +826,22 @@ class SqliteVectorIndex:
         """Every chunk id with a vector in the space; for doctor."""
         return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
 
+    async def written_by(self) -> tuple[str, str] | None:
+        """The recorded writer of these vectors and how it came to be known."""
+        rows = dict(self.conn.execute(
+            "SELECT key, value FROM vector_meta WHERE key IN ('embedder', 'embedder_basis')").fetchall())
+        if "embedder" not in rows:
+            return None
+        return str(rows["embedder"]), str(rows.get("embedder_basis", "written"))
+
+    async def record_writer(self, writer: str, basis: str) -> None:
+        self.conn.executemany("INSERT OR REPLACE INTO vector_meta (key, value) VALUES (?, ?)",
+                              [("embedder", writer), ("embedder_basis", basis)])
+        self.conn.commit()
+
+    async def spaces_with_vectors(self) -> list[str]:
+        return [r[0] for r in self.conn.execute("SELECT DISTINCT space FROM vectors ORDER BY space")]
+
     async def delete_space(self, space: str) -> None:
         self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
         self.conn.commit()
