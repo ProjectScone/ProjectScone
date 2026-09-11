@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-import re
 import unicodedata
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
@@ -262,8 +261,6 @@ async def _path_line(evidence: _Evidence, path: "Path", label: Callable[[str], s
 async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[str] = (),
                         question: str | None = None, limits: ContextLimits | None = None,
                         status: "StatusMode" = "current", as_of: str | None = None) -> GraphContext:
-    from .view import counts
-
     limits = limits or ContextLimits()
     when = as_of if as_of is not None else engine.clock()
     moment = parse_rfc3339(when)
@@ -435,8 +432,6 @@ async def graph_connections(engine: "MemoryEngine", space: str, source: str, tar
     """How two entities connect, as packet lines: up to ``limit`` shortest
     paths, each hop's facts re-read so a path resting on a fact that no
     longer counts is dropped rather than shown."""
-    from .view import counts
-
     limits = ContextLimits(max_bytes=max_bytes, max_hops=max(1, min(max_hops, 4)), hub_degree=hub_degree)
     when = as_of if as_of is not None else engine.clock()
     projection, read = await load_projection(engine, space, mode=status, as_of=when)
