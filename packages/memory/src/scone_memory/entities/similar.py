@@ -7,12 +7,17 @@ in one line (its label, its kind, its strongest relations both ways and its
 values) and embedded with the engine's own embedder; the entities nearest
 the question's vector become seeds too.
 
-Lines are embedded once each: vectors are kept by the embedder's id and the
-line, so an entity whose line has not changed is never embedded again, in
-any projection. Only the most connected ``MAX_SIMILAR_ENTITIES`` are
-considered, and the rest are counted, because with a remote embedder every
-new line is a call. No floor is guessed here: each seed carries its score,
-and a caller who has measured one passes ``min_similarity``.
+Lines are embedded once each: vectors are kept by the embedder's id, its
+dimension and the line, so an entity whose line has not changed is never
+embedded again, in any projection. Only the most connected
+``MAX_SIMILAR_ENTITIES`` are considered, and the rest are counted, because
+with a remote embedder every new line is a call. No floor is guessed here:
+each seed carries its score, and a caller who has measured one passes
+``min_similarity``.
+
+An embedder's answer is checked whole before any of it is kept or scored:
+one vector per text, each of the declared dimension, every value a finite
+number. An answer that fails is refused with ``SimilarUnavailable``.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 from collections import OrderedDict, defaultdict
 import hashlib
 import math
+from numbers import Real
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from .project import Entity, EntityProjection
@@ -69,26 +75,51 @@ def entity_lines(projection: EntityProjection) -> dict[str, str]:
     return lines
 
 
-def _key(embedder_id: str, text: str) -> str:
-    return hashlib.sha256(f"{embedder_id}\0{text}".encode("utf-8", "surrogatepass")).hexdigest()
+class SimilarUnavailable(Exception):
+    """The embedder's answer cannot be compared: too few or too many
+    vectors, or a vector of the wrong length or with a value that is not a
+    finite number."""
+
+
+def _key(embedder_id: str, dim: int, text: str) -> str:
+    return hashlib.sha256(f"{embedder_id}\0{dim}\0{text}".encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _checked(answer: object, count: int, dim: int) -> list[tuple[float, ...]]:
+    """The answer to ``count`` texts as vectors, or ``SimilarUnavailable``."""
+    if not isinstance(answer, (list, tuple)) or len(answer) != count:
+        raise SimilarUnavailable(f"the embedder answered {count} texts with "
+                                 f"{len(answer) if isinstance(answer, (list, tuple)) else 'no'} vectors")
+    vectors = []
+    for vector in answer:
+        if not isinstance(vector, (list, tuple)) or len(vector) != dim:
+            raise SimilarUnavailable(f"the embedder gave a vector of "
+                                     f"{len(vector) if isinstance(vector, (list, tuple)) else 'no'} values, not {dim}")
+        if not all(isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+                   for value in vector):
+            raise SimilarUnavailable("the embedder gave a vector with a value that is not a finite number")
+        vectors.append(tuple(float(value) for value in vector))
+    return vectors
 
 
 async def _vectors(engine: "MemoryEngine", texts: Sequence[str]) -> list[tuple[float, ...]]:
-    """Vectors for the texts, embedding only those not kept already."""
+    """Vectors for the texts, embedding only those not kept already. What
+    this request found kept is held here across its waits for the
+    embedder, since another request may evict it meanwhile."""
     embedder = engine.embedder
-    keys = [_key(embedder.id, text) for text in texts]
-    missing = list(dict.fromkeys((key, text) for key, text in zip(keys, texts) if key not in _VECTORS))
+    keys = [_key(embedder.id, embedder.dim, text) for text in texts]
+    held = {key: _VECTORS[key] for key in keys if key in _VECTORS}
+    missing = list(dict.fromkeys((key, text) for key, text in zip(keys, texts) if key not in held))
     for start in range(0, len(missing), _BATCH):
         batch = missing[start:start + _BATCH]
-        for (key, _), vector in zip(batch, await embedder.embed([text for _, text in batch])):
-            _VECTORS[key] = tuple(vector)
-    found = []
+        answer = _checked(await embedder.embed([text for _, text in batch]), len(batch), embedder.dim)
+        held.update((key, vector) for (key, _), vector in zip(batch, answer))
     for key in keys:
+        _VECTORS[key] = held[key]
         _VECTORS.move_to_end(key)
-        found.append(_VECTORS[key])
     while len(_VECTORS) > _KEPT:
         _VECTORS.popitem(last=False)
-    return found
+    return [held[key] for key in keys]
 
 
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
@@ -101,7 +132,8 @@ async def similar_entities(engine: "MemoryEngine", projection: EntityProjection,
                            exclude: Iterable[str] = ()) -> tuple[list[tuple[Entity, float]], int]:
     """The ``limit`` entities whose lines are nearest the question, closest
     first, above zero and at least ``min_similarity`` when given, skipping
-    ``exclude``; and how many entities were left uncompared by the cap."""
+    ``exclude``; and how many entities were left uncompared by the cap.
+    Raises ``SimilarUnavailable`` when the embedder's answer is unusable."""
     if limit < 1:
         return [], 0
     ranked = sorted(projection.entities, key=lambda entity: (-(entity.as_subject + entity.as_object), entity.entity_id))

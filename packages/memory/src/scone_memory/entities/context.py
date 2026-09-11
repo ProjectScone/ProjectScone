@@ -269,7 +269,7 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     """``similar`` adds, after the entities a question names, up to
     ``SIMILAR_SEEDS`` it resembles by vector, each marked with its score;
     ``min_similarity`` keeps out any below it."""
-    from .similar import similar_entities
+    from .similar import SimilarUnavailable, similar_entities
 
     limits = limits or ContextLimits()
     if min_similarity is not None and not -1.0 <= min_similarity <= 1.0:
@@ -316,9 +316,16 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         seeds += [entity for entity in mentioned(projection, question, limit=len(question)) if entity not in seeds]
     resembled: list[dict[str, object]] = []
     if question and similar:
-        resembling, uncompared = await similar_entities(
-            engine, projection, question, limit=min(SIMILAR_SEEDS, max(0, limits.max_entities - len(seeds))),
-            min_similarity=min_similarity, exclude=[entity.entity_id for entity in seeds])
+        try:
+            resembling, uncompared = await similar_entities(
+                engine, projection, question, limit=min(SIMILAR_SEEDS, max(0, limits.max_entities - len(seeds))),
+                min_similarity=min_similarity, exclude=[entity.entity_id for entity in seeds])
+        except Exception as error:  # noqa: BLE001 - like recall's vector lane, said rather than hidden
+            # The packet stands on the names; why the similar ones are
+            # missing is said in words of ours, not the provider's.
+            detail = str(error) if isinstance(error, SimilarUnavailable) else type(error).__name__
+            reasons.append(f"similar_unavailable ({one_line(detail, 120)})")
+            resembling, uncompared = [], 0
         if uncompared:
             reasons.append(f"similar_cut {uncompared}")
         seeds += [entity for entity, _ in resembling]

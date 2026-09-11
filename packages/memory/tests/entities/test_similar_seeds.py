@@ -10,6 +10,8 @@ close, and the lines are embedded once each however often they are asked.
 
 from __future__ import annotations
 
+import pytest
+
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.entities import similar
 from scone_memory.entities.context import graph_context
@@ -103,3 +105,125 @@ def test_an_entity_is_described_by_its_kind_relations_and_values():
     acme = next(entity.entity_id for entity in projection.entities if entity.key == "acme robotics")
     assert lines[acme] == "acme robotics, organisation: based in Lisbon; industry robotics manufacturing; " \
                           "alice chen works at it"
+
+
+class Faulty(HashEmbedder):
+    """The hash embedder until armed; then an answer that cannot be used."""
+
+    def __init__(self, fault: str, dim: int = 256) -> None:
+        super().__init__(dim)
+        self.fault, self.armed = fault, False
+
+    async def embed(self, texts):
+        vectors = await super().embed(texts)
+        if not self.armed:
+            return vectors
+        if self.fault == "raises":
+            raise RuntimeError("the provider is down")
+        if self.fault == "short":
+            return vectors[:-1]
+        if self.fault == "nan":
+            return [[float("nan"), *vector[1:]] for vector in vectors]
+        if self.fault == "infinite":
+            return [[float("inf"), *vector[1:]] for vector in vectors]
+        if self.fault == "narrow":
+            return [vector[:1] for vector in vectors]
+        return [[True, *vector[1:]] for vector in vectors]
+
+
+@pytest.mark.parametrize("fault, said", [
+    ("raises", "(RuntimeError)"), ("short", "answered 5 texts with 4 vectors"), ("nan", "not a finite number"),
+    ("infinite", "not a finite number"), ("narrow", "of 1 values, not 256"), ("not_a_number", "not a finite number")])
+async def test_an_unusable_embedder_answer_is_said_and_never_kept(monkeypatch, fault, said):
+    """Named seeds stay; the similar ones are said to be unavailable, never
+    silently absent, and nothing the embedder said is kept for later."""
+    from collections import OrderedDict
+
+    monkeypatch.setattr(similar, "_VECTORS", OrderedDict())
+    embedder = Faulty(fault)
+    engine = await workplace(embedder)
+    embedder.armed = True
+    packet = await graph_context(engine, "alpha", question="is Globex a manufacturing firm?", similar=True)
+    assert packet.status == "prepared" and packet.coverage["similar"] == []
+    [entity] = [line for line in packet.text.splitlines() if line.startswith("entity: ")]
+    assert entity.startswith("entity: Globex")
+    [reason] = [reason for reason in packet.coverage["reasons"] if reason.startswith("similar_unavailable")]
+    assert said in reason and "provider is down" not in packet.text
+    assert "coverage: limited: " in packet.text and reason in packet.text
+    assert similar._VECTORS == OrderedDict()
+
+
+async def test_an_unusable_answer_is_refused_before_any_of_it_is_scored():
+    embedder = Faulty("narrow", dim=2)
+    embedder.armed = True
+    engine = type("Engine", (), {"embedder": embedder})()
+    with pytest.raises(similar.SimilarUnavailable, match="1 values, not 2"):
+        await similar._vectors(engine, ["first text", "second text"])
+
+
+class Sized:
+    """One model name at two sizes: vectors of one size never answer for
+    the other."""
+
+    id = "shared-model-name"
+
+    def __init__(self, dim: int) -> None:
+        self.dim, self.texts = dim, []
+
+    async def embed(self, texts):
+        self.texts.extend(texts)
+        return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+
+async def test_one_model_at_two_sizes_is_embedded_at_each(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(similar, "_VECTORS", OrderedDict())
+    narrow, wide = Sized(2), Sized(3)
+    first = await similar._vectors(type("Engine", (), {"embedder": narrow})(), ["shared"])
+    second = await similar._vectors(type("Engine", (), {"embedder": wide})(), ["shared"])
+    assert [len(first[0]), len(second[0])] == [2, 3] and wide.texts == ["shared"]
+
+
+async def test_a_vector_evicted_while_a_request_waits_is_still_its_answer(monkeypatch):
+    """A request that found a vector kept holds it across its own wait for
+    the embedder, so another request filling the cache meanwhile cannot
+    take it away."""
+    import asyncio
+    from collections import OrderedDict
+
+    monkeypatch.setattr(similar, "_VECTORS", OrderedDict())
+    monkeypatch.setattr(similar, "_KEPT", 2)
+    embedder = HashEmbedder(dim=8)
+    engine = type("Engine", (), {"embedder": embedder})()
+    [kept] = await similar._vectors(engine, ["shared line"])
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Waiting(HashEmbedder):
+        async def embed(self, texts):
+            started.set()
+            await release.wait()
+            return await super().embed(texts)
+
+    waiting = type("Engine", (), {"embedder": Waiting(dim=8)})()
+    pending = asyncio.create_task(similar._vectors(waiting, ["shared line", "a new question"]))
+    await started.wait()
+    await similar._vectors(engine, ["another line", "and one more"])
+    release.set()
+    shared, _ = await pending
+    assert shared == kept
+
+
+async def test_numbers_of_any_real_type_are_numbers(monkeypatch):
+    """An embedder built on numpy answers in numpy floats; they are numbers."""
+    from collections import OrderedDict
+    import numpy
+
+    monkeypatch.setattr(similar, "_VECTORS", OrderedDict())
+
+    class Numpy(HashEmbedder):
+        async def embed(self, texts):
+            return [[numpy.float32(value) for value in vector] for vector in await super().embed(texts)]
+
+    [vector] = await similar._vectors(type("Engine", (), {"embedder": Numpy(dim=4)})(), ["acme robotics"])
+    assert len(vector) == 4 and all(type(value) is float for value in vector)

@@ -517,9 +517,16 @@ into a graph):
 - **No floor is guessed.** Only one you pass as `min_similarity` keeps
   weak matches out.
 - **Cost.** A line is embedded once, whatever projection it appears in.
-  Only the 5,000 most connected entities are compared, and
-  `similar_cut N` counts the rest. With a remote embedder each new line
-  is a call, which is why this is opt-in.
+  Vectors are kept by the embedder's id and dimension, so one model name
+  at two sizes is embedded at each. Only the 5,000 most connected
+  entities are compared, and `similar_cut N` counts the rest. With a
+  remote embedder each new line is a call, which is why this is opt-in.
+- **An unusable answer is said, not kept.** The embedder's answer is
+  checked whole before any of it is kept or scored: one vector per text,
+  each of the declared dimension, every value a finite number. When it
+  fails, or the embedder raises, the packet keeps its named seeds and
+  says `similar_unavailable (…)`, in words of ours, never the
+  provider's.
 - Advertised as `graph.context_similar`. MCP `memory_graph_context`, the
   ToolBox `graph_context` and `scone graph context --similar` take the
   same options. The packet is one self-describing line per
