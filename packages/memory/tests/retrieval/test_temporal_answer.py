@@ -198,3 +198,50 @@ async def test_a_day_with_nothing_recorded_says_so():
     answer = await temporal_answer(engine, "alpha", "What did I do 3 days ago?", now=NOW)
     assert answer.status == "ungrounded" and answer.value == {}
     assert "nothing recorded" in answer.text
+
+
+async def ledger() -> MemoryEngine:
+    """Alice worked at Acme for a while, then at Globex; the Lisbon office
+    opened and has not closed."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2021-03-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Globex", valid_from="2023-06-30T00:00:00Z")
+    await engine.assert_fact("alpha", "lisbon office", "status", "open", valid_from="2022-01-15T00:00:00Z")
+    return engine
+
+
+async def test_how_long_a_claim_held_is_the_length_of_its_valid_time():
+    answer = await temporal_answer(await ledger(), "alpha", "How long did Alice work at Acme Robotics?", now=NOW)
+    assert answer.status == "computed"
+    assert answer.value["days"] == 851 and answer.value["months"] == 27
+    assert "answer: 851 days" in answer.text and "2021-03-01 → 2023-06-30" in answer.text
+    assert answer.anchors[0]["claim"] == "alice chen works_at Acme Robotics"
+    assert answer.anchors[0]["fact_ids"] and answer.anchors[0]["status"] == "found"
+
+
+async def test_a_claim_that_still_holds_is_counted_up_to_the_moment_asked():
+    answer = await temporal_answer(await ledger(), "alpha", "How long has the Lisbon office been open?", now=NOW)
+    assert answer.status == "computed" and answer.value["holds"] is True
+    assert "so far" in answer.text and answer.value["days"] == (
+        __import__("datetime").date(2023, 4, 20) - __import__("datetime").date(2022, 1, 15)).days
+
+
+async def test_when_a_claim_began_and_ended_are_both_named():
+    answer = await temporal_answer(await ledger(), "alpha", "When did Alice work at Acme Robotics?", now=NOW)
+    assert answer.status == "computed"
+    assert answer.value == {"from": "2021-03-01", "until": "2023-06-30", "holds": False,
+                            "days": 851, "months": 27, "years": 2}
+    assert "answer: from 2021-03-01 until 2023-06-30" in answer.text
+
+
+async def test_a_claim_the_ledger_does_not_hold_is_not_computed_around():
+    answer = await temporal_answer(await ledger(), "alpha", "How long did Alice work at Initech?", now=NOW)
+    assert answer.status == "ungrounded" and answer.value == {}
+    assert "coverage: limited: ungrounded" in answer.text
+
+
+async def test_two_claims_the_question_fits_alike_leave_it_undecided():
+    engine = await ledger()
+    await engine.assert_fact("alpha", "alice chen", "advises", "Acme Robotics", valid_from="2020-02-01T00:00:00Z")
+    answer = await temporal_answer(engine, "alpha", "How long has Alice Chen Acme Robotics?", now=NOW)
+    assert answer.status == "ambiguous" and answer.value == {}

@@ -96,6 +96,13 @@ tool `memory_temporal_answer`, the ToolBox tool `temporal_answer` and
   many days after A did B", "from A to B", "how many weeks ago did I X",
   "how long ago", "how many months has it been since X", "which came
   first/last, A or B", and an order question that lists its events.
+- **A question about one claim's own time** ("how long did Alice work at
+  Acme", "when did the Lisbon office open") is answered from the ledger
+  rather than from passages, because the ledger keeps when each claim
+  held. The claim holding most of the question's words wins and must hold
+  at least half; a claim holding nearly as much with another valid time
+  leaves it undecided. A claim that still holds is counted up to the
+  moment asked and says so, and the answer cites the facts behind it.
 - **A question about a day** ("what did I do five days ago", "who did I
   meet last Tuesday") is answered from that day instead: the days it
   names bound the search rather than rank it, so nothing from another day

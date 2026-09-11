@@ -127,3 +127,34 @@ def test_a_question_about_one_day_asks_what_was_recorded_then(question, words):
 def test_a_dated_question_that_is_not_a_lookup_is_not_planned_as_one(question):
     asked = plan(question, now="2023-04-20T10:12:00Z")
     assert asked is None or asked.kind != "on"
+
+
+@pytest.mark.parametrize("question, kind, event", [
+    ("How long did Alice work at Acme?", "held", "alice work at acme"),
+    ("How long has Alice worked at Acme Robotics?", "held", "alice worked at acme robotics"),
+    ("How long was the project open?", "held", "project open"),
+    ("When did Alice join Acme?", "when", "alice join acme"),
+    ("When was Alice the manager of the Lisbon office?", "when", "alice the manager of the lisbon office"),
+])
+def test_a_question_about_a_claim_asks_the_ledger_not_the_passages(question, kind, event):
+    """How long something held, and when it began or ended, are the valid
+    time of a claim, which the ledger keeps exactly."""
+    asked = plan(question, now="2023-04-20T10:12:00Z")
+    assert (asked.kind, asked.events) == (kind, (event,))
+
+
+@pytest.mark.parametrize("question", [
+    "How long ago did I meet Emma?",  # a distance from now, not the length of a claim
+    "How long was it between my trip to Rome and my trip to Paris?",  # two events
+    "How long is the Amazon?",
+])
+def test_a_length_that_is_not_a_claims_own_is_not_asked_of_the_ledger(question):
+    asked = plan(question, now="2023-04-20T10:12:00Z")
+    assert asked is None or asked.kind in ("since", "between")
+
+
+def test_a_question_naming_a_day_is_not_a_question_about_a_claim():
+    """"When did I meet Emma five days ago" names the day; the ledger is
+    asked only when nothing else dates the question."""
+    asked = plan("When did I meet Emma 5 days ago?", now="2023-04-20T10:12:00Z")
+    assert asked.kind == "on" and asked.window is not None and asked.window.words == "5 days ago"
