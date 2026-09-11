@@ -24,8 +24,16 @@ __all__ += ['DocumentIngested', 'DocumentProvenance', 'DocumentSource', 'documen
             'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'DocumentTextRegion', 'ParsedDocument',
             'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested', 'DocumentTableCell', 'DocumentTableHeader', 'DocumentTableContext']
 
+__all__ += ['DirectorySync', 'DirectorySyncResult', 'SourceReceipt', 'ScanLimits']
+
 
 def __getattr__(name: str) -> object:
+    if name in {'DirectorySync', 'DirectorySyncResult', 'SourceReceipt'}:
+        from .directory_sync import DirectorySync, DirectorySyncResult, SourceReceipt
+        return {'DirectorySync': DirectorySync, 'DirectorySyncResult': DirectorySyncResult, 'SourceReceipt': SourceReceipt}[name]
+    if name == 'ScanLimits':
+        from .source_scan import ScanLimits
+        return ScanLimits
     if name == 'DocumentIngestionWorkflow':
         from .file_workflow import DocumentIngestionWorkflow
         return DocumentIngestionWorkflow

@@ -482,8 +482,9 @@ asks the caller to inspect the current key before retrying. It does not claim a
 key is empty when only its revision receipt failed. Claims citing the old source
 continue to stand under the existing forget policy.
 
-This improves the existing keyed text-update API. Automatic file revision
-tracking, directory reconciliation, retaining inspectable revision history,
-metadata-only updates and transactional attachment transfer remain separate gaps;
-content-addressed document ingestion does not yet maintain an external source's
-current revision automatically.
+This improves the existing keyed text-update API. For automatic local file
+revision tracking and explicit missing-file deletion, use the separate
+[directory synchronization workflow](directory-sync.md). Retaining inspectable
+revision history, metadata-only updates and transactional attachment transfer
+remain separate gaps; ordinary content-addressed document ingestion does not
+itself manage an external source's current revision.

@@ -33,7 +33,7 @@ class SourceRevision(BaseModel):
 
 class SourceEntry(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', revalidate_instances='always')
-    state: Literal['active', 'replace', 'retire', 'delete', 'absent', 'suppressed']
+    state: Literal['active', 'replace', 'retire', 'delete', 'absent', 'suppress', 'suppressed']
     current: SourceRevision | None = None
     pending: SourceRevision | None = None
 
@@ -42,6 +42,9 @@ class SourceEntry(BaseModel):
         if self.state in ('replace', 'retire'):
             if self.pending is None or (self.state == 'retire' and self.pending.episode_id is None):
                 raise ValueError('replacement requires its pending revision')
+        elif self.state == 'suppress':
+            if self.current is None and self.pending is None:
+                raise ValueError('suppression requires a known revision')
         elif self.pending is not None:
             raise ValueError('only replacement transitions carry a pending revision')
         if self.state in ('active', 'delete', 'absent') and (self.current is None or self.current.episode_id is None):

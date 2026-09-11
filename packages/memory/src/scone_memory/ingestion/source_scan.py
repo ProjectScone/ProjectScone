@@ -170,6 +170,31 @@ class DirectoryScanner:
         except (OSError, _ScanFault):
             raise InvalidInput('directory source changed or cannot be read safely') from None
 
+    def missing(self, path: str) -> bool:
+        """Confirm absence immediately before deletion; unreadable is not absent."""
+        try:
+            self._path(path)
+            with self._root() as root_fd:
+                parent = os.dup(root_fd)
+                try:
+                    parts = path.split('/')
+                    for name in parts[:-1]:
+                        try:
+                            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        except FileNotFoundError:
+                            return True
+                        os.close(parent)
+                        parent = child
+                    try:
+                        os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        return True
+                    return False
+                finally:
+                    os.close(parent)
+        except (OSError, _ScanFault):
+            raise InvalidInput('directory source absence cannot be confirmed') from None
+
     def scan(self) -> SourceSnapshot:
         files: list[ScannedFile] = []
         directories: list[tuple[str, FileStamp]] = []

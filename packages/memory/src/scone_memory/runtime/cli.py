@@ -96,6 +96,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("source-key", help="read the current source stored with remember --key")
     p.add_argument("dedup_key")
 
+    p = sub.add_parser("sync-directory", help="reconcile local documents through an encrypted source journal")
+    p.add_argument("root")
+    p.add_argument("--journal", required=True, help="private journal path outside the source root")
+    p.add_argument("--key-file", required=True, help="private file containing a 32-byte journal key")
+    p.add_argument("--store-id", required=True, help="stable identity for this memory catalog")
+    p.add_argument("--parser-revision", required=True, help="change when parser configuration changes")
+    p.add_argument("--delete-missing", action="store_true", help="retire managed missing sources after a complete stable scan")
+    p.add_argument("--max-files", type=int, default=1000)
+    p.add_argument("--max-total-bytes", type=int, default=256_000_000)
+    p.add_argument("--extension", action="append", help="restrict to a dotted suffix; repeat for several")
+
     p = sub.add_parser("jobs", help="recent ingest batches and how far each has got")
     p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("job", help="one ingest batch: what each record became")
@@ -417,6 +428,10 @@ def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
 async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settings=None) -> int:
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
+
+    if args.command == "sync-directory":
+        from .directory_cli import run_directory_sync
+        return await run_directory_sync(args, engine, out)
 
     if args.command == "remember":
         if args.image is not None and args.jsonl:
