@@ -42,7 +42,9 @@ async def episode_or_gone(runtime: RetentionRuntime, space: str, episode_id: int
     """The episode, or Gone when a tombstone says it was forgotten, or
     NotFound when the id never meant anything here."""
     found = await runtime.documents.get_episode(space, episode_id)
-    if found is not None:
+    # A record for another space or id is a faulty store's answer, not this
+    # episode: it is treated as missing, never shown.
+    if found is not None and found.space == space and found.episode_id == episode_id:
         return found
     stone = await runtime.documents.tombstone(space, episode_id)
     if stone is not None:

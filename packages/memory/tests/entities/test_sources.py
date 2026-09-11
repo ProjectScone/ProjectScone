@@ -168,3 +168,25 @@ async def test_chunks_from_another_episode_or_past_the_content_are_refused():
     size = len(NOTE.encode())
     assert view["chunks"] and all(0 <= chunk["start"] <= chunk["end"] <= size for chunk in view["chunks"])
     assert "foreign_chunks" in view["coverage"]["reasons"]
+
+
+class WrongEpisode(InMemoryDocumentStore):
+    """A faulty adapter that answers one space's read with another's episode."""
+
+    async def get_episode(self, space, episode_id):
+        return await super().get_episode("beta", episode_id + 1) or await super().get_episode(space, episode_id)
+
+
+async def test_an_episode_from_another_space_is_never_shown():
+    import pytest as _pytest
+    from scone_memory.core.errors import NotFound
+
+    store = WrongEpisode()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    mine = await engine.remember("alpha", "# Mine\n\nAlpha's note.")
+    await engine.remember("beta", "# Private beta heading\n\nBeta's secret.")
+    with _pytest.raises(NotFound):
+        await engine.episode("alpha", mine.episode_id)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/sources", params={"episode": mine.episode_id}, headers=auth())
+    assert response.status_code == 404 and "beta" not in response.text.casefold()
