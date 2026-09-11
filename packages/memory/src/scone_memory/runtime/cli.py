@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
-    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, schema, export")
+    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -216,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("timeline", help="one entity's facts in valid time")
     g.add_argument("name")
     g.add_argument("--as-of")
+    g = graph.add_parser("walk", help="entities reached from names hop by hop; --direction in finds what depends on them")
+    g.add_argument("names", nargs="+")
+    g.add_argument("--direction", default="both", choices=["both", "out", "in"])
+    g.add_argument("--hops", type=int, help="most steps from the names (1 to 8; default: as far as it reaches)")
+    g.add_argument("--limit", type=int, default=150, help="most entities shown (1 to 1000)")
     g = graph.add_parser("schema", help="the kinds of entity and the predicates the graph holds")
     g.add_argument("--limit", type=int, default=200, help="predicates to list, most used first (default 200)")
     g.add_argument("--max-bytes", type=int, default=64_000, help="byte budget for the listed predicates")
@@ -483,6 +488,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     from ..entities.export import export_graph
     from ..entities.read import load_projection
     from ..entities.report import render_markdown, report_record
+    from ..entities.view import SeedRefused, knowledge_view, walk_seeds
     from ..entities.schema import MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
     from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 
@@ -493,11 +499,16 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         raise InvalidInput("--resolution must be a number above 0 and at most 10")
     named = {"path": [args.source, args.target] if command == "path" else [],
              "context": args.names if command == "context" else [],
-             "entity": [args.name] if command == "entity" else []}.get(command, [])
+             "entity": [args.name] if command == "entity" else [],
+             "walk": args.names if command == "walk" else []}.get(command, [])
     if len(named) > MAX_NAMES or any(not 1 <= len(name) <= MAX_NAME for name in named):
         raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
     if command == "path" and not 1 <= args.max_hops <= 4:
         raise InvalidInput("--max-hops must be from 1 to 4")
+    if command == "walk" and args.hops is not None and not 1 <= args.hops <= 8:
+        raise InvalidInput("--hops must be from 1 to 8")
+    if command == "walk" and not 1 <= args.limit <= 1000:
+        raise InvalidInput("--limit must be from 1 to 1000")
     if command == "schema" and not 1 <= args.limit <= MAX_PREDICATES:
         raise InvalidInput(f"--limit must be from 1 to {MAX_PREDICATES}")
     if command == "schema" and not 1_024 <= args.max_bytes <= MAX_BYTES_LIMIT:
@@ -551,6 +562,16 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
+    if command == "walk":
+        try:
+            seeds = walk_seeds(projection, args.names, coverage)
+        except SeedRefused as refused:
+            print(_ledger_json(refused.answer, indent=None), file=out)
+            return 1
+        print(_ledger_json(knowledge_view(projection, mode="current", as_of=when, limit=args.limit,
+                                          attribute_limit=300, coverage=coverage, seeds=seeds,
+                                          direction=args.direction, hops=args.hops)), file=out)
+        return 0
     reasons = coverage.get("reasons") or []
     exported = export_graph(projection, args.format, about={"status": "current", "as_of": when,
                                                            "coverage": {**coverage, "truncated": bool(reasons)}})

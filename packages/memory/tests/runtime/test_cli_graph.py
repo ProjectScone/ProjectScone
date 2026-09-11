@@ -166,6 +166,8 @@ def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
     (("context", "--question", "q" * 2001), "--question"),
     (("schema", "--limit", "0"), "--limit"),
     (("schema", "--max-bytes", "100"), "--max-bytes"),
+    (("walk", "lisbon", "--hops", "9"), "--hops"),
+    (("walk", *(f"person {n}" for n in range(25))), "names"),
     (("timeline", "alice", "--as-of", "0001-01-01T00:00:00+01:00"), "--as-of"),
     (("timeline", "alice", "--as-of", "9999-12-31T23:59:59-01:00"), "--as-of"),
 ])
@@ -211,3 +213,20 @@ async def test_stored_text_utf8_cannot_encode_still_prints(arguments):
     code = await run(build_parser().parse_args(["graph", *arguments]), memory, io.StringIO(""), out)
     await memory.close()
     assert code in (0, 1) and raw.getvalue().decode("utf-8")
+
+
+async def test_walk_prints_what_depends_on_an_entity_hop_by_hop(engine):
+    code, text = await graph(engine, "walk", "lisbon", "--direction", "in")
+    view = json.loads(text)
+    hops = {entity["key"]: entity["hop"] for entity in view["entities"]}
+    assert code == 0 and hops == {"lisbon": 0, "acme robotics": 1, "alice chen": 2}
+    assert view["filters"]["direction"] == "in"
+    code, text = await graph(engine, "walk", "lisbon", "--hops", "1")
+    assert code == 0 and "hop_limit" in json.loads(text)["coverage"]["reasons"]
+
+
+async def test_walk_names_an_unknown_or_ambiguous_seed(engine):
+    code, text = await graph(engine, "walk", "alice")
+    assert code == 1 and len(json.loads(text)["candidates"]) == 2
+    code, text = await graph(engine, "walk", "nobody")
+    assert code == 1 and "no entity is named" in json.loads(text)["error"]

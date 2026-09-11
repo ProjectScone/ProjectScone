@@ -34,7 +34,7 @@ from ..entities.read import load_projection, read_record
 from ..entities.schema import MAX_BYTES, MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
 from ..entities.report import render_markdown, report_record
 from ..entities.service import ProjectionBuilding
-from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
+from ..entities.view import SeedRefused, StatusMode, WalkDirection, walk_seeds, entity_listing, entity_record, knowledge_view, projection_meta, support
 from ..memory.engine import MemoryEngine
 from .responses import LedgerJSONResponse
 
@@ -69,6 +69,8 @@ class EntityOut(BaseModel):
     flags: list[str]
     #: Claims in this view the entity takes part in, as subject or object.
     claims: int
+    #: In a seeded view, the steps from the nearest seed (0 for a seed).
+    hop: Optional[int] = None
 
 
 class RelationOut(BaseModel):
@@ -108,6 +110,10 @@ class Filters(BaseModel):
     #: walked under.
     seeds: Optional[list[str]] = None
     hub_degree: Optional[int] = None
+    #: How a seeded walk followed relations, and how many steps it allowed
+    #: (None: as far as it could reach).
+    direction: Optional[Literal["both", "out", "in"]] = None
+    hops: Optional[int] = None
 
 
 class ListFilters(Filters):
@@ -270,6 +276,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         limit: int = Query(default=150, ge=1, le=1000), attribute_limit: int = Query(default=300, ge=0, le=5000),
         groupings: bool = False, resolution: float = Query(default=1.0, gt=0, le=10),
         seed: list[str] = Query(default=[]), hub_degree: int = Query(default=64, ge=1, le=100_000),
+        direction: WalkDirection = "both", hops: Optional[int] = Query(default=None, ge=1, le=8),
         cursor: Optional[str] = Query(default=None, max_length=512), space: str = Depends(space_for),
     ) -> dict[str, object] | LedgerJSONResponse:
         """Entities, the relations between them and their values, as the ledger records them.
@@ -278,8 +285,9 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         in, a page at a time: ``coverage.next_cursor`` asks for the next, and
         a cursor from before the graph changed is refused with 409. With
         ``seed`` (names or ids), the entities reached from them breadth
-        first in both directions, hubs past ``hub_degree`` shown but not
-        walked through. With ``groupings=true`` a separate, computed block
+        first, following relations in ``direction`` (``in`` finds what
+        depends on a seed) for at most ``hops`` steps, hubs past
+        ``hub_degree`` shown but not walked through. With ``groupings=true`` a separate, computed block
         assigns the shown entities to communities, found at ``resolution``,
         and scores their importance."""
         when = _moment(engine, as_of)
@@ -293,23 +301,15 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
                     "code": "cursor_stale"})
         if len(seed) > 24:
             raise InvalidInput("at most 24 seeds")
-        seeds: list[str] = []
-        for name in seed:
-            found = resolve(projection, name)
-            if found.status == "ambiguous":
-                complete, read = _read(coverage)
-                listed = _candidates(found)
-                return LedgerJSONResponse(status_code=409, content={
-                    "error": f"{name!r} could mean several entities", "name": name, **listed,
-                    "truncated": bool(listed["truncated"]) or not complete, "complete": complete, "coverage": read})
-            if found.status == "not_found":
-                complete, read = _read(coverage)
-                where = "" if complete else " in the facts read; the read was capped, so it may exist"
-                return LedgerJSONResponse(status_code=404, content={"error": f"no entity is named {name!r}{where}",
-                                                              "name": name, "complete": complete, "coverage": read})
-            seeds.append(found.candidates[0].entity_id)
+        if not seed and (direction != "both" or hops is not None):
+            raise InvalidInput("direction and hops shape a seeded walk; give a seed")
+        try:
+            seeds = walk_seeds(projection, seed, coverage)
+        except SeedRefused as refused:
+            return LedgerJSONResponse(status_code=refused.status, content=refused.answer)
         view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
-                              coverage=coverage, seeds=seeds, hub_degree=hub_degree, offset=offset)
+                              coverage=coverage, seeds=seeds, hub_degree=hub_degree, offset=offset,
+                              direction=direction, hops=hops)
         page = view["coverage"]
         assert isinstance(page, dict)
         next_offset = page.pop("next_offset", None)

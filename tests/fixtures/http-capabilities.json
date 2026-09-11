@@ -59,6 +59,7 @@
       "graph.timeline": true,
       "graph.sources": true,
       "graph.schema": true,
+      "graph.knowledge_walk": true,
       "recall.graph_boost": true,
       "graph.knowledge_paging": true,
       "graph.knowledge_seeds": true

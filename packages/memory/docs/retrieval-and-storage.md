@@ -180,6 +180,8 @@ capability, named with the route.
 | `cursor` | none | The next page of the ranking, from `coverage.next_cursor` |
 | `seed` | none | Names or ids (repeatable, up to 24) to walk out from instead of ranking |
 | `hub_degree` | 64 | In a seeded view, an entity with more relations is shown but not walked through |
+| `direction` | `both` | In a seeded view, which way relations are followed: `out` (subject to object), `in` (object to subject) or `both` |
+| `hops` | none (1–8) | In a seeded view, the most steps from a seed |
 
 Without `seed`, the view pages through the ranking. `coverage.next_cursor`
 names the next page and is absent on the last. A cursor encodes the
@@ -199,8 +201,19 @@ are taken; more is a 422. An unknown seed is a 404, and an ambiguous one
 a 409 listing the candidates. Both keep the read's coverage, so a capped
 read is never taken for absence or a complete list. `filters.seeds`
 gives the resolved ids and `filters.hub_degree` the degree the walk used.
-Paging and seeded walks are advertised as `graph.knowledge_paging` and
-`graph.knowledge_seeds`: a server without them ignores those parameters.
+A walk follows relations in `direction`. `in` finds what depends on a
+seed: what is based in Lisbon, who lives there, then who works at what
+is based there. `out` follows only what the seed points at.
+
+`hops` stops the walk after that many steps. When a step more would
+have reached more, `hop_limit` is among the reasons. Each entity in a
+seeded view carries its `hop` from the nearest seed (0 for a seed).
+`filters.direction` and `filters.hops` echo the walk. `direction` or
+`hops` without a seed is a 422.
+
+Paging, seeded walks and walk shapes are advertised as
+`graph.knowledge_paging`, `graph.knowledge_seeds` and
+`graph.knowledge_walk`: a server without them ignores those parameters.
 
 Status modes:
 
@@ -720,6 +733,7 @@ store:
 | `scone graph context [NAMES…] [--question Q] [--max-bytes N]` | the graph context packet |
 | `scone graph entity NAME` | one entity's relations both ways and its values |
 | `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
+| `scone graph walk NAMES… [--direction in\|out\|both] [--hops N] [--limit N]` | the entities reached from the names, each with its hop, as JSON |
 | `scone graph schema [--limit N] [--max-bytes N]` | the kinds and predicates the graph holds, as JSON |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 

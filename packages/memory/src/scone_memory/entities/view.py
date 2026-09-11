@@ -28,6 +28,10 @@ from .kinds import KIND_HINTS_VERSION
 from .project import Entity, EntityProjection, FactRole, PROJECTION_VERSION
 
 StatusMode = Literal["current", "history", "proposed", "all"]
+#: Which way a seeded walk follows a relation: out from its subject to its
+#: object, in from its object to its subject (what depends on the seed), or
+#: both.
+WalkDirection = Literal["both", "out", "in"]
 STATUS_MODES: tuple[StatusMode, ...] = ("current", "history", "proposed", "all")
 VIEW_SCHEMA_VERSION = 1
 
@@ -102,51 +106,72 @@ def _reasons(coverage: Mapping[str, object]) -> list[str]:
     return [str(reason) for reason in found] if isinstance(found, list) else []
 
 
-def _walk(counted: "_Counted", seeds: Sequence[str], limit: int,
-          hub_degree: int) -> tuple[list[Entity], int, bool]:
-    """Entities reached from the seeds, breadth first over relations in either
-    direction, each entity's neighbours in order of the facts behind the
-    relation. An entity with more than ``hub_degree`` relations is shown but
-    not walked through unless it is a seed. Returns the entities (at most
-    ``limit``), how many hubs were not walked through, and whether the walk
-    reached more than it shows."""
+def _walk(counted: "_Counted", seeds: Sequence[str], limit: int, hub_degree: int,
+          direction: WalkDirection = "both", hops: int | None = None) -> tuple[list[Entity], dict[str, int], int, bool, bool]:
+    """Entities reached from the seeds, breadth first over relations in
+    ``direction``, each entity's neighbours in order of the facts behind the
+    relation, for at most ``hops`` steps. An entity with more than
+    ``hub_degree`` relations is shown but not walked through unless it is a
+    seed (its degree counts both ways, whatever the direction). Returns the
+    entities (at most ``limit``), each one's hop from the nearest seed, how
+    many hubs were not walked through, whether the walk reached more than
+    it shows, and whether it stopped at ``hops`` with more to reach."""
     by_id = {entity.entity_id: entity for entity in counted.entities}
-    touching: dict[str, list[tuple[int, str]]] = {}
+    degree: dict[str, int] = {}
+    following_of: dict[str, list[tuple[int, str]]] = {}
     for relation, roles in counted.relations:
-        if relation.subject_id != relation.object_id:
-            touching.setdefault(relation.subject_id, []).append((len(roles), relation.object_id))
-            touching.setdefault(relation.object_id, []).append((len(roles), relation.subject_id))
+        if relation.subject_id == relation.object_id:
+            continue
+        for near, far, way in ((relation.subject_id, relation.object_id, "out"),
+                               (relation.object_id, relation.subject_id, "in")):
+            degree[near] = degree.get(near, 0) + 1
+            if direction in ("both", way):
+                following_of.setdefault(near, []).append((len(roles), far))
     starts = [seed for seed in dict.fromkeys(seeds) if seed in by_id]
-    order, seen, frontier, hubs = list(starts), set(starts), list(starts), 0
-    while frontier and len(order) <= limit:
+
+    def walkable(entity_id: str) -> bool:
+        return entity_id in starts or degree.get(entity_id, 0) <= hub_degree
+
+    hop_of = {seed: 0 for seed in starts}
+    order, frontier, hubs, step = list(starts), list(starts), 0, 0
+    while frontier and len(order) <= limit and (hops is None or step < hops):
+        step += 1
         following: list[str] = []
         for entity_id in frontier:
-            neighbours = touching.get(entity_id, [])
-            if entity_id not in starts and len(neighbours) > hub_degree:
+            if not walkable(entity_id):
                 hubs += 1
                 continue
-            for _support, far in sorted(neighbours, key=lambda item: (-item[0], item[1])):
-                if far not in seen:
-                    seen.add(far)
+            for _support, far in sorted(following_of.get(entity_id, []), key=lambda item: (-item[0], item[1])):
+                if far not in hop_of:
+                    hop_of[far] = step
                     following.append(far)
         order += following
         frontier = following
-    return [by_id[entity_id] for entity_id in order[:limit]], hubs, len(order) > limit
+    # Stopped by the hop limit only if a step more would have reached more.
+    stopped = hops is not None and step == hops and any(
+        far not in hop_of for entity_id in frontier if walkable(entity_id) for _, far in following_of.get(entity_id, []))
+    return [by_id[entity_id] for entity_id in order[:limit]], hop_of, hubs, len(order) > limit, stopped
 
 
 def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str, limit: int,
                    attribute_limit: int, coverage: Mapping[str, object], seeds: Sequence[str] = (),
-                   hub_degree: int = 64, offset: int = 0) -> dict[str, object]:
+                   hub_degree: int = 64, offset: int = 0, direction: WalkDirection = "both",
+                   hops: int | None = None) -> dict[str, object]:
     """Entities, the relations among them and their values. Without seeds,
     the entities ranked by the claims they take part in, ``limit`` from
-    ``offset``; with seeds, those reached from them breadth first."""
+    ``offset``; with seeds, those reached from them breadth first, following
+    relations in ``direction`` for at most ``hops`` steps, each entity with
+    its ``hop`` from the nearest seed."""
     counted = _Counted(projection, mode, as_of)
     reasons = _reasons(coverage)
     more = False
+    hop_of: dict[str, int] = {}
     if seeds:
-        shown, hubs, cut = _walk(counted, seeds, limit, hub_degree)
+        shown, hop_of, hubs, cut, stopped = _walk(counted, seeds, limit, hub_degree, direction, hops)
         if hubs:
             reasons.append("hub_skipped")
+        if stopped:
+            reasons.append("hop_limit")
         if cut:
             reasons.append("entity_limit")
         elif len(shown) < len(counted.entities):
@@ -165,8 +190,10 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
     return {
         "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
         "filters": {"status": mode, "as_of": as_of,
-                    **({"seeds": list(dict.fromkeys(seeds)), "hub_degree": hub_degree} if seeds else {})},
-        "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in shown],
+                    **({"seeds": list(dict.fromkeys(seeds)), "hub_degree": hub_degree, "direction": direction,
+                        "hops": hops} if seeds else {})},
+        "entities": [{**entity_record(entity, counted.score[entity.entity_id]),
+                      **({"hop": hop_of[entity.entity_id]} if seeds else {})} for entity in shown],
         "relations": [{"id": relation.relation_id, "subject_id": relation.subject_id,
                        "predicate": relation.predicate, "object_id": relation.object_id,
                        "fact_ids": [role.fact_id for role in roles], "support": support(roles),
@@ -208,3 +235,40 @@ def entity_listing(projection: EntityProjection, *, mode: StatusMode, as_of: str
                      "entities_total": len(matching), "entities_shown": min(len(matching), limit),
                      "truncated": bool(reasons), "reasons": reasons},
     }
+
+
+class SeedRefused(Exception):
+    """A seed name no walk can start from: ``status`` 404 or 409, and the
+    answer to give, with the read's coverage so a capped read is never
+    taken for absence or a complete list."""
+
+    def __init__(self, status: int, answer: dict[str, object]) -> None:
+        super().__init__(answer["error"])
+        self.status, self.answer = status, answer
+
+
+def walk_seeds(projection: EntityProjection, names: Sequence[str],
+               coverage: Mapping[str, object]) -> list[str]:
+    """The entity ids a seeded walk starts from, one per name; an unknown
+    or ambiguous name raises ``SeedRefused``."""
+    from .query import resolve
+    from .read import read_record
+
+    seeds: list[str] = []
+    for name in names:
+        found = resolve(projection, name)
+        if found.status == "resolved":
+            seeds.append(found.candidates[0].entity_id)
+            continue
+        complete, read = read_record(dict(coverage))
+        if found.status == "ambiguous":
+            raise SeedRefused(409, {
+                "error": f"{name!r} could mean several entities", "name": name,
+                "candidates": [{"id": c.entity_id, "key": c.key, "label": c.label} for c in found.candidates],
+                "candidates_total": found.total,
+                "truncated": found.total > len(found.candidates) or not complete, "complete": complete,
+                "coverage": read})
+        where = "" if complete else " in the facts read; the read was capped, so it may exist"
+        raise SeedRefused(404, {"error": f"no entity is named {name!r}{where}", "name": name,
+                                "complete": complete, "coverage": read})
+    return seeds

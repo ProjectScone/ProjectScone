@@ -691,3 +691,43 @@ async def test_a_schema_from_a_capped_read_says_it_is_partial(monkeypatch):
         body = client.get("/v1/graph/schema", headers=auth()).json()
     assert body["complete"] is False and body["truncated"] is True and body["truncated_by"] == ["read"]
     assert body["predicates_total"] == 2
+
+
+def _walked(client, **params):
+    view = client.get("/v1/graph/knowledge", params=params, headers=auth()).json()
+    return view, {entity["key"]: entity.get("hop") for entity in view["entities"]}
+
+
+def test_a_walk_can_follow_relations_forward_only(city):
+    """From Alice forward: her employer, then where it is based. Bob, who
+    only points at Lisbon himself, is not reached."""
+    client, _ = city
+    view, hops = _walked(client, seed="alice chen", direction="out")
+    assert hops == {"alice chen": 0, "acme robotics": 1, "lisbon": 2}
+    assert view["filters"]["direction"] == "out"
+
+
+def test_a_walk_backward_finds_what_depends_on_an_entity(city):
+    """Everything that leads to Lisbon: what is based there and who lives
+    there, then who works at what is based there."""
+    client, _ = city
+    _, hops = _walked(client, seed="Lisbon", direction="in")
+    assert hops == {"lisbon": 0, "acme robotics": 1, "bob stone": 1, "alice chen": 2}
+
+
+def test_a_walk_stops_at_its_hop_limit_and_says_so(city):
+    client, _ = city
+    view, hops = _walked(client, seed="Lisbon", hops=1)
+    assert hops == {"lisbon": 0, "acme robotics": 1, "bob stone": 1}
+    assert "hop_limit" in view["coverage"]["reasons"] and view["filters"]["hops"] == 1
+    reached, whole = _walked(client, seed="Lisbon", hops=2)
+    assert "alice chen" in whole and "hop_limit" not in reached["coverage"]["reasons"], "nothing was left to reach"
+
+
+def test_walk_parameters_are_checked_and_advertised(city):
+    client, _ = city
+    assert client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "direction": "up"}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "hops": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"direction": "in"}, headers=auth()).status_code == 422
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.knowledge_walk"] is True
