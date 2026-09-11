@@ -285,12 +285,17 @@ def fact_line(f) -> str:
 
 def graph_bench_command(args: argparse.Namespace, out) -> int:
     """Graph quality on a fixture, in process; the configured store is never
-    opened. Exits 1 when a threshold is breached."""
+    opened. Exits 1 when a threshold is breached, and 2 when the fixture's
+    gold names something it never loads."""
     from pathlib import Path
 
-    from ..testing.entity_graph_benchmark import THRESHOLDS_V1, failures, run_entity_graph_benchmark
+    from ..testing.entity_graph_benchmark import THRESHOLDS_V1, FixtureError, failures, run_entity_graph_benchmark
 
-    report = asyncio.run(run_entity_graph_benchmark(Path(args.fixtures)))
+    try:
+        report = asyncio.run(run_entity_graph_benchmark(Path(args.fixtures)))
+    except FixtureError as refused:
+        print(f"error: fixture refused: {refused}", file=sys.stderr)
+        return 2
     breached = failures(report, THRESHOLDS_V1)
     if getattr(args, "json", False):
         print(json.dumps({"report": report.record(), "failures": breached}, indent=2, sort_keys=True), file=out)
