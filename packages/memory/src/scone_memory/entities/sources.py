@@ -80,7 +80,11 @@ async def _once(engine: "MemoryEngine", space: str, episode_id: int, *, max_chun
         inside = [section for section in headed if section.start <= offset < section.end]
         return max(inside, key=lambda section: (section.level, section.start)).title if inside else None
 
-    chunks = sorted(await engine.documents.chunks_of(space, episode_id), key=lambda chunk: chunk.ordinal)
+    returned = await engine.documents.chunks_of(space, episode_id)
+    chunks = sorted((chunk for chunk in returned if chunk.space == space and chunk.episode_id == episode_id
+                     and 0 <= chunk.start <= chunk.end <= len(body)), key=lambda chunk: chunk.ordinal)
+    if len(chunks) != len(returned):
+        reasons.append("foreign_chunks")
     if len(chunks) > max_chunks:
         reasons.append("chunk_limit")
     shown_chunks = [{"chunk_id": chunk.chunk_id, "ordinal": chunk.ordinal, "start": chunk.start, "end": chunk.end,

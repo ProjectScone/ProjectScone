@@ -148,3 +148,23 @@ async def test_a_capped_projection_read_shows_in_the_views_coverage(source, monk
     monkeypatch.setattr(read, "MAX_FACTS", 1)
     view = await sources_view(engine, "alpha", note.episode_id)
     assert "fact_limit" in view["coverage"]["reasons"] and view["coverage"]["truncated"] is True
+
+
+class ForeignChunks(InMemoryDocumentStore):
+    """A faulty adapter that hands back another episode's chunks too."""
+
+    async def chunks_of(self, space, episode_id):
+        own = await super().chunks_of(space, episode_id)
+        other = await super().chunks_of(space, episode_id + 1)
+        return own + other
+
+
+async def test_chunks_from_another_episode_or_past_the_content_are_refused():
+    store = ForeignChunks()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(), chunk_target=64).open()
+    note = await engine.remember("alpha", NOTE)
+    await engine.remember("alpha", "A much longer unrelated note. " * 20)
+    view = await sources_view(engine, "alpha", note.episode_id)
+    size = len(NOTE.encode())
+    assert view["chunks"] and all(0 <= chunk["start"] <= chunk["end"] <= size for chunk in view["chunks"])
+    assert "foreign_chunks" in view["coverage"]["reasons"]
