@@ -60,7 +60,8 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, XLSX, PPTX | Paragraphs/tables, sheet cell references, slides and notes | No rendered Office layout or macro execution |
+| DOCX | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| XLSX, PPTX | Sheet cell references, slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
@@ -207,7 +208,45 @@ tables. Resource exhaustion fails explicitly: at most 20,000 cells per table,
 operations and 8 MB of serialized cell evidence, within the existing text,
 segment and wall-time limits. The slot and evidence limits also apply across
 the complete document. This does not detect tables in OCR geometry or add typed
-table evidence to Office and delimited readers yet.
+table evidence to spreadsheet, presentation or delimited readers yet.
+
+### Word table merges and context
+
+DOCX tables retain the same cell evidence, including `gridSpan`, legacy horizontal
+merges, vertical merges and skipped leading/trailing grid columns. Contiguous
+rows marked with the direct `tblHeader` property supply column headers; bold text,
+first-row styling and late header markers do not establish a header relationship.
+`metadata.header_basis=word_repeating_rows` identifies this interpretation.
+Both transitional and strict WordprocessingML namespaces are supported. Unknown
+table, row or cell namespaces retain text with an explicit fallback.
+
+A merged cell keeps the first cell's locator and records the additional source
+cells in `merged_locators`. Its text retains the source cells' nonempty content,
+separated by newlines. Spans describe the combined grid area. On later rows,
+values carry `context` references to non-header cells that span into their row.
+For example, `West / Revenue: €20` distinguishes the spanning data cell `West`
+(`association=row_span`) from the declared column header `Revenue`. These
+references survive chunk filtering even when their source cells lie in an
+earlier segment. They do not reclassify data as headers.
+
+Tables with merge-source or row-context evidence use manifest version 5;
+unmerged tables use version 4. Empty new fields are omitted, preserving existing
+HTML table manifest bytes. The parser identifies this extraction as
+`native-xml-word-tables-v1`. Use a new durable run and parser revision when
+re-extracting older flattened Word tables. Referenced notes, comments, text boxes
+and relocated package members retain their existing source roles and locators.
+
+Deleted cells are excluded. Historical property snapshots do not override
+current grid properties. A tracked row-deletion marker triggers
+`tracked_row_structure` text fallback: row and cell-content revision states are
+independent, so the reader does not discard independently live text or claim a
+resolved current grid. Nested tables and inconsistent merge continuations also
+use explicit text fallback. Inherited table styles and full tracked-layout
+reconciliation remain open.
+
+Word extraction applies the same cell, column, occupied-slot, reference and
+evidence bounds. It checks cumulative text and segment limits while constructing
+contextual rows, including preceding document content, before retaining a result.
 
 ## Durable extraction checkpoints
 

@@ -36,7 +36,7 @@ FILE_MEDIA_TYPES = {
 
 class DocumentManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
@@ -49,6 +49,9 @@ class DocumentManifest(BaseModel):
 
 
 def _validate_manifest_version(manifest: DocumentManifest) -> None:
+    if manifest.schema_version < 5 and any(c.context or c.merged_locators
+            for s in manifest.parsed.segments for c in s.table_cells):
+        raise ValueError('document merged table sources require manifest version five')
     if manifest.schema_version < 4 and any(s.table_cells for s in manifest.parsed.segments):
         raise ValueError('document table cells require manifest version four')
     if manifest.schema_version == 1 and any(segment.regions for segment in manifest.parsed.segments):
@@ -116,7 +119,8 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
     validate_document(parsed, limits)
     has_order = any('ocr_reading_order' in s.metadata for s in parsed.segments)
     has_tables = any(s.table_cells for s in parsed.segments)
-    return DocumentManifest(schema_version=4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
+    has_merges = any(c.context or c.merged_locators for s in parsed.segments for c in s.table_cells)
+    return DocumentManifest(schema_version=5 if has_merges else 4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
                             original_sha256=digest(data), filename=filename, parsed=parsed)
 
 

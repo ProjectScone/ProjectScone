@@ -20,6 +20,8 @@ from pydantic import ValidationError
 from ...core.errors import InvalidInput
 from .archive import SafeArchive
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
+from .table_types import DocumentTableCell
+from .word_tables import word_children, word_table
 
 OFFICE_EXTENSIONS = frozenset({'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'epub'})
 _ODF_REVISION_METADATA = frozenset({
@@ -102,17 +104,19 @@ class _Output:
             pieces.append(part)
         return separator.join(pieces)
 
-    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None) -> None:
+    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None, *,
+            table_cells: tuple[DocumentTableCell, ...] = ()) -> None:
         self.check()
-        text = text.strip()
-        if not text:
+        if not table_cells:
+            text = text.strip()
+        if not text.strip():
             return
         self.text_bytes += len(text.encode('utf-8')) + (2 if self.segments else 0)
         if self.text_bytes > self.limits.max_text_bytes:
             raise InvalidInput('document exceeds its extracted text byte limit')
         if len(self.segments) >= self.limits.max_segments:
             raise InvalidInput('document exceeds its segment limit')
-        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}))
+        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}, table_cells=table_cells))
 
 
 def _resolve(source: str, target: str) -> str:
@@ -217,7 +221,12 @@ def _prune_run_metadata(root: Element, output: _Output) -> None:
         children = []
         for child in parent:
             output.check()
-            if child.tag not in _RUN_METADATA and not _hidden_run(child):
+            namespace = child.tag.rsplit('}', 1)[0] + '}'
+            word = namespace[1:-1] in _WORD_NAMESPACES
+            deleted_cell = word and child.tag == namespace + 'tc' and child.find(
+                f'{namespace}tcPr/{namespace}cellDel') is not None
+            row_marker = word and child.tag == namespace + 'del' and parent.tag == namespace + 'trPr'
+            if (child.tag not in _RUN_METADATA or row_marker) and not _hidden_run(child) and not deleted_cell:
                 children.append(child)
         parent[:] = children
         stack.extend(children)
@@ -252,10 +261,16 @@ def _word_content(
             continue
         if _local(block.tag) == 'tbl':
             tables += 1
-            for number, row in enumerate((child for child in block if _local(child.tag) == 'tr'), 1):
+            rows = list(word_children(block, 'tr'))
+            detached = [_detach_textboxes(row, output) for row in rows]
+            structured = word_table(block, rows, f'{prefix}table:{tables}', metadata,
+                lambda cell: output.join((_run_text(p, output) for p in _elements(cell, 'p')), '\n'),
+                output.limits, output.check, text_bytes=output.text_bytes, segments=len(output.segments))
+            for number, (row, boxes) in enumerate(zip(rows, detached), 1):
                 locator = f'{prefix}table:{tables}/row:{number}'
-                boxes = _detach_textboxes(row, output)
-                output.add(_row_text(row, output), locator, metadata)
+                segment = structured.get(number - 1)
+                if segment is not None:
+                    output.add(segment.text, locator, segment.metadata, table_cells=segment.table_cells)
                 yield row, locator, boxes
         else:
             paragraphs += 1
@@ -686,7 +701,9 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
         output.check()
         if not output.segments:
             raise InvalidInput('document contains no extractable text')
-        parsed = ParsedDocument(format=extension, parser='native-xml', segments=tuple(output.segments))
+        parser = 'native-xml-word-tables-v1' if extension == 'docx' and any(
+            'table_status' in segment.metadata for segment in output.segments) else 'native-xml'
+        parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments))
         validate_document(parsed, limits)
         return parsed
     except (ValidationError, ValueError, OverflowError, RecursionError):
