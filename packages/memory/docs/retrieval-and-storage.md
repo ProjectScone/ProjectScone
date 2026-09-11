@@ -66,6 +66,61 @@ with the lane off and for all 20 with it on. A single synthetic set
 shows the mechanism works; whether it helps on real questions is for
 the retrieval benchmarks to show before the default changes.
 
+## Abstaining, by a floor that was measured
+
+A similarity is a number one embedder produces under one set of settings.
+It is not a probability, and a floor that abstains well for one embedder
+on one corpus says nothing about another, so this framework ships no
+floor and guesses none. It measures one instead:
+
+```bash
+scone calibrate bench-data/longmemeval_s.json --sample 40 --out abstention.json
+export SCONE_ABSTENTION_POLICY=./abstention.json
+```
+
+- **What is measured.** Each question is asked of its own memory, and one
+  question whose answer is not in that memory is asked of it too, so both
+  sides are measured on the same corpus with the same embedder. Each
+  candidate floor is scored by how many unanswerable questions it would
+  catch and how many answerable ones it would withhold.
+- **Which floor is taken.** The highest one whose share of withheld
+  answers is inside `--target-false-abstain` (0.05 by default). When no
+  floor is that cheap, none is written and the command says so.
+- **What the policy holds:** the floor, the embedder id and width it was
+  measured with, what it caught and withheld, the target, the dataset and
+  when. `scone status` prints it, and `/v1/status` returns it.
+- **It is refused, not reused.** An engine whose embedder or width differs
+  from the policy's refuses to start, because one embedder's similarities
+  say nothing about another's. A policy file that cannot be read stops the
+  engine too, rather than being ignored.
+- **What it changes.** A recall whose top similarity is below the floor
+  comes back with `low_confidence` true. Nothing is hidden and no answer
+  is rewritten: the reader decides what to do with it.
+- **What it does not mean.** The rates are what the floor cost on that
+  corpus, not a probability for the next question. Re-measure when the
+  embedder, its settings or the corpus changes.
+
+### What it measured here
+
+On a 40-question sample of `bench-data/longmemeval_s.json`, with the hash
+embedder and one unanswerable question per answerable one:
+
+| Floor | Catches (of unanswerable) | Withholds (of answerable) |
+| --- | --- | --- |
+| 0.30 | 65% | 35% |
+| 0.35 | 83% | 60% |
+| 0.40 | 93% | 85% |
+| 0.45 | 100% | 95% |
+
+No floor is within the default budget of 5% withheld, so `scone
+calibrate` writes nothing and says so. That is the result, not a failure
+of the command: the hash embedder's cosine does not separate what this
+corpus can answer from what it cannot, and a floor chosen anyway would
+withhold a third of the answers to catch two thirds of the gaps. An
+embedder whose similarities separate them better would be measured the
+same way, which is the point of measuring rather than shipping a
+constant.
+
 ## Questions about dates, answered by computation
 
 Much of what people ask memory is arithmetic over dates: how long between
@@ -162,6 +217,13 @@ On the 40 temporal questions of `bench-data/temporal-40.json`:
 | Refused: not a question it reads | 8 |
 | Refused: nothing in memory for the event or the day | 4 |
 | Refused: an event's day undecided | 2 |
+
+Restricting ordinary recall to the dates a question names was measured on
+the same 40 questions and is not worth doing: the session the expected
+answer rests on reaches the top five for 36 of 40 either way, and the two
+sets differ, because an event is often told on a day other than the one
+the question names. The days bound the search only for a question about a
+day, where the day is what is being asked for.
 
 The four wrong ones are grounding, not arithmetic: the phrase matched a
 later passage recalling the event rather than the one recording it

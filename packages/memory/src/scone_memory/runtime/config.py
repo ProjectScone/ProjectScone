@@ -30,6 +30,7 @@
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
+    SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
     SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
                                  alternatively load preprovisioned CPU model files; both required
@@ -154,6 +155,7 @@ class Settings:
     contextual_embeddings: bool = False
     demote_restated: bool = True
     many_valued: tuple[str, ...] = ()
+    abstention_policy: str | None = None
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
@@ -352,6 +354,7 @@ class Settings:
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
@@ -446,6 +449,15 @@ def parse_key_roles(many: Optional[str], one: Optional[str]) -> tuple[dict[str, 
 def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
     """The key -> space half of parse_key_roles, for callers that only want spaces."""
     return parse_key_roles(many, one)[0]
+
+
+def build_abstention(settings: Settings):
+    """The measured floor to abstain by, when the operator configured one.
+    A policy that cannot be read is refused here, not ignored: abstaining
+    by a floor nobody measured is what this avoids."""
+    from ..retrieval.abstention import AbstentionPolicy
+
+    return AbstentionPolicy.read(settings.abstention_policy) if settings.abstention_policy else None
 
 
 def build_embedder(settings: Settings):
@@ -598,6 +610,8 @@ def build_vectors(settings: Settings, documents=None):
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
+#: Settings carried into an engine that are read from a file, not a value.
+FILE_SETTINGS = ("abstention_policy",)
 
 
 def _environment_integer(name: str, value: str) -> int:
@@ -680,6 +694,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
+        abstention=build_abstention(settings),
     ).open()
 
 
@@ -851,6 +866,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
+        abstention=build_abstention(settings),
         blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

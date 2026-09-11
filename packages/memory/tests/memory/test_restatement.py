@@ -105,7 +105,8 @@ def test_both_benches_build_their_engines_with_every_setting():
     import inspect
 
     from scone_memory.runtime import cli
-    from scone_memory.runtime.config import ENGINE_SETTINGS, Settings, build_in_process_engine
+    from scone_memory.runtime.config import (ENGINE_SETTINGS, FILE_SETTINGS, Settings, build_engine,
+                                              build_in_process_engine)
 
     for command in (cli.bench_command, cli.conflicts_command):
         assert "build_in_process_engine" in inspect.getsource(command), command.__name__
@@ -113,3 +114,8 @@ def test_both_benches_build_their_engines_with_every_setting():
     for setting in ENGINE_SETTINGS:
         assert f"{setting}=settings.{setting}" in source, setting
         assert hasattr(Settings(), setting), setting
+    # Settings read from a file reach an engine through their builder.
+    for setting in FILE_SETTINGS:
+        assert hasattr(Settings(), setting), setting
+    for built in (build_in_process_engine, cli.build_engine if hasattr(cli, "build_engine") else build_engine):
+        assert "abstention=build_abstention(settings)" in inspect.getsource(built), built.__name__

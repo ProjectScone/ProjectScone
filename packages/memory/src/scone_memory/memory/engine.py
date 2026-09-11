@@ -28,6 +28,7 @@ from ..ingestion.records import (
     content_hash as content_hash, contextual_prefix as contextual_prefix,
 )
 from ..retrieval import fact_recall
+from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
@@ -151,9 +152,18 @@ class MemoryEngine:
         rerank_max_bytes: int = 64000,
         rerank_timeout: float = 1.0,
         many_valued: Iterable[str] = (),
+        abstention: AbstentionPolicy | None = None,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
+        if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
+            raise InvalidInput(
+                f"the abstention policy was measured with embedder {abstention.embedder_id} "
+                f"({abstention.dim}-d); this engine embeds with {embedder.id} ({embedder.dim}-d), and one "
+                f"embedder's similarities say nothing about another's")
+        #: The measured floor this engine abstains by, when one was given.
+        self.abstention = abstention
+        similarity_floor = abstention.floor if abstention is not None else similarity_floor
         self.candidate_limit = validate_candidate_limit(candidate_limit)
         validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
         if reranker is not None and not callable(getattr(reranker, "rerank", None)):
@@ -1079,6 +1089,7 @@ class MemoryEngine:
     async def status(self, space: str) -> Status:
         return await catalog.status(self.documents, space, identity=lambda: {
             "embedder": self.embedder.id, "document_store": self.documents.name, "vector_index": self.vectors.name,
+            "abstention": self.abstention.record() if self.abstention is not None else None,
         })
 
     # -- portability ------------------------------------------------------

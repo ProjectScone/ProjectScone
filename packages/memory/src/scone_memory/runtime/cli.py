@@ -262,6 +262,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid", "svg", "canvas", "html"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
+    p = sub.add_parser("calibrate",
+                       help="measure the floor this engine abstains by, on questions with and without an answer")
+    p.add_argument("dataset", help="a LongMemEval-shaped JSON file of questions")
+    p.add_argument("--sample", type=int, help="measure on a stratified sample of N questions")
+    p.add_argument("--target-false-abstain", type=float, default=None,
+                   help="the share of answerable questions the floor may withhold (default 0.05)")
+    p.add_argument("--out", help="write the policy here; without it, nothing is written")
+
     p = sub.add_parser("bench-temporal",
                        help="score computed temporal answers on a file of dated questions (no model called)")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
@@ -353,6 +361,35 @@ def graph_bench_command(args: argparse.Namespace, out) -> int:
             print(f"{key}: {value}", file=out)
         print("thresholds: " + ("pass" if not breached else "; ".join(breached)), file=out)
     return 1 if breached else 0
+
+
+async def calibrate_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Measure the floor to abstain by, with the configured embedder, and
+    write it down with what it cost. Each question is measured on its own
+    memory, so the configured store is not read or written."""
+    from ..bench.calibrate import DEFAULT_TARGET, calibrate, write_policy
+    from ..bench.runner import load_items, stratified_sample
+    from .config import build_embedder, build_in_process_engine
+
+    items = load_items(args.dataset)
+    if args.sample:
+        items = stratified_sample(items, args.sample)
+    embedder = build_embedder(settings)
+    target = DEFAULT_TARGET if args.target_false_abstain is None else args.target_false_abstain
+    policy, report = await calibrate(lambda: build_in_process_engine(settings, embedder), items,
+                                     target_false_abstain=target, dataset=str(args.dataset))
+    if policy is None:
+        said = {"policy": None, "reason": "no floor withholds few enough answers to take",
+                "sweep": report.abstention}
+        print(json.dumps(said) if args.json else
+              f"abstention: no floor is within {target} of answers withheld; none written", file=out)
+        return 1
+    if args.out:
+        write_policy(policy, args.out)
+    print(json.dumps(policy.record()) if args.json else
+          policy.text() + (f"\nwritten: {args.out}" if args.out else "\nnot written: pass --out to keep it"),
+          file=out)
+    return 0
 
 
 async def temporal_command(args: argparse.Namespace, settings: Settings, out) -> int:
@@ -1100,9 +1137,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-temporal"):
+    if args.command in ("bench", "bench-conflicts", "bench-temporal", "calibrate"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
-                   "bench-temporal": temporal_command}[args.command]
+                   "bench-temporal": temporal_command, "calibrate": calibrate_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:

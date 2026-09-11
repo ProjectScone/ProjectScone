@@ -23,6 +23,7 @@ class CatalogIdentity(TypedDict):
     embedder: str
     document_store: str
     vector_index: str
+    abstention: Optional[dict]
 
 
 @dataclass(frozen=True)

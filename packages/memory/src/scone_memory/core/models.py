@@ -411,6 +411,9 @@ class Status(BaseModel):
     embedder: str = ""
     document_store: str = ""
     vector_index: str = ""
+    #: The measured floor this engine abstains by, with what it cost and
+    #: the embedder it was measured with; None when none was configured.
+    abstention: Optional[dict] = None
 
 
 class DecisionOutcome(BaseModel):
