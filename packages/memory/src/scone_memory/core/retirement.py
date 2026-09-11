@@ -7,7 +7,7 @@ lock or a transaction across document, vector, blob and event stores.
 """
 from __future__ import annotations
 
-from typing import Annotated, Protocol, runtime_checkable
+from typing import Annotated, Protocol, TypeGuard, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -104,3 +104,10 @@ class RetirementStore(Protocol):
     async def retirement(self, space: str, episode_id: int) -> Retirement | None: ...
     async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]: ...
     async def clear_retirement(self, space: str, episode_id: int) -> None: ...
+
+
+def supports_retirement(store: object) -> TypeGuard[RetirementStore]:
+    """Custom stores must supply callable methods, not just matching names."""
+    return isinstance(store, RetirementStore) and all(callable(getattr(store, name, None)) for name in (
+        "record_retirement", "retirement", "page_retirements", "clear_retirement",
+    ))

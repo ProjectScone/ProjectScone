@@ -66,6 +66,7 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
+    ForgetStatus,
     IngestJob,
     SpaceReceipt,
     Tombstone,
@@ -505,6 +506,10 @@ class MemoryEngine:
         nothing removed. The claims and links that cite it are reported,
         not closed: a source being gone is a fact about the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
+
+    async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
+        """Observe retained, pending or completed source removal without writes."""
+        return await retention.forget_status(self._retention_runtime(), space, episode_id)
 
     async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
         """Remove the episode, its chunks and vectors, and release the

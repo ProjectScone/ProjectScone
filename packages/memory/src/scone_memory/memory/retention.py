@@ -12,9 +12,9 @@ from typing import Awaitable, Callable, Mapping, Optional
 
 from ..backends.blobs import BlobStore
 from ..core.errors import Gone, InvalidInput, NotFound
-from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, SpaceReceipt, Tombstone
+from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, ForgetStatus, SpaceReceipt, Tombstone
 from ..core.ports import DocumentStore, EventLog, NewEvent, NewTombstone, VectorIndex
-from ..core.retirement import Retirement, RetirementStore, retirement_key
+from ..core.retirement import Retirement, RetirementStore, retirement_key, supports_retirement
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space, retention_policy
 
@@ -166,6 +166,58 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
     )
 
 
+def _status_identity(record: Episode | Tombstone | Retirement | None, space: str, episode_id: int) -> None:
+    if record is not None and (record.space != space or record.episode_id != episode_id):
+        raise InvalidInput("source status identity does not match the requested source")
+
+
+def _pending_status(pending: Retirement, space: str, episode_id: int) -> ForgetStatus:
+    _status_identity(pending, space, episode_id)
+    # Custom adapters may hand back unchecked copies; revalidate the receipt.
+    pending = Retirement.model_validate(pending)
+    return ForgetStatus(episode_id=episode_id, state="pending",
+                        requested_at=pending.requested_at, impact=pending.receipt)
+
+
+async def forget_status(runtime: RetentionRuntime, space: str, episode_id: int) -> ForgetStatus:
+    """Read progress with bounded point reads; never retry a removal as a read.
+
+    This is an observation, not a lock against a later write. Pending intents
+    win over tombstones because cleanup acknowledges its intent last.
+    """
+    check_space(space)
+    retirement_key(space, episode_id)
+    store = _retirement_store(runtime)
+    pending = await store.retirement(space, episode_id)
+    if pending is not None:
+        return _pending_status(pending, space, episode_id)
+    episode = await runtime.documents.get_episode(space, episode_id)
+    _status_identity(episode, space, episode_id)
+    stone = await runtime.documents.tombstone(space, episode_id)
+    _status_identity(stone, space, episode_id)
+    pending = await store.retirement(space, episode_id)
+    if pending is not None:
+        return _pending_status(pending, space, episode_id)
+    if stone is not None:
+        # The earlier row read can predate a concurrent successful removal.
+        if await runtime.documents.get_episode(space, episode_id) is not None:
+            raise InvalidInput("source and tombstone coexist; inspect source integrity")
+        parse_rfc3339(stone.forgotten_at)
+        return ForgetStatus(episode_id=episode_id, state="forgotten", forgotten_at=stone.forgotten_at)
+    if episode is not None:
+        return ForgetStatus(episode_id=episode_id, state="present")
+    # A removal can finish between the tombstone and final intent reads.
+    stone = await runtime.documents.tombstone(space, episode_id)
+    _status_identity(stone, space, episode_id)
+    if stone is not None:
+        pending = await store.retirement(space, episode_id)
+        if pending is not None:
+            return _pending_status(pending, space, episode_id)
+        parse_rfc3339(stone.forgotten_at)
+        return ForgetStatus(episode_id=episode_id, state="forgotten", forgotten_at=stone.forgotten_at)
+    raise NotFound(f"episode {episode_id} not found in {space!r}")
+
+
 async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> ForgetReceipt:
     """Remove the episode, its chunks and vectors, and release the
     attachments nothing else carries; return the receipt that
@@ -197,9 +249,7 @@ async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
 
 def _retirement_store(runtime: RetentionRuntime) -> RetirementStore:
     store = runtime.documents
-    if not isinstance(store, RetirementStore) or not all(callable(getattr(store, name, None)) for name in (
-        "record_retirement", "retirement", "page_retirements", "clear_retirement",
-    )):
+    if not supports_retirement(store):
         raise InvalidInput("this document store does not implement durable retirement")
     return store
 

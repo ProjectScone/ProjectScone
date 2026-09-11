@@ -495,3 +495,37 @@ revision tracking and explicit missing-file deletion, use the separate
 revision history, metadata-only updates and transactional attachment transfer
 remain separate gaps; ordinary content-addressed document ingestion does not
 itself manage an external source's current revision.
+
+### Inspecting source removal
+
+Servers with `episodes.forget: true` in `/v1/capabilities` expose the complete
+source-removal workflow. This flag describes implementation support; the key's
+role still determines whether DELETE is allowed.
+
+- `GET /v1/episodes/{id}/impact` previews chunks and attachments removed and
+  citing facts and links retained. It does not reserve a snapshot against writes.
+- `DELETE /v1/episodes/{id}` removes the source through durable cleanup and
+  returns a receipt. Repeating DELETE can finish an interrupted cleanup.
+- `GET /v1/episodes/{id}/forget-status` reads `present`, `pending`, or `forgotten`
+  without starting or resuming cleanup. The engine equivalent is
+  `await memory.forget_status(space, episode_id)`.
+
+A pending status includes the original `requested_at` and `impact`. It takes
+precedence over an existing tombstone until all cleanup steps acknowledge
+completion. A forgotten status includes `forgotten_at` but no full receipt:
+the tombstone does not retain the original attachment or citing-claim inventory.
+Unknown IDs and IDs belonging to another space return 404. Valid read keys may
+inspect status and impact; keys without write permission receive 403 on DELETE.
+Custom document stores must implement the callable durable-retirement protocol
+before this workflow is advertised.
+
+After an interrupted response, read status before deciding whether to resume.
+Status is a point-in-time observation, not a transaction or a lock against later
+writes. Browser and transport stacks may replay idempotent DELETE requests after
+connection failures; the durable retirement identity binds retries to the same
+source. Clients should not automatically initiate another removal attempt.
+
+Source removal leaves citing claims, links and their stored quotes in the ledger.
+Shared attachments remain where another source in the space carries them.
+Downloaded copies and backups are outside this action; this is not a promise of
+complete erasure from every storage location.

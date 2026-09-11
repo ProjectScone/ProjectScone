@@ -9,6 +9,8 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+from ..core.retirement import supports_retirement
+
 from dataclasses import asdict
 
 import asyncio
@@ -334,6 +336,7 @@ def create_app(
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
+            "episodes.forget": supports_retirement(engine.documents),
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
@@ -528,6 +531,11 @@ def create_app(
     async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
         """What forgetting would take and leave; removes nothing."""
         return (await engine.impact(space, episode_id)).model_dump()
+
+    @app.get("/v1/episodes/{episode_id}/forget-status")
+    async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """Read removal progress, including interrupted cleanup, without writes."""
+        return (await engine.forget_status(space, episode_id)).model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:

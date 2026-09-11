@@ -52,7 +52,8 @@
       "recall.structural_context": true,
       "recall.multi_hop": true,
       "documents.files": true,
-      "documents.provenance": true
+      "documents.provenance": true,
+      "episodes.forget": true
     }
   }
 }
