@@ -86,3 +86,14 @@ async def test_a_recall_below_the_measured_floor_is_flagged_for_the_reader():
                                 abstention=policy).open()
     await engine.remember("alpha", "The kitchen tap was replaced on Tuesday by the plumber.")
     assert (await engine.recall("alpha", "what colour is the roof")).low_confidence is True
+
+
+def test_a_policy_file_too_large_to_be_one_is_refused(tmp_path):
+    """A policy is a few hundred bytes; anything else is not one, and is
+    refused before it is parsed."""
+    from scone_memory.retrieval.abstention import MAX_POLICY_BYTES
+
+    path = tmp_path / "policy.json"
+    path.write_text("{\"schema_version\": 1, \"pad\": \"" + "x" * (MAX_POLICY_BYTES + 1) + "\"}", encoding="utf-8")
+    with pytest.raises(PolicyError, match="too large"):
+        AbstentionPolicy.read(path)

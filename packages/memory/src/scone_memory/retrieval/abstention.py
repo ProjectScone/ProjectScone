@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 SCHEMA_VERSION = 1
+#: A policy is a few hundred bytes; a larger file is not one.
+MAX_POLICY_BYTES = 64 * 1024
 
 
 class PolicyError(ValueError):
@@ -72,8 +74,15 @@ class AbstentionPolicy:
     def read(cls, path: str | Path) -> "AbstentionPolicy":
         """A policy from a file, refused rather than guessed at when its
         version, floor, embedder or width is not one this can use."""
+        found = Path(path)
         try:
-            written = json.loads(Path(path).read_text(encoding="utf-8"))
+            size = found.stat().st_size
+        except OSError as unreadable:
+            raise PolicyError(f"the policy could not be read: {unreadable}") from None
+        if size > MAX_POLICY_BYTES:
+            raise PolicyError(f"the policy file is too large to be one: {size} bytes, over {MAX_POLICY_BYTES}")
+        try:
+            written = json.loads(found.read_text(encoding="utf-8"))
         except (OSError, ValueError) as unreadable:
             raise PolicyError(f"the policy could not be read: {unreadable}") from None
         if not isinstance(written, dict):

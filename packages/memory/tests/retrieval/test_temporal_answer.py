@@ -245,3 +245,24 @@ async def test_two_claims_the_question_fits_alike_leave_it_undecided():
     await engine.assert_fact("alpha", "alice chen", "advises", "Acme Robotics", valid_from="2020-02-01T00:00:00Z")
     answer = await temporal_answer(engine, "alpha", "How long has Alice Chen Acme Robotics?", now=NOW)
     assert answer.status == "ambiguous" and answer.value == {}
+
+
+async def test_a_question_listing_more_events_than_can_be_grounded_is_refused():
+    """Each event named costs a search, so a list longer than MAX_EVENTS is
+    not read: the answer says so instead of searching all night."""
+    from scone_memory.retrieval.temporal import MAX_EVENTS
+
+    engine = await diary()
+    listed = ", ".join(f"'the thing number {n}'" for n in range(MAX_EVENTS + 1))
+    answer = await temporal_answer(engine, "alpha", f"In what order did these happen: {listed}?", now=NOW)
+    assert answer.status == "not_temporal" and "more than" in answer.text
+
+
+async def test_a_ledger_answer_says_when_the_read_was_capped(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await ledger()
+    monkeypatch.setattr(read, "MAX_FACTS", 1)
+    answer = await temporal_answer(engine, "alpha", "How long did Alice work at Acme Robotics?", now=NOW)
+    assert "coverage: limited: " in answer.text and "fact_limit" in answer.text
+    assert answer.coverage["read"]["truncated"] is True
