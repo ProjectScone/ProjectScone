@@ -309,6 +309,8 @@ async def test_a_claim_the_store_lost_is_missing_not_out_of_view(monkeypatch):
         return [fact for fact in await listed(self, *args, **kwargs) if fact.predicate != "leads"]
 
     monkeypatch.setattr(InMemoryDocumentStore, "list_facts", losing)
+    _projected_without(monkeypatch, lambda projection: replace(
+        projection, relations=tuple(relation for relation in projection.relations if relation.predicate != "leads")))
     report = await run_entity_graph_benchmark(FIXTURE)
     assert report.claims_missing == 1 and report.claims_out_of_view == 0
 
@@ -342,4 +344,21 @@ async def test_a_claim_restated_in_another_interval_is_its_own_fact(tmp_path, as
     ]))
     report = await run_entity_graph_benchmark(path)
     assert report.facts == 3 and report.claims_out_of_view == 2 and report.claims_missing == 0
+    assert report.literal_error_rate == 0.0
+
+
+@pytest.mark.parametrize("years, stored, out_of_view", [((2023, 2024), 1, 0), ((2024, 2023), 2, 1)])
+async def test_a_value_reaffirmed_later_is_the_same_fact_not_a_lost_one(tmp_path, years, stored, out_of_view):
+    """34 from 2023, then 34 again from 2024, is one fact the ledger kept,
+    not a second one it lost; the other way round, the backfill is a closed
+    fact of its own. Rows are scored by the fact the ledger answered with."""
+    path = tmp_path / "reaffirmed.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in [
+        {"kind": "meta", "name": "reaffirmed", "as_of": "2025-06-01T00:00:00Z"},
+        *({"kind": "fact", "subject": "alice", "predicate": "age", "object": "34",
+           "valid_from": f"{year}-01-01T00:00:00Z"} for year in years),
+        {"kind": "literal", "subject": "alice", "predicate": "age", "object": "34", "value": True},
+    ]))
+    report = await run_entity_graph_benchmark(path)
+    assert (report.facts, report.claims_missing, report.claims_out_of_view) == (stored, 0, out_of_view)
     assert report.literal_error_rate == 0.0

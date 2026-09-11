@@ -66,7 +66,6 @@ import time
 from typing import Mapping
 
 from ..core.errors import SconeError
-from ..core.models import Fact
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space, entity_key
 from ..entities.analysis import analyze_projection
@@ -299,10 +298,14 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 clock=lambda: moment).open()
     try:
+        # Each fact row is scored by the fact the ledger answered with: a
+        # value restated later is the same fact, a backfill is a new one.
+        made: dict[int, list[Row]] = defaultdict(list)
         for row in rows:
             if row["kind"] == "fact":
-                await engine.assert_fact(space, str(row["subject"]), str(row["predicate"]), str(row["object"]),
-                                         valid_from=str(row.get("valid_from", _VALID_FROM)))
+                answer = await engine.assert_fact(space, str(row["subject"]), str(row["predicate"]),
+                                                  str(row["object"]), valid_from=str(row.get("valid_from", _VALID_FROM)))
+                made[answer.fact_id].append(row)
         projection, coverage = await load_projection(engine, space, mode="current", as_of=moment)
         by_key = {entity.key: entity.entity_id for entity in projection.entities}
 
@@ -310,17 +313,8 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
         entity_of = {name: by_key.get(entity_key(name)) for cluster in gold for name in cluster}
         fragments = {cluster[0]: len({entity_of[name] or f"missing:{name}" for name in cluster}) for cluster in gold}
 
-        # A claim restated in another interval is another fact: 34, then 35,
-        # then 34 again is three facts, told apart by when each began.
         facts = await engine.documents.list_facts(space, include_closed=True)
-        by_claim: dict[tuple[str, str, str], list[Fact]] = defaultdict(list)
-        for fact in facts:
-            by_claim[(fact.subject, fact.predicate, fact.object)].append(fact)
-
-        def stored(row: Row) -> Fact | None:
-            """The stored fact a fact row made: its claim, from when it began."""
-            begins = _begins(row)
-            return next((fact for fact in by_claim[_claim(row)] if parse_rfc3339(fact.valid_from) == begins), None)
+        by_id = {fact.fact_id: fact for fact in facts}
 
         relations_of: dict[int, list[Relation]] = defaultdict(list)
         attributes_of: dict[int, list[Attribute]] = defaultdict(list)
@@ -331,41 +325,39 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
             for fact_id in attribute.fact_ids:
                 attributes_of[fact_id].append(attribute)
 
-        def holds(row: Row) -> bool:
-            """Whether the view should hold the claim at as_of, by its own
-            rule; a claim the store lost should, once it has begun."""
-            fact = stored(row)
+        def holds(fact_id: int) -> bool:
+            """Whether the view should hold the fact at as_of, by its own
+            rule; a fact the store lost should, once its row has begun."""
+            fact = by_id.get(fact_id)
             if fact is None:
-                return _begins(row) <= when
+                return min(_begins(row) for row in made[fact_id]) <= when
             return counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, "current", when)
 
-        def carried(row: Row) -> tuple[bool, bool]:
+        def carried(fact_id: int) -> tuple[bool, bool]:
             """Whether a relation, and whether an attribute, carries this very
-            claim: its fact, on its own subject, predicate and object."""
-            fact = stored(row)
-            if fact is None:
-                return False, False
+            fact, on its own subject, predicate and object."""
+            row = made[fact_id][0]
             subject, predicate = by_key.get(entity_key(str(row["subject"]))), str(row["predicate"])
             thing = by_key.get(entity_key(str(row["object"])))
             return (any(relation.subject_id == subject and relation.predicate == predicate
-                        and relation.object_id == thing for relation in relations_of[fact.fact_id]),
+                        and relation.object_id == thing for relation in relations_of[fact_id]),
                     any(attribute.entity_id == subject and attribute.predicate == predicate
-                        and attribute.value == str(row["object"]).strip() for attribute in attributes_of[fact.fact_id]))
+                        and attribute.value == str(row["object"]).strip() for attribute in attributes_of[fact_id]))
 
-        stated = [row for row in rows if row["kind"] == "fact"]
-        in_view = [row for row in stated if holds(row)]
-        claims_missing = sum(not any(carried(row)) for row in in_view)
-        rows_of: dict[tuple[str, str, str], list[Row]] = defaultdict(list)
-        for row in stated:
-            rows_of[_claim(row)].append(row)
+        in_view = [fact_id for fact_id in made if holds(fact_id)]
+        claims_missing = sum(not any(carried(fact_id)) for fact_id in in_view)
+        ids_of: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+        for fact_id, made_by in made.items():
+            ids_of[_claim(made_by[0])].append(fact_id)
 
-        def held(label: Row) -> Row | None:
-            """The fact row a label is about: of its claim's, the one the
-            view should hold at as_of."""
-            return next((row for row in rows_of[_claim(label)] if holds(row)), None)
+        def held(label: Row) -> int | None:
+            """The fact a label is about: of its claim's, the one the view
+            should hold at as_of."""
+            return next((fact_id for fact_id in ids_of[_claim(label)] if holds(fact_id)), None)
 
         unheld = [f"line {number}: literal {_said(row)} does not hold at as_of; "
-                  + ("its fact begins later" if all(_begins(fact_row) > when for fact_row in rows_of[_claim(row)])
+                  + ("its fact begins later" if all(_begins(made_row) > when for fact_id in ids_of[_claim(row)]
+                                                    for made_row in made[fact_id])
                      else "the ledger closed it")
                   for number, row in numbered if row["kind"] == "literal" and held(row) is None]
         if unheld:
@@ -416,7 +408,7 @@ async def run_entity_graph_benchmark(path: Path) -> EntityGraphReport:
     result = EntityGraphReport(
         fixture=str(meta.get("name", path.name)), facts=len(facts), entities=len(projection.entities),
         relations=len(projection.relations), attributes=len(projection.attributes), claims_missing=claims_missing,
-        claims_out_of_view=len(stated) - len(in_view),
+        claims_out_of_view=len(made) - len(in_view),
         gold_names_missing=sum(entity is None for entity in entity_of.values()), path_ends_missing=ends_missing,
         cluster_fragments=fragments,
         fragmentation=round(sum(fragments.values()) / len(fragments), 6) if fragments else None,

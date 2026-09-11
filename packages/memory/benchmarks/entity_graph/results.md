@@ -20,10 +20,11 @@ missing evidence outright:
 
 Which facts the view should hold is decided by the view's own rule. A
 fact that begins after `as_of`, or one the ledger closed, is counted
-apart as out of view, not as missing. A claim restated in another
-interval is its own fact, told apart by when it began: an age of 34,
-then 35, then 34 again is three facts. A label on 34 is scored against
-whichever of them holds at `as_of`.
+apart as out of view, not as missing. Each fact row is scored by the
+fact the ledger answered it with. An age of 34, then 35, then 34 again
+is three facts, and a label on 34 is scored against whichever of them
+holds at `as_of`. An age of 34 restated from a later day is the same
+fact, reaffirmed, not a second one lost.
 
 A fixture is refused (exit 2), naming each line, rather than scored, in
 two cases:
