@@ -39,10 +39,13 @@ def hint(predicate: str, role: Literal["subject", "object"]) -> EntityKind | Non
 def infer_kind(hints: Iterable[tuple[EntityKind, int]]) -> tuple[EntityKind | None, KindStatus, tuple[int, ...]]:
     """Resolve hints into a kind, its status and up to eight supporting fact ids."""
     found = sorted(set(hints), key=lambda item: (item[1], item[0]))
-    kinds = {kind for kind, _ in found}
+    kinds = sorted({kind for kind, _ in found})
     if not kinds:
         return None, "unknown", ()
-    basis = tuple(dict.fromkeys(fact_id for _, fact_id in found))[:8]
+    # The first fact behind each kind comes first, so a conflict's bounded
+    # evidence always shows every side of it.
+    leading = sorted(next(fact_id for kind, fact_id in found if kind == wanted) for wanted in kinds)
+    basis = tuple(dict.fromkeys((*leading, *(fact_id for _, fact_id in found))))[:8]
     if len(kinds) > 1:
         return None, "conflict", basis
-    return next(iter(kinds)), "inferred", basis
+    return kinds[0], "inferred", basis

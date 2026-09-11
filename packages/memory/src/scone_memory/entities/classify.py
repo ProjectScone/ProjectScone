@@ -14,7 +14,8 @@ The rules, in order:
 3. quoted text, or prose (long, or holding a sentence break);
 4. a third-person or indefinite pronoun;
 5. a date, quantity, identifier or yes/no shape, which names a thing only
-   when a subject carries the same key and its case cannot matter;
+   when a subject carries the same key and the text holds no cased letters
+   (a unit, version or path never joins by folding, in either direction);
 6. any key that a subject carries;
 7. a predicate whose object is a value (role, colour, price, status, ...);
 8. a leading determiner: a title-cased rest is a name ("the Web Summit"),
@@ -121,8 +122,11 @@ _SENTENCE_BREAK = re.compile(r"(\S+)[.!?…。！？]+\s+(?=\S)")
 
 
 def is_case_safe(text: str) -> bool:
-    """True when folding case cannot change what the text means."""
-    return all(character.lower() == character.upper() for character in text) or text == entity_key(text)
+    """True when folding case cannot change what the text means: it holds
+    no cased letters at all. Text already in lower case is not enough,
+    because subject keys are folded too; a subject 'mb' may have been
+    written 'MB', and matching it proves nothing about case."""
+    return all(character.lower() == character.upper() for character in text)
 
 
 def reference_flag(key: str) -> Literal["speaker_reference", "unresolved_reference"] | None:

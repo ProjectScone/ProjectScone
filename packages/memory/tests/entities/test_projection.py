@@ -149,3 +149,23 @@ def test_a_lowercase_object_joins_the_claims_made_about_it() -> None:
     assert edge.subject_id == ids["alice chen"] and edge.fact_ids == (10,)
     role = next(role for role in projection.roles if role.fact_id == 10)
     assert role.classification.basis == "subject_anchor"
+
+
+def test_a_value_meets_a_folded_subject_only_when_case_cannot_matter() -> None:
+    # 'mb' as a subject was written 'MB' (megabytes); 'mb' as an object is a
+    # unit that may be millibits. Folding lost the difference, so they stay apart.
+    rows = [fact(1, "mb", "means", "megabytes", quote="MB means megabytes."), fact(2, "transfer", "unit", "mb")]
+    projection = project_entities("alpha", rows, revision=1)
+    role = next(role for role in projection.roles if role.fact_id == 2)
+    assert (role.object_id, role.classification.detail) == (None, "case_sensitive")
+    assert any(a.predicate == "unit" and a.value == "mb" for a in projection.attributes)
+
+
+def test_a_kind_conflict_shows_evidence_for_every_side() -> None:
+    # Eight claims make acme a person (it 'works at' offices); one makes it an
+    # organisation. The bounded evidence must still name the dissenting claim.
+    rows = [fact(number, "acme", "works_at", f"Office {number}") for number in range(1, 9)]
+    rows.append(fact(9, "dana", "works_at", "Acme"))
+    acme = by_key(project_entities("alpha", rows, revision=1))["acme"]
+    assert acme.kind_status == "conflict" and acme.kind is None
+    assert 9 in acme.kind_basis and 1 in acme.kind_basis and len(acme.kind_basis) <= 8

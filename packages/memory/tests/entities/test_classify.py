@@ -81,6 +81,13 @@ def test_a_value_whose_case_can_matter_never_joins_through_folding() -> None:
         ("literal", "quantity", "quantity_shape", "case_sensitive")
 
 
+def test_a_lowercase_value_is_no_proof_its_case_cannot_matter() -> None:
+    # Subject keys are folded: the subject 'mb' may have been written 'MB'.
+    anchored = ClassificationContext(anchors=frozenset({"mb"}))
+    result = classify_object("mb", "unit", anchored)
+    assert (result.object_class, result.basis, result.detail) == ("literal", "quantity_shape", "case_sensitive")
+
+
 def test_any_name_a_subject_carries_is_an_entity() -> None:
     anchored = ClassificationContext(anchors=frozenset({"tired"}))
     assert classify_object("tired", "feels", anchored).basis == "subject_anchor"
@@ -103,14 +110,16 @@ def test_a_lowercase_phrase_becomes_a_concept_only_when_two_subjects_share_it() 
     assert classify_object("machine learning", "interested_in", shared).basis == "shared_object"
 
 
-@pytest.mark.parametrize(("text", "safe"), [("2024-05-01", True), ("里斯本", True), ("acme robotics", True),
+@pytest.mark.parametrize(("text", "safe"), [("2024-05-01", True), ("里斯本", True), ("42", True),
+                                              ("acme robotics", False), ("mb", False),
                                               ("Acme", False), ("MB", False), ("3 MB", False)])
 def test_case_safety(text: str, safe: bool) -> None:
     assert is_case_safe(text) is safe
 
 
 @pytest.mark.parametrize(("text", "blocked"), [
-    ("Acme Robotics", None), ("2024-05-01", None), ("MB", "quantity_shape"), ("v2.3.1", None),
+    ("Acme Robotics", None), ("2024-05-01", None), ("MB", "quantity_shape"), ("mb", "quantity_shape"),
+    ("v2.3.1", "identifier_shape"),
     ("V2.3.1-RC", "identifier_shape"), ("it", "pronoun"), ('"a quote"', "quoted_text"),
     ("It rained. We stayed in", "prose"),
 ])

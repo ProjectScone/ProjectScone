@@ -4,8 +4,10 @@
 looser. ``join_match`` is the one rule every join follows to decide whether
 a claim's object names the thing another claim's subject is about: the
 keys must be equal, and an object that cannot name one thing (prose, a
-quotation, a pronoun) never joins, while a value whose case can change its
-meaning ('MB' against 'mb') joins only when spelled exactly the same. The
+quotation, a pronoun) never joins, nor does a value whose case can change
+its meaning ('MB' against 'mb'): stored subjects are folded, so even an
+identical spelling cannot show the case was the same. Only a recorded
+identity decision may join such a value. The
 entity projection's classifier decides the same cases, so the graph a
 person sees and the one retrieval walks agree.
 """
@@ -20,7 +22,6 @@ from ..entities.classify import join_block_reason
 
 __all__ = ["JoinMatch", "entity_key", "join_match", "lookup_keys"]
 
-_NEVER_JOIN = frozenset({"prose", "quoted_text", "pronoun"})
 
 
 @dataclass(frozen=True)
@@ -37,25 +38,14 @@ def join_match(object_text: str, subject_text: str) -> JoinMatch | None:
     key = entity_key(object_text)
     if key != entity_key(subject_text):
         return None
-    blocked = join_block_reason(object_text)
-    if blocked in _NEVER_JOIN:
+    if join_block_reason(object_text) is not None:
         return None
-    if object_text == subject_text:
-        return JoinMatch(key, "literal")
-    if blocked is not None and object_text.strip() != subject_text.strip():
-        return None
-    return JoinMatch(key, "normalised")
+    return JoinMatch(key, "literal" if object_text == subject_text else "normalised")
 
 
 def lookup_keys(object_text: str) -> tuple[str, ...]:
     """The subject spellings to look up for an object: its key and its exact
-    text, only the exact text when folding could change its meaning, and
-    nothing when it cannot name one thing."""
-    if not object_text.strip():
+    text, or nothing when the join rule would refuse every match."""
+    if not object_text.strip() or join_block_reason(object_text) is not None:
         return ()
-    blocked = join_block_reason(object_text)
-    if blocked in _NEVER_JOIN:
-        return ()
-    if blocked is not None:
-        return tuple(dict.fromkeys((object_text, object_text.strip())))
     return tuple(dict.fromkeys((entity_key(object_text), object_text)))
