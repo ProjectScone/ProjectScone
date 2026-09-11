@@ -33,7 +33,7 @@ projection:
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
@@ -258,6 +258,22 @@ class _Budget:
         return during
 
 
+#: Indexes kept by projection digest: one is the same for an unchanged
+#: graph, and building it is most of a warm match's work.
+_KEPT = 8
+_GRAPHS: "OrderedDict[str, _Graph]" = OrderedDict()
+
+
+def _graph_of(projection: EntityProjection) -> _Graph:
+    if projection.digest in _GRAPHS:
+        _GRAPHS.move_to_end(projection.digest)
+        return _GRAPHS[projection.digest]
+    graph = _GRAPHS[projection.digest] = _Graph(projection)
+    while len(_GRAPHS) > _KEPT:
+        _GRAPHS.popitem(last=False)
+    return graph
+
+
 @dataclass
 class _Constants:
     """What the query's constants name in this projection."""
@@ -399,7 +415,7 @@ async def graph_match(engine: "MemoryEngine", space: str, patterns: object, *, r
     projection, read = await load_projection(engine, space, mode=status, as_of=when)
     complete, read_answer = read_record(read)
     reasons = _reasons(read)
-    graph = _Graph(projection)
+    graph = _graph_of(projection)
     constants = _constants(graph, projection, parsed)
     header = [f"match: space {one_line(space)}, {status} facts as of {when}, "
               f"projection {projection.digest[:12]} at revision {projection.revision}"]

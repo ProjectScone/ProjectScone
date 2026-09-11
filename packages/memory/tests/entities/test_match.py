@@ -251,6 +251,7 @@ async def test_a_value_carried_between_patterns_is_found_without_scanning_its_ki
         self.by_value = {key: Counted(edges) for key, edges in self.by_value.items()}
 
     monkeypatch.setattr(match_module._Graph, "__init__", counted)
+    monkeypatch.setattr(match_module, "_GRAPHS", type(match_module._GRAPHS)())
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 clock=Clock("2025-06-01T00:00:00.000Z")).open()
     for n in range(400):
@@ -437,3 +438,22 @@ async def test_a_malformed_query_is_refused_before_anything_is_read(patterns, op
     engine = await seeded()
     with pytest.raises(MatchQueryError, match=message.replace("?", r"\?")):
         await graph_match(engine, "alpha", patterns, **options)
+
+
+async def test_an_unchanged_graph_is_indexed_once(monkeypatch):
+    built = []
+    real = match_module._Graph.__init__
+
+    def counted(self, projection):
+        built.append(projection.digest)
+        real(self, projection)
+
+    monkeypatch.setattr(match_module._Graph, "__init__", counted)
+    monkeypatch.setattr(match_module, "_GRAPHS", type(match_module._GRAPHS)())
+    engine = await seeded()
+    await graph_match(engine, "alpha", where("?who | works_at | ?org"))
+    await graph_match(engine, "alpha", where("?who | lives_in | ?place"))
+    assert len(built) == 1
+    await engine.assert_fact("alpha", "zed", "works_at", "Acme Robotics", valid_from=DAY)
+    await graph_match(engine, "alpha", where("?who | works_at | ?org"))
+    assert len(built) == 2, "a changed graph is indexed again"
