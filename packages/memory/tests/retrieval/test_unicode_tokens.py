@@ -61,8 +61,8 @@ def test_unspaced_scripts_index_each_character_and_each_overlapping_pair(text: s
     assert tokenize(text) == tokens
 
 
-def test_ascii_behaviour_is_unchanged() -> None:
-    assert tokenize("The Cat's on THE mat, isn't it?") == ["cat's", "mat", "isn't"]
+def test_ascii_words_keep_contractions_and_lose_possessive_endings() -> None:
+    assert tokenize("The Cat's on THE mat, isn't it?") == ["cat", "mat", "isn't"]
     assert tokenize("Alice works_at Acme, doesn't she? 2021") == ["alice", "works", "acme", "doesn't", "she", "2021"]
 
 
@@ -111,3 +111,14 @@ def test_plain_ascii_reads_the_same_on_either_path(text: str) -> None:
     # ASCII text takes a fast path. One accented word forces the full
     # Unicode path, and must not change how the rest of the text reads.
     assert tokenize(text + " é") == tokenize(text) + ["é"]
+
+
+def test_a_possessive_matches_the_name_it_belongs_to():
+    """"Alves's employer" must find passages naming Alves: the possessive
+    ending leaves the token, while contractions and names keep theirs."""
+    from scone_memory.retrieval.lexical import tokenize
+
+    assert tokenize("Which city is Ana Alves's employer in?") == ["city", "ana", "alves", "employer"]
+    assert tokenize("Chris' car") == ["chris", "car"]
+    assert tokenize("Zoë’s café") == ["zoë", "café"]
+    assert "don't" in tokenize("I don't know") and "o'brien" in tokenize("Mr O'Brien called")

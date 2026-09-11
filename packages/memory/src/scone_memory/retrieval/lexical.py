@@ -28,7 +28,7 @@ from functools import lru_cache
 from typing import Iterable
 
 #: Raise whenever the tokens produced for any text change.
-TOKENIZER_VERSION = 2
+TOKENIZER_VERSION = 3
 
 _ASCII_TOKEN = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 
@@ -98,16 +98,24 @@ def _grams(run: str, mark: re.Pattern[str], graphemes: re.Pattern[str]) -> list[
     return grams
 
 
+def _unpossessed(token: str) -> str:
+    """A possessive ending leaves a word ("alves's", "chris'" to "alves",
+    "chris"), so a question about someone's things finds passages naming
+    them; contractions and names with inner apostrophes keep them."""
+    return token[:-2] if token.endswith("'s") else token.rstrip("'")
+
+
 def tokenize(text: str) -> list[str]:
     folded = text.casefold()
     if folded.isascii():
-        return [t for t in _ASCII_TOKEN.findall(folded) if t not in STOPWORDS]
+        return [t for t in map(_unpossessed, _ASCII_TOKEN.findall(folded)) if t and t not in STOPWORDS]
     words, mark, graphemes = _patterns()
     folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
     tokens: list[str] = []
     for word in words.findall(folded.replace("\u2019", "'")):
         if _UNSPACED_CHAR.search(word) is None:
-            if word not in STOPWORDS:
+            word = _unpossessed(word)
+            if word and word not in STOPWORDS:
                 tokens.append(word)
             continue
         for segment in _SEGMENT.findall(word):

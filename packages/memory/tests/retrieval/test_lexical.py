@@ -21,4 +21,4 @@ def test_removed_documents_stop_counting():
 
 
 def test_tokenizer_drops_stopwords_and_case():
-    assert tokenize("The Cat's on THE mat, isn't it?") == ["cat's", "mat", "isn't"]
+    assert tokenize("The Cat's on THE mat, isn't it?") == ["cat", "mat", "isn't"]
