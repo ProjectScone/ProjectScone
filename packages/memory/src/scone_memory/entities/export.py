@@ -14,6 +14,8 @@
 - ``jsonld``: JSON-LD linked data, one node per entity.
 - ``obsidian``: a zip of Markdown notes, one per entity, wiki-linked through
   its relations, with an index.
+- ``mermaid``: a Mermaid flowchart of the most connected entities and the
+  relations between them, which GitHub and most Markdown viewers draw.
 - ``wiki``: a zip an agent can crawl from ``index.md``: one article per
   topic (the report's communities) and one per entity, joined by plain
   relative Markdown links, every statement citing its facts.
@@ -41,8 +43,9 @@ import zipfile
 from .markdown import literal
 from .project import Entity, EntityProjection
 
-ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"]
-EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki")
+ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid"]
+EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
+                                            "mermaid")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -611,9 +614,46 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     return Export(_zip(files), "application/zip", "graph-wiki.zip")
 
 
+#: Entities a Mermaid chart draws: a picture past this is unreadable.
+_MERMAID_NODES = 60
+# Characters that could close a quoted label, start markup or read as an
+# entity code, written as Mermaid's own entity codes.
+_MERMAID_CODES = {"#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;", "&": "#amp;", "`": "#96;", "|": "#124;"}
+
+
+def _mermaid_text(value: object) -> str:
+    """Stored text as a quoted Mermaid label: one line, controls shown as
+    symbols, and nothing in it able to end the label or add an edge."""
+    flat = _NOT_XML.sub(lambda match: _visible(match.group()), " ".join(str(value).split()))
+    return "".join(_MERMAID_CODES.get(character, character) for character in flat)
+
+
+def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The most connected entities, up to ``_MERMAID_NODES``, and every
+    relation between them, each edge naming its predicate and facts. Node
+    ids are the chart's own (n1, n2, ...), so no stored text is ever
+    syntax, and the first line says what was left out."""
+    degree = _degrees(projection)
+    ranked = sorted(projection.entities, key=lambda entity: (-degree[entity.entity_id], entity.label, entity.entity_id))
+    shown = {entity.entity_id: f"n{index}" for index, entity in enumerate(ranked[:_MERMAID_NODES], start=1)}
+    drawn = sorted((relation for relation in projection.relations
+                    if relation.subject_id in shown and relation.object_id in shown),
+                   key=lambda relation: (int(shown[relation.subject_id][1:]), relation.predicate,
+                                         int(shown[relation.object_id][1:])))
+    left = (len(projection.entities) - len(shown), len(projection.relations) - len(drawn))
+    scope = (f"{_many(left[0], 'entity', 'entities')} and {_many(left[1], 'relation')} left out" if any(left)
+             else "nothing left out")
+    lines = [f"%% Knowledge graph {_mermaid_text(projection.space)}: projection {projection.digest[:12]} at revision "
+             f"{projection.revision}; {scope}; values are not drawn", "flowchart LR"]
+    lines += [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
+    lines += [f'  {shown[relation.subject_id]} -->|"{_mermaid_text(relation.predicate)} {_cite(relation.fact_ids)}"| '
+              f'{shown[relation.object_id]}' for relation in drawn]
+    return Export("\n".join(lines).encode() + b"\n", "text/vnd.mermaid", "graph.mmd")
+
+
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
-    "obsidian": _obsidian, "wiki": _wiki,
+    "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid,
 }
 
 

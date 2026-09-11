@@ -605,6 +605,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `jsonld` | JSON-LD linked data | RDF tooling |
 | `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
+| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -654,6 +655,14 @@ How each format places values and escapes its own syntax:
     even to a crawler that reads links with a pattern.
   - A section longer than 200 lines lists the first 200 and says how many
     more there are.
+- **Mermaid** draws at most 60 entities, the most connected, and every
+  relation between them. Each edge carries its predicate and facts. The
+  first line, a comment, says how many entities and relations were left
+  out, and that values are not drawn.
+  - Node ids are the chart's own (`n1`, `n2`, ...).
+  - A name is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
+    and `|` are written as Mermaid entity codes. No stored text can
+    close a label or add an edge.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
   `[:HAS_VALUE]`, with the predicate a property, never query syntax.
   Strings escape quotes and backslashes, and write controls, line

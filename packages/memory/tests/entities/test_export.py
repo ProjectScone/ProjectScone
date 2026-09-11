@@ -42,7 +42,7 @@ def projection():
 
 
 def test_every_format_is_offered():
-    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"}
+    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -227,7 +227,7 @@ def test_cypher_and_markdown_write_control_characters_as_escapes():
     assert "\x01" not in notes and "␁" in notes
 
 
-@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki"])
+@pytest.mark.parametrize("format", ["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid"])
 def test_every_format_writes_whatever_the_ledger_holds(format):
     """The ledger accepts NUL and lone surrogates. No export may fail on
     them or write a file its own parser rejects."""
@@ -474,3 +474,33 @@ def test_a_crowded_entity_lists_its_first_relations_and_counts_the_rest():
     acme = next(text for name, text in wiki(ledger).items() if name.lower() == "entities/acme.md")
     assert acme.count("works\\_at (fact") + acme.count("works_at (fact") == 200
     assert "and 50 more" in acme
+
+
+def mermaid(ledger=LEDGER):
+    return export_graph(project_entities("alpha", ledger, revision=1), "mermaid").body.decode()
+
+
+def test_mermaid_is_a_flowchart_of_entities_and_the_relations_between_them():
+    text = mermaid()
+    lines = text.splitlines()
+    assert lines[0].startswith("%% ") and lines[1] == "flowchart LR"
+    nodes = dict(re.findall(r'^  (n\d+)\["([^"]*)"\]$', text, re.M))
+    edges = re.findall(r'^  (n\d+) -->\|"([^"]*)"\| (n\d+)$', text, re.M)
+    assert "alice chen" in nodes.values() and len(edges) == len(project_entities("alpha", LEDGER, revision=1).relations)
+    assert all("(fact" in label for _, label, _ in edges)
+    assert export_graph(project_entities("alpha", LEDGER, revision=1), "mermaid").media_type == "text/vnd.mermaid"
+
+
+def test_mermaid_text_cannot_close_a_label_or_start_markup():
+    text = mermaid([fact(1, 'eve "x"] --> evil["y', "knows", "Bob <b>#1</b>")])
+    labels = re.findall(r'\["([^"]*)"\]', text)
+    assert len(labels) == 2 and all('"' not in label and "<" not in label for label in labels)
+    assert any("#quot;" in label for label in labels) and any("#35;1" in label for label in labels)
+    assert text.count("-->") == 1, "one relation, one arrow: a name cannot add an edge"
+
+
+def test_mermaid_shows_the_most_connected_and_counts_the_rest():
+    ledger = [fact(n, f"worker {n:03d}", "works_at", "zenith corp") for n in range(1, 80)]
+    text = mermaid(ledger)
+    assert len(re.findall(r'^  n\d+\[', text, re.M)) == 60 and '  n1["zenith corp"]' in text
+    assert text.splitlines()[0].endswith("20 entities and 20 relations left out; values are not drawn")
