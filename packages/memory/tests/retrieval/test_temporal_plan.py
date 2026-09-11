@@ -97,3 +97,9 @@ def test_the_last_and_splits_a_pair_so_either_half_may_hold_its_own():
 def test_an_event_a_question_does_not_name_is_not_planned():
     """One word is a thing, not an event this can ground confidently."""
     assert plan("How many days between Rome and Paris?") is None
+
+
+def test_since_one_event_when_another_is_the_span_between_them():
+    asked = plan("How many weeks had passed since I recovered from the flu when I went on my 10th jog outdoors?")
+    assert asked.kind == "between" and asked.unit == "week"
+    assert asked.events == ("i recovered from the flu", "i went on my 10th jog outdoors")

@@ -262,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid", "svg", "canvas", "html"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
+    p = sub.add_parser("bench-temporal",
+                       help="score computed temporal answers on a file of dated questions (no model called)")
+    p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
+    p.add_argument("--limit", type=int, help="only the first N questions")
+
     p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
     p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
     p = sub.add_parser("bench-conflicts",
@@ -348,6 +353,16 @@ def graph_bench_command(args: argparse.Namespace, out) -> int:
             print(f"{key}: {value}", file=out)
         print("thresholds: " + ("pass" if not breached else "; ".join(breached)), file=out)
     return 1 if breached else 0
+
+
+async def temporal_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Score computed temporal answers. Each question gets its own memory,
+    so the configured store is not read or written."""
+    from ..bench.temporal import run_temporal
+
+    scored = await run_temporal(args.dataset, limit=args.limit)
+    print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
 
 
 async def bench_command(args: argparse.Namespace, settings: Settings, out) -> int:
@@ -1085,8 +1100,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts"):
-        command = bench_command if args.command == "bench" else conflicts_command
+    if args.command in ("bench", "bench-conflicts", "bench-temporal"):
+        command = {"bench": bench_command, "bench-conflicts": conflicts_command,
+                   "bench-temporal": temporal_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:

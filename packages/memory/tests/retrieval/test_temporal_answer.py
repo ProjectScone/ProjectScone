@@ -155,3 +155,30 @@ async def test_the_passage_holding_most_of_the_words_grounds_the_event():
                      (2, "2023-02-02T08:00:00Z", "I started the Spanish course at the community centre."))
     anchor = await _anchor(engine, "alpha", "spanish course at the community centre", limit=5, as_of=None)
     assert (anchor["status"], anchor["date"], anchor["episode_id"]) == ("found", "2023-02-02", 2)
+
+
+async def test_a_day_another_passage_nearly_matches_is_undecided():
+    """A passage from another day holding nearly as much of a long phrase
+    leaves which day is meant open, and both days are shown: here one
+    word in fourteen separates them."""
+    engine = await diary(
+        ("2023-04-11T12:00:00Z", "I meet Emma for coffee near the river to talk about her new job in Lisbon "
+                                 "on this rainy Tuesday morning."),
+        ("2023-04-05T09:00:00Z", "Emma and I had coffee near the river to talk about her new job in Lisbon; "
+                                 "a rainy Tuesday morning."))
+    answer = await temporal_answer(engine, "alpha", "How many days ago did I meet Emma for coffee near the river "
+                                                    "to talk about her new job in Lisbon on a rainy Tuesday "
+                                                    "morning?", now=NOW)
+    assert answer.status == "ambiguous" and "2023-04-05" in answer.text and "2023-04-11" in answer.text
+
+
+async def test_one_passage_cannot_date_two_events_apart():
+    """A passage that holds both events records one day, so the distance
+    between them would be an artefact of that, and is not computed."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.remember("alpha", "Looking back: I sold baked goods at the market, and later I ran the "
+                                   "charity bake-off at the village hall.", created_at="2023-04-18T09:00:00Z")
+    answer = await temporal_answer(engine, "alpha", "How many days passed between the time I sold baked goods and "
+                                                    "the time I ran the charity bake-off?", now=NOW)
+    assert answer.status == "ambiguous" and answer.value == {}
+    assert "one passage holds more than one of the events" in answer.text

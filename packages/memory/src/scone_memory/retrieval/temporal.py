@@ -149,10 +149,11 @@ def plan(question: str) -> Optional[Plan]:
         rest = _after(text, marker)
         if rest is not None and (pair := _pair(rest, order)) is not None:
             return Plan("between", pair, unit)
-    for marker in (" after ", " before ", " since "):
+    for marker, joins in ((" after ", (" did ",)), (" before ", (" did ",)), (" since ", (" when ", " did "))):
         rest = _after(text, marker)
-        if rest is not None and (pair := _pair(rest, " did ")) is not None:
-            return Plan("between", pair if marker != " before " else pair[::-1], unit)
+        for join in joins if rest is not None else ():
+            if (pair := _pair(cast(str, rest), join)) is not None:
+                return Plan("between", pair if marker != " before " else pair[::-1], unit)
     if " ago " in text:
         rest = _after(text, " ago ")
         event = _lead_in(rest) if rest else ""
@@ -181,6 +182,9 @@ def _lead_in(rest: str) -> str:
 DEFAULT_LIMIT, MAX_LIMIT = 5, 50
 #: The share of an event phrase's words a passage must hold to ground it.
 MIN_SUPPORT = 0.5
+#: How much less of the phrase a passage from another day may hold and
+#: still leave which day is meant undecided.
+NEAR_TIE = 0.1
 #: Characters of the grounding passage quoted back.
 QUOTE = 160
 MAX_BYTES, MIN_BYTES, MAX_BYTES_LIMIT = 4_000, 512, 64_000
@@ -257,7 +261,7 @@ async def _anchor(engine: "MemoryEngine", space: str, phrase: str, *, limit: int
         return anchor
     day = _day(item.created_at)
     others = sorted({_day(other.created_at).isoformat() for score, _, other in scored
-                     if score == support and _day(other.created_at) != day})
+                     if score >= support - NEAR_TIE and _day(other.created_at) != day})
     anchor.update({"status": "ambiguous" if others else "found", "date": day.isoformat(),
                    "episode_id": item.episode_id, "chunk_id": item.chunk_id, "quote": item.text[:QUOTE],
                    "other_dates": others})
@@ -301,8 +305,18 @@ async def temporal_answer(engine: "MemoryEngine", space: str, question: str, *, 
     anchors = tuple([await _anchor(engine, space, phrase, limit=limit, as_of=as_of) for phrase in asked.events])
     unfound = [str(anchor["event"]) for anchor in anchors if anchor["status"] == "unfound"]
     unsure = [str(anchor["event"]) for anchor in anchors if anchor["status"] == "ambiguous"]
+    # One passage cannot date two events apart: where it holds both, the
+    # day it records is its own, and the distance between them would be an
+    # artefact of that.
+    together = {str(anchor["episode_id"]) for anchor in anchors if anchor.get("episode_id")}
+    if len(anchors) > 1 and len(together) < len(anchors):
+        unsure = unsure or [str(anchor["event"]) for anchor in anchors]
+        reasons_together = ["one passage holds more than one of the events"]
+    else:
+        reasons_together = []
     reasons = [f"ungrounded ({', '.join(unfound)})"] if unfound else []
     reasons += [f"ambiguous ({', '.join(unsure)})"] if unsure else []
+    reasons += reasons_together
     if unfound or unsure:
         status: Literal["ambiguous", "ungrounded"] = "ungrounded" if unfound else "ambiguous"
         return TemporalAnswer(status, _fit(_lines(space, asked_at, reasons, anchors, []), max_bytes), asked,

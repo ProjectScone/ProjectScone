@@ -12,6 +12,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
+from scone_memory.runtime import cli
 from scone_memory.runtime.cli import build_parser, run
 
 DAY = "2024-01-01T00:00:00Z"
@@ -337,3 +338,13 @@ async def test_when_leaves_a_question_it_cannot_read_to_the_caller():
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     code, text = await temporal(memory, "What did I drink?")
     assert code == 1 and "not a temporal question" in text
+
+
+def test_bench_temporal_scores_a_file_of_dated_questions(tmp_path):
+    from tests.benchmarks.test_bench_temporal import ITEMS
+
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(ITEMS), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench-temporal", str(path)], env={}, stdin=io.StringIO(""), out=out)
+    assert code == 0 and "temporal: 3 questions; computed 1 of 3" in out.getvalue(), out.getvalue()

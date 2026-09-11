@@ -108,8 +108,11 @@ tool `memory_temporal_answer`, the ToolBox tool `temporal_answer` and
   at least half of them. The event's day is the day that passage records.
 - **When it does not answer.** `status` says why: `not_temporal` (not a
   question this reads), `ungrounded` (an event is not in memory), or
-  `ambiguous` (a passage from another day holds the phrase as well, and
-  both days are shown).
+  `ambiguous`. A day is undecided when a passage from another day holds
+  nearly as much of the phrase (within a tenth of it), and both days are
+  shown; and when one passage holds more than one of the events, since
+  the day it records is its own and the distance between them would be an
+  artefact of that.
 - **What comes back.** Each event cites its episode, chunk, day and a
   verbatim excerpt; the answer line gives the unit asked for and the
   exact days; and a working line shows the subtraction, so the answer can
@@ -117,6 +120,41 @@ tool `memory_temporal_answer`, the ToolBox tool `temporal_answer` and
 - Dates named in a question ("in May 2023", "three weeks ago", "last
   month", "the past two months") are read into windows of whole days by
   the same module, against the moment asked.
+
+### What it scores
+
+```bash
+scone bench-temporal bench-data/temporal-40.json
+```
+
+Each question gets its own memory built from its own dated sessions, so
+no question is answered from another's. The scorer calls no model: a
+number answer is right when the expected answer holds that number, in
+the unit asked for or in days, counting a day either way (the files
+themselves say "9 days ago. 10 days including the last day is also
+acceptable"); a chosen event is right when the expected answer names it
+rather than the one refused; an order is right when the expected answer
+puts the same events in the same order.
+
+On the 40 temporal questions of `bench-data/temporal-40.json`:
+
+| | Questions |
+| --- | --- |
+| Computed | 20 |
+| — right | 16 (80% of what it computed) |
+| — wrong | 4 |
+| Refused: not a question it reads | 16 |
+| Refused: an event not in memory | 2 |
+| Refused: an event's day undecided | 2 |
+
+The four wrong ones are grounding, not arithmetic: the phrase matched a
+later passage recalling the event rather than the one recording it
+("the Hindu festival of Holi", told again three weeks after the day).
+Choosing the earliest passage instead was measured and is worse (16
+right and 6 wrong), and so is widening what counts as undecided past a
+tenth (14 right, 4 wrong). What the planner refuses to read is counted
+apart, because leaving a question to ordinary recall is not the same as
+answering it wrongly.
 
 ## What survives a crash
 
