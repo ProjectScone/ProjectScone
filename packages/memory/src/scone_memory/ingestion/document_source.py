@@ -21,11 +21,14 @@ class DocumentSource:
     collection_id: str
     path: str
     parser_revision: str
+    generation: int = 0
 
     def __post_init__(self) -> None:
         self.validate()
 
     def validate(self) -> None:
+        if type(self.generation) is not int or not 0 <= self.generation < 2**63:
+            raise InvalidInput('document source generation must be a bounded nonnegative integer')
         if not isinstance(self.collection_id, str) or not re.fullmatch(r'[0-9a-f]{32}', self.collection_id):
             raise InvalidInput('document collection_id must be a UUID hex string')
         for name, value, maximum in (('path', self.path, 1024), ('parser_revision', self.parser_revision, 128)):
@@ -46,7 +49,8 @@ class DocumentSource:
 
     def metadata(self) -> dict[str, str]:
         return {'source_collection': self.collection_id, 'source_path_hash': self.path_hash,
-                'source_parser_revision': self.parser_revision}
+                'source_parser_revision': self.parser_revision,
+                **({'source_generation': str(self.generation)} if self.generation else {})}
 
 
 def source_revision_key(source: DocumentSource, original_sha256: str, manifest_sha256: str) -> str:
@@ -57,7 +61,10 @@ def source_revision_key(source: DocumentSource, original_sha256: str, manifest_s
     if any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
            for value in (original_sha256, manifest_sha256)):
         raise InvalidInput('source revision requires original and manifest SHA-256 digests')
-    binding = json.dumps([source.parser_revision, original_sha256, manifest_sha256],
+    parts: list[str | int] = [source.parser_revision, original_sha256, manifest_sha256]
+    if source.generation:
+        parts.append(source.generation)
+    binding = json.dumps(parts,
                          ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     revision = hashlib.sha256(binding).hexdigest()
     return f'document-source-v1:{source.collection_id}:{source.path_hash}:{revision}'

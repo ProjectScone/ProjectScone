@@ -110,3 +110,21 @@ def test_revision_key_is_bounded_and_sensitive_to_exact_path_and_both_content_di
     for original, manifest in [('bad', 'c' * 64), ('b' * 64, 'not-a-digest')]:
         with pytest.raises(InvalidInput):
             source_revision_key(owner, original, manifest)
+
+
+async def test_a_managed_source_can_return_to_earlier_bytes_after_retirement(engine):
+    original, manifest = await prepared(engine)
+    owner = DocumentSource('a' * 32, 'report.txt', 'v1')
+    first = await store_document(engine, 'alpha', original, manifest, source=owner)
+    await engine.forget('alpha', first.added.episode_id)
+    original, manifest = await prepared(engine)
+    next_generation = replace(owner, generation=2)
+    returned = await store_document(engine, 'alpha', original, manifest, source=next_generation)
+    assert returned.added.episode_id != first.added.episode_id
+    assert (await document_provenance(engine, 'alpha', returned.added.episode_id)).filename == 'report.txt'
+
+
+@pytest.mark.parametrize('generation', [-1, True, 1.5, 2**63])
+def test_source_generation_is_a_bounded_nonnegative_integer(generation):
+    with pytest.raises(InvalidInput):
+        DocumentSource('a' * 32, 'report.txt', 'v1', generation=generation)
