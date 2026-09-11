@@ -4,6 +4,10 @@
 graph without valid time cannot answer it. Here the graph as it held at
 ``since`` is set beside the graph as it holds at ``until``:
 
+A many-valued predicate holds its values side by side, so nothing it
+reports ever moved: one value ending and another beginning are two
+changes, not one claim passing from the first to the second.
+
 - **moved**: a subject's single claim under one predicate passed from one
   object to another, "alice chen works_at Acme Robotics → Globex";
 - **began** and **ended**: relations holding at one moment and not the
@@ -191,7 +195,7 @@ async def _compare(engine: "MemoryEngine", space: str, start: str, end: str, lim
             found.append(_Found("value", subject_id, predicate,
                                 tuple(c for _, c in sorted(then.items()) if c.value is not None),
                                 tuple(c for _, c in sorted(now_held.items()) if c.value is not None), sides))
-        elif len(gone) == 1 and len(came) == 1 and told["moved"]:
+        elif len(gone) == 1 and len(came) == 1 and told["moved"] and predicate not in engine.many_valued:
             found.append(_Found("moved", subject_id, predicate, gone, came, sides))
         else:
             if told["ended"]:

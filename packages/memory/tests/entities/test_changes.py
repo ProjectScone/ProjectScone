@@ -310,3 +310,20 @@ async def test_a_new_value_of_a_many_valued_predicate_begins_rather_than_moves()
     found = await graph_changes(engine, "alpha", since=SINCE, until=UNTIL)
     assert [(change["kind"], change["predicate"]) for change in found.changes] == [("began", "knows")]
     assert "began: alice chen knows Carol Diaz" in found.text
+
+
+async def test_one_value_ending_and_another_beginning_is_not_a_claim_that_moved():
+    """With a many-valued predicate the two are separate claims: Bob ended,
+    Carol began, and Dana holds throughout. Nothing moved."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-01-01T00:00:00.000Z"), many_valued=["knows"]).open()
+    bob = await engine.assert_fact("alpha", "alice chen", "knows", "Bob Stone", valid_from=JAN)
+    await engine.assert_fact("alpha", "alice chen", "knows", "Dana Ruiz", valid_from=JAN)
+    engine.clock.now = MAR
+    await engine.close_fact("alpha", bob.fact_id, "lost touch")
+    await engine.assert_fact("alpha", "alice chen", "knows", "Carol Diaz", valid_from=MAR)
+    found = await graph_changes(engine, "alpha", since=SINCE, until=UNTIL)
+    assert sorted((change["kind"], change["predicate"]) for change in found.changes) == [
+        ("began", "knows"), ("ended", "knows")]
+    assert "ended: alice chen knows Bob Stone" in found.text and "began: alice chen knows Carol Diaz" in found.text
+    assert "moved" not in found.text and "Dana" not in found.text
