@@ -6,10 +6,11 @@ import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
+import sqlite3
 from typing import TYPE_CHECKING, cast
 
 from ..agents.workflow import JSONValue, StepContext, WorkflowError, WorkflowRunner, WorkflowStatus, WorkflowStep
-from ..core.errors import InvalidInput
+from ..core.errors import InvalidInput, NotFound
 from ..core.models import Added, Attachment
 from ..core.validation import check_space
 from ..ocr.types import OcrEngine, OcrResult
@@ -120,6 +121,8 @@ class PdfOcrWorkflow:
             raise WorkflowError('sources_invalid')
         try:
             original, raw = await self._memory.attachment(space, identifier)
+        except (OSError, sqlite3.OperationalError):
+            raise
         except Exception:
             raise WorkflowError('sources_invalid') from None
         if (original.media_type != 'application/pdf' or hashlib.sha256(raw).hexdigest() != identifier
@@ -214,6 +217,10 @@ class PdfOcrWorkflow:
             manifest, _ = await self._memory.attachment(space, cast(str, saved['manifest']))
             return PdfOcrIngested(added, original, manifest, tuple(p.number for p in complete.pages if p.empty),
                                   tuple(reused), bool(receipt.reused_steps))
+        except (FileNotFoundError, NotFound):
+            raise WorkflowError('sources_invalid') from None
+        except (OSError, sqlite3.OperationalError):
+            raise WorkflowError('verification_unavailable') from None
         finally:
             self._prepared = None
             self._running = False

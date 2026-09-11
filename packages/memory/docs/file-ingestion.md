@@ -109,6 +109,12 @@ manifest before indexing. Reopening the same journal with the same key,
 parser revision, limits and source identity resumes indexing without
 repeating completed extraction. Changed parser/model options need a changed
 `parser_revision`. Source validation rejects missing or deleted evidence.
+An `OSError` (other than confirmed `FileNotFoundError`) or SQLite operational
+failure during verification reports `verification_unavailable`. It preserves
+completed receipts and prevents execution or result return until an explicit
+retry verifies the evidence successfully. Callback error messages are not
+exposed. A missing source, changed evidence, or an explicit verifier rejection
+still permanently invalidates that run.
 
 This is one caller-owned active document per journal. It does not provide a
 background queue, distributed worker leases, or separate durable

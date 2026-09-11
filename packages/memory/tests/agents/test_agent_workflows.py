@@ -322,6 +322,81 @@ async def test_source_verifier_exceptions_do_not_leak_or_execute_steps(tmp_path)
     r.close()
 
 
+@pytest.mark.parametrize('error', [ConnectionError, PermissionError, sqlite3.OperationalError])
+@pytest.mark.parametrize('phase', ['initial', 'final', 'replay'])
+async def test_storage_verification_outage_preserves_receipts_for_verified_retry(tmp_path, error, phase):
+    checks = calls = 0
+    fail_at = {'initial': 1, 'final': 2, 'replay': 3}[phase]
+
+    async def verify(context):
+        nonlocal checks
+        checks += 1
+        if checks == fail_at:
+            raise error('private storage address and credentials')
+        return True
+
+    async def work(context):
+        nonlocal calls
+        calls += 1
+        return {'receipt': 'retained'}
+
+    path = tmp_path / 'w.db'
+    steps = [WorkflowStep('read', '1', work)]
+    job = runner(path, steps, source_verifier=verify)
+    args = dict(space='s', scope={}, inputs=None)
+    if phase == 'replay':
+        await job.run('r', **args)
+    with pytest.raises(WorkflowError, match='^verification_unavailable$'):
+        await job.run('r', **args)
+    status = job.status('r', **args)
+    assert status.status == 'verification_unavailable'
+    assert status.completed_steps == (() if phase == 'initial' else ('read',))
+    assert calls == (0 if phase == 'initial' else 1)
+    job.close()
+    resumed = runner(path, steps, source_verifier=verify)
+    try:
+        result = await resumed.run('r', **args)
+        assert result.results == {'read': {'receipt': 'retained'}}
+        assert result.reused_steps == (() if phase == 'initial' else ('read',))
+        assert calls == 1
+    finally:
+        resumed.close()
+
+
+@pytest.mark.parametrize('missing', [False, True])
+async def test_retry_after_outage_still_invalidates_confirmed_missing_sources(tmp_path, missing):
+    checks = 0
+
+    async def verify(context):
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            raise ConnectionError('temporary outage')
+        if checks > 3:
+            if missing:
+                raise FileNotFoundError('confirmed missing source')
+            return False
+        return True
+
+    async def work(context):
+        return 'retained receipt'
+
+    job = runner(tmp_path / 'w.db', [WorkflowStep('read', '1', work)], source_verifier=verify)
+    args = dict(space='s', scope={}, inputs=None)
+    try:
+        await job.run('r', **args)
+        with pytest.raises(WorkflowError, match='^verification_unavailable$'):
+            await job.run('r', **args)
+        with pytest.raises(WorkflowError, match='^sources_invalid$'):
+            await job.run('r', **args)
+        assert job.status('r', **args).completed_steps == ()
+        with pytest.raises(WorkflowError, match='^sources_invalid$'):
+            await job.run('r', **args)
+        assert checks == 4
+    finally:
+        job.close()
+
+
 async def test_resume_receipt_preserves_workflow_order_after_json_checkpoint(tmp_path):
     async def work(context): return 'ok'
     path = tmp_path / 'w.db'

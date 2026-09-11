@@ -145,6 +145,9 @@ class WorkflowRunner:
     Steps and verifier are trusted application code. Scope is an immutable
     invocation binding, not an authorization engine. The verifier must check
     current retained evidence and authorization, including completed outputs.
+    Storage OSError/SQLite operational failures pause verification without
+    discarding receipts. FileNotFoundError and explicit false results invalidate
+    the run; adapters should report confirmed missing evidence accordingly.
     Async deadlines are cooperative; callbacks must propagate cancellation.
     """
     def __init__(
@@ -331,6 +334,12 @@ class WorkflowRunner:
     async def _verify(self, token: str, context: StepContext, state: dict[str, JSONValue]) -> None:
         try:
             valid = await self._verifier(context)
+        except FileNotFoundError:
+            valid = False
+        except (OSError, sqlite3.OperationalError) as exc:
+            state.update(status='verification_unavailable', error_class=type(exc).__name__[:80])
+            self._save(token, state)
+            raise WorkflowError('verification_unavailable') from None
         except Exception:
             valid = False
         if valid is not True:

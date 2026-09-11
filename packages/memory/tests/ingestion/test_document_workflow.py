@@ -7,13 +7,11 @@ from scone_memory import HashEmbedder, MemoryEngine
 from scone_memory.agents import WorkflowError
 from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
 from scone_memory.backends.blobs import FileBlobStore
-from scone_memory.ingestion.pdf import PypdfParser
-from .test_pdf_ingestion import pdf_bytes
 
 KEY = b'w' * 32
 
 
-class CountingParser(PypdfParser):
+class CountingParser:
     def __init__(self):
         self.calls = 0
 
@@ -46,6 +44,7 @@ def workflow(memory, path, parser, **kwargs):
 
 
 async def test_cancelled_indexing_resumes_after_storage_and_journal_restart(tmp_path):
+    from .test_pdf_ingestion import pdf_bytes
     blocked = HeldEmbedder()
     memory = await open_memory(tmp_path, blocked)
     parser = CountingParser()
@@ -94,6 +93,7 @@ async def test_cancelled_indexing_resumes_after_storage_and_journal_restart(tmp_
 
 @pytest.mark.parametrize('change', ['space', 'source', 'revision', 'limits'])
 async def test_pdf_checkpoint_binding_cannot_be_repurposed(tmp_path, change):
+    from .test_pdf_ingestion import pdf_bytes
     from scone_memory.ingestion.formats.types import DocumentLimits
     memory = await open_memory(tmp_path)
     parser = CountingParser()
@@ -132,6 +132,60 @@ async def test_invalid_pdf_has_durable_stage_failure_and_no_searchable_record(tm
         assert state.attempts == {'extract': 1} and state.error_class == 'InvalidInput'
         assert state.completed_steps == ()
         assert (await memory.documents.counts('alpha')).episodes == 0
+    finally:
+        job.close()
+        await memory.close()
+
+
+async def test_completed_document_survives_temporary_source_storage_outage(tmp_path, monkeypatch):
+    memory = await open_memory(tmp_path)
+    parser = CountingParser()
+    original = await memory.attach('alpha', b'Current contract value', 'text/plain', filename='contract.txt')
+    job = workflow(memory, tmp_path, parser)
+    args = dict(space='alpha', attachment_id=original.attachment_id)
+    try:
+        first = await job.run('contract', **args)
+        attachment = memory.attachment
+
+        async def unavailable(*args, **kwargs):
+            raise ConnectionError('private backend details')
+
+        monkeypatch.setattr(memory, 'attachment', unavailable)
+        with pytest.raises(WorkflowError, match='^verification_unavailable$'):
+            await job.run('contract', **args)
+        assert job.status('contract', **args).completed_steps == ('extract', 'index')
+        job.close()
+        monkeypatch.setattr(memory, 'attachment', attachment)
+        job = workflow(memory, tmp_path, parser)
+        result = await job.run('contract', **args)
+        assert result.results == first.results
+        assert result.reused_steps == ('extract', 'index')
+        assert parser.calls == 1
+        assert (await memory.documents.counts('alpha')).episodes == 1
+    finally:
+        job.close()
+        await memory.close()
+
+
+async def test_missing_indexed_episode_invalidates_checkpoint_even_when_all_blobs_remain(tmp_path):
+    memory = await open_memory(tmp_path)
+    original = await memory.attach('alpha', b'Current contract', 'text/plain', filename='contract.txt')
+    job = workflow(memory, tmp_path, CountingParser())
+    args = dict(space='alpha', attachment_id=original.attachment_id)
+    try:
+        first = await job.run('contract', **args)
+        manifest_id = first.results['extract']['manifest_id']
+        retained = [await memory.attachment('alpha', identifier)
+                    for identifier in (original.attachment_id, manifest_id)]
+        await memory.forget('alpha', first.results['index']['episode_id'])
+        for attachment, raw in retained:
+            await memory.attach('alpha', raw, attachment.media_type, filename=attachment.filename)
+        assert [entry[0].attachment_id for entry in retained] == [
+            (await memory.attachment('alpha', identifier))[0].attachment_id
+            for identifier in (original.attachment_id, manifest_id)]
+        with pytest.raises(WorkflowError, match='^sources_invalid$'):
+            await job.run('contract', **args)
+        assert job.status('contract', **args).completed_steps == ()
     finally:
         job.close()
         await memory.close()

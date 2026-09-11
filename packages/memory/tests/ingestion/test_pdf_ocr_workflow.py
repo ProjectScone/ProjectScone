@@ -42,6 +42,51 @@ async def retain(memory, raw=None, space='alpha'):
     return await memory.attach(space, raw or pdf_bytes(), 'application/pdf', filename='source.pdf')
 
 
+@pytest.mark.parametrize('fail_read', ['first', 'after_binding', 'last'])
+async def test_completed_pdf_survives_temporary_original_storage_outage(tmp_path, monkeypatch, fail_read):
+    memory = await open_memory(tmp_path)
+    engine = ObservedOcr()
+    original = await retain(memory)
+    job = workflow(memory, tmp_path, engine)
+    args = dict(space='alpha', attachment_id=original.attachment_id)
+    try:
+        first = await job.run('scan', **args)
+        calls = engine.calls
+        attachment = memory.attachment
+        reads = 0
+
+        async def observed(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            return await attachment(*args, **kwargs)
+
+        monkeypatch.setattr(memory, 'attachment', observed)
+        await job.run('scan', **args)
+        fail_at = {'first': 1, 'after_binding': 3, 'last': reads}[fail_read]
+        reads = 0
+
+        async def unavailable(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            if reads == fail_at:
+                raise ConnectionError('private backend details')
+            return await attachment(*args, **kwargs)
+
+        monkeypatch.setattr(memory, 'attachment', unavailable)
+        with pytest.raises(WorkflowError, match='^verification_unavailable$'):
+            await job.run('scan', **args)
+        job.close()
+        monkeypatch.setattr(memory, 'attachment', attachment)
+        job = workflow(memory, tmp_path, engine)
+        result = await job.run('scan', **args)
+        assert result.reused_pages == (1, 2) and result.reused_index
+        assert result.added.episode_id == first.added.episode_id
+        assert engine.calls == calls
+    finally:
+        job.close()
+        await memory.close()
+
+
 async def test_cancelled_second_page_resumes_without_rendering_or_recognizing_first(tmp_path, monkeypatch):
     memory = await open_memory(tmp_path)
     original = await retain(memory)
