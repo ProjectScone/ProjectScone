@@ -80,9 +80,11 @@ repeating completed extraction. Changed parser/model options need a changed
 `parser_revision`. Source validation rejects missing or deleted evidence.
 
 This is one caller-owned active document per journal. It does not provide a
-background queue, distributed worker leases, per-page OCR checkpoints, or
-separate durable chunking/embedding stages. Cancellation interrupts the active
-call; an explicit retry resumes eligible stages.
+background queue, distributed worker leases, or separate durable
+chunking/embedding stages. Cancellation interrupts the active call; an explicit
+retry resumes eligible stages. For retained PDFs, the separate `PdfOcrWorkflow`
+provides encrypted per-page OCR checkpoints and indexing recovery; see the
+[PDF OCR guide](pdf-ocr.md#resume-completed-pages-after-interruption).
 
 ## HTTP and execution boundaries
 

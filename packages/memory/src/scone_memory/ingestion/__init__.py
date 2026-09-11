@@ -20,11 +20,14 @@ from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument
 
 __all__ += ['DocumentIngested', 'DocumentProvenance', 'document_provenance', 'ingest_document',
             'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'ParsedDocument',
-            'DocumentIngestionWorkflow']
+            'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested']
 
 
 def __getattr__(name: str) -> object:
     if name == 'DocumentIngestionWorkflow':
         from .file_workflow import DocumentIngestionWorkflow
         return DocumentIngestionWorkflow
+    if name in {'PdfOcrWorkflow', 'PdfOcrIngested'}:
+        from .pdf_ocr_workflow import PdfOcrIngested, PdfOcrWorkflow
+        return PdfOcrWorkflow if name == 'PdfOcrWorkflow' else PdfOcrIngested
     raise AttributeError(name)

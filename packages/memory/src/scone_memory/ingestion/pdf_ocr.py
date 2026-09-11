@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from importlib.util import find_spec
 import json
 import logging
@@ -53,6 +54,32 @@ def _page_text(result: OcrResult, offset: int, max_bytes: int) -> tuple[str, tup
     return ''.join(parts), tuple(regions)
 
 
+def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], limits: PdfLimits) -> ParsedPdf:
+    """Rebuild absolute UTF-8 spans from native text and validated page results."""
+    encoded = parsed.text.encode('utf-8')
+    pages: list[PdfPage] = []
+    texts: list[str] = []
+    offset = 0
+    for page in parsed.pages:
+        if page.number > 1:
+            offset += 2
+        text = encoded[page.start:page.end].decode('utf-8')
+        updates: dict[str, object] = {}
+        if page.number in recognized:
+            result = recognized[page.number]
+            text, regions = _page_text(result, offset, limits.max_text_bytes)
+            updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions}
+        end = offset + len(text.encode('utf-8'))
+        if end > limits.max_text_bytes:
+            raise InvalidInput('PDF OCR text exceeds its byte limit')
+        pages.append(page.model_copy(update={**updates, 'start': offset, 'end': end, 'empty': not text.strip()}))
+        texts.append(text)
+        offset = end
+    output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v1', pages=tuple(pages))
+    validate_pdf(output, limits)
+    return output
+
+
 class OcrPdfParser:
     """OCR missing text pages, or explicitly all pages, within one wall deadline.
 
@@ -71,30 +98,30 @@ class OcrPdfParser:
 
     async def _parse(self, data: bytes, limits: PdfLimits) -> ParsedPdf:
         deadline = time.monotonic() + limits.timeout_seconds
-        parsed = await PypdfParser()._parse(data, limits, allow_empty=True,
-            metadata_only=self.options.mode == 'all_pages')
-        encoded = parsed.text.encode('utf-8')
-        pages: list[PdfPage] = []
-        texts: list[str] = []
-        offset = 0
+        parsed = await self.inspect(data, limits)
+        recognized: dict[int, OcrResult] = {}
+        text_bytes = len(parsed.text.encode())
         for page in parsed.pages:
-            if page.number > 1:
-                offset += 2
-            text = encoded[page.start:page.end].decode('utf-8')
-            updates: dict[str, object] = {}
             if page.empty or self.options.mode == 'all_pages':
                 result = await self._recognize(data, page.number, deadline)
-                text, regions = _page_text(result, offset, limits.max_text_bytes)
-                updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions}
-            end = offset + len(text.encode('utf-8'))
-            if end > limits.max_text_bytes:
-                raise InvalidInput('PDF OCR text exceeds its byte limit')
-            pages.append(page.model_copy(update={**updates, 'start': offset, 'end': end, 'empty': not text.strip()}))
-            texts.append(text)
-            offset = end
-        output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v1', pages=tuple(pages))
-        validate_pdf(output, limits)
-        return output
+                text_bytes += sum(len(r.text.encode()) for r in result.regions) + max(0, len(result.regions) - 1) - (page.end - page.start)
+                if text_bytes > limits.max_text_bytes:
+                    raise InvalidInput('PDF OCR text exceeds its byte limit')
+                recognized[page.number] = result
+        return assemble_ocr_pdf(parsed, recognized, limits)
+
+    async def inspect(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
+        """Read native page geometry/text without recognizing missing pages."""
+        return await PypdfParser()._parse(data, limits, allow_empty=True,
+            metadata_only=self.options.mode == 'all_pages')
+
+    async def recognize_page(self, data: bytes, page: int, *, timeout_seconds: float = 30.0) -> OcrResult:
+        """Render and recognize one page, including a deadline for the provider."""
+        budget = PdfLimits(timeout_seconds=timeout_seconds).timeout_seconds
+        try:
+            return await asyncio.wait_for(self._recognize(data, page, time.monotonic() + budget), budget)
+        except asyncio.TimeoutError as error:
+            raise InvalidInput('PDF OCR page exceeded its wall time limit') from error
 
     async def _recognize(self, data: bytes, page: int, deadline: float) -> OcrResult:
         if find_spec('pypdfium2') is None:
