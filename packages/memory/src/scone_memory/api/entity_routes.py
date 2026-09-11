@@ -22,6 +22,7 @@ from ..core.errors import InvalidInput, NotFound
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.context import ContextLimits, graph_context
+from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
@@ -321,6 +322,25 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
                 "candidates": list(packet.candidates),
                 "coverage": {"reasons": packet.coverage.get("reasons", []), "read": packet.coverage.get("read", {}),
                              "hubs_not_crossed": packet.coverage.get("hubs_not_crossed", [])}}
+
+    @app.get("/v1/graph/timeline", response_model=None)
+    async def get_timeline(
+        entity: str = Query(min_length=1, max_length=200), as_of: Optional[str] = None,
+        limit: int = Query(default=200, ge=1, le=500), space: str = Depends(space_for),
+    ) -> dict[str, object] | JSONResponse:
+        """One entity's facts in valid time, in lanes by role and predicate,
+        with supersession and stored links between them, and a marker for
+        what held at ``as_of``."""
+        when = _moment(engine, as_of)
+        try:
+            return await timeline_view(engine, space, entity, as_of=when, limit=limit)
+        except TimelineEntityAmbiguous as ambiguous:
+            return JSONResponse(status_code=409, content={
+                "error": f"{entity!r} could mean several entities", "name": entity,
+                "candidates": ambiguous.candidates, "candidates_total": ambiguous.total,
+                "truncated": ambiguous.total > len(ambiguous.candidates)})
+        except TimelineEntityMissing:
+            raise NotFound(f"no entity is named {entity!r}") from None
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(

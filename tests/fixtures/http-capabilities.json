@@ -55,7 +55,8 @@
       "graph.report": true,
       "graph.path": true,
       "graph.export": true,
-      "graph.context": true
+      "graph.context": true,
+      "graph.timeline": true
     }
   }
 }

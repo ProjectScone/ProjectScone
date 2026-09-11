@@ -40,5 +40,6 @@ async def checked_facts(documents: "DocumentStore", space: str, fact_ids: list[i
         checked.append({"fact_id": fact.fact_id, "subject": fact.subject, "predicate": fact.predicate,
                         "object": fact.object, "status": fact.status, "excluded": fact.excluded,
                         "origin": fact.origin, "valid_from": fact.valid_from, "valid_until": fact.valid_until,
-                        "source_episode_id": fact.source_episode_id, "quote": fact.quote, "grounding": grounding})
+                        "source_episode_id": fact.source_episode_id, "quote": fact.quote,
+                        "superseded_by": fact.superseded_by, "grounding": grounding})
     return checked

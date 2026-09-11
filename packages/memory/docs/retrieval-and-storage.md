@@ -393,6 +393,32 @@ The MCP server offers the same reads as tools:
 These sit beside the six tools shared with the Rust server, and none of
 them writes.
 
+#### `GET /v1/graph/timeline`
+
+One entity's facts in valid time (`entity=`, a name or id). Every fact
+the entity takes part in, as subject, as object or through a value, is
+an item. Items sit in lanes: `subject:<predicate>`, `value:<predicate>`
+and `object:<predicate>`. Within a lane they are ordered by `valid_from`
+and then id, never by when they were written, so a backfilled fact lands
+where it belongs.
+
+- **Relations:** supersession (`superseded_by`) and stored links between
+  the entity's facts (`extends`, `supports`, `contradicts`,
+  `derived_from`).
+- **Items:** each is re-read, with its status, validity, exclusion,
+  origin and grounding (a quote only when it verifies).
+- **Marker:** `holds_at_as_of` marks what held at `as_of`, which
+  defaults to now. Excluded facts are shown with `excluded: true` and
+  never marked.
+- **Limit:** `limit` (default 200, up to 500) keeps the newest items, and
+  `coverage` counts the rest (`item_limit`). A link read cut short is
+  reported as `links_cut`.
+- **Fence:** if the space changes while the timeline is read, it is read
+  again, and `consistent` says whether a still read was reached.
+
+A name that could mean several entities is a 409 listing the
+candidates, and an unknown one is a 404. Advertised as `graph.timeline`.
+
 #### `GET /v1/graph/export`
 
 The view's whole graph as a file for another tool. It takes `status` and
