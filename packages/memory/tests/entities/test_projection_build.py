@@ -77,3 +77,53 @@ async def test_closing_the_engine_stops_what_is_still_building():
     await engine.close()
     await asyncio.sleep(0)
     assert all(task.cancelled() or task.done() for task in running) and not engine.entities.building()
+
+
+class Gated(service_module.EntityService):
+    """Holds each projection build until released."""
+
+    def __init__(self, engine) -> None:
+        super().__init__(engine)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.inputs: list[int] = []
+
+    async def _project(self, space, facts, revision):
+        self.inputs.append(len(facts))
+        self.started.set()
+        await self.release.wait()
+        return await super()._project(space, facts, revision)
+
+
+async def test_a_build_is_shared_only_by_requests_reading_the_same_ledger(monkeypatch):
+    """A build begun under one read is not handed to a request whose read
+    differs (here, a lower cap): its projection would not match its coverage."""
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(3):
+        await engine.assert_fact("alpha", f"person {number}", "knows", "Bob", valid_from="2024-01-01T00:00:00Z")
+    engine.entities = gated = Gated(engine)
+    monkeypatch.setattr(read, "MAX_FACTS", 3)
+    first = asyncio.ensure_future(gated.projection("alpha", mode="all", when=WHEN))
+    await gated.started.wait()
+    monkeypatch.setattr(read, "MAX_FACTS", 1)
+    second = asyncio.ensure_future(gated.projection("alpha", mode="all", when=WHEN))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    gated.release.set()
+    (wide, wide_read), (narrow, narrow_read) = await asyncio.gather(first, second)
+    assert len(wide.roles) == wide_read["facts_counted"] == 3
+    assert len(narrow.roles) == narrow_read["facts_counted"] == narrow_read["facts_read"] == 1
+
+
+class Failing(InMemoryDocumentStore):
+    async def page_facts(self, space, before_id, limit):
+        raise TimeoutError("storage read timed out")
+
+
+async def test_a_store_that_times_out_is_a_failure_not_a_build_in_progress():
+    engine = await MemoryEngine(Failing(), InMemoryVectorIndex(), HashEmbedder()).open()
+    with pytest.raises(TimeoutError, match="storage read timed out"):
+        await engine.entities.projection("alpha", mode="current", when=WHEN, timeout=1.0)
+    assert not engine.entities.building()

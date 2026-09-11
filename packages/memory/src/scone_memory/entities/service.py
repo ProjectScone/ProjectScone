@@ -66,6 +66,8 @@ class ProjectionBuilding(Exception):
         super().__init__(f"the entity projection for {space!r} is still being built; try again shortly")
 
 _Key = tuple[str, datetime | None, datetime | None]
+#: One build: the view's key within one ledger read (revision, cap and rows).
+_Slot = tuple[str, int, int, str, _Key]
 
 
 def _ledger_digest(facts: tuple[Fact, ...]) -> str:
@@ -103,7 +105,7 @@ class EntityService:
         self._engine = engine
         self._held: OrderedDict[str, _Held] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
-        self._projecting: dict[tuple[str, int, _Key], asyncio.Future[tuple[EntityProjection, int]]] = {}
+        self._projecting: dict[_Slot, asyncio.Future[tuple[EntityProjection, int]]] = {}
         self._background: set[asyncio.Task[tuple[EntityProjection, dict[str, object]]]] = set()
 
     def cached(self, space: str) -> EntityProjection | None:
@@ -142,17 +144,19 @@ class EntityService:
         task.add_done_callback(self._settled)
         if timeout is None:
             return await task
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout)
-        except asyncio.TimeoutError:
-            raise ProjectionBuilding(space) from None
+        # asyncio.wait never cancels the build and never mistakes a failure
+        # inside it (a store's own TimeoutError, say) for the budget running out.
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if not done:
+            raise ProjectionBuilding(space)
+        return task.result()
 
     def _settled(self, task: asyncio.Task[tuple[EntityProjection, dict[str, object]]]) -> None:
         self._background.discard(task)
         if not task.cancelled():
             task.exception()  # a failure nobody waited for is still retrieved, not logged as lost
 
-    def _projected(self, slot: tuple[str, int, _Key], _done: object) -> None:
+    def _projected(self, slot: _Slot, _done: object) -> None:
         self._projecting.pop(slot, None)
 
     async def _project(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
@@ -168,7 +172,7 @@ class EntityService:
         key = held.key(mode, when)
         found = held.views.get(key)
         if found is None:
-            slot = (space, held.ledger.revision, key)
+            slot = (space, held.ledger.revision, held.ledger.limit, held.digest, key)
             pending = self._projecting.get(slot)
             if pending is None:
                 facts = [fact for fact in held.ledger.facts
