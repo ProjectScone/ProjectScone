@@ -169,3 +169,18 @@ def test_a_kind_conflict_shows_evidence_for_every_side() -> None:
     acme = by_key(project_entities("alpha", rows, revision=1))["acme"]
     assert acme.kind_status == "conflict" and acme.kind is None
     assert 9 in acme.kind_basis and 1 in acme.kind_basis and len(acme.kind_basis) <= 8
+
+
+def test_the_projection_digest_of_a_fixed_ledger_does_not_drift():
+    """Ids, cursors and caches rest on the digest. A change to how it is
+    computed must be a deliberate version change, never a side effect."""
+    from scone_memory.core.models import Fact
+
+    facts = [Fact(fact_id=1, space="alpha", subject="alice chen", predicate="works_at", object="Acme Robotics",
+                  valid_from="2024-01-01T00:00:00Z", source_episode_id=1, quote="Alice Chen joined Acme Robotics"),
+             Fact(fact_id=2, space="alpha", subject="acme robotics", predicate="based_in", object="Lisbon",
+                  valid_from="2024-02-01T00:00:00Z"),
+             Fact(fact_id=3, space="alpha", subject="alice chen", predicate="joined_on", object="May 2021",
+                  valid_from="2024-01-01T00:00:00Z", status="closed", valid_until="2025-01-01T00:00:00Z")]
+    assert project_entities("alpha", facts, revision=1).digest == \
+        "012b6a529ba69407521ac8dbc90ab3517babf2f93f9cafac18928cfc7d2646f8"

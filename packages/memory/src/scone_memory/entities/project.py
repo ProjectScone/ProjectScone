@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import re
-from typing import Iterable, Literal
+from typing import Iterable, Literal, cast
 
 from ..core.models import Fact
 from ..core.timeutil import format_rfc3339, parse_rfc3339
@@ -140,7 +141,9 @@ class EntityProjection:
         return sorted((frozenset(group) for group in groups.values()), key=lambda group: (-len(group), min(group)))
 
 
+@lru_cache(maxsize=4096)
 def _moment(text: str) -> str:
+    # A space's facts share few distinct instants; each is parsed once.
     return format_rfc3339(parse_rfc3339(text))
 
 
@@ -269,9 +272,18 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> Ent
     return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles), digest)
 
 
+_SCALARS = frozenset({str, int, float, bool, type(None)})
+
+
 def _plain(item: object) -> object:
-    if hasattr(item, "__slots__"):
-        return {name: _plain(getattr(item, name)) for name in item.__slots__}
-    if isinstance(item, tuple):
-        return [_plain(value) for value in item]
+    # Most values are scalars; test the exact type first, the costly
+    # attribute lookup only for the rest. The output is unchanged.
+    kind = type(item)
+    if kind in _SCALARS:
+        return item
+    if kind is tuple:
+        return [_plain(value) for value in cast("tuple[object, ...]", item)]
+    slots = getattr(kind, "__slots__", None)
+    if slots is not None:
+        return {name: _plain(getattr(item, name)) for name in slots}
     return item
