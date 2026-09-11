@@ -373,7 +373,7 @@ def _epub(bundle: SafeArchive, output: _Output) -> None:
         if resource[1] not in {'application/xhtml+xml', 'text/html'}:
             continue
         path = _resolve(package_path, resource[0])
-        document = bundle.xml(path)
+        document = bundle.xml(path, allow_doctype=True)
         body = next(_elements(document, 'body'), None)
         if body is None:
             raise InvalidInput('EPUB chapter has no XHTML body')
