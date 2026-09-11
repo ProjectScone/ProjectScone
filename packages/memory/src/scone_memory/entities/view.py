@@ -32,18 +32,24 @@ STATUS_MODES: tuple[StatusMode, ...] = ("current", "history", "proposed", "all")
 VIEW_SCHEMA_VERSION = 1
 
 
-def _passes(role: FactRole, mode: StatusMode, when: datetime) -> bool:
+def counts(status: str, excluded: bool, valid_from: str, valid_until: str | None, mode: StatusMode,
+           when: datetime) -> bool:
+    """Whether a fact with these fields counts in a status mode at ``when``."""
     if mode == "all":
-        return True
-    if role.excluded:
+        return status != "declined"
+    if excluded:
         return False
     if mode == "proposed":
-        return role.status == "proposed"
-    if role.status not in ("active", "closed") or parse_rfc3339(role.valid_from) > when:
+        return status == "proposed"
+    if status not in ("active", "closed") or parse_rfc3339(valid_from) > when:
         return False
     if mode == "history":
         return True
-    return role.valid_until is None or parse_rfc3339(role.valid_until) > when
+    return valid_until is None or parse_rfc3339(valid_until) > when
+
+
+def _passes(role: FactRole, mode: StatusMode, when: datetime) -> bool:
+    return counts(role.status, role.excluded, role.valid_from, role.valid_until, mode, when)
 
 
 def _support(roles: Sequence[FactRole]) -> dict[str, int]:

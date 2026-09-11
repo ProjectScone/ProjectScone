@@ -139,9 +139,13 @@ Status modes:
 - `proposed`: proposals awaiting review, not excluded.
 - `all`: everything, excluded facts included.
 
-A relation or attribute appears when at least one of its facts counts in the
-mode. Its `fact_ids` and `support` then cover only those facts. Relations are
-shown only when both ends are among the shown entities.
+The view is projected from the counted facts alone, so classification and
+kind hints come only from them. An excluded claim, or one that begins after
+`as_of`, cannot turn a value into an entity or suggest a kind.
+`coverage.facts_counted` reports how many facts counted. A relation or
+attribute appears when at least one of its facts counts, and its `fact_ids`
+and `support` cover only those facts. Relations are shown only when both ends
+are among the shown entities.
 
 The response (`api.entity_routes.KnowledgeView`):
 
@@ -162,7 +166,7 @@ The response (`api.entity_routes.KnowledgeView`):
                  "first_valid_from": "…", "last_valid_until": null}],
   "attributes": [{"id": "att:…", "entity_id": "ent:…", "predicate": "joined_on", "value": "May 2021",
                   "literal_kind": "date", "fact_ids": [2], "support": {"…": 0}}],
-  "coverage": {"facts_read": 9, "facts_limit": 50000, "entities_total": 6, "entities_shown": 6,
+  "coverage": {"facts_read": 9, "facts_counted": 9, "facts_limit": 50000, "entities_total": 6, "entities_shown": 6,
                "relations_total": 4, "relations_shown": 4, "attributes_total": 3,
                "attributes_shown": 3, "truncated": false, "reasons": []}
 }

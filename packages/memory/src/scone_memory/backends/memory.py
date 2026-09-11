@@ -454,6 +454,10 @@ class InMemoryVectorIndex:
                 self._writer = None
             raise
         self._pending -= 1
+        # The vectors landed only now. If another writer settled the record
+        # while this write waited (a rebuild that finished, a foreign write),
+        # apply the rule again so the record cannot vouch for what it did not see.
+        self._writer = after_write(self._writer, writer, True)
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,

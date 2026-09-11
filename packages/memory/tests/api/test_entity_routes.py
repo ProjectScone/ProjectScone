@@ -112,3 +112,19 @@ def test_capabilities_advertise_the_entity_routes(seeded):
     client, _ = seeded
     features = client.get("/v1/capabilities", headers=auth()).json()["features"]
     assert features["entities.read"] is True and features["graph.knowledge"] is True
+
+
+async def test_a_view_is_classified_only_from_the_facts_it_counts():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "status", "tired", valid_from="2020-01-01T00:00:00Z")
+    hidden = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2020-01-01T00:00:00Z")
+    await engine.exclude("alpha", hidden.fact_id, "private")
+    await engine.assert_fact("alpha", "tired", "knows", "Bob", valid_from="2030-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"as_of": "2021-01-01T00:00:00Z"}, headers=auth()).json()
+        listed = client.get("/v1/entities", params={"as_of": "2021-01-01T00:00:00Z"}, headers=auth()).json()
+    assert view["relations"] == []
+    assert [(a["predicate"], a["value"]) for a in view["attributes"]] == [("status", "tired")]
+    alice = next(entity for entity in view["entities"] if entity["key"] == "alice")
+    assert alice["kind"] is None and hidden.fact_id not in alice["kind_basis"]
+    assert [entity["key"] for entity in listed["entities"]] == ["alice"]

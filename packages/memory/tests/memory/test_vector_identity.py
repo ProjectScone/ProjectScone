@@ -599,3 +599,28 @@ async def test_a_failed_write_never_withdraws_another_pending_writers_claim() ->
     index.gates[1].set()
     await second
     assert await index.written_by() == ("mixed", "invalidated")
+
+
+async def test_a_write_that_lands_after_another_writer_settled_marks_the_index_mixed() -> None:
+    import asyncio
+    from scone_memory.core.ports import VectorPoint
+
+    gate = asyncio.Event()
+
+    class Held(InMemoryVectorIndex):
+        async def upsert(self, points):
+            await gate.wait()
+            await super().upsert(points)
+
+    index = Held()
+    await index.ensure(2)
+    pending = asyncio.ensure_future(
+        index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a"))
+    await asyncio.sleep(0)
+    # Another engine's rebuild runs to completion while the write waits.
+    marker = ("rebuilding:model-b:n", "rebuilding")
+    assert await index.swap_writer(await index.written_by(), marker)
+    assert await index.swap_writer(marker, ("model-b", "written"))
+    gate.set()
+    await pending
+    assert await index.written_by() == ("mixed", "invalidated")

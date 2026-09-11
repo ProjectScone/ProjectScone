@@ -97,6 +97,9 @@ class ListFilters(Filters):
 
 class Coverage(BaseModel):
     facts_read: int
+    #: Facts that count in this view's status mode and moment; the view is
+    #: projected from these alone.
+    facts_counted: int
     facts_limit: int
     entities_total: int
     entities_shown: int
@@ -146,7 +149,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     ) -> dict[str, object]:
         """Entities, the relations between them and their values, as the ledger records them."""
         when = _moment(engine, as_of)
-        projection, coverage = await load_projection(engine, space)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         return knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
                               coverage=coverage)
 
@@ -157,5 +160,5 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     ) -> dict[str, object]:
         """Entities ranked by the claims they take part in, optionally filtered by name."""
         when = _moment(engine, as_of)
-        projection, coverage = await load_projection(engine, space)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         return entity_listing(projection, mode=status, as_of=when, limit=limit, query=q, coverage=coverage)
