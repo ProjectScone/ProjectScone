@@ -139,3 +139,51 @@ async def test_bounds_are_refused_before_anything_is_read(options, message):
     engine = await engine_with(("alice chen", "works_at", "Acme"))
     with pytest.raises(DuplicatesError, match=message):
         await likely_duplicates(engine, "alpha", **options)
+
+
+async def test_only_names_that_could_reach_the_score_are_compared():
+    """Pairs are drawn from each name's rarest words and letters only: two
+    names that cannot be alike enough are never compared, so a large graph
+    costs its likely pairs, not all of them."""
+    import random
+
+    chosen = random.Random(3)
+
+    def word() -> str:
+        return "".join(chosen.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(7))
+
+    names = sorted({f"{word()} {word()} company" for _ in range(120)})
+    engine = await engine_with(*[(name, "knows", "Zed") for name in names])
+    found = await likely_duplicates(engine, "alpha")
+    everything = len(names) * (len(names) - 1) // 2
+    assert found.coverage["compared"] < everything // 20
+
+
+async def test_candidates_past_the_bound_are_counted(monkeypatch):
+    from scone_memory.entities import duplicates as duplicates_module
+
+    monkeypatch.setattr(duplicates_module, "MAX_CANDIDATES", 5)
+    engine = await engine_with(*[(f"{first} chen", "knows", "Zed") for first in (
+        "alice", "bruno", "clara", "dmitri", "elena", "farid", "greta", "hiro", "ines", "jonas")])
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    assert found.coverage["compared"] == 5 and any(r.startswith("candidates_cut ") for r in found.coverage["reasons"])
+
+
+async def test_names_that_differ_by_a_number_are_different_things():
+    engine = await engine_with(("worker 12", "works_at", "Acme"), ("worker 13", "works_at", "Acme"),
+                               ("room 101", "part_of", "Block A"), ("room 101b", "part_of", "Block A"))
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    assert ("worker 12", "worker 13") not in pairs(found)
+    assert ("room 101", "room 101b") not in pairs(found)
+
+
+async def test_the_same_name_once_folded_meets_however_common_its_other_blocks(monkeypatch):
+    """Names of single letters have no word or letter run to file them by,
+    and here their initials are shared too widely to compare by; the same
+    name once folded still meets."""
+    from scone_memory.entities import duplicates as duplicates_module
+
+    monkeypatch.setattr(duplicates_module, "MAX_BLOCK", 2)
+    engine = await engine_with(("j k l", "knows", "Zed"), ("dr. j k l", "knows", "Yves"), ("j k lee", "knows", "Uma"))
+    found = await likely_duplicates(engine, "alpha")
+    assert ("dr. j k l", "j k l") in pairs(found)

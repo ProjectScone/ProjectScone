@@ -12,20 +12,28 @@ says why each might be one:
 - one name the initials of the other ("IBM");
 - the neighbours both have, each cited by its facts.
 
-Two entities of different known kinds are never suggested, and two
-related to each other are suggested less: a thing rarely points at
-itself under another name. Candidates come from names sharing a word, or
-for short names three letters in a row; a word shared by more than
-``MAX_BLOCK`` entities is too common to compare by, and is counted. It
+Two entities of different known kinds are never suggested, nor two
+whose names hold different numbers ("Room 101" and "Room 102" are two
+rooms, however alike their letters), and two related to each other are
+suggested less: a thing rarely points at itself under another name. It
 merges nothing.
+
+Only pairs that could reach ``min_score`` are compared. Two names can be
+alike enough by their words (or letters) only if they share one of the
+rarest of them: each name is filed under its rarest words and letter runs
+alone, as many as a match at that score needs, so a large graph costs
+its likely pairs, not all of them. A run shared by more than
+``MAX_BLOCK`` names is too common to compare by, more than
+``MAX_CANDIDATES`` pairs are not compared, and both are counted.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import TYPE_CHECKING, Literal
+import math
+from typing import TYPE_CHECKING, Literal, Mapping
 
 from ..retrieval.lexical import STOPWORDS
 from .context import _cited, _fit, _reasons, one_line
@@ -42,6 +50,10 @@ DEFAULT_MIN_SCORE = 0.5
 #: Entities sharing a word, or three letters, before it is too common to
 #: compare them by.
 MAX_BLOCK = 200
+#: Pairs compared at most; the rarest blocks' pairs come first.
+MAX_CANDIDATES = 200_000
+#: The most neighbours in common add to a pair's likeness by name.
+_NEAR = 0.15
 MAX_BYTES, MIN_BYTES, MAX_BYTES_LIMIT = 8_000, 512, 64_000
 _SAME = "the same name once titles and punctuation are set aside"
 _INITIALS = "one name is the initials of the other"
@@ -73,6 +85,16 @@ def _alike(left: set[str], right: set[str]) -> float:
     return len(left & right) / len(left | right) if left | right else 0.0
 
 
+def _rarest(tokens: set[str], seen: Mapping[str, int], threshold: float) -> list[str]:
+    """The rarest of the tokens that any set alike to these by at least
+    ``threshold`` (Jaccard) must share one of: all but the
+    ``ceil(threshold * n) - 1`` commonest."""
+    ordered = sorted(tokens, key=lambda token: (seen[token], token))
+    if threshold <= 0:
+        return ordered
+    return ordered[:max(1, len(ordered) - math.ceil(threshold * len(ordered)) + 1)]
+
+
 def _entity(entity: Entity) -> dict[str, object]:
     return {"id": entity.entity_id, "key": entity.key, "label": entity.label, "kind": entity.kind}
 
@@ -98,31 +120,49 @@ async def likely_duplicates(engine: "MemoryEngine", space: str, *, limit: int = 
     entities = {entity.entity_id: entity for entity in projection.entities}
     folded = {entity_id: variant_fold(entity.key) for entity_id, entity in entities.items()}
     words = {entity_id: [word for word in name.split() if word not in STOPWORDS] for entity_id, name in folded.items()}
+    numbered = {entity_id: {word for word in name.split() if any(character.isdigit() for character in word)}
+                for entity_id, name in folded.items()}
 
-    # Candidates: names sharing a word, short names sharing three letters,
-    # and a short name that is some name's initials.
+    # Candidates: the same name once folded, a short name that is some
+    # name's initials, and names sharing one of their rarest words or
+    # (for short names) letter runs, as many as a match at min_score needs.
+    named = {entity_id: {word for word in words[entity_id] if len(word) > 1} for entity_id in entities}
+    lettered = {entity_id: {run for run in _letters(folded[entity_id]) if run.strip()}
+                for entity_id in entities if len(words[entity_id]) <= 2}
+    seen_words = Counter(word for tokens in named.values() for word in tokens)
+    seen_runs = Counter(run for tokens in lettered.values() for run in tokens)
+    threshold = max(0.0, min_score - _NEAR)
     blocks: dict[str, list[str]] = defaultdict(list)
     for entity_id in sorted(entities):
-        for word in set(words[entity_id]):
-            if len(word) > 1:
-                blocks[f"word:{word}"].append(entity_id)
-        if len(words[entity_id]) <= 2:
-            for trigram in _letters(folded[entity_id]):
-                if trigram.strip():
-                    blocks[f"letters:{trigram}"].append(entity_id)
+        if folded[entity_id]:
+            blocks[f"same:{folded[entity_id]}"].append(entity_id)
+        for word in _rarest(named[entity_id], seen_words, threshold):
+            blocks[f"word:{word}"].append(entity_id)
+        for run in _rarest(lettered.get(entity_id, set()), seen_runs, threshold):
+            blocks[f"letters:{run}"].append(entity_id)
         if len(words[entity_id]) > 1:
             blocks["initials:" + "".join(word[0] for word in words[entity_id])].append(entity_id)
         elif len(folded[entity_id]) > 1 and folded[entity_id].isalpha():
             blocks["initials:" + folded[entity_id]].append(entity_id)
     candidates: set[tuple[str, str]] = set()
-    skipped = 0
-    for members in blocks.values():
+    skipped = unread = 0
+    usable = sorted(((key, members) for key, members in blocks.items() if len(members) > 1),
+                    key=lambda item: (len(item[1]), item[0]))
+    for index, (key, members) in enumerate(usable):
         if len(members) > MAX_BLOCK:
             skipped += 1
             continue
-        candidates.update(combinations(members, 2))
+        pairs_here = list(combinations(members, 2))
+        room = MAX_CANDIDATES - len(candidates)
+        candidates.update(pairs_here[:room])
+        if len(pairs_here) > room:
+            unread = sum(1 for _, rest in usable[index:] if len(rest) <= MAX_BLOCK)
+            skipped += sum(1 for _, rest in usable[index:] if len(rest) > MAX_BLOCK)
+            break
     if skipped:
         reasons.append(f"blocks_skipped {skipped}")
+    if unread:
+        reasons.append(f"candidates_cut {unread} blocks")
 
     neighbours: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     between: dict[tuple[str, str], list[tuple[str, str, str, tuple[int, ...]]]] = defaultdict(list)
@@ -143,6 +183,8 @@ async def likely_duplicates(engine: "MemoryEngine", space: str, *, limit: int = 
         first, second = sorted(pair, key=canonical)
         a, b = entities[first], entities[second]
         if a.kind is not None and b.kind is not None and a.kind != b.kind:
+            continue
+        if numbered[first] != numbered[second]:
             continue
         why: list[str] = []
         same = bool(folded[first]) and folded[first] == folded[second]

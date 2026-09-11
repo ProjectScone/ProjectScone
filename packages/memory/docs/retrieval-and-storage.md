@@ -531,12 +531,25 @@ that decision. Nothing is merged.
   - one name is the initials of the other ("IBM");
   - neighbours in common, cited by their facts, which raise the likelihood.
 - **What keeps a pair out.** Two entities of different known kinds are never
-  suggested. Two related to each other are halved, since a thing rarely
-  points at itself under another name, and the relation is named.
-- **Candidates** come from names sharing a word, short names sharing three
-  letters, or initials. A word or letter run shared by more than 200
-  entities is too common to compare by, and is counted as
-  `blocks_skipped N`.
+  suggested, nor two whose names hold different numbers ("Room 101" and
+  "Room 102" are two rooms, however alike their letters). Two related to
+  each other are halved, since a thing rarely points at itself under
+  another name, and the relation is named.
+- **Only pairs that could reach `min_score` are compared.**
+  - Two names can be alike enough by their words or letters only if they
+    share one of the rarest of them. So each name is filed under its
+    rarest words, and for short names its rarest three-letter runs: as
+    many as a match at that score needs, allowing for what shared
+    neighbours add.
+  - The same folded name and matching initials are always compared.
+  - A run shared by more than 200 names is too common to compare by and is
+    counted as `blocks_skipped N`.
+  - At most 200,000 pairs are compared, the rarest blocks' first; the rest
+    are counted as `candidates_cut`.
+  - On 10,000 generated names built from a few syllables, as alike as
+    names get, an answer takes about six seconds and says what it cut.
+    Real names differ more and are cheaper.
+  - `coverage.compared` says how many pairs were compared.
 - Each pair puts the likelier canonical name first: the more connected,
   then the earlier.
 - On the graph benchmark's fixture it suggests exactly its one non-case
