@@ -126,7 +126,8 @@ def _node_link(projection: EntityProjection, about: Mapping[str, object]) -> Exp
 
 def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     """Entities and values are both nodes (``type`` says which), so a value
-    keeps its own edge carrying the predicate and the facts behind it.
+    keeps its own edge (``link`` says relation or value) carrying the
+    predicate and the facts behind it.
 
     XML 1.0 cannot hold some characters the ledger can (U+0001, U+FFFE, a
     lone surrogate). Text shows each as a visible stand-in, and the element
@@ -135,7 +136,7 @@ def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     ElementTree.register_namespace("", ns)
     root = ElementTree.Element(f"{{{ns}}}graphml")
     for key, target in (("type", "node"), ("label", "node"), ("key", "node"), ("kind", "node"),
-                        ("literal_kind", "node"), ("kind", "edge"), ("predicate", "edge"), ("fact_ids", "edge"),
+                        ("literal_kind", "node"), ("link", "edge"), ("predicate", "edge"), ("fact_ids", "edge"),
                         ("digest", "graph"), ("about", "graph"), ("exact", "all")):
         ElementTree.SubElement(root, f"{{{ns}}}key", {"id": key, "for": target, "attr.name": key,
                                                       "attr.type": "string"})
@@ -151,9 +152,9 @@ def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Expor
         if exact:
             ElementTree.SubElement(parent, f"{{{ns}}}data", {"key": "exact"}).text = json.dumps(exact, sort_keys=True)
 
-    def edge(edge_id: str, source: str, target: str, kind: str, predicate: str, fact_ids: tuple[int, ...]) -> None:
+    def edge(edge_id: str, source: str, target: str, link: str, predicate: str, fact_ids: tuple[int, ...]) -> None:
         element = ElementTree.SubElement(graph, f"{{{ns}}}edge", {"id": edge_id, "source": source, "target": target})
-        fields(element, (("kind", kind), ("predicate", predicate), ("fact_ids", " ".join(map(str, fact_ids)))))
+        fields(element, (("link", link), ("predicate", predicate), ("fact_ids", " ".join(map(str, fact_ids)))))
 
     fields(graph, (("digest", projection.digest), ("about", _about_text(about))))
     for entity in projection.entities:
@@ -168,8 +169,10 @@ def _graphml(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     for attribute in projection.attributes:
         edge(f"{attribute.attribute_id}:has", attribute.entity_id, attribute.attribute_id, "value", attribute.predicate,
              attribute.fact_ids)
-    return Export(ElementTree.tostring(root, encoding="utf-8", xml_declaration=True), "application/graphml+xml",
-                  "graph.graphml")
+    # A parser folds a raw CR (and CR LF) into LF; a character reference
+    # survives. The serializer writes CR only inside text, never in markup.
+    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
+    return Export(body, "application/graphml+xml", "graph.graphml")
 
 
 def _cypher_text(value: object) -> str:
@@ -243,29 +246,43 @@ _PREDICATES = "https://projectscone.dev/predicate/"
 
 
 def _json_ld(projection: EntityProjection, about: Mapping[str, object]) -> Export:
-    """Each predicate is a ``p:`` term, percent-encoded, so no stored
-    predicate can take the place of a node's own ``@id``, ``label`` or ``key``."""
-    def urn(entity_id: str) -> str:
-        return f"urn:scone:{projection.space}:{entity_id}"
+    """Linked data in two layers. Each entity node states its relations and
+    values plainly, as any RDF tool reads them. Each relation and value is
+    also a ``Claim`` node naming its subject, predicate, object or value,
+    and the facts behind it, so provenance belongs to the statement, not to
+    the thing it points at. Predicates are percent-encoded ``p:`` terms, so
+    none can take the place of a node's own ``@id``, ``label`` or ``key``."""
+    def urn(item_id: str) -> str:
+        return f"urn:scone:{projection.space}:{item_id}"
 
     def term(predicate: str) -> str:
-        return "p:" + quote(predicate, safe="-_.~")
+        return "p:" + quote(predicate.encode("utf-8", "surrogatepass"), safe="-_.~")
 
     nodes: dict[str, dict[str, object]] = {
         entity.entity_id: {"@id": urn(entity.entity_id), "@type": (entity.kind or "entity").capitalize(),
                            "label": entity.label, "key": entity.key}
         for entity in projection.entities}
-    claims: dict[str, dict[str, list[dict[str, object]]]] = defaultdict(lambda: defaultdict(list))
+    stated: dict[str, dict[str, list[object]]] = defaultdict(lambda: defaultdict(list))
+    claims: list[dict[str, object]] = []
     for relation in projection.relations:
-        claims[relation.subject_id][term(relation.predicate)].append(
-            {"@id": urn(relation.object_id), "facts": list(relation.fact_ids)})
+        stated[relation.subject_id][term(relation.predicate)].append({"@id": urn(relation.object_id)})
+        claims.append({"@id": urn(relation.relation_id), "@type": "Claim",
+                       "subject": {"@id": urn(relation.subject_id)}, "predicate": {"@id": term(relation.predicate)},
+                       "object": {"@id": urn(relation.object_id)}, "facts": list(relation.fact_ids)})
     for attribute in projection.attributes:
-        claims[attribute.entity_id][term(attribute.predicate)].append(
-            {"@value": attribute.value, "facts": list(attribute.fact_ids)})
-    graph = [{**nodes[entity_id], **claims[entity_id]} for entity_id in sorted(nodes)]
+        stated[attribute.entity_id][term(attribute.predicate)].append(attribute.value)
+        claims.append({"@id": urn(attribute.attribute_id), "@type": "Claim",
+                       "subject": {"@id": urn(attribute.entity_id)}, "predicate": {"@id": term(attribute.predicate)},
+                       "value": attribute.value, "literal_kind": attribute.literal_kind or "",
+                       "facts": list(attribute.fact_ids)})
+    record = {"@id": urn(f"export:{projection.digest}"), "@type": "Export", "digest": projection.digest,
+              "about": dict(about)}
+    graph = [{**nodes[entity_id], **stated[entity_id]} for entity_id in sorted(nodes)]
+    # Only "@context" and "@graph" at the top: anything beside them would make
+    # the document a node and put every statement in a named graph.
     data = {"@context": {"@vocab": "https://projectscone.dev/vocab#", "p": _PREDICATES,
                          "label": "http://www.w3.org/2000/01/rdf-schema#label"},
-            "digest": projection.digest, "about": dict(about), "@graph": graph}
+            "@graph": [record, *graph, *sorted(claims, key=lambda claim: str(claim["@id"]))]}
     return Export(_encoded(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)), "application/ld+json",
                   "graph.jsonld")
 

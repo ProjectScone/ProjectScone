@@ -346,9 +346,11 @@ says so in the file and in the response.
 How each format places values and escapes its own syntax:
 
 - **GraphML** nodes have a `type`, `entity` or `value`. A value hangs off
-  its entity by an edge of `kind` `value` that carries its predicate and
-  facts; relations are edges of `kind` `relation`. The file is written by
-  an XML serializer. XML 1.0 cannot hold some characters the ledger
+  its entity by an edge whose `link` is `value`, carrying its predicate
+  and facts; relations are edges whose `link` is `relation`. Every key id
+  is distinct. The file is written by an XML serializer, with each
+  carriage return written as `&#13;`, since a parser folds a raw one
+  into a line feed. XML 1.0 cannot hold some characters the ledger
   accepts (U+0001, U+FFFE, a lone surrogate). Text shows a control as its
   Control Pictures symbol (U+0001 as ␁) and anything else as U+FFFD, and
   that element gains an `exact` field holding its original values as JSON.
@@ -361,9 +363,17 @@ How each format places values and escapes its own syntax:
   formula (`=`, `+`, `-`, `@`). A NUL or a lone surrogate, which CSV
   readers cannot take, is shown as ␀ or U+FFFD; `about.json` and the JSON
   formats keep it exactly.
-- **JSON-LD** puts every predicate under the `p:` prefix,
-  percent-encoded, so a stored predicate named `label`, `key` or `@id`
-  cannot overwrite the node's own fields.
+- **JSON-LD** has two layers. Each entity node states its relations and
+  values plainly, for any RDF tool. Each relation and value is also a
+  `Claim` node with its `subject`, `predicate`, `object` or `value`, and
+  `facts`. So two people who know Bob are two claims, each with its own
+  facts, and the facts are never gathered onto Bob. Every predicate is a
+  percent-encoded `p:` term, lone surrogates included, so a stored
+  predicate named `label`, `key` or `@id` cannot overwrite the node's own
+  fields. The digest and `about` sit on an `Export` node, and the
+  document holds only `@context` and `@graph`, so every statement lands
+  in the default graph. It expands under a JSON-LD 1.1 processor (checked
+  with PyLD 3.3).
 - **Obsidian** notes escape names as the Markdown report does. Note file
   names drop characters that file systems or wiki links misread, and a
   Windows device name (`con`, `lpt1`, even `con.txt`) gains a leading

@@ -61,7 +61,7 @@ def test_graphml_parses_and_keeps_hostile_names_as_text(projection):
     names = [data.text for data in root.iterfind(".//g:node/g:data[@key='label']", ns)]
     assert HOSTILE in names
     assert not [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "script"]
-    kinds = [edge.find("g:data[@key='kind']", ns).text for edge in root.iterfind(".//g:edge", ns)]
+    kinds = [edge.find("g:data[@key='link']", ns).text for edge in root.iterfind(".//g:edge", ns)]
     assert kinds.count("relation") == len(projection.relations) and kinds.count("value") == len(projection.attributes)
 
 
@@ -165,7 +165,7 @@ def test_json_ld_predicates_never_collide_with_its_own_fields():
     rows = [fact(1, "alice", "label", "Example"), fact(2, "alice", "@id", "urn:evil"), fact(3, "alice", "key", "k"),
             fact(4, "alice", "works_at", "Acme")]
     data = json.loads(export_graph(project_entities("alpha", rows, revision=1), "jsonld").body)
-    alice = next(item for item in data["@graph"] if item["key"] == "alice")
+    alice = next(item for item in data["@graph"] if item.get("key") == "alice")
     assert alice["label"] == "alice" and alice["@id"].startswith("urn:scone:alpha:ent:")
     assert {"p:label", "p:%40id", "p:key", "p:works_at"} <= set(alice)
     assert data["@context"]["p"].endswith("/")
@@ -245,3 +245,72 @@ def test_every_format_writes_whatever_the_ledger_holds(format):
         assert "nul\u2400here" in cells and "half\ufffdpair" in cells
     else:
         text_of(body)
+
+
+
+def walk(item):
+    yield item
+    children = item.values() if isinstance(item, dict) else item if isinstance(item, list) else ()
+    for child in children:
+        yield from walk(child)
+
+
+_VALUE_KEYWORDS = {"@value", "@type", "@language", "@index", "@direction"}
+
+
+def test_json_ld_value_objects_hold_only_json_ld_keywords(projection):
+    """A value object may carry nothing but JSON-LD keywords; provenance
+    beside "@value" makes the document invalid to a JSON-LD processor."""
+    data = json.loads(export_graph(projection, "jsonld").body)
+    assert all(set(item) <= _VALUE_KEYWORDS for item in walk(data) if isinstance(item, dict) and "@value" in item)
+
+
+def test_json_ld_claims_keep_each_relations_own_facts():
+    """Two people who know Bob are two claims, each with its own facts;
+    the facts are never gathered onto Bob."""
+    rows = [fact(1, "alice", "knows", "Bob"), fact(2, "charlie", "knows", "Bob"), fact(3, "alice", "joined_on", "May 2021")]
+    projection = project_entities("alpha", rows, revision=1)
+    data = json.loads(export_graph(projection, "jsonld").body)
+    ids = {entity.key: f"urn:scone:alpha:{entity.entity_id}" for entity in projection.entities}
+    claims = [item for item in data["@graph"] if item.get("@type") == "Claim"]
+    knows = {(claim["subject"]["@id"], claim["object"]["@id"], tuple(claim["facts"])) for claim in claims
+             if claim["predicate"]["@id"] == "p:knows"}
+    assert knows == {(ids["alice"], ids["bob"], (1,)), (ids["charlie"], ids["bob"], (2,))}
+    value = next(claim for claim in claims if claim["predicate"]["@id"] == "p:joined_on")
+    assert value["value"] == "May 2021" and value["facts"] == [3] and value["subject"]["@id"] == ids["alice"]
+    bob = next(item for item in data["@graph"] if item.get("@id") == ids["bob"])
+    assert "facts" not in bob
+
+
+def test_json_ld_takes_any_predicate_the_ledger_holds():
+    rows = [fact(1, "bob", "bad\ud800predicate", "a value")]
+    data = json.loads(export_graph(project_entities("alpha", rows, revision=1), "jsonld").body)
+    assert any(key.startswith("p:bad%ED%A0%80predicate") for item in data["@graph"] for key in item)
+
+
+def test_graphml_key_ids_are_unique(projection):
+    root = ElementTree.fromstring(export_graph(projection, "graphml").body)
+    ids = [key.get("id") for key in root.iter("{http://graphml.graphdrawing.org/xmlns}key")]
+    assert len(ids) == len(set(ids))
+
+
+@pytest.mark.parametrize("value", ["first\rsecond", "a\r\nb", "tab\there"])
+def test_graphml_keeps_carriage_returns_a_parser_would_fold(value):
+    """An XML parser folds a raw CR, and CR LF, into LF; written as a
+    character reference, the CR survives."""
+    projection = project_entities("alpha", [fact(1, "alice", "description", value)], revision=1)
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    root = ElementTree.fromstring(export_graph(projection, "graphml").body)
+    shown = [node.find("g:data[@key='label']", ns).text for node in root.iterfind(".//g:node", ns)
+             if node.find("g:data[@key='type']", ns).text == "value"]
+    assert shown == [value]
+
+
+
+def test_json_ld_puts_every_statement_in_the_default_graph(projection):
+    """Properties beside "@graph" would turn the document into a node whose
+    statements sit in a named graph; the export's own record is a node."""
+    data = json.loads(export_graph(projection, "jsonld").body)
+    assert set(data) == {"@context", "@graph"}
+    record = next(item for item in data["@graph"] if item.get("@type") == "Export")
+    assert record["digest"] == projection.digest and "about" in record
