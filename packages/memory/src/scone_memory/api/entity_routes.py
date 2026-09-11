@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from ..core.errors import InvalidInput, NotFound
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
+from ..entities.context import ContextLimits, graph_context
+from ..entities.grounding import checked_facts
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
@@ -230,35 +232,6 @@ def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
             for entity in projection.entities}
 
 
-async def _checked_facts(engine: MemoryEngine, space: str, fact_ids: list[int]) -> list[dict[str, object]]:
-    """Re-read each fact and check its quote against the retained source now."""
-    episodes: dict[int, object] = {}
-    checked = []
-    for fact_id in fact_ids:
-        fact = await engine.documents.get_fact(space, fact_id)
-        if fact is None or fact.space != space:
-            continue
-        if fact.source_episode_id is None:
-            grounding = "stated"
-        elif fact.quote is None:
-            grounding = "source_unquoted"
-        else:
-            if fact.source_episode_id not in episodes:
-                episodes[fact.source_episode_id] = await engine.documents.get_episode(space, fact.source_episode_id)
-            episode = episodes[fact.source_episode_id]
-            content = getattr(episode, "content", None)
-            own = (getattr(episode, "space", None) == space
-                   and getattr(episode, "episode_id", None) == fact.source_episode_id)
-            grounding = ("quote_source_missing" if episode is None or content is None
-                         else "quote_source_mismatch" if not own
-                         else "quote_verified" if fact.quote in content else "quote_not_found")
-        checked.append({"fact_id": fact.fact_id, "subject": fact.subject, "predicate": fact.predicate,
-                        "object": fact.object, "status": fact.status, "excluded": fact.excluded,
-                        "origin": fact.origin, "valid_from": fact.valid_from, "valid_until": fact.valid_until,
-                        "source_episode_id": fact.source_episode_id, "quote": fact.quote, "grounding": grounding})
-    return checked
-
-
 def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object]) -> None:
     @app.exception_handler(ProjectionBuilding)
     async def _building(_: Request, error: ProjectionBuilding) -> JSONResponse:
@@ -315,6 +288,29 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         return Response(exported.body, media_type=exported.media_type, headers={
             "Content-Disposition": f'attachment; filename="{exported.filename}"',
             "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false"})
+
+    @app.get("/v1/graph/context")
+    async def get_context(
+        names: list[str] = Query(default=[]), q: Optional[str] = Query(default=None, min_length=1, max_length=2000),
+        max_hops: int = Query(default=2, ge=1, le=4), max_bytes: int = Query(default=8_000, ge=512, le=64_000),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """What the graph records around some names, or the entities a question
+        names, as one line per item for a model: coverage first, then the
+        entities, paths between them, relations by hop and values, each citing
+        facts re-read now. Cut between lines to ``max_bytes``."""
+        if not names and q is None:
+            raise InvalidInput("give names or q")
+        if len(names) > 24 or any(not 1 <= len(name) <= 200 for name in names):
+            raise InvalidInput("names: at most 24, each 1..200 characters")
+        when = _moment(engine, as_of)
+        packet = await graph_context(engine, space, names=names, question=q, status=status, as_of=when,
+                                     limits=ContextLimits(max_bytes=max_bytes, max_hops=max_hops))
+        return {"schema_version": 1, "space": space, "filters": {"status": status, "as_of": when},
+                "status": packet.status, "text": packet.text, "seeds": list(packet.seeds),
+                "candidates": list(packet.candidates),
+                "coverage": {"reasons": packet.coverage.get("reasons", []), "read": packet.coverage.get("read", {}),
+                             "hubs_not_crossed": packet.coverage.get("hubs_not_crossed", [])}}
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(
@@ -444,7 +440,7 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
             "attributes": [{"predicate": attribute.predicate, "value": attribute.value,
                             "literal_kind": attribute.literal_kind, "fact_ids": list(attribute.fact_ids)}
                            for attribute in found.attributes],
-            "facts": await _checked_facts(engine, space, cited), "complete": complete,
+            "facts": await checked_facts(engine.documents, space, cited), "complete": complete,
             "coverage": {**read, "relations_total": found.relations_total,
                          "relations_shown": len(found.outgoing) + len(found.incoming),
                          "truncated": bool(reasons), "reasons": reasons}}

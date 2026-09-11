@@ -54,7 +54,8 @@
       "graph.knowledge": true,
       "graph.report": true,
       "graph.path": true,
-      "graph.export": true
+      "graph.export": true,
+      "graph.context": true
     }
   }
 }

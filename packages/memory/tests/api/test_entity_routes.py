@@ -488,3 +488,15 @@ def test_a_path_names_its_projection_filters_and_the_bounds_it_applied(quoted):
     assert found["filters"]["status"] == "current" and found["filters"]["as_of"]
     assert found["policy"] == {"max_hops": 3, "limit": 2, "hub_degree": 50}
     assert view["projection"]["version"] == found["projection"]["version"]
+
+
+def test_the_graph_context_packet_is_served_for_names_or_a_question(quoted):
+    client, _, _ = quoted
+    named = client.get("/v1/graph/context", params=[("names", "alice chen"), ("names", "lisbon")], headers=auth()).json()
+    assert named["schema_version"] == 1 and named["space"] == "alpha" and named["status"] == "prepared"
+    assert any(line.startswith("path: ") for line in named["text"].splitlines()) and len(named["seeds"]) == 2
+    asked = client.get("/v1/graph/context", params={"q": "who works in lisbon?"}, headers=auth()).json()
+    assert asked["status"] == "prepared" and asked["coverage"]["reasons"] == []
+    assert client.get("/v1/graph/context", headers=auth()).status_code == 422
+    assert client.get("/v1/graph/context", params={"q": "x", "max_bytes": 511}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context"] is True

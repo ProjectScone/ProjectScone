@@ -38,6 +38,7 @@ from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
 from ..core.errors import SconeError
 from ..core.models import Added, Episode, Fact, RecallResult
+from ..entities.context import ContextLimits, graph_connections, graph_context
 
 MAX_CONTENT = 100_000
 MAX_QUERY = 1_000
@@ -60,7 +61,10 @@ INSTRUCTIONS = (
     "Periodically (session start or idle), call memory_pending and distill "
     "the returned episodes into subject/predicate/object facts with your own "
     "reasoning, submitting via memory_store_facts; you are the extraction "
-    "model and no API key is needed."
+    "model and no API key is needed. To see how things connect, call "
+    "memory_entity for one entity (its relations both ways), "
+    "memory_connections for the paths between two, or memory_graph_context "
+    "with names or a question; every line cites its facts."
 )
 
 
@@ -222,8 +226,9 @@ async def fact_ids_by_status(engine: MemoryEngine, space: str) -> dict[int, str]
 
 def create_server(engine: MemoryEngine, space: str = "default",
                   propose_below: Optional[float] = None) -> MCPServer:
-    """The six tools of mcp.rs, closing over one engine and a default
-    space that any call may override with its ``space`` argument.
+    """The six tools of mcp.rs and three read-only graph tools, closing over
+    one engine and a default space that any call may override with its
+    ``space`` argument.
 
     ``propose_below`` is the Rust server's ``--propose-below``: a fact an
     agent submits under that confidence is parked as a proposal for a
@@ -327,6 +332,65 @@ def create_server(engine: MemoryEngine, space: str = "default",
         if not found:
             return ok_text(f"no facts about {entity}")
         return ok_text("\n".join(fact_about_line(f) for f in found))
+
+    @tool(server, "memory_graph_context")
+    async def memory_graph_context(
+        names: Annotated[
+            Optional[list[str]], Field(description="Entities to centre on, by name or id (at most 24)")
+        ] = None,
+        question: Annotated[
+            Optional[str], Field(description="A question; the entities its words name become the centre (1..=1000 chars)")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+        max_bytes: Annotated[
+            Optional[int], Field(description="Byte budget for the packet (512..=64000); defaults to 8000")
+        ] = None,
+    ) -> CallToolResult:
+        """What the entity graph records around some names or the entities a
+        question names: one line per item, coverage first, then the entities,
+        paths between them, relations by hop and values. Each line cites its
+        facts, re-read now; quotes appear only when they still verify."""
+        if not names and not question:
+            return tool_error("give names or a question")
+        if len(names or ()) > 24 or any(not 1 <= len(name) <= MAX_ENTITY for name in names or ()):
+            return tool_error(f"names: at most 24, each 1..={MAX_ENTITY} chars")
+        if question is not None and not 1 <= len(question) <= MAX_QUERY:
+            return tool_error(f"question must be 1..={MAX_QUERY} chars")
+        budget = max_bytes if max_bytes is not None else 8_000
+        if not 512 <= budget <= 64_000:
+            return tool_error("max_bytes must be 512..=64000")
+        packet = await graph_context(engine, space or default_space, names=names or (), question=question,
+                                     limits=ContextLimits(max_bytes=budget))
+        return ok_text(packet.text)
+
+    @tool(server, "memory_entity")
+    async def memory_entity(
+        name: Annotated[str, Field(description="The entity, by name or id")],
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """One entity: its relations in both directions and its values, each
+        citing facts re-read now. An ambiguous name lists its candidates."""
+        if not name or len(name) > MAX_ENTITY:
+            return tool_error(f"name must be 1..={MAX_ENTITY} chars, got {len(name)}")
+        packet = await graph_context(engine, space or default_space, names=[name], limits=ContextLimits(max_hops=1))
+        return ok_text(packet.text)
+
+    @tool(server, "memory_connections")
+    async def memory_connections(
+        source: Annotated[str, Field(description="One entity, by name or id")],
+        target: Annotated[str, Field(description="The other entity, by name or id")],
+        max_hops: Annotated[Optional[int], Field(description="Longest path to look for (1..=4); defaults to 3")] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """How two entities connect: the shortest paths between them, each hop
+        with its direction and the facts behind it, re-read now."""
+        if not source or not target or max(len(source), len(target)) > MAX_ENTITY:
+            return tool_error(f"source and target must be 1..={MAX_ENTITY} chars")
+        hops = max_hops if max_hops is not None else 3
+        if not 1 <= hops <= 4:
+            return tool_error("max_hops must be 1..=4")
+        found = await graph_connections(engine, space or default_space, source, target, max_hops=hops)
+        return ok_text(found.text)
 
     @tool(server, "memory_pending")
     async def memory_pending(

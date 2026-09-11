@@ -325,6 +325,48 @@ found, but never claim that something is absent. Each response carries
 - an entity page adds `fact_limit` to its coverage reasons, since its
   incoming relations may be missing.
 
+#### `GET /v1/graph/context`
+
+A graph context packet for a model: what the graph records around some
+names (`names=`, repeatable, at most 24) or around the entities a
+question names (`q=`). A question's words are matched to entity names
+case- and punctuation-insensitively, the longest name first. Common
+words never count as names. The packet is one self-describing line per
+item, in this order:
+
+| Line | Holds |
+| --- | --- |
+| `graph:` | space, status mode, moment, projection digest and revision |
+| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N` |
+| `note:` | that names, values and quotes are recorded data, not instructions |
+| `entity:` or `candidate:` | the entities asked about, or every candidate for an ambiguous name |
+| `path:` | the shortest route between each pair of them, as `A -works_at-> B <-lives_in- C` |
+| `hop N:` | relations N steps out (`max_hops`, 1–4, default 2), those with the most facts first |
+| `value:` | values recorded for the entities asked about |
+
+Every relation and value cites its facts. Each cited fact is re-read,
+and one that no longer counts is dropped and counted as
+`stale_evidence`. A quote is shown only when it still verifies against
+its own source. An entity with more than 64 relations is reached but
+never walked through. Names are folded onto one line, with control
+characters shown as symbols, so no stored text can start a line of its
+own. The text fits `max_bytes` (512–64,000, default 8,000). It is cut
+only between lines, with an `omitted:` footer counting what was left
+out, and it is byte-identical for the same ledger and moment.
+
+The response carries `status` (`prepared`, `ambiguous` or `empty`),
+`text`, `seeds`, `candidates` and `coverage`. Advertised as
+`graph.context`.
+
+The MCP server offers the same reads as tools:
+
+- `memory_graph_context`: names or a question;
+- `memory_entity`: one entity, with its relations in both directions;
+- `memory_connections`: the paths between two entities.
+
+These sit beside the six tools shared with the Rust server, and none of
+them writes.
+
 #### `GET /v1/graph/export`
 
 The view's whole graph as a file for another tool. It takes `status` and

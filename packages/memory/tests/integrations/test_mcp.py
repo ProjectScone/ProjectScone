@@ -1,6 +1,6 @@
 """The MCP server: six tools with the names, arguments and bounds of
-crates/scone/src/mcp.rs, results as plain text, refusals as ``is_error``
-results rather than exceptions."""
+crates/scone/src/mcp.rs, and three graph tools beside them, results as
+plain text, refusals as ``is_error`` results rather than exceptions."""
 
 from __future__ import annotations
 
@@ -27,6 +27,14 @@ RUST_ARGUMENTS = {
     "memory_store_facts": {"episode_id", "facts", "space"},
     "memory_forget": {"fact_id", "reason", "space"},
 }
+#: The entity graph, read only: a packet around names or a question, one
+#: entity with its relations both ways, and the paths between two.
+GRAPH_ARGUMENTS = {
+    "memory_graph_context": {"names", "question", "space", "max_bytes"},
+    "memory_entity": {"name", "space"},
+    "memory_connections": {"source", "target", "max_hops", "space"},
+}
+TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
 
 @pytest.fixture
@@ -62,10 +70,10 @@ async def store_and_distill(server, content: str, subject: str, predicate: str, 
 # -- the contract with mcp.rs -------------------------------------------------
 
 
-async def test_exposes_the_six_rust_tools_with_their_argument_names(server):
+async def test_exposes_the_six_rust_tools_and_the_graph_tools_with_their_argument_names(server):
     tools = {t.name: t for t in await server.list_tools()}
-    assert set(tools) == set(RUST_ARGUMENTS)
-    for name, arguments in RUST_ARGUMENTS.items():
+    assert set(tools) == set(TOOL_ARGUMENTS)
+    for name, arguments in TOOL_ARGUMENTS.items():
         assert set(tools[name].input_schema["properties"]) == arguments, name
         assert tools[name].description, name
 
@@ -283,7 +291,7 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
     )
     async with client_module.Client(params) as client:
         listed = await client.list_tools()
-        assert {t.name for t in listed.tools} == set(RUST_ARGUMENTS)
+        assert {t.name for t in listed.tools} == set(TOOL_ARGUMENTS)
 
         stored = await client.call_tool("memory_store", {"content": "Moved to Lisbon in March"})
         assert not stored.is_error
@@ -435,3 +443,19 @@ def test_invalid_proposal_threshold_raises_domain_error(threshold):
     engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder())
     with pytest.raises(InvalidInput, match="confidence"):
         create_server(engine, propose_below=threshold)
+
+
+
+async def test_the_graph_tools_read_an_entity_both_ways_and_the_paths_between_two(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Acme Robotics is based in Lisbon.", "acme robotics", "based_in", "Lisbon")
+    result = await server.call_tool("memory_entity", {"name": "acme robotics"})
+    error, entity = result.is_error, "\n".join(block.text for block in result.content)
+    assert not error and entity.splitlines()[1].startswith("coverage: ")
+    assert any(line.startswith("hop 1: ") and "works_at Acme Robotics" in line for line in entity.splitlines())
+    error, paths = await call(server, "memory_connections", source="alice chen", target="lisbon")
+    assert not error and any(line.startswith("path: ") and "-based_in->" in line for line in paths.splitlines())
+    error, packet = await call(server, "memory_graph_context", question="what is in lisbon?")
+    assert not error and any(line.startswith("entity: Lisbon") for line in packet.splitlines())
+    error, text = await call(server, "memory_graph_context")
+    assert error and "names or a question" in text
