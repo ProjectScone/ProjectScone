@@ -78,6 +78,12 @@ Annotations outside a paragraph use `body/comment:N` locators (with a slide
 prefix in presentations). Nested annotations carry their own metadata. These
 segments consume the same text and segment budgets as ordinary content.
 
+ODP speaker notes use `slide:N/notes/...` locators, with `content_role` set to
+`speaker_notes` and `parent_locator` set to their slide. Visible slide paragraphs
+are numbered separately. Comments within speaker notes retain their own comment
+role and point to the corresponding note paragraph. Notes remain searchable and
+consume the same extraction budgets as slide content.
+
 DOCX extraction likewise omits deleted content and old move locations before
 numbering paragraphs and tables. Current insertions and move destinations remain.
 Directly hidden runs (`w:vanish`) are omitted; inherited style visibility is not

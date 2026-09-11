@@ -28,6 +28,7 @@ _ODF_REVISION_METADATA = frozenset({
 _ODF_TEXT = '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}'
 _ODF_OFFICE = '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}'
 _ODF_SIDE_CONTENT = frozenset({_ODF_OFFICE + 'annotation', _ODF_TEXT + 'note'})
+_ODF_SPEAKER_NOTES = frozenset({'{urn:oasis:names:tc:opendocument:xmlns:presentation:1.0}notes'})
 _DC = '{http://purl.org/dc/elements/1.1/}'
 _WORD_NAMESPACES = (
     'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -437,15 +438,25 @@ def _odf(bundle: SafeArchive, output: _Output, extension: str) -> None:
         return
     if extension == 'odp':
         for number, page in enumerate(_elements(content, 'page'), 1):
-            _odf_content(page, output, f'slide:{number}/', {'slide_name': _attr(page, 'name')})
+            locator = f'slide:{number}'
+            metadata = {'slide_name': _attr(page, 'name')}
+            _odf_content(page, output, locator + '/', metadata, skip_tags=_ODF_SPEAKER_NOTES)
+            for note_number, notes in enumerate(_blocks(page, set(), include_tags=_ODF_SPEAKER_NOTES), 1):
+                note_suffix = 'notes' if note_number == 1 else f'notes:{note_number}'
+                _odf_content(notes, output, f'{locator}/{note_suffix}/', {
+                    **metadata, 'content_role': 'speaker_notes', 'parent_locator': locator,
+                })
         return
     _odf_content(content, output, '', {})
 
 
-def _odf_content(root: Element, output: _Output, prefix: str, metadata: dict[str, str]) -> None:
+def _odf_content(
+    root: Element, output: _Output, prefix: str, metadata: dict[str, str], *,
+    skip_tags: frozenset[str] = frozenset(),
+) -> None:
     paragraphs = tables = 0
     counts: dict[str, int] = {}
-    for block in _blocks(root, {'p', 'h', 'table'}, include_tags=_ODF_SIDE_CONTENT):
+    for block in _blocks(root, {'p', 'h', 'table'}, include_tags=_ODF_SIDE_CONTENT, skip_tags=skip_tags):
         if block.tag in _ODF_SIDE_CONTENT:
             _odf_side_content(block, output, prefix + 'body', metadata, counts)
             continue
