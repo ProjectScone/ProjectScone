@@ -416,8 +416,9 @@ class InMemoryVectorIndex:
         self._points: dict[int, VectorPoint] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
-        #: Writes that have taken the record and not yet finished.
-        self._pending = 0
+        #: Writes that have taken the record and not yet returned, by writer.
+        #: While another embedder's write can still land, nothing is vouched for.
+        self._pending: dict[str, int] = {}
 
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
@@ -433,42 +434,54 @@ class InMemoryVectorIndex:
                           require_empty: bool = False) -> bool:
         if self._writer != expected or (require_empty and self._points):
             return False
+        # A record that vouches for one writer cannot be set while another
+        # writer's vectors may still land.
+        if record[1] in ("written", "declared") and self._foreign_pending(record[0]):
+            return False
         self._writer = record
         return True
 
+    def _foreign_pending(self, writer: str) -> bool:
+        return any(name != writer for name in self._pending)
+
+    def _finished(self, writer: str) -> None:
+        self._pending[writer] -= 1
+        if not self._pending[writer]:
+            del self._pending[writer]
+
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
         # Write through upsert, so a subclass that changes writing still
-        # decides it. The record changes before anything can yield: a writer
-        # that runs while this one awaits sees it, and a stale value can never
-        # be written back over theirs.
+        # decides it. The record changes before anything can yield, the write
+        # counts as pending until it returns, and the rule is applied again
+        # once it has landed.
         before = self._writer
         self._writer = settled = after_write(before, writer, bool(self._points))
-        self._pending += 1
+        self._pending[writer] = self._pending.get(writer, 0) + 1
         try:
             await self.upsert(points)
         except BaseException:
-            self._pending -= 1
+            self._finished(writer)
             # Nothing landed in an empty index: leave no claim behind, but only
             # when no other write still counts on it and nobody changed it.
             if before is None and not self._points and not self._pending and self._writer == settled:
                 self._writer = None
             raise
-        self._pending -= 1
-        # The vectors landed only now. If another writer settled the record
-        # while this write waited (a rebuild that finished, a foreign write),
-        # apply the rule again so the record cannot vouch for what it did not see.
+        self._finished(writer)
         self._writer = after_write(self._writer, writer, True)
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
                         writer: str) -> list[tuple[int, float]]:
+        # While another embedder's write is pending the record never vouches
+        # for anyone else: writes change it before they yield, and swap_writer
+        # refuses to vouch past them.
         record = self._writer
         if not vouches(record, writer, bool(self._points)):
             raise VectorsNotComparable(f"stored vectors are recorded as "
                                        f"{record[0] if record else 'unrecorded'}, not {writer}")
         found = await self.search(space, vector, limit, as_of, tags, where)
-        # A search override may yield; any write that changed the record while
-        # it ran may have put another writer's vectors into what it compared.
+        # A search override may yield; any write that changed the record
+        # while it ran may have put another writer's vectors into it.
         if self._writer != record:
             raise VectorsNotComparable("the vectors' writer changed during the search")
         return found

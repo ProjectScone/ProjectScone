@@ -617,10 +617,46 @@ async def test_a_write_that_lands_after_another_writer_settled_marks_the_index_m
     pending = asyncio.ensure_future(
         index.upsert_as([VectorPoint(1, "s", 1, "2025-01-01T00:00:00Z", [1.0, 0.0])], "model-a"))
     await asyncio.sleep(0)
-    # Another engine's rebuild runs to completion while the write waits.
+    # Another engine's rebuild runs while the write waits: it may mark the
+    # index, but it cannot vouch for itself while model-a's write can land.
     marker = ("rebuilding:model-b:n", "rebuilding")
     assert await index.swap_writer(await index.written_by(), marker)
-    assert await index.swap_writer(marker, ("model-b", "written"))
+    assert not await index.swap_writer(marker, ("model-b", "written"))
     gate.set()
+    await pending
+    assert await index.written_by() == ("mixed", "invalidated")
+
+
+async def test_nothing_is_vouched_for_while_another_embedders_write_is_landing() -> None:
+    import asyncio
+    from scone_memory.core.vector_writers import VectorsNotComparable
+    from scone_memory.memory.vector_identity import VectorWriterChanged
+
+    class Controlled(InMemoryVectorIndex):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+            self.landed, self.finish = asyncio.Event(), asyncio.Event()
+
+        async def upsert(self, points):
+            self.entered.set()
+            await self.release.wait()
+            await super().upsert(points)
+            self.landed.set()
+            await self.finish.wait()
+
+    index, documents = Controlled(), InMemoryDocumentStore()
+    first = await MemoryEngine(documents, index, Model("model-a")).open()
+    second = await MemoryEngine(documents, index, Rotated("model-b")).open()
+    pending = asyncio.create_task(first.remember("s", "Retained fact"))
+    await index.entered.wait()
+    with pytest.raises(VectorWriterChanged):
+        await second.reembed_vectors()
+    index.release.set()
+    await index.landed.wait()
+    [vector] = await second.embedder.embed(["Retained fact"])
+    with pytest.raises(VectorsNotComparable):
+        await second.vectors.search("s", vector, 10)
+    index.finish.set()
     await pending
     assert await index.written_by() == ("mixed", "invalidated")

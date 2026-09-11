@@ -16,9 +16,9 @@ from pydantic import BaseModel, Field, JsonValue
 from ..core.models import Chunk, Episode, Fact, FactLink, RecallResult
 from ..core.ports import TextFilter
 from ..core.validation import entity_key
-from ..entities.classify import ClassificationContext, classify_object, reference_flag
+from ..entities.classify import classify_object, reference_flag
 from ..entities.ids import ENTITY_ID_SCHEME, key_id
-from ..entities.project import quoted_form
+from ..entities.project import classification_context, quoted_form
 from ..memory.engine import check_space
 
 MAX_CHUNKS = 24
@@ -279,7 +279,7 @@ def _add_concepts(graph: QueryEvidenceGraph, space: str) -> None:
               if claim.kind == "claim" and claim.data.get("provenance_status") == "retained"
               and claim.data.get("record_complete") is True
               and all(isinstance(claim.data.get(key), str) for key in ("subject", "predicate", "object"))]
-    context = ClassificationContext(anchors=frozenset(entity_key(str(claim.data["subject"])) for claim in claims))
+    context = classification_context((str(claim.data["subject"]), str(claim.data["object"])) for claim in claims)
     concepts: dict[str, EvidenceNode] = {}
     spellings: dict[str, set[str]] = {}
     concept_truncated = False

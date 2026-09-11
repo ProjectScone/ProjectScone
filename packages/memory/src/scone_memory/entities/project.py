@@ -161,6 +161,20 @@ def _support(facts: Iterable[Fact]) -> Support:
     return Support(**{name: counts[name] for name in Support.__slots__})
 
 
+def classification_context(claims: Iterable[tuple[str, str]]) -> ClassificationContext:
+    """What the classifier needs from a set of (subject, object) claims:
+    every subject's key anchors, and an object two or more subjects share
+    counts as shared. Every view classifies through this, so the same
+    claims come out the same everywhere."""
+    anchors: set[str] = set()
+    sharers: dict[str, set[str]] = defaultdict(set)
+    for subject, obj in claims:
+        anchors.add(entity_key(subject))
+        sharers[entity_key(obj)].add(entity_key(subject))
+    return ClassificationContext(anchors=frozenset(anchors),
+                                 shared_objects=frozenset(key for key, subjects in sharers.items() if len(subjects) > 1))
+
+
 def quoted_form(key: str, quote: str | None) -> str | None:
     """The quote's own spelling of a key: case and spacing as written."""
     if not quote:
@@ -184,12 +198,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> Ent
         if fact.space != space:
             raise ValueError(f"fact {fact.fact_id} belongs to space {fact.space!r}, not {space!r}")
     held = [fact for fact in rows if fact.status != "declined"]
-    anchors = frozenset(entity_key(fact.subject) for fact in held)
-    sharers: dict[str, set[str]] = defaultdict(set)
-    for fact in held:
-        sharers[entity_key(fact.object)].add(entity_key(fact.subject))
-    context = ClassificationContext(anchors=anchors,
-                                    shared_objects=frozenset(key for key, subjects in sharers.items() if len(subjects) > 1))
+    context = classification_context((fact.subject, fact.object) for fact in held)
 
     forms: dict[str, Counter[str]] = defaultdict(Counter)
     hints: dict[str, list[tuple[EntityKind, int]]] = defaultdict(list)

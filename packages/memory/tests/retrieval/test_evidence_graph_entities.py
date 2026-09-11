@@ -83,3 +83,18 @@ async def test_a_short_name_is_mentioned_only_in_its_own_case(engine):
     graph = await build_query_evidence_graph(engine.documents, "alpha", "ask ai", result)
     ai = concepts(graph)["AI"]
     assert not any(edge.kind == "mentions" and edge.target == ai.id for edge in graph.edges)
+
+
+async def test_the_evidence_graph_classifies_claims_as_the_knowledge_map_does(engine):
+    from scone_memory.entities.project import project_entities
+    episode = await engine.remember("alpha", "Alice enjoys graph theory. Bob enjoys graph theory.", source="notes/g.md")
+    facts = [await engine.assert_fact("alpha", subject, "enjoys", "graph theory", source_episode_id=episode.episode_id,
+                                      quote=f"{subject.title()} enjoys graph theory")
+             for subject in ("alice", "bob")]
+    result = await engine.recall("alpha", "graph theory")
+    result.facts = facts
+    graph = await build_query_evidence_graph(engine.documents, "alpha", "graph theory", result)
+    drawn = {node.data["key"] for node in graph.nodes if node.kind == "concept"}
+    projected = {entity.key for entity in project_entities("alpha", facts, revision=1).entities}
+    assert drawn == projected == {"alice", "bob", "graph theory"}
+    assert len([edge for edge in graph.edges if edge.kind == "relation"]) == 2
