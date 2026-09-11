@@ -85,7 +85,7 @@ async def _once(engine: "MemoryEngine", space: str, name: str, *, when: str,
             "far": None if far_id is None else {"id": far_id, "key": entities[far_id].key, "label": entities[far_id].label},
             "valid_from": fact["valid_from"], "valid_until": until, "status": fact["status"],
             "excluded": fact["excluded"], "origin": fact["origin"],
-            "superseded_by": fact["superseded_by"],
+            "superseded_by": fact["superseded_by"], "source_episode_id": fact["source_episode_id"],
             "grounding": fact["grounding"], "quote": fact["quote"] if fact["grounding"] == "quote_verified" else None,
             "holds_at_as_of": counts(str(fact["status"]), bool(fact["excluded"]), str(fact["valid_from"]), until,
                                      "current", moment)})

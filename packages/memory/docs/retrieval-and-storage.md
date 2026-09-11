@@ -441,7 +441,7 @@ where it belongs.
   the entity's facts (`extends`, `supports`, `contradicts`,
   `derived_from`).
 - **Items:** each is re-read, with its status, validity, exclusion,
-  origin and grounding (a quote only when it verifies).
+  origin, source episode and grounding (a quote only when it verifies).
 - **Marker:** `holds_at_as_of` marks what held at `as_of`, which
   defaults to now. Excluded facts are shown with `excluded: true` and
   never marked.

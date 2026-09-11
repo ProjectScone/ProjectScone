@@ -124,3 +124,15 @@ async def test_a_timeline_reads_again_when_the_space_moves_while_it_reads():
     store.engine, store.armed = engine, True
     view = await timeline_view(engine, "alpha", "alice chen")
     assert {item["predicate"] for item in view["items"]} == {"lives_in", "visited"} and view["consistent"] is True
+
+
+async def test_each_item_names_the_source_it_rests_on():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    note = await engine.remember("alpha", "Alice Chen moved to Lisbon in 2023.")
+    moved = await engine.assert_fact("alpha", "alice chen", "lives_in", "Lisbon", source_episode_id=note.episode_id,
+                                     quote="Alice Chen moved to Lisbon", valid_from="2023-01-01T00:00:00Z")
+    stated = await engine.assert_fact("alpha", "alice chen", "joined_on", "May 2021", valid_from="2021-05-01T00:00:00Z")
+    view = await timeline_view(engine, "alpha", "alice chen")
+    sources = {item["fact_id"]: item["source_episode_id"] for item in view["items"]}
+    assert sources == {moved.fact_id: note.episode_id, stated.fact_id: None}
