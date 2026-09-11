@@ -962,28 +962,35 @@ _HTML_CODE = """
       shapes[key].classList.toggle("dim", wanted !== "" && nodes[key].label.toLocaleLowerCase().indexOf(wanted) < 0);
     });
   });
+  // Screen points become drawing points through the drawing's own screen
+  // transform, letterboxing included; a drag keeps the transform it began
+  // with, so moving the view does not compound the move.
+  function drawn(event, inverse) {
+    var point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    return point.matrixTransform(inverse);
+  }
   var view = svg.viewBox.baseVal, start = null, moved = false;
   svg.addEventListener("wheel", function (event) {
     event.preventDefault();
-    var scale = event.deltaY > 0 ? 1.15 : 1 / 1.15, point = svg.createSVGPoint();
-    point.x = event.clientX;
-    point.y = event.clientY;
-    var at = point.matrixTransform(svg.getScreenCTM().inverse());
+    var scale = event.deltaY > 0 ? 1.15 : 1 / 1.15, at = drawn(event, svg.getScreenCTM().inverse());
     view.x = at.x - (at.x - view.x) * scale;
     view.y = at.y - (at.y - view.y) * scale;
     view.width *= scale;
     view.height *= scale;
   }, { passive: false });
   svg.addEventListener("pointerdown", function (event) {
-    start = { x: event.clientX, y: event.clientY, left: view.x, top: view.y };
+    var inverse = svg.getScreenCTM().inverse();
+    start = { x: event.clientX, y: event.clientY, inverse: inverse, at: drawn(event, inverse), left: view.x, top: view.y };
     moved = false;
   });
   window.addEventListener("pointermove", function (event) {
     if (!start) { return; }
-    var ratio = view.width / svg.clientWidth, dx = event.clientX - start.x, dy = event.clientY - start.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; }
-    view.x = start.left - dx * ratio;
-    view.y = start.top - dy * ratio;
+    if (Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 4) { moved = true; }
+    var at = drawn(event, start.inverse);
+    view.x = start.left - (at.x - start.at.x);
+    view.y = start.top - (at.y - start.at.y);
   });
   window.addEventListener("pointerup", function () { start = null; });
 })();

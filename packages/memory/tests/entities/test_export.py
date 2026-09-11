@@ -744,6 +744,9 @@ def test_html_keeps_hostile_names_as_data():
 def test_html_code_writes_names_as_text_never_as_markup(projection):
     code = _page(export_graph(projection, "html").body).data["graph-code"]
     assert "textContent" in code and "innerHTML" not in code and "eval(" not in code
+    # Drags are measured through the drawing's screen transform; a ratio of
+    # widths ignores letterboxing and moved the graph half as far (Firefox).
+    assert "clientWidth" not in code and "start.inverse" in code
 
 
 def _label_boxes(root):
