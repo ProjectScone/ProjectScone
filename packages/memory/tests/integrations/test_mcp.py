@@ -34,6 +34,7 @@ GRAPH_ARGUMENTS = {
     "memory_entity": {"name", "space"},
     "memory_connections": {"source", "target", "max_hops", "space"},
     "memory_graph_schema": {"limit", "max_bytes", "space"},
+    "memory_graph_match": {"where", "returns", "limit", "status", "as_of", "together", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -475,6 +476,20 @@ async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
     assert error and "max_bytes" in text
 
 
+async def test_the_match_tool_answers_a_structured_question_with_cited_rows(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Acme Robotics is based in Lisbon.", "acme robotics", "based_in", "Lisbon")
+    where = [{"subject": "?who", "predicate": "works_at", "object": "?org"},
+             {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}]
+    error, text = await call(server, "memory_graph_match", where=where, returns=["?who"])
+    assert not error and text.splitlines()[0].startswith("match: space default, current facts as of ")
+    assert any(line.startswith("row: ?who = alice chen (person) ent:") for line in text.splitlines())
+    error, text = await call(server, "memory_graph_match", where=where * 4)
+    assert error and "between 1 and 6 patterns" in text
+    error, text = await call(server, "memory_graph_match", where=where, status="history", as_of="soon")
+    assert error and "RFC 3339" in text
+
+
 async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(server):
     error, text = await call(server, "memory_graph_context", question="who? " * 300)
     assert not error, text
@@ -486,6 +501,7 @@ async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(serv
     ("memory_graph_schema", {"limit": True}), ("memory_graph_schema", {"limit": "5"}),
     ("memory_graph_schema", {"max_bytes": "2048"}), ("memory_connections", {"source": "a", "target": "b", "max_hops": True}),
     ("memory_graph_context", {"names": ["a"], "max_bytes": True}),
+    ("memory_graph_match", {"where": [{"subject": "?a", "predicate": "knows", "object": "?b"}], "limit": True}),
 ])
 async def test_graph_tools_take_whole_numbers_only_as_the_toolbox_and_http_do(server, tool, arguments):
     """Refused either way the SDK refuses: an error result, or the argument

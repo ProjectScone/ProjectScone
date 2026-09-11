@@ -27,6 +27,7 @@ from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits,
 from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
+from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_ROWS, MIN_BYTES, MAX_WHERE, MatchQueryError, graph_match
 from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
@@ -409,6 +410,33 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
                                      limits=ContextLimits(max_bytes=max_bytes, max_hops=max_hops), similar=similar,
                                      min_similarity=min_similarity)
         return packet.record(space, status, when)
+
+    @app.get("/v1/graph/match")
+    async def get_match(
+        where: str = Query(min_length=2, max_length=MAX_WHERE),
+        returns: Optional[list[str]] = Query(default=None),
+        limit: int = Query(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS),
+        together: bool = True, max_bytes: int = Query(default=MATCH_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """A structured question: ``where`` is a JSON array of 1 to 6 triple
+        patterns, ``{"subject", "predicate", "object"}``, where a term that
+        starts with ``?`` is a variable. Answers every way the patterns hold
+        together, as rows over the variables returned (every one by default), each
+        citing its facts re-read now; in history, only facts that held at
+        one moment are joined unless ``together`` is false. ``returns``
+        names the variables to answer with."""
+        try:
+            patterns = json.loads(where)
+        except ValueError:
+            raise InvalidInput("where must be a JSON array of patterns") from None
+        when = _moment(engine, as_of)
+        try:
+            result = await graph_match(engine, space, patterns, returns=returns, limit=limit, status=status,
+                                       as_of=when, together=together, max_bytes=max_bytes)
+        except MatchQueryError as refused:
+            raise InvalidInput(str(refused)) from None
+        return result.record(space, status=status, as_of=when, together=together, limit=limit)
 
     @app.get("/v1/graph/sources")
     async def get_sources(

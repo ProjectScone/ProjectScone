@@ -42,6 +42,9 @@ from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
 from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
+from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_PATTERNS, MAX_ROWS, MatchQueryError, graph_match
+from ..entities.view import StatusMode
+from ..core.validation import normalise_time
 
 MAX_CONTENT = 100_000
 MAX_QUERY = 1_000
@@ -68,8 +71,20 @@ INSTRUCTIONS = (
     "memory_entity for one entity (its relations both ways), "
     "memory_connections for the paths between two, or memory_graph_context "
     "with names or a question; every line cites its facts. memory_graph_schema "
-    "says what kinds of entity and which predicates the graph holds."
+    "says what kinds of entity and which predicates the graph holds, and "
+    "memory_graph_match answers a structured question given as triple patterns "
+    "joined by ?variables."
 )
+
+
+class TriplePattern(BaseModel):
+    """One pattern of a structured question; a term starting with ? is a variable."""
+
+    model_config = {"extra": "forbid"}
+
+    subject: str
+    predicate: str
+    object: str
 
 
 class SubmittedFact(BaseModel):
@@ -427,6 +442,49 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error("max_bytes must be 1024..=64000")
         return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed,
                                                        max_bytes=budget)))
+
+    @tool(server, "memory_graph_match")
+    async def memory_graph_match(
+        where: Annotated[
+            list[TriplePattern],
+            Field(description=(f"1..={MAX_PATTERNS} triple patterns joined by shared variables; a term starting "
+                               "with ? is a variable, as in {subject: '?who', predicate: 'works_at', object: '?org'}"
+                               " and {subject: '?org', predicate: 'based_in', object: 'Lisbon'}")),
+        ],
+        returns: Annotated[
+            Optional[list[str]], Field(description="The variables to answer with; defaults to every variable")
+        ] = None,
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Rows to answer (1..={MAX_ROWS}); defaults to {DEFAULT_ROWS}")
+        ] = None,
+        status: Annotated[
+            Optional[StatusMode], Field(description="current (default), history, proposed or all")
+        ] = None,
+        as_of: Annotated[Optional[str], Field(description="RFC 3339 instant to ask at; defaults to now")] = None,
+        together: Annotated[
+            Optional[StrictBool],
+            Field(description="Join only facts that held at one moment (default true); false joins across time"),
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """A structured question over the entity graph: every way the patterns
+        hold together, one row per answer, each citing its facts re-read now.
+        Constants name entities exactly (suggestions come back for near
+        misses) and in object position match values too. Read
+        memory_graph_schema first to know the predicates."""
+        try:
+            found = await graph_match(
+                engine, space or default_space, [pattern.model_dump() for pattern in where], returns=returns,
+                limit=limit if limit is not None else DEFAULT_ROWS, status=status or "current",
+                as_of=normalise_time(as_of) if as_of is not None else None,
+                together=True if together is None else together,
+                max_bytes=max_bytes if max_bytes is not None else MATCH_BYTES)
+        except MatchQueryError as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
 
     def readable(space: str) -> str:
         """A space named in a resource address, refused with the reason."""

@@ -620,6 +620,68 @@ out. Otherwise the `no path:` line says why:
 - `not connected in the facts read` after a capped or torn read;
 - `both names are the same entity`, rather than a path citing no facts.
 
+#### `GET /v1/graph/match`
+
+A structured question over the graph: triple patterns joined by shared
+variables (LlamaIndex's text-to-Cypher and Cypher templates, done safely).
+"Who works at an organisation based in Lisbon?" is two patterns:
+
+```
+GET /v1/graph/match?where=[{"subject":"?who","predicate":"works_at","object":"?org"},
+                           {"subject":"?org","predicate":"based_in","object":"Lisbon"}]
+```
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `where` | required | A JSON array of 1 to 6 patterns, each `{subject, predicate, object}`; at most 10,000 characters |
+| `returns` | every variable | The variables to answer with (repeatable) |
+| `limit` | 20 (1–100) | Most rows answered |
+| `status`, `as_of` | `current`, now | Which facts count, and when, as for the knowledge view |
+| `together` | true | Join only facts that held at one moment |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the answer text |
+
+- **Terms.** A term that starts with `?` is a variable: `?` then a letter
+  or `_`, then up to 31 letters, digits or `_`. Any other term is a
+  constant of at most 200 characters. A pattern with no variable asks
+  whether it holds, and answers one row (`row: holds`) when it does.
+- **Constants name exactly.** A subject or object constant names an entity
+  by id, key or variant (titles, possessives and punctuation aside). The
+  looser lookup tiers never match; when only they would, the answer is
+  `not_found` and they come back as `candidates`, so "alice" never
+  silently means Alice Chen. A constant that names several entities
+  answers `ambiguous` with them. An object constant also matches values
+  by the one join rule, so "512 MB" never matches "512 mb". A predicate
+  constant no fact in the view uses is `not_found` too.
+- **Variables bind one kind of thing.** An entity, a value or, in
+  predicate position, a predicate. A value bound in one pattern and used
+  as a subject in another joins nothing; a value carried into another
+  pattern meets only the same text.
+- **Time.** Each row has `during`, the stretches when all its facts held
+  at once. With `together` (the default), only rows whose facts held
+  together are answered. In history this keeps "worked at Acme until 2021"
+  from joining "Acme based in Lisbon from 2024". When that is why nothing
+  matched, the answer says how many joins across time it left out.
+- **Rows.** Each row names its variables' bindings (an entity's id, key,
+  label and kind; a value; a predicate) and cites the facts of every
+  pattern. Those facts are re-read before the row is shown (256 facts at
+  most). A row whose pattern no longer holds is dropped and counted as
+  `stale_evidence`, and one past the budget is shown and counted as
+  `unverified`. Rows are distinct over the variables returned, merging
+  their facts, and ordered by their labels.
+- **Bounds.** At most 10,000 partial bindings are searched. Past that the
+  search stops and says `bindings_cut`, and more rows than `limit` say
+  `rows_cut N`. The answer says "no match" only when nothing was cut and
+  the read was whole. Otherwise it says "no match among the bindings
+  searched", "among the facts read" or "among the facts that still hold".
+- The answer has `status` (`matched`, `none`, `ambiguous` or
+  `not_found`), `variables`, `rows`, `candidates`, `not_found`, `coverage`
+  and `text`: one line per row for a model, fitted to `max_bytes`, with
+  the note that names and values are recorded data, not instructions.
+- A malformed query is a 422 naming what is wrong, before anything is
+  read. It is a GET, so a key with the read role may ask. Advertised as
+  `graph.match`. MCP `memory_graph_match`, the ToolBox `graph_match` and
+  `scone graph match` take the same query and bounds.
+
 #### `GET /v1/graph/sources`
 
 One source followed through (`episode=`, an episode id):
@@ -808,13 +870,15 @@ store:
 | `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
 | `scone graph walk NAMES… [--direction in\|out\|both] [--hops N] [--limit N]` | the entities reached from the names, each with its hop, as JSON |
 | `scone graph schema [--limit N] [--max-bytes N]` | the kinds and predicates the graph holds, as JSON |
+| `scone graph match --pattern S P O [--pattern …] [--returns ?X] [--status S] [--as-of T] [--apart] [--limit N]` | the rows answering a structured question, one `row:` line each; quote the `?` variables in a shell |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
 prints and the instant it says it read at always agree. `--json` prints
 `path`, `context` and `entity` as the JSON that `/v1/graph/context`
 returns: the packet text with its status, seeds, candidates, coverage
-and filters.
+and filters. It prints `match` as the `/v1/graph/match` JSON, and
+`match` exits with status 1 when no row answers.
 
 A name that is ambiguous or unknown exits with status 1, after printing
 its candidates or the reason. For `timeline`, that is the body the HTTP

@@ -8,9 +8,9 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same eight contracts: `search_memory`, `add_memory`, `read_profile`,
-`trace_memory`, and the four entity-graph reads `graph_context`,
-`explain_entity`, `connect_entities` and `graph_schema`. Hosts can
+render the same nine contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, and the five entity-graph reads `graph_context`,
+`explain_entity`, `connect_entities`, `graph_schema` and `graph_match`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -37,7 +37,8 @@ automatically chosen winner. Quote retention is checked; factual accuracy is
 not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
-`memory_entity`, `memory_connections` and `memory_graph_schema`:
+`memory_entity`, `memory_connections`, `memory_graph_schema` and
+`memory_graph_match`:
 
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. `max_bytes` (512 to
@@ -55,6 +56,14 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   `/v1/graph/schema` JSON, for a model to read before it asks anything.
   `max_bytes` (1,024 to 64,000, default 16,000) bounds the listed
   predicates, and a predicate over 200 characters is shown clipped.
+- `graph_match` answers a structured question: `where` is 1 to 6
+  patterns `{subject, predicate, object}` joined by `?variables`, as in
+  `?who works_at ?org` and `?org based_in "Lisbon"`. It answers the
+  `/v1/graph/match` JSON: one row per answer, each citing its facts
+  re-read now. Constants name entities exactly, and near misses come back
+  as candidates. With `status: "history"`, only facts that held at one
+  moment are joined unless `together` is false. `returns`, `limit`
+  (1 to 100), `as_of` and `max_bytes` bound it, as the route does.
 
 Each reads the current projection of the box's space at one instant. The
 first three answer with the JSON that `/v1/graph/context` returns: the

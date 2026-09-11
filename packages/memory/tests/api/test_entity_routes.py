@@ -779,3 +779,48 @@ async def test_a_recall_event_that_holds_no_ids_is_counted_not_answered_with_a_f
         report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth())
     assert view.status_code == report.status_code == 200
     assert view.json()["coverage"]["usage"]["malformed"] == report.json()["recall_usage"]["malformed"] == 1
+
+
+def test_a_structured_question_is_answered_with_its_rows_and_facts(seeded):
+    import json
+
+    client, works = seeded
+    where = json.dumps([{"subject": "?who", "predicate": "works_at", "object": "?org"},
+                        {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}])
+    found = client.get("/v1/graph/match", params={"where": where, "returns": ["?who"]}, headers=auth())
+    assert found.status_code == 200
+    body = found.json()
+    assert body["status"] == "matched" and body["variables"] == ["?who"]
+    assert body["rows"][0]["bindings"]["?who"]["key"] == "alice chen" and works.fact_id in body["rows"][0]["fact_ids"]
+    assert body["filters"] == {"status": "current", "as_of": body["filters"]["as_of"], "together": True, "limit": 20}
+    assert "row: ?who = " in body["text"] and body["coverage"]["reasons"] == []
+    other = client.get("/v1/graph/match", params={"where": where}, headers=auth("key-b")).json()
+    assert other["status"] == "not_found", "another space's graph answers nothing about this one"
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.match"] is True
+
+
+@pytest.mark.parametrize("params", [
+    {"where": "not json"},
+    {"where": "{}"},
+    {"where": "[]"},
+    {"where": '[{"subject": "?a", "predicate": "knows"}]'},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "returns": "?c"},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "limit": 101},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "max_bytes": 100},
+    {"where": "x" * 10_001},
+])
+def test_a_malformed_question_is_refused_with_the_reason(seeded, params):
+    client, _ = seeded
+    refused = client.get("/v1/graph/match", params=params, headers=auth())
+    assert refused.status_code == 422
+
+
+def test_a_reader_key_may_ask_structured_questions():
+    import json
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    asyncio.run(engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics"))
+    where = json.dumps([{"subject": "?who", "predicate": "works_at", "object": "?org"}])
+    with TestClient(create_app(engine, {"reader": "default"}, roles={"reader": "read"})) as client:
+        asked = client.get("/v1/graph/match", params={"where": where}, headers=auth("reader"))
+    assert asked.status_code == 200 and asked.json()["status"] == "matched"

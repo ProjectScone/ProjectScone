@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
-    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, export")
+    p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, match, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -227,6 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("schema", help="the kinds of entity and the predicates the graph holds")
     g.add_argument("--limit", type=int, default=200, help="predicates to list, most used first (default 200)")
     g.add_argument("--max-bytes", type=int, default=64_000, help="byte budget for the listed predicates")
+    g = graph.add_parser("match", help="a structured question: triple patterns joined by ?variables (quote them)")
+    g.add_argument("--pattern", nargs=3, action="append", required=True, metavar=("SUBJECT", "PREDICATE", "OBJECT"),
+                   help="one pattern; repeat for more, up to 6. A term starting with ? is a variable")
+    g.add_argument("--returns", action="append", help="a variable to answer with; repeat for more (default: every one)")
+    g.add_argument("--limit", type=int, default=20, help="rows to answer (1 to 100)")
+    g.add_argument("--status", default="current", choices=["current", "history", "proposed", "all"])
+    g.add_argument("--as-of")
+    g.add_argument("--apart", action="store_true", help="join facts across time, not only those that held at one moment")
+    g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid"])
@@ -551,6 +560,23 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         else:
             print(found.text, file=out)
         return 0 if found.status == "prepared" else 1
+    if command == "match":
+        from ..entities.match import MatchQueryError, graph_match
+
+        patterns = [dict(zip(("subject", "predicate", "object"), pattern)) for pattern in args.pattern]
+        try:
+            when = as_of or engine.clock()
+            matched = await graph_match(engine, space, patterns, returns=args.returns, limit=args.limit,
+                                        status=args.status, as_of=when, together=not args.apart,
+                                        max_bytes=args.max_bytes)
+        except MatchQueryError as refused:
+            raise InvalidInput(str(refused)) from None
+        if getattr(args, "json", False):
+            print(_ledger_json(matched.record(space, status=args.status, as_of=when, together=not args.apart,
+                                              limit=args.limit)), file=out)
+        else:
+            print(matched.text, file=out)
+        return 0 if matched.status == "matched" else 1
     if command == "timeline":
         try:
             view = await timeline_view(engine, space, args.name, as_of=as_of)

@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ElementTree
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.core.errors import InvalidInput
 from scone_memory.runtime.cli import build_parser, run
 
 DAY = "2024-01-01T00:00:00Z"
@@ -248,3 +249,39 @@ async def test_report_can_say_what_recall_uses():
     code, text = await graph(memory, "report", "--markdown", "--usage")
     await memory.close()
     assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")
+
+
+async def test_match_answers_a_structured_question_and_exits_zero_on_a_row(engine):
+    code, text = await graph(engine, "match", "--pattern", "?who", "works_at", "?org",
+                             "--pattern", "?org", "based_in", "Lisbon", "--returns", "?who")
+    assert code == 0 and "row: ?who = alice chen (person) ent:" in text
+    code, text = await graph(engine, "match", "--pattern", "?who", "works_at", "Lisbon")
+    assert code == 1 and "result: no match" in text
+
+
+async def test_match_answers_json_with_the_routes_record(engine):
+    """Carl left Acme in 2021, before Acme's Lisbon office (2024): only
+    --apart joins them."""
+    await engine.assert_fact("default", "carl", "works_at", "Acme Robotics", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("default", "carl", "works_at", "Globex", valid_from="2021-01-01T00:00:00Z")
+    question = ["--pattern", "?who", "works_at", "?org", "--pattern", "?org", "based_in", "Lisbon", "--returns", "?who",
+                "--json", "--status", "history", "--limit", "5"]
+    code, text = await graph(engine, "match", *question, "--apart")
+    body = json.loads(text)
+    assert code == 0 and body["filters"]["status"] == "history" and body["filters"]["together"] is False
+    assert body["filters"]["limit"] == 5
+    assert [row["bindings"]["?who"]["key"] for row in body["rows"]] == ["alice chen", "carl"]
+    code, text = await graph(engine, "match", *question)
+    assert [row["bindings"]["?who"]["key"] for row in json.loads(text)["rows"]] == ["alice chen"]
+
+
+@pytest.mark.parametrize("arguments, complaint", [
+    (["--pattern", "?1x", "works_at", "?org"], "variable"),
+    (["--pattern", "?who", "works_at", "?org", "--returns", "?nobody"], "?nobody"),
+    (["--pattern", "?who", "works_at", "?org", "--limit", "0"], "limit"),
+    (["--pattern", "?who", "works_at", "?org", "--max-bytes", "100"], "max_bytes"),
+    (["--pattern", "?who", "works_at", "?org", "--as-of", "soon"], "RFC 3339"),
+])
+async def test_a_malformed_match_is_refused_before_anything_is_read(engine, arguments, complaint):
+    with pytest.raises(InvalidInput, match=complaint.replace("?", r"\?")):
+        await graph(engine, "match", *arguments)

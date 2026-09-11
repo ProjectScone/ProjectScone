@@ -31,8 +31,8 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-4:] == ["graph_context", "explain_entity", "connect_entities",
-                                                         "graph_schema"]
+    assert [tool.name for tool in MEMORY_TOOLS][-5:] == ["graph_context", "explain_entity", "connect_entities",
+                                                         "graph_schema", "graph_match"]
 
 
 async def test_graph_context_answers_with_the_packet_the_route_gives(box):
@@ -132,3 +132,35 @@ async def test_graph_context_can_seed_by_resemblance(box):
     assert result["ok"] is True and result["coverage"]["similar"] and " similar " in result["text"]
     assert (await box.run("graph_context", {"question": "x", "similar": "yes"}))["ok"] is False
     assert (await box.run("graph_context", {"question": "x", "min_similarity": 2}))["ok"] is False
+
+
+WHERE = [{"subject": "?who", "predicate": "works_at", "object": "?org"},
+         {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}]
+
+
+async def test_graph_match_answers_a_structured_question_with_the_routes_rows(box):
+    result = await box.run("graph_match", {"where": WHERE, "returns": ["?who"]})
+    assert result["ok"] is True and result["status"] == "matched" and result["space"] == "alpha"
+    assert result["rows"][0]["bindings"]["?who"]["key"] == "alice chen" and result["variables"] == ["?who"]
+    assert result["filters"] == {"status": "current", "as_of": NOW, "together": True, "limit": 20}
+    history = await box.run("graph_match", {"where": WHERE, "status": "history", "together": False, "limit": 5})
+    assert history["ok"] is True and history["filters"]["status"] == "history" and history["filters"]["limit"] == 5
+
+
+@pytest.mark.parametrize("arguments, complaint", [
+    ({"where": "?who works_at ?org"}, "where must be a list of patterns"),
+    ({"where": ["?who works_at ?org"]}, "where must be a list of patterns"),
+    ({"where": WHERE * 4}, "between 1 and 6 patterns"),
+    ({"where": WHERE, "returns": ["?nobody"]}, "?nobody"),
+    ({"where": WHERE, "status": "someday"}, "status must be one of"),
+    ({"where": WHERE, "limit": 0}, "limit"),
+    ({}, "where"),
+])
+async def test_a_malformed_structured_question_is_a_result_the_model_can_read(box, arguments, complaint):
+    result = await box.run("graph_match", arguments)
+    assert result["ok"] is False and complaint in result["error"]
+
+
+async def test_graph_match_reads_its_own_space_only(box):
+    result = await box.run("graph_match", {"where": [{"subject": "zed", "predicate": "works_at", "object": "?org"}]})
+    assert result["ok"] is True and result["status"] == "not_found"

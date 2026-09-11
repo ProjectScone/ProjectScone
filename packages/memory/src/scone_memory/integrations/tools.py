@@ -26,6 +26,8 @@ from ..memory.engine import MemoryEngine
 MAX_ITEMS = 20
 #: The graph tools' bounds, shared with the HTTP routes, MCP and the CLI.
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
+from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
+from ..entities.view import STATUS_MODES  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -143,9 +145,37 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": "Byte budget for the listed predicates, 1024 to 64000. Defaults to 16000."},
         }, []),
     ),
+    ToolSpec(
+        name="graph_match",
+        summary=("A structured question over the entity graph, as triple patterns joined by shared "
+                 "variables: every way they hold together, one row per answer, each citing its facts "
+                 "re-read now. Constants name entities exactly; near misses come back as suggestions. "
+                 "Read graph_schema first to know the predicates."),
+        parameters=_schema({
+            "where": {"type": "array", "minItems": 1, "maxItems": MAX_PATTERNS,
+                      "items": {"type": "object", "properties": {
+                          "subject": {"type": "string"}, "predicate": {"type": "string"},
+                          "object": {"type": "string"}},
+                          "required": ["subject", "predicate", "object"], "additionalProperties": False},
+                      "description": ("1 to 6 patterns; a term starting with ? is a variable, as in "
+                                      "{subject: '?who', predicate: 'works_at', object: '?org'} and "
+                                      "{subject: '?org', predicate: 'based_in', object: 'Lisbon'}.")},
+            "returns": {"type": "array", "items": {"type": "string"},
+                        "description": "The variables to answer with. Defaults to every variable."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
+                      "description": f"Rows to answer, 1 to {MAX_ROWS}. Defaults to {DEFAULT_ROWS}."},
+            "status": {"type": "string", "enum": list(STATUS_MODES),
+                       "description": "current (default), history, proposed or all."},
+            "as_of": {"type": "string", "description": "RFC 3339 instant to ask at. Defaults to now."},
+            "together": {"type": "boolean",
+                         "description": "Join only facts that held at one moment (default true)."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, ["where"]),
+    ),
 )
 
-_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema"})
+_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -185,8 +215,14 @@ def check(spec: ToolSpec, arguments: Mapping[str, Any]) -> Optional[str]:
             return f"{name} must be text"
         if kind == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
             return f"{name} must be a whole number"
-        if kind == "array" and not (isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value)):
+        if kind == "array" and rule["items"]["type"] == "object" and not (
+                isinstance(value, (list, tuple)) and all(isinstance(v, Mapping) for v in value)):
+            return f"{name} must be a list of patterns"
+        if kind == "array" and rule["items"]["type"] == "string" and not (
+                isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value)):
             return f"{name} must be a list of text"
+        if "enum" in rule and value not in rule["enum"]:
+            return f"{name} must be one of {', '.join(rule['enum'])}"
         if kind == "boolean" and not isinstance(value, bool):
             return f"{name} must be true or false"
         if kind == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -273,6 +309,20 @@ class ToolBox:
         if len(names) > MAX_NAMES or any(not 1 <= len(entry) <= MAX_NAME for entry in names):
             raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
         when = self.engine.clock()
+        if name == "graph_match":
+            from ..core.validation import normalise_time
+            from ..entities.match import MAX_BYTES, MatchQueryError, graph_match
+
+            status = arguments.get("status", "current")
+            moment = normalise_time(arguments["as_of"]) if arguments.get("as_of") else when
+            limit, together = arguments.get("limit", DEFAULT_ROWS), arguments.get("together", True)
+            try:
+                found = await graph_match(self.engine, self.space, list(arguments["where"]),
+                                          returns=arguments.get("returns"), limit=limit, status=status, as_of=moment,
+                                          together=together, max_bytes=arguments.get("max_bytes", MAX_BYTES))
+            except MatchQueryError as refused:
+                raise InvalidInput(str(refused)) from None
+            return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
         if name == "graph_schema":
             return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200),
                                        max_bytes=arguments.get("max_bytes", 16_000))
