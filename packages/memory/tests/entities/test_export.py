@@ -42,7 +42,8 @@ def projection():
 
 
 def test_every_format_is_offered():
-    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid"}
+    assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid",
+                                   "svg", "canvas"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -578,3 +579,113 @@ def test_mermaid_budgets_the_utf16_units_a_browser_counts():
     text = mermaid(ledger)
     assert len(text.encode("utf-16-le")) // 2 <= 45_000
     assert re.search(r"\d+ relations left out of the chart", text.splitlines()[0]) and "-->" in text
+
+
+SVG = "{http://www.w3.org/2000/svg}"
+
+
+def test_svg_draws_each_entity_and_relation_with_a_title_citing_its_facts(projection):
+    exported = export_graph(projection, "svg", about={"status": "current", "as_of": "2025-06-01T00:00:00.000Z"})
+    assert exported.media_type == "image/svg+xml" and exported.filename == "graph.svg"
+    root = ElementTree.fromstring(exported.body)
+    assert root.tag == f"{SVG}svg" and root.get("role") == "img"
+    assert root.find(f"{SVG}title").text == "Knowledge graph alpha"
+    assert "current facts as of 2025-06-01T00:00:00.000Z" in root.find(f"{SVG}desc").text
+    circles = root.findall(f".//{SVG}circle")
+    assert len(circles) == len(projection.entities)
+    titles = [element.find(f"{SVG}title").text for element in root.iter() if element.tag == f"{SVG}line"]
+    assert len(titles) == len(projection.relations)
+    assert any(title.startswith("alice chen works_at Acme, Inc.") and title.endswith("(fact 1)") for title in titles)
+    names = [text for text in root.iter(f"{SVG}text") if text.get("text-anchor") == "middle"]
+    assert names and all(text.get("paint-order") == "stroke" for text in names), "a halo keeps names legible"
+
+
+def test_svg_keeps_hostile_names_as_text():
+    hostile = 'Evil</text><script>alert(1)</script>\x07 & co'
+    projection = project_entities("alpha", [fact(1, hostile, "knows", "Alice Chen")], revision=1)
+    body = export_graph(projection, "svg").body
+    assert b"<script" not in body and b"\x07" not in body
+    shown = [element.text for element in ElementTree.fromstring(body).iter(f"{SVG}text")]
+    assert any(text and text.startswith("evil</text><script>") for text in shown)
+
+
+def test_svg_says_what_the_drawing_and_the_read_left_out(monkeypatch):
+    from scone_memory.entities import export as export_module
+
+    monkeypatch.setattr(export_module, "_SVG_NODES", 2)
+    projection = project_entities("alpha", LEDGER, revision=3)
+    about = {"status": "history", "as_of": "2025-06-01T00:00:00.000Z",
+             "coverage": {"facts_read": 5, "facts_counted": 5, "truncated": True, "reasons": ["fact_limit"]}}
+    desc = ElementTree.fromstring(export_graph(projection, "svg", about=about).body).find(f"{SVG}desc").text
+    assert "read limited by fact_limit" in desc and "3 entities and 3 relations left out of the drawing" in desc
+
+
+def test_canvas_is_a_json_canvas_of_community_groups_cards_and_labelled_edges(projection):
+    exported = export_graph(projection, "canvas")
+    assert exported.filename == "graph.canvas" and exported.media_type == "application/json"
+    canvas = json.loads(exported.body)
+    groups = [node for node in canvas["nodes"] if node["type"] == "group"]
+    cards = [node for node in canvas["nodes"] if node["type"] == "text" and node["id"] != "about"]
+    assert groups and len(cards) == len(projection.entities)
+    [about] = [node for node in canvas["nodes"] if node["id"] == "about"]
+    assert about["text"].startswith("**Knowledge graph alpha**") and "every entity and relation read is drawn" in about["text"]
+    assert all(isinstance(node[side], int) for node in canvas["nodes"] for side in ("x", "y", "width", "height"))
+    ids = {node["id"] for node in canvas["nodes"]}
+    assert len(ids) == len(canvas["nodes"]) and len(canvas["edges"]) == len(projection.relations)
+    assert all(edge["fromNode"] in ids and edge["toNode"] in ids and edge["toEnd"] == "arrow" for edge in canvas["edges"])
+    assert any(edge["label"] == "works_at (fact 1)" for edge in canvas["edges"])
+    for card in cards:
+        assert any(group["x"] <= card["x"] and card["x"] + card["width"] <= group["x"] + group["width"]
+                   and group["y"] <= card["y"] and card["y"] + card["height"] <= group["y"] + group["height"]
+                   for group in groups), card
+
+
+def test_canvas_cards_escape_names_as_notes_do():
+    names = ['<img src="https://example.invalid/x.png">', "**bold** [x](https://example.invalid)"]
+    projection = project_entities("alpha", [fact(1, names[0], "knows", "Bob"), fact(2, names[1], "knows", "Bob")],
+                                  revision=1)
+    texts = [node["text"] for node in json.loads(export_graph(projection, "canvas").body)["nodes"]
+             if node["type"] == "text" and node["id"] != "about"]
+    assert all("<img" not in text.replace("\\<", "") and "[x]" not in text.replace("\\[", "").replace("\\]", "")
+               for text in texts)
+
+
+def test_the_obsidian_vault_carries_a_canvas_of_its_notes(projection):
+    vault = zipfile.ZipFile(io.BytesIO(export_graph(projection, "obsidian").body))
+    canvas = json.loads(vault.read("graph.canvas"))
+    files = [node["file"] for node in canvas["nodes"] if node["type"] == "file"]
+    assert len(files) == len(projection.entities) and all(name in vault.namelist() for name in files)
+
+
+def test_svg_box_titles_fit_their_boxes():
+    triples = [(f"worker {n}", "works_at", "Acme Robotics International Holdings") for n in range(2)]
+    projection = project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+    root = ElementTree.fromstring(export_graph(projection, "svg").body)
+    [box] = root.find(f"{SVG}g[@class='communities']").findall(f"{SVG}rect")
+    [title] = root.find(f"{SVG}g[@class='communities']").findall(f"{SVG}text")
+    assert len(title.text) * 6.6 <= float(box.get("width")) - 24 and title.text.endswith("…")
+
+
+def test_svg_dashes_the_arrows_between_communities_and_loops_a_self_relation():
+    triples = [(f"worker {n}", "works_at", "Acme") for n in range(3)] + [
+        (f"resident {n}", "lives_in", "Porto") for n in range(3)] + [
+        ("worker 0", "lives_in", "Porto"), ("worker 1", "knows", "Worker 1")]
+    projection = project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+    root = ElementTree.fromstring(export_graph(projection, "svg").body)
+    lines = {element.find(f"{SVG}title").text: element for element in root.iter(f"{SVG}line")}
+    across = lines["worker 0 lives_in Porto (fact 7)"]
+    inside = lines["worker 2 works_at Acme (fact 3)"]
+    assert across.get("stroke-dasharray") == "5 4" and inside.get("stroke-dasharray") is None
+    [loop] = [element for element in root.iter(f"{SVG}path") if element.find(f"{SVG}title") is not None]
+    assert loop.find(f"{SVG}title").text == "worker 1 knows worker 1 (fact 8)"
+
+
+def test_canvas_cards_take_their_communitys_colour(projection):
+    canvas = json.loads(export_graph(projection, "canvas").body)
+    colour = {node["id"].removeprefix("group-"): node.get("color") for node in canvas["nodes"] if node["type"] == "group"}
+    cards = [node for node in canvas["nodes"] if node["type"] == "text" and node["id"] != "about"]
+    assert any("color" in card for card in cards)
+    for card in cards:
+        group = next(g for g in canvas["nodes"] if g["type"] == "group" and g["x"] <= card["x"] <= g["x"] + g["width"]
+                     and g["y"] <= card["y"] <= g["y"] + g["height"])
+        assert card.get("color") == colour[group["id"].removeprefix("group-")]

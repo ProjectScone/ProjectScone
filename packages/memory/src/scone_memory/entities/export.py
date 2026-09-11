@@ -43,9 +43,10 @@ import zipfile
 from .markdown import literal
 from .project import Entity, EntityProjection
 
-ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid"]
+ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
+                       "canvas"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid")
+                                            "mermaid", "svg", "canvas")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -480,6 +481,8 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
                                    f"Projection `{projection.digest[:12]}`, {len(projection.entities)} entities.",
                                    *_about_lines(about), "",
                                    *sorted(f"- [[{name}]]" for name in names.values())]) + "\n"
+    # The same graph drawn as a canvas of the vault's own notes.
+    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"entities/{names[entity_id]}.md")
     return Export(_zip(files), "application/zip", "graph-obsidian.zip")
 
 
@@ -720,9 +723,168 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
                   "graph.mmd")
 
 
+#: What the drawings show at most: the most connected entities, and the
+#: best supported relations between them.
+_SVG_NODES, _SVG_EDGES = 200, 600
+_SVG_LABEL = 32
+#: Okabe and Ito's colours, told apart with any colour vision; the last,
+#: grey, is for entities in no community.
+_PALETTE = ("#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#999999")
+
+
+def _xml_text(value: object, limit: int | None = None) -> str:
+    text = " ".join(str(value).split())
+    if limit is not None and len(text) > limit:
+        text = text[:limit - 1] + "…"
+    return _NOT_XML.sub(lambda match: _visible(match.group()), text)
+
+
+def _drawing_notes(projection: EntityProjection, about: Mapping[str, object], left_out: tuple[int, int]) -> list[str]:
+    coverage = about.get("coverage")
+    reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
+    return [f"projection {projection.digest[:12]} at revision {projection.revision}",
+            *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+            *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
+            (f"{_many(left_out[0], 'entity', 'entities')} and {_many(left_out[1], 'relation')} left out of the drawing"
+             if any(left_out) else "every entity and relation read is drawn"), "values are not drawn"]
+
+
+def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The graph as an image any browser, Markdown viewer or document
+    shows, with no script: communities as tinted boxes, entities as circles
+    sized by their relations, relations as arrows. Every circle and arrow
+    carries a title naming it and, for an arrow, the facts behind it; the
+    description says what view it draws and what it left out."""
+    from .layout import layout_projection
+
+    drawing = layout_projection(projection, max_nodes=_SVG_NODES, max_edges=_SVG_EDGES)
+    ns = "http://www.w3.org/2000/svg"
+    ElementTree.register_namespace("", ns)
+    margin = 24.0
+    width, height = drawing.width + 2 * margin, drawing.height + 2 * margin
+
+    def number(value: float) -> str:
+        return f"{value:.1f}"
+
+    root = ElementTree.Element(f"{{{ns}}}svg", {
+        "viewBox": f"0 0 {number(width)} {number(height)}", "width": number(width), "height": number(height),
+        "role": "img", "font-family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "font-size": "11"})
+    ElementTree.SubElement(root, f"{{{ns}}}title").text = f"Knowledge graph {_xml_text(projection.space)}"
+    ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(
+        _xml_text(note) for note in _drawing_notes(projection, about, drawing.left_out))
+    marker = ElementTree.SubElement(ElementTree.SubElement(root, f"{{{ns}}}defs"), f"{{{ns}}}marker", {
+        "id": "arrow", "viewBox": "0 0 10 10", "refX": "10", "refY": "5", "markerWidth": "7", "markerHeight": "7",
+        "orient": "auto-start-reverse"})
+    ElementTree.SubElement(marker, f"{{{ns}}}path", {"d": "M 0 0 L 10 5 L 0 10 z", "fill": "#6b6b6b"})
+    ElementTree.SubElement(root, f"{{{ns}}}rect", {"width": "100%", "height": "100%", "fill": "#ffffff"})
+    colour_of: dict[str, str] = {}
+    boxes = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "communities"})
+    for box in drawing.groups:
+        colour = _PALETTE[-1] if box.colour < 0 else _PALETTE[box.colour % (len(_PALETTE) - 1)]
+        colour_of[box.group_id] = colour
+        ElementTree.SubElement(boxes, f"{{{ns}}}rect", {
+            "x": number(box.x + margin), "y": number(box.y + margin), "width": number(box.width),
+            "height": number(box.height), "rx": "14", "fill": colour, "fill-opacity": "0.07", "stroke": colour,
+            "stroke-opacity": "0.45"})
+        # A title is cut to its box, at about 6.6 pixels a character.
+        ElementTree.SubElement(boxes, f"{{{ns}}}text", {
+            "x": number(box.x + margin + 12), "y": number(box.y + margin + 20), "font-weight": "600",
+            "fill": "#333333"}).text = _xml_text(box.label, max(8, min(60, int((box.width - 24) / 6.6))))
+    at = {node.entity_id: node for node in drawing.nodes}
+    labels = {entity.entity_id: entity.label for entity in projection.entities}
+    arrows = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "relations", "stroke": "#6b6b6b"})
+    for relation in drawing.edges:
+        source, target = at[relation.subject_id], at[relation.object_id]
+        # A relation between communities is drawn fainter and dashed, so
+        # the communities themselves stay legible.
+        across = {"stroke-opacity": "0.35", "stroke-dasharray": "5 4"} if source.group_id != target.group_id \
+            else {"stroke-opacity": "0.6"}
+        title = (f"{_xml_text(labels[relation.subject_id])} {_xml_text(relation.predicate)} "
+                 f"{_xml_text(labels[relation.object_id])} {_cite(relation.fact_ids)}")
+        weight = number(1.0 + min(3.0, len(relation.fact_ids) - 1) * 0.6)
+        if source is target:
+            x, y, r = source.x + margin, source.y + margin, source.radius
+            element = ElementTree.SubElement(arrows, f"{{{ns}}}path", {
+                "d": f"M {number(x - r * 0.5)} {number(y - r * 0.87)} a {number(r * 0.6)} {number(r * 0.6)} 0 1 1 "
+                     f"{number(r)} 0", "fill": "none", "stroke-width": weight, "marker-end": "url(#arrow)", **across})
+        else:
+            dx, dy = target.x - source.x, target.y - source.y
+            length = max((dx * dx + dy * dy) ** 0.5, 1e-9)
+            ux, uy = dx / length, dy / length
+            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {
+                "x1": number(source.x + margin + ux * source.radius), "y1": number(source.y + margin + uy * source.radius),
+                "x2": number(target.x + margin - ux * (target.radius + 1)),
+                "y2": number(target.y + margin - uy * (target.radius + 1)),
+                "stroke-width": weight, "marker-end": "url(#arrow)", **across})
+        ElementTree.SubElement(element, f"{{{ns}}}title").text = title
+    circles = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "entities"})
+    for node in drawing.nodes:
+        group = ElementTree.SubElement(circles, f"{{{ns}}}g")
+        circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
+            "cx": number(node.x + margin), "cy": number(node.y + margin), "r": number(node.radius),
+            "fill": colour_of[node.group_id], "stroke": "#ffffff", "stroke-width": "1.5"})
+        ElementTree.SubElement(circle, f"{{{ns}}}title").text = (
+            f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}")
+        # A white halo keeps a name legible where an arrow runs under it.
+        ElementTree.SubElement(group, f"{{{ns}}}text", {
+            "x": number(node.x + margin), "y": number(node.y + margin + node.radius + 12), "text-anchor": "middle",
+            "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3", "paint-order": "stroke",
+            "stroke-linejoin": "round"}).text = _xml_text(node.label, _SVG_LABEL)
+    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
+    return Export(body + b"\n", "image/svg+xml", "graph.svg")
+
+
+#: A card's size on a canvas, and the radius the layout gives it so no two touch.
+_CARD_WIDTH, _CARD_HEIGHT, _CARD_ROOM = 220, 70, 120.0
+
+
+def _canvas_text(projection: EntityProjection, about: Mapping[str, object],
+                 note_for: Callable[[str], str] | None = None) -> str:
+    """JSON Canvas 1.0, the file Obsidian's canvas opens: a group per
+    community, a card per entity (its note, when ``note_for`` names one)
+    and a labelled arrow per relation, with a card saying what view it
+    draws and what it left out."""
+    from .layout import layout_projection
+
+    drawing = layout_projection(projection, max_nodes=_SVG_NODES, max_edges=_SVG_EDGES,
+                                radii=(_CARD_ROOM, _CARD_ROOM))
+    nodes: list[dict[str, object]] = [{
+        "id": "about", "type": "text", "x": 0, "y": -160, "width": 640, "height": 120,
+        "text": f"**Knowledge graph {literal(projection.space)}**\n\n" + "; ".join(
+            literal(note) for note in _drawing_notes(projection, about, drawing.left_out))}]
+    colours: dict[str, str] = {}
+    for box in drawing.groups:
+        group: dict[str, object] = {"id": f"group-{box.group_id}", "type": "group", "x": round(box.x),
+                                    "y": round(box.y), "width": round(box.width), "height": round(box.height),
+                                    "label": literal(" ".join(box.label.split())[:80])}
+        if box.colour >= 0:
+            colours[box.group_id] = group["color"] = str(box.colour % 6 + 1)
+        nodes.append(group)
+    for node in drawing.nodes:
+        card: dict[str, object] = {"id": node.entity_id, "x": round(node.x - _CARD_WIDTH / 2),
+                                   "y": round(node.y - _CARD_HEIGHT / 2), "width": _CARD_WIDTH,
+                                   "height": _CARD_HEIGHT}
+        if note_for is not None:
+            card.update({"type": "file", "file": note_for(node.entity_id)})
+        else:
+            card.update({"type": "text", "text": f"**{literal(node.label)}**\n{literal(node.kind or 'unknown kind')}"})
+        if node.group_id in colours:
+            card["color"] = colours[node.group_id]
+        nodes.append(card)
+    edges = [{"id": f"relation-{relation.relation_id}", "fromNode": relation.subject_id,
+              "toNode": relation.object_id, "toEnd": "arrow",
+              "label": f"{literal(' '.join(relation.predicate.split())[:80])} {_cite(relation.fact_ids)}"}
+             for relation in drawing.edges]
+    return json.dumps({"nodes": nodes, "edges": edges}, ensure_ascii=False, indent=1)
+
+
+def _canvas(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    return Export(_encoded(_canvas_text(projection, about)), "application/json", "graph.canvas")
+
+
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
-    "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid,
+    "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas,
 }
 
 

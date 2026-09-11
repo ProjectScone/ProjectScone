@@ -837,3 +837,16 @@ def test_the_overview_digests_each_community_for_a_global_question(seeded):
     assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.overview"] is True
     for params in ({"limit": 0}, {"facts": 11}, {"resolution": 0}, {"max_bytes": 100}, {"q": "q" * 2001}):
         assert client.get("/v1/graph/overview", params=params, headers=auth()).status_code == 422, params
+
+
+def test_the_graph_exports_as_a_drawing_and_as_a_canvas(seeded):
+    import json
+    import xml.etree.ElementTree as ElementTree
+
+    client, _ = seeded
+    drawn = client.get("/v1/graph/export", params={"format": "svg"}, headers=auth())
+    assert drawn.status_code == 200 and drawn.headers["content-type"].startswith("image/svg+xml")
+    assert ElementTree.fromstring(drawn.content).tag == "{http://www.w3.org/2000/svg}svg"
+    canvas = client.get("/v1/graph/export", params={"format": "canvas"}, headers=auth())
+    assert canvas.status_code == 200 and 'filename="graph.canvas"' in canvas.headers["content-disposition"]
+    assert {node["type"] for node in json.loads(canvas.content)["nodes"]} >= {"group", "text"}

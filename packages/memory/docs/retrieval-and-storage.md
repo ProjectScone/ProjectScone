@@ -727,8 +727,9 @@ traceable to a fact, and the caller's model reads the digests.
   predicates. Each community says what it `matched`. A question that
   concerns none keeps them by size, and the text says so.
 - **Entities in no community** (no relation to another) are counted.
-- The analysis is kept per projection digest and resolution, so asking
-  again of an unchanged graph costs only the re-reads.
+- The analysis is kept per projection digest and resolution, shared with
+  the drawings, so asking again of an unchanged graph costs only the
+  re-reads.
 - Advertised as `graph.overview`. MCP `memory_graph_overview`, the
   ToolBox `graph_overview` and `scone graph overview` take the same
   bounds.
@@ -805,9 +806,11 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
+| `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
+| `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -822,6 +825,37 @@ the view it shows without opening a zip or parsing XML:
   export says so in the response as well as in the file.
 
 How each format places values and escapes its own syntax:
+
+- **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
+  out by construction, not simulated, so the same graph always draws
+  the same way.
+  - Each community is laid out around its most central member, in rings
+    by how many steps away each member is. Every ring is wide enough
+    that no two of its members touch and far enough out that no two
+    rings do, and a member sits near the one that reached it.
+  - Each community gets a box as tight as its members allow, and the boxes
+    are packed in rows, largest first, 24 units apart. Entities with no
+    relation to another share a box of their own.
+  - An entity's size grows with its relations.
+  - The 200 most connected entities are drawn, and the 600 best supported
+    relations between them.
+  - The drawing's description (the SVG's `desc`, the canvas's `about`
+    card) says what view it draws, what the read left out and what the
+    drawing left out; values are not drawn.
+  - The colours are Okabe and Ito's, which can be told apart with any
+    colour vision.
+- **SVG** is written by an XML serializer, with text made safe as in
+  GraphML.
+  - Every circle has a title naming its entity, kind and id. Every arrow
+    has a title naming the relation and the facts behind it, which
+    browsers show on hover.
+  - An arrow between communities is dashed and fainter, so communities
+    stay legible, and a relation of an entity to itself is a loop.
+  - Names carry a white halo where an arrow runs under them. A box's title
+    is cut to its box, and a name to 32 characters.
+- **Canvas** cards and group labels are escaped as notes are. Positions
+  and sizes are whole numbers, as JSON Canvas requires. In the vault's
+  `graph.canvas` each card is the entity's own note.
 
 - **GraphML** nodes have a `type`, `entity` or `value`. A value hangs off
   its entity by an edge whose `link` is `value`, carrying its predicate
