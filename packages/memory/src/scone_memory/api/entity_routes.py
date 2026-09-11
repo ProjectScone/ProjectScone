@@ -17,7 +17,7 @@ import json
 from typing import Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
 from ..core.errors import InvalidInput, NotFound
@@ -31,11 +31,12 @@ from ..entities.export import ExportFormat, export_graph
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
 from ..entities.read import load_projection, read_record
-from ..entities.schema import MAX_PREDICATES, schema_record
+from ..entities.schema import MAX_BYTES, MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
 from ..entities.report import build_report, render_markdown
 from ..entities.service import ProjectionBuilding
 from ..entities.view import StatusMode, entity_listing, entity_record, knowledge_view, projection_meta, support
 from ..memory.engine import MemoryEngine
+from .responses import LedgerJSONResponse
 
 
 class Support(BaseModel):
@@ -259,8 +260,8 @@ def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
 
 def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object]) -> None:
     @app.exception_handler(ProjectionBuilding)
-    async def _building(_: Request, error: ProjectionBuilding) -> JSONResponse:
-        return JSONResponse({"error": str(error), "code": "projection_building"}, status_code=503,
+    async def _building(_: Request, error: ProjectionBuilding) -> LedgerJSONResponse:
+        return LedgerJSONResponse({"error": str(error), "code": "projection_building"}, status_code=503,
                             headers={"Retry-After": "1"})
 
     @app.get("/v1/graph/knowledge", response_model=KnowledgeView, response_model_exclude_unset=True)
@@ -270,7 +271,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         groupings: bool = False, resolution: float = Query(default=1.0, gt=0, le=10),
         seed: list[str] = Query(default=[]), hub_degree: int = Query(default=64, ge=1, le=100_000),
         cursor: Optional[str] = Query(default=None, max_length=512), space: str = Depends(space_for),
-    ) -> dict[str, object] | JSONResponse:
+    ) -> dict[str, object] | LedgerJSONResponse:
         """Entities, the relations between them and their values, as the ledger records them.
 
         Without ``seed``, the entities ranked by the claims they take part
@@ -287,7 +288,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         if cursor is not None:
             offset, digest = _read_cursor(cursor)
             if digest != projection.digest:
-                return JSONResponse(status_code=409, content={
+                return LedgerJSONResponse(status_code=409, content={
                     "error": "the graph changed since this cursor was issued; start again without it",
                     "code": "cursor_stale"})
         if len(seed) > 24:
@@ -298,13 +299,13 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
             if found.status == "ambiguous":
                 complete, read = _read(coverage)
                 listed = _candidates(found)
-                return JSONResponse(status_code=409, content={
+                return LedgerJSONResponse(status_code=409, content={
                     "error": f"{name!r} could mean several entities", "name": name, **listed,
                     "truncated": bool(listed["truncated"]) or not complete, "complete": complete, "coverage": read})
             if found.status == "not_found":
                 complete, read = _read(coverage)
                 where = "" if complete else " in the facts read; the read was capped, so it may exist"
-                return JSONResponse(status_code=404, content={"error": f"no entity is named {name!r}{where}",
+                return LedgerJSONResponse(status_code=404, content={"error": f"no entity is named {name!r}{where}",
                                                               "name": name, "complete": complete, "coverage": read})
             seeds.append(found.candidates[0].entity_id)
         view = knowledge_view(projection, mode=status, as_of=when, limit=limit, attribute_limit=attribute_limit,
@@ -341,12 +342,15 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     @app.get("/v1/graph/schema")
     async def get_schema(
         status: StatusMode = "current", as_of: Optional[str] = None,
-        limit: int = Query(default=200, ge=1, le=MAX_PREDICATES), space: str = Depends(space_for),
+        limit: int = Query(default=200, ge=1, le=MAX_PREDICATES),
+        max_bytes: int = Query(default=MAX_BYTES, ge=1_024, le=MAX_BYTES_LIMIT), space: str = Depends(space_for),
     ) -> dict[str, object]:
         """What the space's graph is made of: the kinds its entities have, the
         predicates its facts use and which kinds each joins, most used first.
-        Read it to know what the graph could be asked."""
-        return await schema_record(engine, space, status=status, as_of=_moment(engine, as_of), limit=limit)
+        Read it to know what the graph could be asked. ``max_bytes`` bounds
+        the listed predicates' JSON; a long predicate is clipped and marked."""
+        return await schema_record(engine, space, status=status, as_of=_moment(engine, as_of), limit=limit,
+                                   max_bytes=max_bytes)
 
     @app.get("/v1/graph/export", response_model=None)
     async def get_export(
@@ -400,7 +404,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     async def get_timeline(
         entity: str = Query(min_length=1, max_length=200), as_of: Optional[str] = None,
         limit: int = Query(default=200, ge=1, le=500), space: str = Depends(space_for),
-    ) -> dict[str, object] | JSONResponse:
+    ) -> dict[str, object] | LedgerJSONResponse:
         """One entity's facts in valid time, in lanes by role and predicate,
         with supersession and stored links between them, and a marker for
         what held at ``as_of``."""
@@ -408,9 +412,9 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         try:
             return await timeline_view(engine, space, entity, as_of=when, limit=limit)
         except TimelineEntityAmbiguous as ambiguous:
-            return JSONResponse(status_code=409, content=ambiguous.record(entity))
+            return LedgerJSONResponse(status_code=409, content=ambiguous.record(entity))
         except TimelineEntityMissing as missing:
-            return JSONResponse(status_code=404, content=missing.record(entity))
+            return LedgerJSONResponse(status_code=404, content=missing.record(entity))
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(
@@ -432,7 +436,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         max_hops: int = Query(default=4, ge=1, le=8), limit: int = Query(default=3, ge=1, le=20),
         hub_degree: int = Query(default=200, ge=2, le=100_000), status: StatusMode = "current",
         as_of: Optional[str] = None, space: str = Depends(space_for),
-    ) -> dict[str, object] | JSONResponse:
+    ) -> dict[str, object] | LedgerJSONResponse:
         """How two entities connect: up to ``limit`` shortest routes, each hop
         with its relation's direction and the facts behind it."""
         when = _moment(engine, as_of)
@@ -443,10 +447,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
             found = resolve(projection, name)
             if found.status == "not_found":
                 where = "" if complete else " in the facts read; the read was capped, so it may exist"
-                return JSONResponse(status_code=404, content={
+                return LedgerJSONResponse(status_code=404, content={
                     "error": f"no entity is named {name!r}{where}", "name": name, "complete": complete, "coverage": read})
             if found.status == "ambiguous":
-                return JSONResponse(status_code=409, content={
+                return LedgerJSONResponse(status_code=409, content={
                     "error": f"{name!r} could mean several entities", "name": name, **_candidates(found),
                     "complete": complete, "coverage": read})
             ends.append(found.candidates[0].entity_id)
@@ -478,7 +482,7 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     async def get_entity(
         entity_id: str, status: StatusMode = "current", as_of: Optional[str] = None,
         limit: int = Query(default=100, ge=1, le=500), space: str = Depends(space_for),
-    ) -> dict[str, object] | JSONResponse:
+    ) -> dict[str, object] | LedgerJSONResponse:
         """One entity: its relations in both directions grouped by predicate, its
         values, and every fact behind them re-read with its quote checked now.
 
@@ -504,11 +508,11 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
 _PAGE_ATTEMPTS = 3
 
 
-def _page_or_missing(page: dict[str, object], entity_id: str) -> dict[str, object] | JSONResponse:
+def _page_or_missing(page: dict[str, object], entity_id: str) -> dict[str, object] | LedgerJSONResponse:
     if page.get("entity") is not None:
         return page
     where = "" if page["complete"] else " in the facts read; the read was capped, so it may exist"
-    return JSONResponse(status_code=404, content={"error": f"no entity {entity_id!r} in this view{where}",
+    return LedgerJSONResponse(status_code=404, content={"error": f"no entity {entity_id!r} in this view{where}",
                                                   "complete": page["complete"], "coverage": page["coverage"]})
 
 

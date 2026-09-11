@@ -137,6 +137,7 @@ def test_the_schema_counts_the_kinds_and_predicates_a_view_holds(seeded):
     assert len(cut["predicates"]) == 1 and cut["predicates_total"] == 3 and cut["truncated"] is True
     assert client.get("/v1/graph/schema", headers=auth("key-b")).json()["totals"]["facts"] == 1
     assert client.get("/v1/graph/schema", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/schema", params={"max_bytes": 100}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/schema").status_code == 401
 
 
@@ -668,3 +669,12 @@ def test_paging_and_seeded_walks_are_advertised(city):
     client, _ = city
     features = client.get("/v1/capabilities", headers=auth()).json()["features"]
     assert features["graph.knowledge_paging"] is True and features["graph.knowledge_seeds"] is True
+
+
+async def test_one_huge_predicate_cannot_make_the_schema_huge():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "x" * 200_000, "value", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/schema", params={"limit": 1}, headers=auth())
+    entry = response.json()["predicates"][0]
+    assert len(response.content) < 4_000 and entry["clipped"] is True and entry["length"] == 200_000

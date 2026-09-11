@@ -165,6 +165,7 @@ def test_an_invalid_option_is_an_input_error(arguments, named, capsys):
     (("path", "alice", "bob", "--max-hops", "5"), "--max-hops"),
     (("context", "--question", "q" * 2001), "--question"),
     (("schema", "--limit", "0"), "--limit"),
+    (("schema", "--max-bytes", "100"), "--max-bytes"),
     (("timeline", "alice", "--as-of", "0001-01-01T00:00:00+01:00"), "--as-of"),
     (("timeline", "alice", "--as-of", "9999-12-31T23:59:59-01:00"), "--as-of"),
 ])
@@ -196,3 +197,17 @@ def test_export_offers_every_format_the_library_writes():
 async def test_export_writes_a_timeline_graph(engine):
     code, text = await graph(engine, "export", "--format", "gexf")
     assert code == 0 and 'mode="dynamic"' in text and 'timeformat="dateTime"' in text
+
+
+@pytest.mark.parametrize("arguments", [("report",), ("report", "--markdown"), ("schema",),
+                                       ("timeline", "zed"), ("context", "zed", "--json"), ("entity", "zed")])
+async def test_stored_text_utf8_cannot_encode_still_prints(arguments):
+    """A real terminal is a strict UTF-8 stream, unlike StringIO: a lone
+    surrogate from the ledger is printed as its escape, never a crash."""
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.assert_fact("default", "zed \ud800", "odd\ud800predicate", "Acme", valid_from=DAY)
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+    code = await run(build_parser().parse_args(["graph", *arguments]), memory, io.StringIO(""), out)
+    await memory.close()
+    assert code in (0, 1) and raw.getvalue().decode("utf-8")

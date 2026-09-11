@@ -399,15 +399,22 @@ def create_server(engine: MemoryEngine, space: str = "default",
         limit: Annotated[
             Optional[int], Field(description=f"Predicates to list, most used first (1..={MAX_PREDICATES}); defaults to 200")
         ] = None,
+        max_bytes: Annotated[
+            Optional[int], Field(description="Byte budget for the listed predicates (1024..=64000); defaults to 8000")
+        ] = None,
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
     ) -> CallToolResult:
         """What the entity graph is made of: the kinds its entities have, the
         predicates its facts use and which kinds each joins. Read it first to
         know what the graph could be asked."""
         listed = limit if limit is not None else 200
+        budget = max_bytes if max_bytes is not None else 8_000
         if not 1 <= listed <= MAX_PREDICATES:
             return tool_error(f"limit must be 1..={MAX_PREDICATES}")
-        return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed)))
+        if not 1_024 <= budget <= 64_000:
+            return tool_error("max_bytes must be 1024..=64000")
+        return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed,
+                                                       max_bytes=budget)))
 
     @tool(server, "memory_pending")
     async def memory_pending(

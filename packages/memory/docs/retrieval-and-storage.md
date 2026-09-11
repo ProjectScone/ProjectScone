@@ -159,7 +159,12 @@ decides every join in retrieval too.
 
 ### Routes
 
-Every route here is read-only and scoped to the caller's key. The view
+Every route here is read-only and scoped to the caller's key. Stored
+text is answered exactly as the ledger holds it. The ledger accepts
+lone surrogates, which UTF-8 cannot encode, and the API writes each
+one as its JSON escape (`\ud800`), which reads back as the same text.
+Every route, not only these, answers this way rather than failing with
+a 500. The CLI's JSON output does the same. The view
 and the entity list are advertised as `graph.knowledge` and
 `entities.read`. The report, paths and export each have their own
 capability, named with the route.
@@ -342,6 +347,7 @@ as it is rather than declared ahead of the facts. Advertised as
 | --- | --- | --- |
 | `status`, `as_of` | `current`, now | Which facts count, as for the view |
 | `limit` | 200 (1–1000) | Most predicates listed, most used first |
+| `max_bytes` | 64,000 (1,024–1,000,000) | Most bytes the listed predicates may take as JSON |
 
 The answer has four parts:
 
@@ -353,8 +359,14 @@ The answer has four parts:
   `organisation`, with counts. `values` lists the value kinds it takes,
   such as a `person`'s `quantity`.
 - `totals`: the whole view's counts.
-- `predicates_total` and `truncated`: how many predicates there are, and
-  whether `limit` cut the list.
+- `predicates_total`, `truncated` and `truncated_by`: how many predicates
+  there are, whether the list was cut, and whether `limit` or
+  `max_bytes` cut it.
+
+A predicate longer than 200 characters is shown clipped, with
+`clipped`, its full `length` and `term_sha256`. That way two long
+predicates that start alike can still be told apart, and one huge
+predicate can't make the answer huge.
 
 Like every read, it carries `projection`, `filters`, `complete` and
 `coverage`. A kind is only as known as the entity's `kind_status` says.
@@ -651,7 +663,7 @@ store:
 | `scone graph context [NAMES…] [--question Q] [--max-bytes N]` | the graph context packet |
 | `scone graph entity NAME` | one entity's relations both ways and its values |
 | `scone graph timeline NAME [--as-of T]` | the timeline, as JSON |
-| `scone graph schema [--limit N]` | the kinds and predicates the graph holds, as JSON |
+| `scone graph schema [--limit N] [--max-bytes N]` | the kinds and predicates the graph holds, as JSON |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
@@ -671,7 +683,8 @@ status 2 and the option named:
 - more than 24 names, or a name outside 1 to 200 characters;
 - `--question` outside 1 to 2,000 characters;
 - `--max-hops` outside 1 to 4;
-- `--limit` outside 1 to 1,000;
+- `--limit` outside 1 to 1,000, or a schema `--max-bytes` outside 1,024
+  to 1,000,000;
 - `--resolution` outside (0, 10], or not a number;
 - `--max-bytes` outside 512 to 64,000;
 - an `--as-of` that is not an RFC 3339 timestamp, or whose UTC

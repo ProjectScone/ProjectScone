@@ -33,7 +33,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_context": {"names", "question", "space", "max_bytes"},
     "memory_entity": {"name", "space"},
     "memory_connections": {"source", "target", "max_hops", "space"},
-    "memory_graph_schema": {"limit", "space"},
+    "memory_graph_schema": {"limit", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -471,3 +471,5 @@ async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
     assert "predicate: works_at, 1 fact: (person) -> (organisation) x1" in lines
     error, text = await call(server, "memory_graph_schema", limit=0)
     assert error and "limit" in text
+    error, text = await call(server, "memory_graph_schema", max_bytes=100)
+    assert error and "max_bytes" in text

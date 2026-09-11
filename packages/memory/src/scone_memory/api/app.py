@@ -31,6 +31,7 @@ from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
 from . import pdf_documents
+from .responses import LedgerJSONResponse
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -226,7 +227,8 @@ def create_app(
         if worker is not None:
             await worker.stop()
 
-    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
+                  default_response_class=LedgerJSONResponse)
     if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine

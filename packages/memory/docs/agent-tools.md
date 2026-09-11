@@ -51,6 +51,8 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 - `graph_schema` returns what the graph is made of: its entity kinds,
   its predicates and the kinds each predicate joins. It is the
   `/v1/graph/schema` JSON, for a model to read before it asks anything.
+  `max_bytes` (1,024 to 64,000, default 16,000) bounds the listed
+  predicates, and a predicate over 200 characters is shown clipped.
 
 Each reads the current projection of the box's space at one instant. The
 first three answer with the JSON that `/v1/graph/context` returns: the

@@ -218,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--as-of")
     g = graph.add_parser("schema", help="the kinds of entity and the predicates the graph holds")
     g.add_argument("--limit", type=int, default=200, help="predicates to list, most used first (default 200)")
+    g.add_argument("--max-bytes", type=int, default=64_000, help="byte budget for the listed predicates")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
@@ -465,6 +466,13 @@ def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
     return data, media_type, pathlib.Path(filename).name
 
 
+def _ledger_json(value: object, indent: int | None = 2) -> str:
+    """JSON any stream can take. A lone surrogate the ledger holds cannot be
+    written as UTF-8, so it is written as its JSON escape, which reads back
+    as the same character; everything else stays as it is."""
+    return json.dumps(value, ensure_ascii=False, indent=indent).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
     """The graph subcommands, on the same projection as the HTTP routes.
     Each reads the clock once, so what it shows and the instant it says it
@@ -475,7 +483,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
     from ..entities.export import export_graph
     from ..entities.read import load_projection
     from ..entities.report import build_report, render_markdown
-    from ..entities.schema import MAX_PREDICATES, schema_record
+    from ..entities.schema import MAX_BYTES_LIMIT, MAX_PREDICATES, schema_record
     from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
     from ..entities.view import knowledge_view
 
@@ -493,6 +501,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         raise InvalidInput("--max-hops must be from 1 to 4")
     if command == "schema" and not 1 <= args.limit <= MAX_PREDICATES:
         raise InvalidInput(f"--limit must be from 1 to {MAX_PREDICATES}")
+    if command == "schema" and not 1_024 <= args.max_bytes <= MAX_BYTES_LIMIT:
+        raise InvalidInput(f"--max-bytes must be from 1024 to {MAX_BYTES_LIMIT}")
     if command == "context":
         if args.question is not None and not 1 <= len(args.question) <= 2000:
             raise InvalidInput("--question must be 1 to 2000 characters")
@@ -520,7 +530,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
             found = await graph_context(engine, space, names=[args.name], as_of=when,
                                         limits=ContextLimits(max_hops=1))
         if getattr(args, "json", False):
-            print(json.dumps(found.record(space, "current", when), ensure_ascii=False, indent=2), file=out)
+            print(_ledger_json(found.record(space, "current", when)), file=out)
         else:
             print(found.text, file=out)
         return 0 if found.status == "prepared" else 1
@@ -528,14 +538,14 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         try:
             view = await timeline_view(engine, space, args.name, as_of=as_of)
         except (TimelineEntityAmbiguous, TimelineEntityMissing) as unresolved:
-            print(json.dumps(unresolved.record(args.name), ensure_ascii=False), file=out)
+            print(_ledger_json(unresolved.record(args.name), indent=None), file=out)
             return 1
-        print(json.dumps(view, ensure_ascii=False, indent=2), file=out)
+        print(_ledger_json(view), file=out)
         return 0
     when = engine.clock()
     if command == "schema":
-        print(json.dumps(await schema_record(engine, space, as_of=when, limit=args.limit), ensure_ascii=False,
-                         indent=2), file=out)
+        print(_ledger_json(await schema_record(engine, space, as_of=when, limit=args.limit, max_bytes=args.max_bytes)),
+              file=out)
         return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
     if command == "report":
@@ -543,7 +553,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         report = build_report(projection, analyze_projection(projection, resolution=args.resolution),
                               meta=view["projection"], filters={"status": "current", "as_of": when},  # type: ignore[arg-type]
                               coverage=coverage)
-        print(render_markdown(report) if args.markdown else json.dumps(report, ensure_ascii=False, indent=2), file=out)
+        print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
     reasons = coverage.get("reasons") or []
     exported = export_graph(projection, args.format, about={"status": "current", "as_of": when,

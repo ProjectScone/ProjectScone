@@ -137,6 +137,8 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         parameters=_schema({
             "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
                       "description": "How many predicates to list, 1 to 1000. Defaults to 200."},
+            "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 64_000,
+                          "description": "Byte budget for the listed predicates, 1024 to 64000. Defaults to 16000."},
         }, []),
     ),
 )
@@ -265,7 +267,8 @@ class ToolBox:
             raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
         when = self.engine.clock()
         if name == "graph_schema":
-            return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200))
+            return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200),
+                                       max_bytes=arguments.get("max_bytes", 16_000))
         if name == "connect_entities":
             packet = await graph_connections(self.engine, self.space, arguments["source"], arguments["target"],
                                              max_hops=arguments.get("max_hops", 3), as_of=when)

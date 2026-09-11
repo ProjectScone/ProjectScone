@@ -101,3 +101,30 @@ def test_a_limit_outside_its_bounds_is_refused():
     for limit in (0, 1001):
         with pytest.raises(ValueError, match="limit"):
             graph_schema(projected(), limit=limit)
+    for max_bytes in (1023, 1_000_001):
+        with pytest.raises(ValueError, match="max_bytes"):
+            graph_schema(projected(), max_bytes=max_bytes)
+
+
+def test_a_long_predicate_is_clipped_but_still_told_apart():
+    import hashlib
+
+    long_one, other = "x" * 5000, "x" * 4999 + "y"
+    entries = graph_schema(projected([("alice", long_one, "1"), ("bob", other, "2")]))["predicates"]
+    shown = {entry["term_sha256"]: entry for entry in entries}
+    assert set(shown) == {hashlib.sha256(term.encode()).hexdigest() for term in (long_one, other)}
+    assert all(len(entry["predicate"]) == 200 and entry["predicate"].endswith("…") and entry["clipped"] is True
+               and entry["length"] in (5000,) for entry in entries)
+    assert "clipped" not in graph_schema(projected())["predicates"][0]
+
+
+def test_a_byte_budget_bounds_the_listed_predicates_and_says_it_cut():
+    import json
+
+    rows = [(f"person {n}", f"predicate_{n:03d}_" + "z" * 150, "v") for n in range(40)]
+    schema = graph_schema(projected(rows), max_bytes=2_000)
+    listed = schema["predicates"]
+    assert 0 < len(listed) < 40 and schema["truncated"] is True and schema["truncated_by"] == "max_bytes"
+    assert sum(len(json.dumps(entry, ensure_ascii=False).encode()) + 1 for entry in listed) <= 2_000
+    assert graph_schema(projected(rows), limit=3)["truncated_by"] == "limit"
+    assert graph_schema(projected())["truncated_by"] is None

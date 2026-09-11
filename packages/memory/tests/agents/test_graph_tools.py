@@ -110,3 +110,18 @@ async def test_the_whole_answer_stays_small_when_many_names_are_ambiguous():
     await engine.close()
     assert result["ok"] is True and len(result["text"].encode()) <= 512 and len(result["candidates"]) == 24
     assert len(json.dumps(result).encode()) < 12_000
+
+
+async def test_one_huge_predicate_cannot_make_the_schema_answer_huge():
+    import json
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock(NOW)).open()
+    await engine.assert_fact("alpha", "alice", "x" * 200_000, "value", valid_from=DAY)
+    box = ToolBox(engine, "alpha")
+    result = await box.run("graph_schema", {"limit": 1})
+    small = await box.run("graph_schema", {"max_bytes": 1024})
+    await engine.close()
+    assert result["ok"] is True and len(json.dumps(result).encode()) < 4_000
+    assert result["predicates"][0]["length"] == 200_000 and small["ok"] is True
+    assert (await box.run("graph_schema", {"max_bytes": 100}))["ok"] is False
