@@ -31,6 +31,8 @@ _BOUNDARY = re.compile(r"(?<=[.!?…؟।])\s+|(?<=[。！？])|\n")
 _QUESTION = re.compile(r"[?？؟][\"'”’)\]」』]*$")
 
 Span = tuple[int, int]
+#: Below this a head and a tail cannot both hold a word.
+_MIN_LIMIT = 16
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,8 @@ def _head_and_tail(message: str, span: Span, room: int) -> list[Span]:
 
 def formulate_query(message: str, *, limit: int = MAX_QUERY) -> FormulatedQuery:
     """Return ``message`` itself when it fits, otherwise ordered verbatim excerpts."""
+    if type(limit) is not int or limit < _MIN_LIMIT:
+        raise ValueError(f"limit must be an integer of at least {_MIN_LIMIT} characters")
     if len(message) <= limit:
         return FormulatedQuery(message, ((0, len(message)),), len(message), "verbatim")
     sentences = _sentences(message)

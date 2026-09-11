@@ -96,6 +96,12 @@ def test_blank_text_over_the_limit_gives_an_empty_query() -> None:
     assert formulated.text == "" and formulated.kept == ()
 
 
+@pytest.mark.parametrize("limit", [0, 1, 15, True])
+def test_a_budget_too_small_for_an_excerpt_is_refused(limit: int) -> None:
+    with pytest.raises(ValueError, match="limit"):
+        formulate_query("abcdef " * 10, limit=limit)
+
+
 @pytest.fixture
 async def memory() -> MemoryEngine:
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
