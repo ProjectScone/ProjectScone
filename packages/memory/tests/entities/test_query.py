@@ -109,3 +109,14 @@ def test_the_variant_fold_never_changes_an_entity_key():
 
     assert variant_fold("Dr. Alice Chen") == "alice chen" and entity_key("Dr. Alice Chen") == "dr. alice chen"
     assert variant_fold("The Beatles") == "beatles" and variant_fold("the") == "the"
+
+
+def test_technical_punctuation_is_part_of_a_name():
+    """C# is not C++, and /tmp/a/b is not /tmp/a-b: the variant tier drops
+    sentence punctuation at word edges, never symbols that make the name."""
+    projection = project_entities("alpha", [fact(1, "c++", "is_a", "language"), fact(2, "/tmp/a-b", "is_a", "path"),
+                                            fact(3, "louis", "knows", "Bob"), fact(4, "node.js", "is_a", "runtime")],
+                                  revision=1)
+    for spelling in ("C#", "/tmp/a/b", "St. Louis", "node js"):
+        assert resolve(projection, spelling).status == "not_found", spelling
+    assert resolve(projection, "Node.js,").tier == "variant"
