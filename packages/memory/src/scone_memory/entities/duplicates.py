@@ -19,8 +19,10 @@ of Lisbon" and "University of Porto", "John Smith" and "Jane Smith")
 name two things, however much else they share. One name may still sit
 within the other ("Acme" and "Acme Robotics"). A misspelling is one
 edit, a letter changed, added or dropped or two neighbouring letters
-swapped, in words of four letters or more: a letter makes another word
-of a short one (Bob and Rob).
+swapped, in words of four to ``NEAR_MAX_LETTERS`` letters: a letter
+makes another word of a short one (Bob and Rob), and a longer word must
+be spelt alike, since spelling out its misspellings costs its length
+squared.
 
 Neighbours in common add to a likeness by name and never make one: two
 people at one firm in one city are two people. Two entities of different
@@ -38,15 +40,16 @@ the others under the spellings of the one word whose spellings the
 fewest names hold, keeping only the names that hold a spelling of every
 one of its words. So a large graph costs its likely pairs, not all of
 them. A spelling held by more than ``MAX_BLOCK`` names is too common to
-look under; past ``MAX_EXAMINED`` pairs looked at, or ``MAX_CANDIDATES``
-compared, the rest are not; and each is counted.
+look under; past ``MAX_SPELLINGS`` spellings, counted before any is made,
+names are filed under their words alone; past ``MAX_EXAMINED`` pairs
+looked at, or ``MAX_CANDIDATES`` compared, the rest are not; and each is
+counted.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import lru_cache
 from itertools import combinations
 import re
 from typing import TYPE_CHECKING, Callable, Literal, Mapping
@@ -77,8 +80,13 @@ ATTEMPTS = 2
 #: The most neighbours in common add to a pair's likeness by name.
 _NEAR = 0.15
 #: Letters a word needs before one edit reads as a misspelling of it
-#: rather than another word.
-NEAR_LETTERS = 4
+#: rather than another word; and letters past which a word must be spelt
+#: alike, since spelling out a word's misspellings costs its length
+#: squared.
+NEAR_LETTERS, NEAR_MAX_LETTERS = 4, 32
+#: Spellings filed for one answer; past it names are filed under their
+#: words alone, and their misspellings are not looked for.
+MAX_SPELLINGS = 250_000
 MAX_BYTES, MIN_BYTES, MAX_BYTES_LIMIT = 8_000, 512, 64_000
 _SAME = "the same name once titles and punctuation are set aside"
 _SPACING = "the same name once spacing is set aside"
@@ -126,17 +134,42 @@ def _one_apart(left: str, right: str) -> bool:
     return short[at:] == long[at + 1:]
 
 
+def _spelt(word: str) -> bool:
+    """Whether a word is long enough to be misspelt, and short enough to
+    spell out."""
+    return NEAR_LETTERS <= len(word) <= NEAR_MAX_LETTERS
+
+
 def _near(left: str, right: str) -> bool:
-    return min(len(left), len(right)) >= NEAR_LETTERS and _one_apart(left, right)
+    return _spelt(left) and _spelt(right) and _one_apart(left, right)
 
 
-@lru_cache(maxsize=1 << 16)
 def _spellings(word: str) -> frozenset[str]:
-    """The word and, when it is long enough to be misspelt, each spelling of
-    it one letter shorter: two words one edit apart share one of these."""
-    if len(word) < NEAR_LETTERS:
+    """The word and, when it can be misspelt, each spelling of it one letter
+    shorter: two words one edit apart share one of these."""
+    if not _spelt(word):
         return frozenset((word,))
     return frozenset((word, *(word[:index] + word[index + 1:] for index in range(len(word)))))
+
+
+class _Words:
+    """Each word's letter runs and spellings, worked out once an answer."""
+
+    def __init__(self) -> None:
+        self._letters: dict[str, set[str]] = {}
+        self._spellings: dict[str, frozenset[str]] = {}
+
+    def letters(self, word: str) -> set[str]:
+        found = self._letters.get(word)
+        if found is None:
+            found = self._letters[word] = _letters(word)
+        return found
+
+    def spellings(self, word: str) -> frozenset[str]:
+        found = self._spellings.get(word)
+        if found is None:
+            found = self._spellings[word] = _spellings(word)
+        return found
 
 
 @dataclass(frozen=True)
@@ -164,7 +197,7 @@ def _name(key: str) -> _Name:
 
 
 def _aligned(left: frozenset[str], right: frozenset[str],
-             letters: Callable[[str], set[str]]) -> tuple[list[str], list[tuple[str, str, float]], bool]:
+             words: _Words) -> tuple[list[str], list[tuple[str, str, float]], bool]:
     """The words two names share; then their other words one letter apart,
     paired most alike first, each word once, with how alike their letters
     are; and whether all of one name's words found a pair."""
@@ -172,10 +205,11 @@ def _aligned(left: frozenset[str], right: frozenset[str],
     rest_left, rest_right = left - right, right - left
     by_spelling: dict[str, set[str]] = defaultdict(set)
     for word in rest_right if rest_left else ():
-        for spelling in _spellings(word):
+        for spelling in words.spellings(word):
             by_spelling[spelling].add(word)
-    edges = sorted((-_alike(letters(one), letters(other)), one, other) for one in rest_left if by_spelling
-                   for other in set().union(*(by_spelling.get(spelling, set()) for spelling in _spellings(one)))
+    edges = sorted((-_alike(words.letters(one), words.letters(other)), one, other) for one in rest_left
+                   if by_spelling
+                   for other in set().union(*(by_spelling.get(spelling, set()) for spelling in words.spellings(one)))
                    if _near(one, other))
     taken: set[str] = set()
     near = []
@@ -186,7 +220,7 @@ def _aligned(left: frozenset[str], right: frozenset[str],
     return shared, sorted(near), len(near) in (len(rest_left), len(rest_right))
 
 
-def _likeness(one: _Name, other: _Name, letters: Callable[[str], set[str]]) -> tuple[float, list[str]]:
+def _likeness(one: _Name, other: _Name, words: _Words) -> tuple[float, list[str]]:
     """How alike two names are, from 0 to 1, and why."""
     if one.numbers != other.numbers:
         return 0.0, []
@@ -196,7 +230,7 @@ def _likeness(one: _Name, other: _Name, letters: Callable[[str], set[str]]) -> t
         return 1.0, [_SPACING]
     why: list[str] = []
     by_words = 0.0
-    shared, near, whole = _aligned(one.words, other.words, letters)
+    shared, near, whole = _aligned(one.words, other.words, words)
     if whole and (shared or near):
         overlap = len(shared) + sum(alike for *_, alike in near)
         by_words = overlap / (len(one.words) + len(other.words) - overlap)
@@ -208,10 +242,12 @@ def _likeness(one: _Name, other: _Name, letters: Callable[[str], set[str]]) -> t
     return max(by_words, 0.85 if stands_for else 0.0), why
 
 
-def _candidates(names: Mapping[str, _Name]) -> tuple[set[tuple[str, str]], int, int]:
-    """The pairs to compare, found by every route a pair scores by; the
-    spellings skipped as too common; and the searches left undone past
-    ``MAX_EXAMINED`` or ``MAX_CANDIDATES``.
+def _candidates(names: Mapping[str, _Name], words: _Words) -> tuple[set[tuple[str, str]], dict[str, int]]:
+    """The pairs to compare, found by every route a pair scores by, and what
+    was cut: spellings too common to search under (``blocks_skipped``),
+    names past ``MAX_SPELLINGS`` filed under their words alone
+    (``spellings_cut``), and searches left undone past ``MAX_EXAMINED`` or
+    ``MAX_CANDIDATES`` (``candidates_cut``).
 
     Names that fold the same, or that are initials of each other, are
     filed together. Of two names alike by their words, one has every word
@@ -227,6 +263,8 @@ def _candidates(names: Mapping[str, _Name]) -> tuple[set[tuple[str, str]], int, 
     together: dict[tuple[str, str, tuple[str, ...]], list[str]] = defaultdict(list)
     held: dict[tuple[str, tuple[str, ...]], list[str]] = defaultdict(list)
     spelled: dict[str, frozenset[str]] = {}
+    unspelt: set[str] = set()
+    room = MAX_SPELLINGS
     for entity_id in sorted(names):
         name = names[entity_id]
         if name.compact:
@@ -235,9 +273,19 @@ def _candidates(names: Mapping[str, _Name]) -> tuple[set[tuple[str, str]], int, 
             together[("initials", letters, name.numbers)].append(entity_id)
         if len(name.every) == 1 and len(name.folded) > 1:
             together[("initials", name.folded, name.numbers)].append(entity_id)
-        spelled[entity_id] = frozenset().union(*map(_spellings, name.words))
+        # What spelling out the name would cost, known before any is made.
+        cost = sum(len(word) + 1 if _spelt(word) else 1 for word in name.words)
+        if cost <= room:
+            room -= cost
+            spelled[entity_id] = frozenset().union(*map(words.spellings, name.words))
+        else:
+            unspelt.add(entity_id)
+            spelled[entity_id] = name.words
         for spelling in spelled[entity_id]:
             held[at(spelling, name)].append(entity_id)
+
+    def spellings(entity_id: str, word: str) -> frozenset[str]:
+        return frozenset((word,)) if entity_id in unspelt else words.spellings(word)
 
     searches: list[tuple[int, tuple[str, ...], list[list[str]], str]] = []
     skipped: set[tuple[object, ...]] = set()
@@ -251,12 +299,12 @@ def _candidates(names: Mapping[str, _Name]) -> tuple[set[tuple[str, str]], int, 
         if not name.words:
             continue
 
-        def commonest(word: str, name: _Name = name) -> tuple[int, int, str]:
-            sizes = [len(held[at(spelling, name)]) for spelling in _spellings(word)]
+        def commonest(word: str, name: _Name = name, entity_id: str = entity_id) -> tuple[int, int, str]:
+            sizes = [len(held[at(spelling, name)]) for spelling in spellings(entity_id, word)]
             return max(sizes), sum(sizes), word
 
         lists = []
-        for spelling in sorted(_spellings(min(name.words, key=commonest))):
+        for spelling in sorted(spellings(entity_id, min(name.words, key=commonest))):
             members = held[at(spelling, name)]
             if len(members) > MAX_BLOCK:
                 skipped.add(("word", *at(spelling, name)))
@@ -265,25 +313,26 @@ def _candidates(names: Mapping[str, _Name]) -> tuple[set[tuple[str, str]], int, 
         searches.append((sum(map(len, lists)), ("word", entity_id), lists, entity_id))
     searches.sort(key=lambda search: (search[0], search[1]))
 
+    cuts = {"blocks_skipped": len(skipped), "spellings_cut": len(unspelt), "candidates_cut": 0}
     candidates: set[tuple[str, str]] = set()
     examined = 0
     for index, (cost, _, lists, searcher) in enumerate(searches):
         if examined + cost > MAX_EXAMINED:
-            return candidates, len(skipped), len(searches) - index
+            return candidates, {**cuts, "candidates_cut": len(searches) - index}
         examined += cost
         if searcher:
-            words = names[searcher].words
             found = {other for members in lists for other in members if other != searcher}
             pairs = {(min(searcher, other), max(searcher, other)) for other in found
-                     if all(not _spellings(word).isdisjoint(spelled[other]) for word in words)}
+                     if all(not spellings(searcher, word).isdisjoint(spelled[other])
+                            for word in names[searcher].words)}
         else:
             pairs = set(combinations(lists[0], 2))
         fresh = sorted(pairs - candidates)
-        room = MAX_CANDIDATES - len(candidates)
-        candidates.update(fresh[:room])
-        if len(fresh) > room:
-            return candidates, len(skipped), len(searches) - index
-    return candidates, len(skipped), 0
+        space = MAX_CANDIDATES - len(candidates)
+        candidates.update(fresh[:space])
+        if len(fresh) > space:
+            return candidates, {**cuts, "candidates_cut": len(searches) - index}
+    return candidates, cuts
 
 
 def _entity(entity: Entity) -> dict[str, object]:
@@ -331,20 +380,28 @@ class _Pair:
     union: int
     joined: list[tuple[str, str, str, tuple[int, ...]]]
 
-    def score(self, holds: "Callable[[int], bool]" = lambda fact_id: True) -> tuple[float, list[str], list[int]]:
-        """The likelihood, its reasons and its facts, counting only the
-        facts ``holds`` says still count."""
+    def score(self, holds: "Callable[[int], bool | None]" = lambda fact_id: True
+              ) -> tuple[float, list[str], list[int]]:
+        """The likelihood, its reasons and its facts. ``holds`` says whether
+        a fact still counts (True), has stopped (False) or was not read
+        again (None). A neighbour in common speaks for the pair only through
+        facts known to count; a relation between the two counts against it
+        through any fact not known to have stopped, and one not read again
+        is named without being cited."""
         shared = [(other, [f for f in left if holds(f)], [f for f in right if holds(f)])
                   for other, left, right in self.shared]
         shared = [(other, left, right) for other, left, right in shared if left and right]
-        joined = [(s, p, o, tuple(f for f in facts if holds(f))) for s, p, o, facts in self.joined]
+        joined = [(s, p, o, tuple(f for f in facts if holds(f) is not False)) for s, p, o, facts in self.joined]
         joined = [item for item in joined if item[3]]
         near = len(shared) / self.union if self.union else 0.0
         score = min(1.0, self.likeness + _NEAR * near) * (0.5 if joined else 1.0) if self.likeness else 0.0
+        known = {f for *_, facts in joined for f in facts if holds(f)}
         return score, [*self.named, *(["neighbours in common: " + ", ".join(other for other, _, _ in shared)]
                                       if shared else []),
-                       *(f"related to each other: {s} {p} {o} ({_cited(facts)})" for s, p, o, facts in joined)], \
-            sorted({f for _, left, right in shared for f in (*left, *right)} | {f for *_, facts in joined for f in facts})
+                       *(f"related to each other: {s} {p} {o} "
+                         f"({_cited([f for f in facts if f in known]) if known & set(facts) else 'not read again'})"
+                         for s, p, o, facts in joined)], \
+            sorted({f for _, left, right in shared for f in (*left, *right)} | known)
 
 
 async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: float, status: "StatusMode",
@@ -355,11 +412,11 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
     reasons = _reasons(read)
     entities = {entity.entity_id: entity for entity in projection.entities}
     names = {entity_id: _name(entity.key) for entity_id, entity in entities.items()}
-    candidates, skipped, unread = _candidates(names)
-    if skipped:
-        reasons.append(f"blocks_skipped {skipped}")
-    if unread:
-        reasons.append(f"candidates_cut {unread} blocks")
+    words = _Words()
+    candidates, cuts = _candidates(names, words)
+    reasons += [f"{cut} {count}{unit}" for cut, unit in (("blocks_skipped", ""), ("spellings_cut", " names"),
+                                                         ("candidates_cut", " blocks"))
+                if (count := cuts.get(cut, 0))]
 
     neighbours: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     between: dict[tuple[str, str], list[tuple[str, str, str, tuple[int, ...]]]] = defaultdict(list)
@@ -376,21 +433,13 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
         """The likelier name first: the more connected, then the earlier."""
         return (-len(neighbours[entity_id]), entities[entity_id].label.casefold(), entity_id)
 
-    letters: dict[str, set[str]] = {}
-
-    def letters_of(word: str) -> set[str]:
-        found = letters.get(word)
-        if found is None:
-            found = letters[word] = _letters(word)
-        return found
-
     compared: list[tuple[float, _Pair]] = []
     for pair in sorted(candidates):
         first, second = sorted(pair, key=canonical)
         a, b = entities[first], entities[second]
         if a.kind is not None and b.kind is not None and a.kind != b.kind:
             continue
-        likeness, why = _likeness(names[first], names[second], letters_of)
+        likeness, why = _likeness(names[first], names[second], words)
         if not likeness:
             continue
         shared = sorted(set(neighbours[first]) & set(neighbours[second]) - {first, second},
@@ -410,6 +459,7 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
     evidence = _Evidence(engine, space, status, parse_rfc3339(when), MAX_REREADS)
     shown: list[tuple[float, _Pair, list[str], list[int]]] = []
     stale: set[int] = set()
+    unread: set[int] = set()
     for index, (_, candidate) in enumerate(compared):
         if len(shown) == limit:
             reasons.append(f"pairs_cut {len(compared) - index}")
@@ -417,11 +467,14 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
         cited = candidate.score()[2]
         await evidence.fetch(cited)
         stale |= {fact_id for fact_id in cited if evidence.holds(fact_id) is False}
-        score, why, kept = candidate.score(lambda fact_id: evidence.holds(fact_id) is not False)
+        unread |= {fact_id for fact_id in cited if evidence.holds(fact_id) is None}
+        score, why, kept = candidate.score(evidence.holds)
         if score >= min_score and score > 0:
             shown.append((round(score, 3), candidate, why, kept))
     if stale:
         reasons.append(f"stale_evidence {len(stale)}")
+    if unread:
+        reasons.append(f"rereads_cut {len(unread)}")
     shown.sort(key=lambda item: (-item[0], entities[item[1].first].label.casefold(),
                                  entities[item[1].second].label.casefold(), item[1].first))
     pairs = tuple({"a": _entity(entities[c.first]), "b": _entity(entities[c.second]), "score": score, "reasons": why,

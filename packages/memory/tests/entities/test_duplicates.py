@@ -207,7 +207,7 @@ async def test_names_with_nothing_left_once_folded_are_not_alike(monkeypatch):
     from itertools import combinations
     from scone_memory.entities import duplicates as duplicates_module
 
-    monkeypatch.setattr(duplicates_module, "_candidates", lambda named: (set(combinations(sorted(named), 2)), 0, 0))
+    monkeypatch.setattr(duplicates_module, "_candidates", lambda named, words: (set(combinations(sorted(named), 2)), {}))
     engine = await engine_with(("...", "knows", "Zed"), ("!!!", "knows", "Zed"))
     found = await likely_duplicates(engine, "alpha", min_score=0.0)
     assert found.pairs == ()
@@ -239,7 +239,7 @@ async def test_short_words_must_be_spelt_alike(monkeypatch):
     from itertools import combinations
     from scone_memory.entities import duplicates as duplicates_module
 
-    monkeypatch.setattr(duplicates_module, "_candidates", lambda named: (set(combinations(sorted(named), 2)), 0, 0))
+    monkeypatch.setattr(duplicates_module, "_candidates", lambda named, words: (set(combinations(sorted(named), 2)), {}))
     engine = await engine_with(("bob stone", "based_in", "Lisbon"), ("rob stone", "based_in", "Lisbon"),
                                ("jon ruiz", "based_in", "Porto"), ("john ruiz", "based_in", "Porto"))
     found = await likely_duplicates(engine, "alpha", min_score=0.0)
@@ -298,7 +298,7 @@ async def test_the_blocks_find_every_pair_comparing_all_of_them_would(monkeypatc
         found = await likely_duplicates(engine, "alpha", min_score=min_score, limit=500)
         with monkeypatch.context() as patched:
             patched.setattr(duplicates_module, "_candidates",
-                            lambda named: (set(combinations(sorted(named), 2)), 0, 0))
+                            lambda named, words: (set(combinations(sorted(named), 2)), {}))
             everything = await likely_duplicates(engine, "alpha", min_score=min_score, limit=500)
         assert found.coverage["reasons"] == everything.coverage["reasons"] == []
         assert found.pairs == everything.pairs, min_score
@@ -507,3 +507,90 @@ async def test_a_misspelt_word_counts_for_how_alike_its_letters_are():
     firm = _alike(_letters("robotics"), _letters("robtics"))
     assert found[("welington", "wellington")] == round(city / (2 - city), 3)
     assert found[("acme robotics", "acme robtics")] == round((1 + firm) / (3 - firm), 3)
+
+
+async def test_facts_not_read_again_for_want_of_budget_count_for_nothing_and_are_said(monkeypatch):
+    """Past the re-read budget a cited fact is unknown: it supports no pair,
+    it is not cited, and the answer says how many went unread."""
+    from scone_memory.entities import duplicates as duplicates_module
+
+    monkeypatch.setattr(duplicates_module, "MAX_REREADS", 3)
+    engine = await engine_with(*[(name, f"link_{index}", "Lisbon") for index in range(4)
+                                 for name in ("acme robotics", "acmerobotics")],
+                               *[(name, f"link_{index}", f"City {index}") for index in range(4)
+                                 for name in ("acme robotics", "acmerobotics")])
+    reads: list[int] = []
+    original = engine.documents.get_fact
+
+    async def counted(space, fact_id):
+        reads.append(fact_id)
+        return await original(space, fact_id)
+
+    monkeypatch.setattr(engine.documents, "get_fact", counted)
+    found = await likely_duplicates(engine, "alpha")
+    [pair] = found.pairs
+    assert set(pair["fact_ids"]) <= set(reads)
+    assert any(reason.startswith("rereads_cut ") for reason in found.coverage["reasons"])
+    assert "coverage: limited: " in found.text
+
+
+async def test_a_relation_not_read_again_still_counts_against_a_pair(monkeypatch):
+    """What could make a pair less likely is not dropped for being unread."""
+    from scone_memory.entities import duplicates as duplicates_module
+
+    engine = await engine_with(("acme", "parent_of", "Acme Labs"), ("acme labs", "based_in", "Lisbon"))
+    monkeypatch.setattr(duplicates_module, "MAX_REREADS", 0)
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    pair = next(p for p in found.pairs if {p["a"]["key"], p["b"]["key"]} == {"acme", "acme labs"})
+    assert pair["score"] < 0.5 and "related to each other: acme parent_of Acme Labs (not read again)" in pair["reasons"]
+
+
+async def test_a_word_too_long_to_spell_out_must_be_spelt_alike(monkeypatch):
+    """Spelling out a word's misspellings costs its length squared, so past
+    NEAR_MAX_LETTERS a word matches only itself, in the search and the
+    score alike: nothing that long is expanded, and none is suggested
+    misspelt."""
+    from itertools import combinations
+    from scone_memory.entities import duplicates as duplicates_module
+
+    assert duplicates_module._spellings("a" * 4000) == frozenset({"a" * 4000})
+    long, longer = "b" * 40, "b" * 39 + "c"
+    fitting, fits = "d" * 20 + "robotics", "d" * 20 + "robtics"
+    engine = await engine_with((f"acme {long}", "based_in", "Lisbon"), (f"acme {longer}", "based_in", "Lisbon"),
+                               (f"acme {fitting}", "based_in", "Porto"), (f"acme {fits}", "based_in", "Porto"))
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    assert pairs(found) == [(f"acme {fitting}", f"acme {fits}")]
+    monkeypatch.setattr(duplicates_module, "_candidates", lambda named, words: (set(combinations(sorted(named), 2)), {}))
+    assert pairs(await likely_duplicates(engine, "alpha", min_score=0.0)) == pairs(found)
+
+
+async def test_spellings_past_the_budget_are_not_spelt_out_and_are_said(monkeypatch):
+    from scone_memory.entities import duplicates as duplicates_module
+
+    monkeypatch.setattr(duplicates_module, "MAX_SPELLINGS", 12)
+    engine = await engine_with(("acme robotics", "based_in", "Lisbon"), ("acme robtics", "based_in", "Lisbon"),
+                               ("zeta works", "based_in", "Porto"), ("zeta wroks", "based_in", "Porto"))
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    assert any(reason.startswith("spellings_cut ") for reason in found.coverage["reasons"])
+    assert "coverage: limited: " in found.text
+
+
+async def test_names_past_the_spelling_budget_are_found_by_their_words_alone(monkeypatch):
+    """Past MAX_SPELLINGS nothing more is spelt out: the names left are filed
+    under their words alone, their misspellings are not looked for, and how
+    many there were is said."""
+    from scone_memory.entities import duplicates as duplicates_module
+
+    monkeypatch.setattr(duplicates_module, "MAX_SPELLINGS", 0)
+    spelt = []
+    real = duplicates_module._spellings
+    monkeypatch.setattr(duplicates_module, "_spellings", lambda word: spelt.append(word) or real(word))
+    # Different initials, so only a spelling could bring the two together.
+    engine = await engine_with(("acme robotics", "based_in", "Lisbon"), ("acme gobotics", "based_in", "Lisbon"),
+                               ("acme", "based_in", "Lisbon"))
+    found = await likely_duplicates(engine, "alpha", min_score=0.0)
+    assert spelt == [], "nothing past the budget is spelt out"
+    assert ("acme gobotics", "acme robotics") not in pairs(found) and ("acme", "acme robotics") in pairs(found)
+    assert "spellings_cut 4 names" in found.coverage["reasons"]  # Lisbon is a name too
+    monkeypatch.setattr(duplicates_module, "MAX_SPELLINGS", 250_000)
+    assert ("acme gobotics", "acme robotics") in pairs(await likely_duplicates(engine, "alpha", min_score=0.0))

@@ -539,8 +539,10 @@ that decision. Nothing is merged.
     misspelling of a long word stands on its own, while one letter in a
     short name needs shared neighbours to reach 0.5.
   - A misspelling is one edit (a letter changed, added or dropped, or two
-    neighbouring letters swapped) in words of four letters or more. One
-    letter makes another word of a short one, so Bob is not Rob.
+    neighbouring letters swapped) in words of four to 32 letters. One
+    letter makes another word of a short one, so Bob is not Rob; and a
+    word longer than 32 letters must be spelt alike, because spelling out a
+    word's misspellings costs its length squared.
   - Two names that each keep a word the other has no spelling of name two
     things, however much else they share: "University of Lisbon" and
     "University of Porto", "John Smith" and "Jane Smith". One name may
@@ -565,6 +567,10 @@ that decision. Nothing is merged.
     exactly the same pairs.
   - A spelling held by more than 200 names is too common to search under,
     and is counted as `blocks_skipped N`.
+  - At most 250,000 spellings are filed for one answer, counted before any
+    is made. Names past that are filed under their words alone, so their
+    misspellings are not looked for, and are counted as `spellings_cut N
+    names`.
   - At most 1,000,000 pairs are looked at and 50,000 compared, the cheapest
     searches first; the rest are counted as `candidates_cut N blocks`.
   - On 10,000 generated names built from twelve syllables, as alike as
@@ -572,6 +578,12 @@ that decision. Nothing is merged.
     9,000 names of random words it compares 34,000 pairs, cuts nothing,
     and takes about half a second.
   - `coverage.compared` says how many pairs were compared.
+- **Evidence is read again before it is shown.** Each shown pair's cited
+  facts are re-read, at most 256 for one answer. A neighbour in common speaks
+  for a pair only through facts found to still count. A relation between the
+  two still counts against the pair when it was not read again, and is named
+  "not read again" rather than cited. Facts left unread are counted as
+  `rereads_cut N`, and the answer is fenced by the space's revision.
 - Each pair puts the likelier canonical name first: the more connected,
   then the earlier.
 - On the graph benchmark's fixture it suggests exactly its one non-case
@@ -1268,6 +1280,10 @@ With 20,000 facts on SQLite, a view costs:
   Chen" and "alice chen") stay two entities until identity decisions
   exist to record a merge. `/v1/entities/duplicates` suggests the pairs
   worth that decision, but merges nothing.
+- Duplicate suggestions read spellings, not meanings. "Acme Inc" and
+  "Acme Corp" each keep a word the other lacks, so they are not suggested,
+  and nor are spellings two edits apart ("Mohammed" and "Muhammad") or in
+  different scripts.
 - Every predicate is single-valued in the ledger. A new object under the
   same subject and predicate closes the one before it, so "alice knows
   Carol" from 2021 ends "alice knows Bob" from 2020. A graph of many-valued
