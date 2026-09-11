@@ -125,3 +125,17 @@ def test_a_crowded_ring_widens_so_its_members_never_touch():
         for right in drawn.nodes:
             if left.entity_id < right.entity_id:
                 assert math.dist((left.x, left.y), (right.x, right.y)) >= left.radius + right.radius
+
+
+def test_each_entity_takes_the_room_its_caller_says_it_needs():
+    """A drawing that writes a name under each circle passes the room the
+    name needs; rings and boxes are spaced by that room, not the circle."""
+    triples = [(f"worker {n}", "works_at", "Acme Robotics") for n in range(20)]
+    drawn = layout_projection(graph(*triples), room=lambda entity, radius: radius + 60)
+    for left in drawn.nodes:
+        for right in drawn.nodes:
+            if left.entity_id < right.entity_id:
+                assert math.dist((left.x, left.y), (right.x, right.y)) >= left.radius + right.radius + 120
+    [box] = drawn.groups
+    assert all(box.x <= node.x - node.radius - 60 and node.x + node.radius + 60 <= box.x + box.width
+               for node in drawn.nodes)

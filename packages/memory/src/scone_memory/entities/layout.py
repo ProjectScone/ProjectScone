@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import math
+from typing import Callable
 
 from .analysis import cached_analysis
 from .project import Entity, EntityProjection, Relation
@@ -117,10 +118,13 @@ def _rings(members: list[Entity], centre: str, neighbours: dict[str, list[str]],
 
 
 def layout_projection(projection: EntityProjection, *, max_nodes: int = MAX_NODES, max_edges: int = MAX_EDGES,
-                      resolution: float = 1.0, radii: tuple[float, float] = (_MIN_RADIUS, _MAX_RADIUS)) -> Drawing:
+                      resolution: float = 1.0, radii: tuple[float, float] = (_MIN_RADIUS, _MAX_RADIUS),
+                      room: Callable[[Entity, float], float] | None = None) -> Drawing:
     """Positions for the ``max_nodes`` most connected entities, by community.
-    An entity's radius grows with its relations, within ``radii``: a
-    drawing of cards passes the radius a card needs."""
+    An entity's radius grows with its relations, within ``radii``. ``room``
+    says how far from its centre an entity's drawing reaches, its name
+    included, given its radius; rings and boxes are spaced by that, so a
+    name never runs into another entity or out of its box."""
     degree = _degrees(projection)
     ranked = sorted(projection.entities, key=lambda e: (-degree[e.entity_id], e.label.casefold(), e.entity_id))
     shown = ranked[:max_nodes]
@@ -134,6 +138,8 @@ def layout_projection(projection: EntityProjection, *, max_nodes: int = MAX_NODE
     smallest, largest = radii
     radius = {entity.entity_id: smallest + (largest - smallest) * math.sqrt(degree[entity.entity_id] / busiest)
               for entity in shown}
+    reach = {entity.entity_id: room(entity, radius[entity.entity_id]) if room else radius[entity.entity_id]
+             for entity in shown}
     neighbours: dict[str, list[str]] = defaultdict(list)
     for relation in between:
         if relation.subject_id != relation.object_id:
@@ -160,11 +166,11 @@ def layout_projection(projection: EntityProjection, *, max_nodes: int = MAX_NODE
     # members allow, then the boxes packed in rows.
     laid = []
     for group_id, label, members, centre in groups:
-        offsets = _rings(members, centre, neighbours if group_id != UNLINKED else defaultdict(list), radius)
-        left = min(offsets[m.entity_id][0] - radius[m.entity_id] for m in members)
-        right = max(offsets[m.entity_id][0] + radius[m.entity_id] for m in members)
-        top = min(offsets[m.entity_id][1] - radius[m.entity_id] for m in members)
-        bottom = max(offsets[m.entity_id][1] + radius[m.entity_id] for m in members)
+        offsets = _rings(members, centre, neighbours if group_id != UNLINKED else defaultdict(list), reach)
+        left = min(offsets[m.entity_id][0] - reach[m.entity_id] for m in members)
+        right = max(offsets[m.entity_id][0] + reach[m.entity_id] for m in members)
+        top = min(offsets[m.entity_id][1] - reach[m.entity_id] for m in members)
+        bottom = max(offsets[m.entity_id][1] + reach[m.entity_id] for m in members)
         size = (right - left + 2 * _PAD, bottom - top + 2 * _PAD + _TITLE_ROOM + _NAME_ROOM)
         laid.append((group_id, label, members, offsets, (left, top), size))
     row_limit = max(max(size[0] for *_, size in laid), math.sqrt(sum(w * h for *_, (w, h) in laid)) * 1.3)

@@ -856,6 +856,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
+| `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -896,8 +897,23 @@ How each format places values and escapes its own syntax:
     browsers show on hover.
   - An arrow between communities is dashed and fainter, so communities
     stay legible, and a relation of an entity to itself is a loop.
-  - Names carry a white halo where an arrow runs under them. A box's title
-    is cut to its box, and a name to 32 characters.
+  - Names carry a white halo where an arrow runs under them.
+  - Every name is fitted to the width the layout made room for
+    (`textLength`), whatever font draws it, so no name runs into another
+    entity or out of its box. The layout spaces each entity by how far its
+    name reaches, not by its circle alone. A name is cut to 32 characters
+    and drawn at most 160 units wide, and a box's title is fitted to its
+    box.
+- **HTML** is one page that runs only its own code.
+  - Its content security policy fetches nothing and lets only the page's own
+    style and code run, each pinned by its SHA-256.
+  - It carries an empty icon of its own, so the browser asks the network for
+    none.
+  - The data (entities, relations and their facts) is a JSON block with
+    every `<`, `>` and `&` escaped, so no stored name can close it. The
+    page's code writes every name with `textContent`, never as markup.
+  - Entities can be reached by keyboard: Tab to one, and Enter or Space
+    opens its panel.
 - **Canvas** cards and group labels are escaped as notes are. Positions
   and sizes are whole numbers, as JSON Canvas requires. In the vault's
   `graph.canvas` each card is the entity's own note.

@@ -34,7 +34,7 @@ import csv
 import io
 import json
 import re
-from typing import Callable, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 import unicodedata
 from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
@@ -43,10 +43,13 @@ import zipfile
 from .markdown import literal
 from .project import Entity, EntityProjection
 
+if TYPE_CHECKING:
+    from .layout import Drawing
+
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
-                       "canvas"]
+                       "canvas", "html"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid", "svg", "canvas")
+                                            "mermaid", "svg", "canvas", "html")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -739,6 +742,32 @@ def _xml_text(value: object, limit: int | None = None) -> str:
     return _NOT_XML.sub(lambda match: _visible(match.group()), text)
 
 
+#: The widest a name under a circle is drawn; a longer one is fitted to it.
+_NAME_WIDTH = 160.0
+
+
+def _text_width(text: str, size: float = 11.0) -> float:
+    """About how wide the text is drawn at ``size``, from its characters.
+    Only an estimate, which is why the drawing fits each text to it."""
+    total = 0.0
+    for character in text:
+        if unicodedata.east_asian_width(character) in ("W", "F"):
+            total += 1.0
+        elif character in "iljtfr.,:;'|!() ":
+            total += 0.32
+        elif character.isupper():
+            total += 0.92 if character in "MW" else 0.68
+        else:
+            total += 0.58 if character.isdigit() else 0.56
+    return total * size
+
+
+def _fitted(parent: ElementTree.Element, tag: str, attributes: dict[str, str], text: str, width: float) -> None:
+    """Text the renderer draws exactly ``width`` wide, whatever its font."""
+    ElementTree.SubElement(parent, tag, {**attributes, "textLength": f"{width:.1f}",
+                                         "lengthAdjust": "spacingAndGlyphs"}).text = text
+
+
 def _drawing_notes(projection: EntityProjection, about: Mapping[str, object], left_out: tuple[int, int]) -> list[str]:
     coverage = about.get("coverage")
     reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
@@ -755,9 +784,25 @@ def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     sized by their relations, relations as arrows. Every circle and arrow
     carries a title naming it and, for an arrow, the facts behind it; the
     description says what view it draws and what it left out."""
+    root, _, _ = _svg_root(projection, about)
+    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
+    return Export(body + b"\n", "image/svg+xml", "graph.svg")
+
+
+def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tuple[ElementTree.Element, "Drawing",
+                                                                                     list[str]]:
+    """The drawing as an SVG element, with the layout and notes it came from."""
+    import math
+
     from .layout import layout_projection
 
-    drawing = layout_projection(projection, max_nodes=_SVG_NODES, max_edges=_SVG_EDGES)
+    names = {entity.entity_id: _xml_text(entity.label, _SVG_LABEL) for entity in projection.entities}
+    widths = {entity_id: min(_text_width(name), _NAME_WIDTH) for entity_id, name in names.items()}
+    # An entity reaches as far as the corner of its name, below its circle.
+    drawing = layout_projection(projection, max_nodes=_SVG_NODES, max_edges=_SVG_EDGES,
+                                room=lambda entity, radius: max(radius, math.hypot(
+                                    widths[entity.entity_id] / 2 + 2, radius + 17)))
+    notes = _drawing_notes(projection, about, drawing.left_out)
     ns = "http://www.w3.org/2000/svg"
     ElementTree.register_namespace("", ns)
     margin = 24.0
@@ -770,8 +815,7 @@ def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         "viewBox": f"0 0 {number(width)} {number(height)}", "width": number(width), "height": number(height),
         "role": "img", "font-family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "font-size": "11"})
     ElementTree.SubElement(root, f"{{{ns}}}title").text = f"Knowledge graph {_xml_text(projection.space)}"
-    ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(
-        _xml_text(note) for note in _drawing_notes(projection, about, drawing.left_out))
+    ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(_xml_text(note) for note in notes)
     marker = ElementTree.SubElement(ElementTree.SubElement(root, f"{{{ns}}}defs"), f"{{{ns}}}marker", {
         "id": "arrow", "viewBox": "0 0 10 10", "refX": "10", "refY": "5", "markerWidth": "7", "markerHeight": "7",
         "orient": "auto-start-reverse"})
@@ -786,10 +830,11 @@ def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
             "x": number(box.x + margin), "y": number(box.y + margin), "width": number(box.width),
             "height": number(box.height), "rx": "14", "fill": colour, "fill-opacity": "0.07", "stroke": colour,
             "stroke-opacity": "0.45"})
-        # A title is cut to its box, at about 6.6 pixels a character.
-        ElementTree.SubElement(boxes, f"{{{ns}}}text", {
-            "x": number(box.x + margin + 12), "y": number(box.y + margin + 20), "font-weight": "600",
-            "fill": "#333333"}).text = _xml_text(box.label, max(8, min(60, int((box.width - 24) / 6.6))))
+        # A title is cut to about what its box holds, then fitted to it.
+        title = _xml_text(box.label, max(8, min(60, int((box.width - 24) / 6.6))))
+        _fitted(boxes, f"{{{ns}}}text", {"x": number(box.x + margin + 12), "y": number(box.y + margin + 20),
+                                         "font-weight": "600", "fill": "#333333"},
+                title, min(_text_width(title) * 1.08, box.width - 24))
     at = {node.entity_id: node for node in drawing.nodes}
     labels = {entity.entity_id: entity.label for entity in projection.entities}
     arrows = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "relations", "stroke": "#6b6b6b"})
@@ -811,7 +856,7 @@ def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
             dx, dy = target.x - source.x, target.y - source.y
             length = max((dx * dx + dy * dy) ** 0.5, 1e-9)
             ux, uy = dx / length, dy / length
-            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {
+            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {"data-relation": relation.relation_id,
                 "x1": number(source.x + margin + ux * source.radius), "y1": number(source.y + margin + uy * source.radius),
                 "x2": number(target.x + margin - ux * (target.radius + 1)),
                 "y2": number(target.y + margin - uy * (target.radius + 1)),
@@ -819,19 +864,174 @@ def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         ElementTree.SubElement(element, f"{{{ns}}}title").text = title
     circles = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "entities"})
     for node in drawing.nodes:
-        group = ElementTree.SubElement(circles, f"{{{ns}}}g")
+        group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id})
         circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
             "cx": number(node.x + margin), "cy": number(node.y + margin), "r": number(node.radius),
             "fill": colour_of[node.group_id], "stroke": "#ffffff", "stroke-width": "1.5"})
         ElementTree.SubElement(circle, f"{{{ns}}}title").text = (
             f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}")
         # A white halo keeps a name legible where an arrow runs under it.
-        ElementTree.SubElement(group, f"{{{ns}}}text", {
+        _fitted(group, f"{{{ns}}}text", {
             "x": number(node.x + margin), "y": number(node.y + margin + node.radius + 12), "text-anchor": "middle",
             "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3", "paint-order": "stroke",
-            "stroke-linejoin": "round"}).text = _xml_text(node.label, _SVG_LABEL)
-    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
-    return Export(body + b"\n", "image/svg+xml", "graph.svg")
+            "stroke-linejoin": "round"}, names[node.entity_id], widths[node.entity_id])
+    return root, drawing, notes
+
+
+_HTML_STYLE = """
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1d1d1f; background: #f6f6f4; }
+body { display: grid; grid-template-rows: auto 1fr; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; padding: 12px 16px;
+  border-bottom: 1px solid #dcdcd8; background: #ffffff; }
+header h1 { margin: 0; font-size: 16px; }
+header p { margin: 0; color: #5b5b5b; font-size: 12px; flex: 1 1 320px; }
+input { font: inherit; padding: 6px 10px; border: 1px solid #c6c6c2; border-radius: 6px; min-width: 220px; }
+main { display: grid; grid-template-columns: 1fr minmax(260px, 340px); min-height: 0; }
+#drawing { min-width: 0; min-height: 0; overflow: hidden; background: #ffffff; }
+#drawing svg { width: 100%; height: 100%; cursor: grab; touch-action: none; }
+aside { border-left: 1px solid #dcdcd8; padding: 16px; overflow: auto; background: #fbfbfa; }
+aside h2 { margin: 0 0 4px; font-size: 16px; overflow-wrap: anywhere; }
+aside ul { padding-left: 18px; }
+aside li { margin: 4px 0; overflow-wrap: anywhere; }
+aside button { font: inherit; color: #0b57d0; background: none; border: 0; padding: 0; cursor: pointer;
+  text-decoration: underline; }
+.muted { color: #5b5b5b; }
+g[data-entity] { cursor: pointer; }
+g[data-entity]:focus { outline: none; }
+g[data-entity]:focus circle, g.chosen circle { stroke: #1d1d1f; stroke-width: 3; }
+g.dim { opacity: 0.15; }
+@media (max-width: 720px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  aside { border-left: 0; border-top: 1px solid #dcdcd8; max-height: 40vh; } }
+"""
+
+# The page's own code. Every stored name reaches the page through the
+# data block and is written with textContent, never parsed as markup.
+_HTML_CODE = """
+(function () {
+  "use strict";
+  var data = JSON.parse(document.getElementById("graph-data").textContent);
+  var svg = document.querySelector("#drawing svg");
+  var panel = document.getElementById("details");
+  var nodes = {}, links = {}, shapes = {};
+  data.nodes.forEach(function (node) { nodes[node.id] = node; links[node.id] = []; });
+  data.edges.forEach(function (edge) {
+    links[edge.source].push(edge);
+    if (edge.target !== edge.source) { links[edge.target].push(edge); }
+  });
+  function element(tag, value, name) {
+    var made = document.createElement(tag);
+    made.textContent = value;
+    if (name) { made.className = name; }
+    return made;
+  }
+  function cited(ids) { return (ids.length === 1 ? "fact " : "facts ") + ids.join(", "); }
+  function show(id) {
+    var node = nodes[id];
+    Object.keys(shapes).forEach(function (key) { shapes[key].classList.toggle("chosen", key === id); });
+    panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \u00b7 " + id, "muted"));
+    var list = document.createElement("ul");
+    links[id].forEach(function (edge) {
+      var outgoing = edge.source === id, other = nodes[outgoing ? edge.target : edge.source];
+      var item = document.createElement("li");
+      item.appendChild(element("span", outgoing ? edge.predicate + " \u2192 " : "\u2190 " + edge.predicate + " "));
+      var go = element("button", other.label);
+      go.type = "button";
+      go.addEventListener("click", function () { show(other.id); shapes[other.id].focus(); });
+      item.appendChild(go);
+      item.appendChild(element("span", " (" + cited(edge.fact_ids) + ")", "muted"));
+      list.appendChild(item);
+    });
+    panel.appendChild(list.childElementCount ? list : element("p", "No relation of it is drawn.", "muted"));
+  }
+  svg.querySelectorAll("g[data-entity]").forEach(function (shape) {
+    var id = shape.getAttribute("data-entity");
+    shapes[id] = shape;
+    shape.setAttribute("tabindex", "0");
+    shape.setAttribute("role", "button");
+    shape.setAttribute("aria-label", nodes[id].label);
+    shape.addEventListener("click", function () { if (!moved) { show(id); } });
+    shape.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(id); }
+    });
+  });
+  document.getElementById("search").addEventListener("input", function (event) {
+    var wanted = event.target.value.trim().toLocaleLowerCase();
+    Object.keys(shapes).forEach(function (key) {
+      shapes[key].classList.toggle("dim", wanted !== "" && nodes[key].label.toLocaleLowerCase().indexOf(wanted) < 0);
+    });
+  });
+  var view = svg.viewBox.baseVal, start = null, moved = false;
+  svg.addEventListener("wheel", function (event) {
+    event.preventDefault();
+    var scale = event.deltaY > 0 ? 1.15 : 1 / 1.15, point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    var at = point.matrixTransform(svg.getScreenCTM().inverse());
+    view.x = at.x - (at.x - view.x) * scale;
+    view.y = at.y - (at.y - view.y) * scale;
+    view.width *= scale;
+    view.height *= scale;
+  }, { passive: false });
+  svg.addEventListener("pointerdown", function (event) {
+    start = { x: event.clientX, y: event.clientY, left: view.x, top: view.y };
+    moved = false;
+  });
+  window.addEventListener("pointermove", function (event) {
+    if (!start) { return; }
+    var ratio = view.width / svg.clientWidth, dx = event.clientX - start.x, dy = event.clientY - start.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; }
+    view.x = start.left - dx * ratio;
+    view.y = start.top - dy * ratio;
+  });
+  window.addEventListener("pointerup", function () { start = null; });
+})();
+"""
+
+
+def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The drawing as one interactive page that fetches nothing: search by
+    name, a panel listing a chosen entity's relations with their facts,
+    and zoom and pan. Its data is a JSON block every name reaches the page
+    through, written as text and never parsed as markup, and its content
+    security policy lets only its own style and code run."""
+    import base64
+    import hashlib
+    import html as markup
+
+    root, drawing, notes = _svg_root(projection, about)
+    said = "; ".join(notes)
+    data = {"about": said,
+            "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id}
+                      for node in drawing.nodes],
+            "edges": [{"id": relation.relation_id, "source": relation.subject_id, "target": relation.object_id,
+                       "predicate": relation.predicate, "fact_ids": list(relation.fact_ids)}
+                      for relation in drawing.edges]}
+    block = (json.dumps(data, ensure_ascii=True, sort_keys=True)
+             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+    def pinned(text: str) -> str:
+        return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode() + "'"
+
+    policy = f"default-src 'none'; img-src data:; script-src {pinned(_HTML_CODE)}; style-src {pinned(_HTML_STYLE)}"
+    title = f"Knowledge graph {projection.space}"
+    drawn = ElementTree.tostring(root, encoding="unicode").replace("\r", "&#13;")
+    page = "\n".join([
+        "<!DOCTYPE html>", '<html lang="en">', "<head>", '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f'<meta http-equiv="Content-Security-Policy" content="{policy}">',
+        # An empty icon of its own, so the browser asks the network for none.
+        '<link rel="icon" href="data:,">',
+        f"<title>{markup.escape(title)}</title>", f"<style>{_HTML_STYLE}</style>", "</head>", "<body>",
+        f"<header><h1>{markup.escape(title)}</h1><p>{markup.escape(said)}</p>",
+        '<input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity"></header>',
+        f'<main><div id="drawing">{drawn}</div>',
+        '<aside id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
+        "facts behind them.</p></aside></main>",
+        f'<script id="graph-data" type="application/json">{block}</script>',
+        f'<script id="graph-code">{_HTML_CODE}</script>', "</body>", "</html>", ""])
+    return Export(page.encode("utf-8", "backslashreplace"), "text/html", "graph.html")
 
 
 #: A card's size on a canvas, and the radius the layout gives it so no two touch.
@@ -884,7 +1084,7 @@ def _canvas(projection: EntityProjection, about: Mapping[str, object]) -> Export
 
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
-    "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas,
+    "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas, "html": _html,
 }
 
 

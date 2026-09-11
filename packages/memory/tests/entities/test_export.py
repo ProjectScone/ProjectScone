@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import unicodedata
 import xml.etree.ElementTree as ElementTree
@@ -43,7 +44,7 @@ def projection():
 
 def test_every_format_is_offered():
     assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid",
-                                   "svg", "canvas"}
+                                   "svg", "canvas", "html"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -689,3 +690,109 @@ def test_canvas_cards_take_their_communitys_colour(projection):
         group = next(g for g in canvas["nodes"] if g["type"] == "group" and g["x"] <= card["x"] <= g["x"] + g["width"]
                      and g["y"] <= card["y"] <= g["y"] + g["height"])
         assert card.get("color") == colour[group["id"].removeprefix("group-")]
+
+
+def _page(body: bytes):
+    from html.parser import HTMLParser
+
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags, self.data, self.inside = [], {}, None
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append((tag, dict(attrs)))
+            self.inside = dict(attrs).get("id") if tag == "script" else None
+
+        def handle_data(self, data):
+            if self.inside:
+                self.data[self.inside] = self.data.get(self.inside, "") + data
+
+    page = Page()
+    page.feed(body.decode("utf-8"))
+    return page
+
+
+def test_html_is_one_page_with_the_drawing_its_data_and_nothing_fetched(projection):
+    exported = export_graph(projection, "html", about={"status": "current", "as_of": "2025-06-01T00:00:00.000Z"})
+    assert exported.media_type == "text/html" and exported.filename == "graph.html"
+    page = _page(exported.body)
+    tags = [tag for tag, _ in page.tags]
+    assert tags.count("svg") == 1 and "input" in tags
+    assert not any(attrs.get("src") or (tag == "link" and not attrs.get("href", "").startswith("data:"))
+                   for tag, attrs in page.tags), "nothing fetched"
+    assert ("link", {"rel": "icon", "href": "data:,"}) in page.tags, "not even an icon"
+    data = json.loads(page.data["graph-data"])
+    assert {node["id"] for node in data["nodes"]} == {entity.entity_id for entity in projection.entities}
+    shapes = {attrs["data-entity"] for tag, attrs in page.tags if tag == "g" and "data-entity" in attrs}
+    assert shapes == {node["id"] for node in data["nodes"]}, "every entity's shape can be found by its id"
+    works = next(edge for edge in data["edges"] if edge["predicate"] == "works_at")
+    assert works["fact_ids"] == [1] and data["about"].startswith("projection ")
+    assert b"Content-Security-Policy" in exported.body and b"default-src 'none'" in exported.body
+
+
+def test_html_keeps_hostile_names_as_data():
+    hostile = '</script><script>alert(1)</script><img src=x onerror=alert(2)>'
+    projection = project_entities("alpha", [fact(1, hostile, "knows", "Alice Chen")], revision=1)
+    body = export_graph(projection, "html").body
+    assert body.count(b"<script") == 2, "only the page's own data and code"
+    assert b"<img" not in body and b"onerror" not in body.replace(b"onerror=alert", b"")
+    data = json.loads(_page(body).data["graph-data"])
+    assert any(node["label"] == hostile for node in data["nodes"])
+
+
+def test_html_code_writes_names_as_text_never_as_markup(projection):
+    code = _page(export_graph(projection, "html").body).data["graph-code"]
+    assert "textContent" in code and "innerHTML" not in code and "eval(" not in code
+
+
+def _label_boxes(root):
+    """Each name's box as the SVG fixes it: textLength wide, centred on x."""
+    boxes = []
+    for text in root.iter(f"{SVG}text"):
+        if text.get("text-anchor") == "middle":
+            width, x, y = float(text.get("textLength")), float(text.get("x")), float(text.get("y"))
+            assert text.get("lengthAdjust") == "spacingAndGlyphs"
+            boxes.append((x - width / 2, y - 11, x + width / 2, y + 3))
+    return boxes
+
+
+@pytest.mark.parametrize("workers", [1, 20])
+def test_svg_names_fit_the_drawing_and_never_overlap(workers):
+    """Long names on a crowded ring: every name is fitted to the width the
+    layout made room for, inside the drawing and clear of every other."""
+    triples = [(f"Alexandria Montgomery Researcher {n}", "works_at", "Wellington International Company")
+               for n in range(workers)]
+    projection = project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+    root = ElementTree.fromstring(export_graph(projection, "svg").body)
+    _, _, width, height = map(float, root.get("viewBox").split())
+    boxes = _label_boxes(root)
+    assert len(boxes) == workers + 1
+    for left, top, right, bottom in boxes:
+        assert 0 <= left and right <= width and 0 <= top and bottom <= height
+    for index, a in enumerate(boxes):
+        for b in boxes[index + 1:]:
+            assert a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1], (a, b)
+    circles = [(float(c.get("cx")), float(c.get("cy")), float(c.get("r"))) for c in root.iter(f"{SVG}circle")]
+    for left, top, right, bottom in boxes:
+        for cx, cy, r in circles:
+            nearest = (min(max(cx, left), right), min(max(cy, top), bottom))
+            assert math.dist(nearest, (cx, cy)) >= r - 1e-9 or top >= cy + r - 1e-9, "no name over a circle"
+
+
+def test_svg_box_titles_are_fitted_to_their_boxes():
+    triples = [(f"worker {n}", "works_at", "Acme Robotics International Holdings") for n in range(2)]
+    projection = project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+    root = ElementTree.fromstring(export_graph(projection, "svg").body)
+    [box] = root.find(f"{SVG}g[@class='communities']").findall(f"{SVG}rect")
+    [title] = root.find(f"{SVG}g[@class='communities']").findall(f"{SVG}text")
+    assert float(title.get("textLength")) <= float(box.get("width")) - 24
+    assert title.get("lengthAdjust") == "spacingAndGlyphs"
+
+
+def test_a_names_width_is_estimated_from_its_letters():
+    """Fitting a name to its estimate distorts it little only if the
+    estimate is close: narrow letters, capitals and wide characters differ."""
+    from scone_memory.entities.export import _text_width
+
+    assert _text_width("illi") < _text_width("oooo") < _text_width("OOOO") < _text_width("MMMM") < _text_width("漢字漢字")
