@@ -678,3 +678,16 @@ async def test_one_huge_predicate_cannot_make_the_schema_huge():
         response = client.get("/v1/graph/schema", params={"limit": 1}, headers=auth())
     entry = response.json()["predicates"][0]
     assert len(response.content) < 4_000 and entry["clipped"] is True and entry["length"] == 200_000
+
+
+async def test_a_schema_from_a_capped_read_says_it_is_partial(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for subject, predicate, value in (("alice", "works_at", "Acme"), ("bob", "lives_in", "Lisbon"), ("carol", "knows", "Bob")):
+        await engine.assert_fact("alpha", subject, predicate, value, valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        body = client.get("/v1/graph/schema", headers=auth()).json()
+    assert body["complete"] is False and body["truncated"] is True and body["truncated_by"] == ["read"]
+    assert body["predicates_total"] == 2

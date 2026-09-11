@@ -82,7 +82,11 @@ def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: i
         raise ValueError(f"limit must be from 1 to {MAX_PREDICATES}")
     if not 1_024 <= max_bytes <= MAX_BYTES_LIMIT:
         raise ValueError(f"max_bytes must be from 1024 to {MAX_BYTES_LIMIT}")
-    kind_of: dict[str, str | None] = {entity.entity_id: entity.kind for entity in projection.entities}
+    # An entity whose hints disagree has no kind; at a join it is shown as
+    # contested, not filed with the entities nothing hinted at.
+    kind_of: dict[str, str | None] = {
+        entity.entity_id: entity.kind or ("contested" if entity.kind_status == "conflict" else None)
+        for entity in projection.entities}
     joins: dict[str, list[tuple[str | None, str | None, int]]] = {}
     values: dict[str, list[tuple[str | None, str | None, int]]] = {}
     for relation in projection.relations:
@@ -106,12 +110,11 @@ def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: i
             break
         listed.append(entry)
         used += _size(entry)
-    cut_by = None if len(listed) == len(entries) else "limit" if len(listed) == limit else "max_bytes"
+    cut_by = [] if len(listed) == len(entries) else ["limit"] if len(listed) == limit else ["max_bytes"]
 
-    entities = Counter(entity.kind for entity in projection.entities)
-    inferred = Counter(entity.kind for entity in projection.entities if entity.kind_status == "inferred")
-    kinds = [{"kind": kind, "entities": count, "inferred": inferred[kind]}
-             for kind, count in sorted(entities.items(), key=lambda item: (-item[1], _kind_order(item[0])))]
+    known = Counter((entity.kind, str(entity.kind_status)) for entity in projection.entities)
+    kinds = [{"kind": kind, "status": status, "entities": count} for (kind, status), count in sorted(
+        known.items(), key=lambda item: (-item[1], _kind_order(item[0][0]), item[0][1]))]
     return {
         "totals": {"entities": len(projection.entities), "relations": len(projection.relations),
                    "attributes": len(projection.attributes), "facts": sum(map(_facts, entries)),
@@ -119,7 +122,7 @@ def graph_schema(projection: EntityProjection, *, limit: int = 200, max_bytes: i
         "kinds": kinds,
         "predicates": listed,
         "predicates_total": len(entries),
-        "truncated": cut_by is not None,
+        "truncated": bool(cut_by),
         "truncated_by": cut_by,
     }
 
@@ -144,9 +147,10 @@ def schema_lines(schema: dict[str, object], *, header: str, reasons: Iterable[st
              f"{_plural(totals['relations'], 'relation')}, {_plural(totals['attributes'], 'value')}, "
              f"{_plural(totals['facts'], 'fact')}, {_plural(totals['predicates'], 'predicate')}"]
     for kind in cast(list[dict[str, object]], schema["kinds"]):
-        count, inferred = cast(int, kind["entities"]), cast(int, kind["inferred"])
-        lines.append(f"kind: {_end(kind['kind'], False)}, {_plural(count, 'entity', 'entities')}"
-                     + (f" ({inferred} inferred)" if inferred else ""))
+        status, count = str(kind["status"]), cast(int, kind["entities"])
+        name = kind["kind"] if kind["kind"] is not None else "contested" if status == "conflict" else None
+        lines.append(f"kind: {_end(name, False)}, {_plural(count, 'entity', 'entities')}"
+                     + (f", {status}" if kind["kind"] is not None else ""))
     for entry in cast(list[dict[str, object]], schema["predicates"]):
         shapes = [f"{_end(join['subject'], True)} -> {_end(join['object'], True)} x{join['relations']}"
                   for join in cast(list[dict[str, object]], entry["joins"])]
@@ -167,8 +171,11 @@ async def schema_record(engine: "MemoryEngine", space: str, *, status: "StatusMo
     when = as_of if as_of is not None else engine.clock()
     projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
     complete, read = read_record(coverage)
+    schema = graph_schema(projection, limit=limit, max_bytes=max_bytes)
+    # A capped read counts only the predicates it saw: the list is partial.
+    cuts = (["read"] if not complete else []) + cast(list[str], schema["truncated_by"])
     return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
-            "filters": {"status": status, "as_of": when}, **graph_schema(projection, limit=limit, max_bytes=max_bytes),
+            "filters": {"status": status, "as_of": when}, **schema, "truncated": bool(cuts), "truncated_by": cuts,
             "complete": complete, "coverage": read}
 
 

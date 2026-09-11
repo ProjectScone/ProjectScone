@@ -29,11 +29,29 @@ def projected(rows=ROWS):
 def test_kinds_are_counted_with_how_they_were_known():
     schema = graph_schema(projected())
     assert schema["kinds"] == [
-        {"kind": "organisation", "entities": 2, "inferred": 2},
-        {"kind": "person", "entities": 2, "inferred": 2},
-        {"kind": "place", "entities": 1, "inferred": 1},
-        {"kind": None, "entities": 1, "inferred": 0},
+        {"kind": "organisation", "status": "inferred", "entities": 2},
+        {"kind": "person", "status": "inferred", "entities": 2},
+        {"kind": "place", "status": "inferred", "entities": 1},
+        {"kind": None, "status": "unknown", "entities": 1},
     ]
+
+
+def test_a_contested_kind_is_its_own_row_and_its_own_end_of_a_join():
+    """Jordan works somewhere (a person) and employs someone (an
+    organisation): the hints disagree, and the schema says so rather than
+    filing Jordan with the entities nobody hinted at."""
+    schema = graph_schema(projected([("jordan", "works_at", "Acme"), ("sam", "employed_by", "Jordan"),
+                                     ("project atlas", "status", "ready")]))
+    assert {"kind": None, "status": "conflict", "entities": 1} in schema["kinds"]
+    assert {"kind": None, "status": "unknown", "entities": 1} in schema["kinds"]
+    by_name = {entry["predicate"]: entry for entry in schema["predicates"]}
+    assert by_name["works_at"]["joins"][0]["subject"] == "contested"
+    assert by_name["employed_by"]["joins"][0]["object"] == "contested"
+    from scone_memory.entities.schema import schema_lines
+
+    lines = schema_lines(schema, header="schema", reasons=[]).splitlines()
+    assert "kind: contested, 1 entity" in lines and "kind: unknown, 1 entity" in lines
+    assert "predicate: works_at, 1 fact: (contested) -> (organisation) x1" in lines
 
 
 def test_each_predicate_says_which_kinds_it_joins_and_which_values_it_takes():
@@ -81,7 +99,7 @@ def test_the_schema_reads_as_lines_for_a_model():
     lines = text.splitlines()
     assert lines[:3] == ["schema: space alpha", "coverage: complete",
                          "totals: 6 entities, 5 relations, 3 values, 8 facts, 6 predicates"]
-    assert "kind: organisation, 2 entities (2 inferred)" in lines and "kind: unknown, 1 entity" in lines
+    assert "kind: organisation, 2 entities, inferred" in lines and "kind: unknown, 1 entity" in lines
     assert "predicate: works_at, 2 facts: (person) -> (organisation) x2" in lines
     assert "predicate: age, 2 facts: (person) -> quantity x2" in lines
     assert lines[-1] == "omitted: 1 predicate"
@@ -124,7 +142,7 @@ def test_a_byte_budget_bounds_the_listed_predicates_and_says_it_cut():
     rows = [(f"person {n}", f"predicate_{n:03d}_" + "z" * 150, "v") for n in range(40)]
     schema = graph_schema(projected(rows), max_bytes=2_000)
     listed = schema["predicates"]
-    assert 0 < len(listed) < 40 and schema["truncated"] is True and schema["truncated_by"] == "max_bytes"
+    assert 0 < len(listed) < 40 and schema["truncated"] is True and schema["truncated_by"] == ["max_bytes"]
     assert sum(len(json.dumps(entry, ensure_ascii=False).encode()) + 1 for entry in listed) <= 2_000
-    assert graph_schema(projected(rows), limit=3)["truncated_by"] == "limit"
-    assert graph_schema(projected())["truncated_by"] is None
+    assert graph_schema(projected(rows), limit=3)["truncated_by"] == ["limit"]
+    assert graph_schema(projected())["truncated_by"] == []

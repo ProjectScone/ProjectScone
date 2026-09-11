@@ -351,17 +351,22 @@ as it is rather than declared ahead of the facts. Advertised as
 
 The answer has four parts:
 
-- `kinds`: each entity kind, with how many entities have it and how
-  many of those were inferred. Entities with no kind are counted under
-  `null`.
+- `kinds`: each entity kind with its `status` and how many entities
+  have it. The status says how the kind is known, for example
+  `inferred`. Entities with no kind are counted under `null`, split into
+  `unknown` (nothing hinted at a kind) and `conflict` (the hints
+  disagree). At either end of a join, a contested entity is shown as
+  `contested`.
 - `predicates`: each predicate with its fact, relation and attribute
   counts. `joins` lists the kind pairs it connects, such as `person` to
   `organisation`, with counts. `values` lists the value kinds it takes,
   such as a `person`'s `quantity`.
 - `totals`: the whole view's counts.
 - `predicates_total`, `truncated` and `truncated_by`: how many predicates
-  there are, whether the list was cut, and whether `limit` or
-  `max_bytes` cut it.
+  there are, whether the list is partial, and why. `truncated_by` lists
+  `read` when the ledger read was capped, so predicates it never saw are
+  missing from the total. It lists `limit` or `max_bytes` when those cut
+  the list.
 
 A predicate longer than 200 characters is shown clipped, with
 `clipped`, its full `length` and `term_sha256`. That way two long

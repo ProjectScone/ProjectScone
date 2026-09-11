@@ -467,7 +467,7 @@ async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
     error, text = await call(server, "memory_graph_schema")
     lines = text.splitlines()
     assert not error and lines[0].startswith("schema: space default, current facts as of ")
-    assert lines[1] == "coverage: complete" and "kind: person, 1 entity (1 inferred)" in lines
+    assert lines[1] == "coverage: complete" and "kind: person, 1 entity, inferred" in lines
     assert "predicate: works_at, 1 fact: (person) -> (organisation) x1" in lines
     error, text = await call(server, "memory_graph_schema", limit=0)
     assert error and "limit" in text
