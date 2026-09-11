@@ -194,11 +194,162 @@ async def test_more_rows_than_the_limit_are_counted():
 
 
 async def test_a_search_cut_short_never_says_no_match(monkeypatch):
-    monkeypatch.setattr(match_module, "MAX_BINDINGS", 3)
+    monkeypatch.setattr(match_module, "MAX_WORK", 3)
     engine = await seeded()
     found = await graph_match(engine, "alpha", where("?a | ?p | ?b", "?c | ?q | ?d"))
-    assert "bindings_cut" in found.coverage["reasons"] and found.rows == ()
-    assert lines(found.text, "result: ") == ["result: no match among the bindings searched"]
+    assert "search_cut" in found.coverage["reasons"] and found.rows == ()
+    assert lines(found.text, "result: ") == ["result: no match within the search budget"]
+
+
+async def test_every_candidate_examined_is_charged_even_when_it_is_refused(monkeypatch):
+    monkeypatch.setattr(match_module, "MAX_WORK", 3)
+    monkeypatch.setattr(match_module, "_extend", lambda *arguments: None)
+    engine = await seeded()
+    found = await graph_match(engine, "alpha", where("?a | ?p | ?b"))
+    assert "search_cut" in found.coverage["reasons"] and found.coverage["searched"] > 3
+
+
+async def test_a_variable_bound_to_an_entity_matches_no_predicate_and_costs_nothing():
+    """?org is an organisation after the first pattern; as a predicate in
+    the second it can match nothing, so nothing is tried."""
+    engine = await seeded()
+    for n in range(50):
+        await engine.assert_fact("alpha", f"person {n}", "works_at", "Acme Robotics", valid_from=DAY)
+    found = await graph_match(engine, "alpha", where("?who | works_at | ?org", "?x | ?org | ?y"))
+    assert found.status == "none" and found.coverage["searched"] == 51
+
+
+async def test_a_value_and_a_predicate_of_one_name_never_stand_for_each_other_and_cost_nothing():
+    """Badges are labelled with predicate names. A label bound as a value
+    looks at no predicate's facts, and a predicate bound first looks at no
+    label, though the names are the same."""
+    engine = await seeded()
+    await engine.assert_fact("alpha", "badge 7", "label", "works_at", valid_from=DAY)
+    await engine.assert_fact("alpha", "badge 8", "label", "joined_on", valid_from=DAY)
+    for n in range(20):
+        await engine.assert_fact("alpha", f"person {n}", "works_at", "Acme Robotics", valid_from=DAY)
+    as_predicate = await graph_match(engine, "alpha", where("?thing | label | ?v", "?x | ?v | ?y"))
+    assert as_predicate.status == "none" and as_predicate.coverage["searched"] == 2
+    as_value = await graph_match(engine, "alpha", where("alice chen | ?p | May 2021", "?thing | label | ?p"))
+    assert as_value.status == "none" and as_value.coverage["searched"] == 1
+
+
+async def test_each_pattern_is_matched_from_its_smallest_index():
+    engine = await seeded()
+    for n in range(10):
+        await engine.assert_fact("alpha", f"person {n}", "works_at", "Globex", valid_from=DAY)
+    found = await graph_match(engine, "alpha", where("?who | works_at | acme robotics"))
+    assert keys(found, "?who") == ["alice chen"] and found.coverage["searched"] == 1
+
+
+async def test_comparing_when_facts_held_is_charged_too(monkeypatch):
+    monkeypatch.setattr(match_module, "MAX_WORK", 2)
+    engine = await seeded()
+    found = await graph_match(engine, "alpha", where("?who | works_at | ?org", "?org | based_in | ?city"))
+    assert found.rows == () and "search_cut" in found.coverage["reasons"]
+
+
+class Changing(InMemoryDocumentStore):
+    """Runs an action the first time the answer re-reads one of its facts."""
+    targets: set[int] = set()
+    action = None
+
+    async def get_fact(self, space, fact_id):
+        if fact_id in self.targets:
+            self.targets.discard(fact_id)
+            await self.action(fact_id)
+        return await super().get_fact(space, fact_id)
+
+
+async def test_when_facts_held_together_is_judged_on_the_facts_as_reread():
+    """Alice's job at Acme looked open when matched; before the row was
+    shown a backfill ended it in 2021, three years before Acme's Lisbon
+    office. The row is dropped: they never held at one moment."""
+    store = Changing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    job = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+
+    async def backfill(_):
+        await engine.assert_fact("alpha", "alice chen", "works_at", "Globex", valid_from="2021-01-01T00:00:00Z")
+
+    store.targets, store.action = {job.fact_id}, backfill
+    found = await graph_match(engine, "alpha", where("?who | works_at | ?org", "?org | based_in | Lisbon"),
+                              status="history")
+    assert found.rows == () and "stale_evidence 1" in found.coverage["reasons"]
+
+
+async def friends():
+    """Alice knew Bob from 2020, then Carol from 2021; both live in Lisbon.
+    The store withdraws a fact the first time the answer re-reads it."""
+    store = Changing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    facts = {
+        "knows bob": (await engine.assert_fact("alpha", "alice chen", "knows", "Bob Stone",
+                                               valid_from="2020-01-01T00:00:00Z")).fact_id,
+        "knows carol": (await engine.assert_fact("alpha", "alice chen", "knows", "Carol Diaz",
+                                                 valid_from="2021-01-01T00:00:00Z")).fact_id,
+        "bob lisbon": (await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon",
+                                                valid_from="2020-01-01T00:00:00Z")).fact_id,
+        "carol lisbon": (await engine.assert_fact("alpha", "carol diaz", "lives_in", "Lisbon",
+                                                  valid_from="2020-01-01T00:00:00Z")).fact_id}
+
+    async def withdraw(fact_id):
+        await engine.exclude("alpha", fact_id, "withdrawn")
+
+    store.action = withdraw
+    return engine, store, facts
+
+
+async def test_a_row_stands_only_while_one_whole_witness_does():
+    """Alice knew Bob, then Carol, who both live in Lisbon. While the answer
+    is read, Alice-knows-Bob and Carol-lives-in-Lisbon are withdrawn: what
+    is left (Alice-knows-Carol, Bob-lives-in-Lisbon) no longer joins."""
+    for together in (True, False):
+        engine, store, facts = await friends()
+        store.targets = {facts["knows bob"], facts["carol lisbon"]}
+        found = await graph_match(engine, "alpha", where("?who | knows | ?friend", "?friend | lives_in | Lisbon"),
+                                  returns=["?who"], status="history", together=together)
+        assert found.rows == () and "stale_evidence 1" in found.coverage["reasons"], together
+
+
+async def test_a_row_held_whenever_any_of_its_witnesses_did():
+    engine, _, facts = await friends()
+    found = await graph_match(engine, "alpha", where("?who | knows | ?friend", "?friend | lives_in | Lisbon"),
+                              returns=["?who"], status="history")
+    assert found.rows[0]["during"] == [{"from": "2020-01-01T00:00:00.000Z", "until": None}]
+    assert len(found.rows[0]["fact_ids"]) == 4
+
+
+async def test_a_fact_that_stopped_counting_is_not_cited_though_its_witness_stands():
+    """Carol lived in Lisbon twice; one of those facts is withdrawn while
+    the answer is read. The other still joins, and only it is cited."""
+    store = Changing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    await engine.assert_fact("alpha", "alice chen", "knows", "Carol Diaz", valid_from="2019-01-01T00:00:00Z")
+    first = await engine.assert_fact("alpha", "carol diaz", "lives_in", "Lisbon", valid_from="2020-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "carol diaz", "lives_in", "Porto", valid_from="2021-01-01T00:00:00Z")
+    again = await engine.assert_fact("alpha", "carol diaz", "lives_in", "Lisbon", valid_from="2022-01-01T00:00:00Z")
+
+    async def withdraw(fact_id):
+        await engine.exclude("alpha", fact_id, "withdrawn")
+
+    store.targets, store.action = {first.fact_id}, withdraw
+    found = await graph_match(engine, "alpha", where("?who | knows | ?friend", "?friend | lives_in | Lisbon"),
+                              status="history")
+    assert again.fact_id in found.rows[0]["fact_ids"] and first.fact_id not in found.rows[0]["fact_ids"]
+
+
+async def test_a_row_cites_only_the_witnesses_that_still_hold():
+    engine, store, facts = await friends()
+    store.targets = {facts["knows bob"]}
+    found = await graph_match(engine, "alpha", where("?who | knows | ?friend", "?friend | lives_in | Lisbon"),
+                              returns=["?who"], status="history")
+    assert found.rows[0]["fact_ids"] == sorted([facts["knows carol"], facts["carol lisbon"]])
+    assert found.rows[0]["during"] == [{"from": "2021-01-01T00:00:00.000Z", "until": None}]
 
 
 async def test_a_capped_read_never_says_no_match(monkeypatch):

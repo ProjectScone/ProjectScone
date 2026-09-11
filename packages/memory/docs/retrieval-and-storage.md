@@ -663,16 +663,27 @@ GET /v1/graph/match?where=[{"subject":"?who","predicate":"works_at","object":"?o
   matched, the answer says how many joins across time it left out.
 - **Rows.** Each row names its variables' bindings (an entity's id, key,
   label and kind; a value; a predicate) and cites the facts of every
-  pattern. Those facts are re-read before the row is shown (256 facts at
-  most). A row whose pattern no longer holds is dropped and counted as
-  `stale_evidence`, and one past the budget is shown and counted as
-  `unverified`. Rows are distinct over the variables returned, merging
-  their facts, and ordered by their labels.
-- **Bounds.** At most 10,000 partial bindings are searched. Past that the
-  search stops and says `bindings_cut`, and more rows than `limit` say
-  `rows_cut N`. The answer says "no match" only when nothing was cut and
-  the read was whole. Otherwise it says "no match among the bindings
-  searched", "among the facts read" or "among the facts that still hold".
+  pattern. Rows are distinct over the variables returned, and ordered by
+  their labels. A row stands on its witnesses, the ways its patterns were
+  matched.
+- **Re-read.** Before a row is shown its facts are read again (256 at
+  most). A witness survives only if each of its patterns still has a fact
+  that counts and, with `together`, those facts held at one moment as
+  they now read: a backfill that ended a job before an office opened
+  ends the join too. A row with no surviving witness is dropped and
+  counted as `stale_evidence`. A row cites, and its `during` covers, only
+  the witnesses that survive. Facts past the re-read budget are taken as
+  read and counted as `unverified`.
+- **Bounds.** The search has a budget of 200,000 units of work: one for
+  every candidate looked at and every pair of stretches of time compared.
+  `coverage.searched` says how much was spent. Past the budget the
+  search stops and says `search_cut`, and more rows than `limit` say
+  `rows_cut N`. Each pattern is matched from the smallest index that
+  can hold its matches. A variable bound to something its position cannot
+  hold (an entity as a predicate, or a value named like a predicate)
+  looks at nothing. The answer says "no match" only when nothing was cut
+  and the read was whole. Otherwise it says "no match within the search
+  budget", "among the facts read" or "among the facts that still hold".
 - The answer has `status` (`matched`, `none`, `ambiguous` or
   `not_found`), `variables`, `rows`, `candidates`, `not_found`, `coverage`
   and `text`: one line per row for a model, fitted to `max_bytes`, with

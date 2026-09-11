@@ -224,6 +224,13 @@ class _Evidence:
         fact = self._read.get(fact_id)
         return str(fact["quote"]) if fact is not None and fact["grounding"] == "quote_verified" else None
 
+    def interval(self, fact_id: int) -> tuple[str, str | None] | None:
+        """When the fact holds as re-read now, or None when it was not."""
+        fact = self._read.get(fact_id)
+        if fact is None:
+            return None
+        return str(fact["valid_from"]), None if fact["valid_until"] is None else str(fact["valid_until"])
+
     def stale(self) -> int:
         return sum(1 for fact_id in self._read if not self.holds(fact_id))
 
