@@ -14,6 +14,7 @@ from ..core.models import BatchDecision, DecisionOutcome, Fact
 from ..core.ports import DocumentStore
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space
+from . import fact_placement
 from .fact_placement import Placement
 
 
@@ -62,21 +63,30 @@ async def approve(runtime: FactReviewRuntime, space: str, fact_id: int, actor: O
     fact = await runtime.proposed(space, fact_id)
     placement = await runtime.place(space, fact.subject, fact.predicate, fact.object, fact.valid_from, exclude_id=fact.fact_id)
     if placement.restates is not None:
-        await runtime.documents.update_fact(
-            fact.model_copy(update={"status": "declined", "closed_reason": f"duplicate of fact {placement.restates.fact_id}"})
-        )
-        await runtime.documents.bump_revision(space)
+        # Approved, the proposal restates what holds; its later start is
+        # kept as an affirmation, as an assertion's would be.
+        async with fact_placement.atomic(runtime.documents):
+            await fact_placement.affirm(runtime.documents, space, placement.restates, fact.valid_from,
+                                        runtime.clock(), confidence=fact.confidence,
+                                        source_episode_id=fact.source_episode_id, origin=fact.origin,
+                                        quote=fact.quote)
+            await runtime.documents.update_fact(
+                fact.model_copy(update={"status": "declined",
+                                        "closed_reason": f"duplicate of fact {placement.restates.fact_id}"}))
+            await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id, "actor": actor})
         return placement.restates
-    accepted = fact.model_copy(update={
-        "status": "closed" if placement.bound else "active",
-        "valid_until": placement.bound,
-        "closed_reason": placement.bound_reason,
-        "superseded_by": placement.bound_by,
-    })
-    await runtime.documents.update_fact(accepted)
-    await runtime.truncate(placement.covering, fact.valid_from, fact.fact_id)
-    await runtime.documents.bump_revision(space)
+    async with fact_placement.atomic(runtime.documents):
+        placement = await fact_placement.resume(runtime.documents, space, placement)
+        accepted = fact.model_copy(update={
+            "status": "closed" if placement.bound else "active",
+            "valid_until": placement.bound,
+            "closed_reason": placement.bound_reason,
+            "superseded_by": placement.bound_by,
+        })
+        await runtime.documents.update_fact(accepted)
+        await runtime.truncate(placement.covering, fact.valid_from, fact.fact_id)
+        await runtime.documents.bump_revision(space)
     await runtime.emit(space, "fact_review", {
         "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering], "actor": actor,
     })

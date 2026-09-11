@@ -16,10 +16,11 @@ import sqlite3
 import time
 from array import array
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import AsyncIterator, Mapping, Optional, Sequence
 
+from ..core.affirmations import Affirmation, NewAffirmation
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
@@ -125,6 +126,13 @@ CREATE INDEX IF NOT EXISTS facts_source_id ON facts(space, source_episode_id, id
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 CREATE TABLE IF NOT EXISTS fact_writes (space TEXT PRIMARY KEY, writes INTEGER NOT NULL);
+-- Restatements from a later day, kept beside their facts. Additive: a
+-- reader that does not know the table leaves it alone, so the shared
+-- schema version stays where it is.
+CREATE TABLE IF NOT EXISTS fact_affirmations (
+  id INTEGER PRIMARY KEY, space TEXT NOT NULL, fact_id INTEGER NOT NULL, valid_from TEXT NOT NULL,
+  recorded_at TEXT NOT NULL, confidence REAL NOT NULL, source_episode_id INTEGER, origin TEXT NOT NULL,
+  quote TEXT, UNIQUE(space, fact_id, valid_from));
 DROP TRIGGER IF EXISTS fact_writes_insert;
 DROP TRIGGER IF EXISTS fact_writes_update;
 DROP TRIGGER IF EXISTS fact_writes_delete;
@@ -299,6 +307,12 @@ def _fact_link(row: sqlite3.Row) -> FactLink:
                     kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
 
 
+def _affirmation(row: sqlite3.Row) -> Affirmation:
+    return Affirmation(affirmation_id=row["id"], space=row["space"], fact_id=row["fact_id"],
+                       valid_from=row["valid_from"], recorded_at=row["recorded_at"], confidence=row["confidence"],
+                       source_episode_id=row["source_episode_id"], origin=row["origin"], quote=row["quote"])
+
+
 def _fact(row: sqlite3.Row) -> Fact:
     return Fact(
         fact_id=row["id"],
@@ -325,6 +339,7 @@ class SqliteDocumentStore:
     def __init__(self, path: str | Path = "~/.scone-memory/memory.db") -> None:
         self.path = path
         self.conn = connect(path)
+        self._holding = False
 
     async def close(self) -> None:
         self.conn.close()
@@ -519,7 +534,7 @@ class SqliteDocumentStore:
                 new.excluded_reason, new.superseded_by, new.quote,
             ),
         )
-        self.conn.commit()
+        self._commit()
         assert cur.lastrowid is not None
         return Fact(fact_id=cur.lastrowid, **new.__dict__)
 
@@ -532,7 +547,7 @@ class SqliteDocumentStore:
                 fact.closed_reason, fact.origin, fact.excluded_reason, fact.superseded_by, fact.fact_id, fact.space,
             ),
         )
-        self.conn.commit()
+        self._commit()
         if cur.rowcount == 0:
             raise KeyError(fact.fact_id)
 
@@ -630,8 +645,8 @@ class SqliteDocumentStore:
 
             gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
                                 links=count("fact_links"), tombstones=count("tombstones"))
-            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions",
-                          "ingest_items", "ingest_jobs"):
+            for table in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight",
+                          "revisions", "ingest_items", "ingest_jobs"):
                 conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
             conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
             conn.commit()
@@ -729,6 +744,54 @@ class SqliteDocumentStore:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""
         return [(r[0], r[1]) for r in self.conn.execute("SELECT id, episode_id FROM chunks WHERE space = ? ORDER BY id", (space,))]
 
+    def _commit(self) -> None:
+        """Commit, unless a transaction is holding the writes for its end."""
+        if not self._holding:
+            self.conn.commit()
+
+    @asynccontextmanager
+    async def atomic(self) -> AsyncIterator[None]:
+        """Writes made inside commit together at the end, or roll back
+        together if anything inside fails. The fact writes it holds never
+        yield to the event loop, so no other task's write can join it."""
+        if self._holding:
+            yield
+            return
+        self._holding = True
+        try:
+            yield
+        except BaseException:
+            self._holding = False
+            self.conn.rollback()
+            raise
+        self._holding = False
+        self.conn.commit()
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fact_affirmations (space, fact_id, valid_from, recorded_at, confidence,"
+            " source_episode_id, origin, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new.space, new.fact_id, new.valid_from, new.recorded_at, new.confidence, new.source_episode_id,
+             new.origin, new.quote))
+        self._commit()
+        row = self.conn.execute("SELECT * FROM fact_affirmations WHERE space = ? AND fact_id = ? AND valid_from = ?",
+                                (new.space, new.fact_id, new.valid_from)).fetchone()
+        return _affirmation(row)
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        rows = self.conn.execute("SELECT * FROM fact_affirmations WHERE space = ? AND fact_id = ? ORDER BY valid_from, id",
+                                 (space, fact_id))
+        return [_affirmation(row) for row in rows]
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        self.conn.executemany("DELETE FROM fact_affirmations WHERE space = ? AND id = ?",
+                              [(space, affirmation_id) for affirmation_id in affirmation_ids])
+        self._commit()
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        return [_affirmation(row) for row in self.conn.execute(
+            "SELECT * FROM fact_affirmations WHERE space = ? ORDER BY id", (space,))]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         self.conn.execute(
             "INSERT OR IGNORE INTO fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
@@ -781,7 +844,7 @@ class SqliteDocumentStore:
             " ON CONFLICT(space) DO UPDATE SET revision = revision + 1",
             (space,),
         )
-        self.conn.commit()
+        self._commit()
         return await self.revision(space)
 
     async def revision(self, space: str) -> int:

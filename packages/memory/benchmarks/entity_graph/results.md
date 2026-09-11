@@ -28,11 +28,11 @@ and predicate with case and spacing folded, and the object trimmed.
   apart as out of view.
 - An age of 34, then 35, then 34 again holds 34, whichever order the rows
   were told in.
-- The order still matters for the ledger itself. Told Acme from 2020,
-  Acme again from 2023, then a late Globex from 2021, the ledger folds
-  the second Acme into the first, and the late Globex then cuts it
-  short. The bench reports that as missing, because the fixture says
-  Acme holds.
+- A ledger that let the order decide would be reported as missing. Told
+  Acme from 2020, Acme again from 2023, then a late Globex from 2021,
+  the ledger once folded the second Acme into the first and let the
+  Globex cut it short. It now keeps the restatement as an affirmation,
+  so every order agrees.
 
 A fixture is refused (exit 2), naming each line, rather than scored, in
 two cases:

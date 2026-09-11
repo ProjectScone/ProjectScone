@@ -23,6 +23,7 @@ from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
+from ..core.affirmations import Affirmation, NewAffirmation
 
 
 class InMemoryDocumentStore:
@@ -42,6 +43,9 @@ class InMemoryDocumentStore:
         self._facts_by_source: dict[tuple[str, int], list[int]] = defaultdict(list)
         self._fact_graph_keys: dict[int, tuple[str, int | None]] = {}
         self._tombstones: dict[tuple[str, int], Tombstone] = {}
+        self._affirmations: dict[int, Affirmation] = {}
+        self._affirmation_keys: dict[tuple[str, int, str], int] = {}
+        self._affirmation_ids = count(1)
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
         self._fact_ids = count(1)
@@ -102,6 +106,9 @@ class InMemoryDocumentStore:
             del self._link_keys[link_key]
         for stone_key in stones:
             del self._tombstones[stone_key]
+        for affirmation_id in [i for i, a in self._affirmations.items() if a.space == space]:
+            gone = self._affirmations.pop(affirmation_id)
+            self._affirmation_keys.pop((gone.space, gone.fact_id, gone.valid_from), None)
         self._inflight = {mark for mark in self._inflight if mark[0] != space}
         for job_key in [key for key in self._jobs if key[0] == space]:
             del self._jobs[job_key]
@@ -385,6 +392,30 @@ class InMemoryDocumentStore:
     async def chunk_index(self, space: str) -> list[tuple[int, int]]:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""
         return sorted((c.chunk_id, c.episode_id) for c in self._chunks.values() if c.space == space)
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        key = (new.space, new.fact_id, new.valid_from)
+        existing = self._affirmation_keys.get(key)
+        if existing is not None:
+            return self._affirmations[existing]
+        affirmation = Affirmation(affirmation_id=next(self._affirmation_ids), **new.__dict__)
+        self._affirmations[affirmation.affirmation_id] = affirmation
+        self._affirmation_keys[key] = affirmation.affirmation_id
+        return affirmation
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        return sorted((a for a in self._affirmations.values() if a.space == space and a.fact_id == fact_id),
+                      key=lambda a: (a.valid_from, a.affirmation_id))
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        for affirmation_id in affirmation_ids:
+            gone = self._affirmations.get(affirmation_id)
+            if gone is not None and gone.space == space:
+                del self._affirmations[affirmation_id]
+                del self._affirmation_keys[(gone.space, gone.fact_id, gone.valid_from)]
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        return sorted((a for a in self._affirmations.values() if a.space == space), key=lambda a: a.affirmation_id)
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         key = (new.space, new.from_fact, new.to_fact, new.kind)

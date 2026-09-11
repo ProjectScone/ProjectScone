@@ -25,6 +25,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from ..core.affirmations import Affirmation, NewAffirmation
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -110,6 +111,13 @@ def _tombstone(doc: Mapping) -> Tombstone:
                      forgotten_at=doc["forgotten_at"], reason=doc.get("reason"))
 
 
+def _affirmation(doc: Mapping) -> Affirmation:
+    return Affirmation(affirmation_id=int(doc["affirmation_id"]), space=doc["space"], fact_id=int(doc["fact_id"]),
+                       valid_from=doc["valid_from"], recorded_at=doc["recorded_at"],
+                       confidence=float(doc.get("confidence", 1.0)), source_episode_id=doc.get("source_episode_id"),
+                       origin=doc.get("origin", "stated"), quote=doc.get("quote"))
+
+
 def _fact_link(doc: Mapping) -> FactLink:
     return FactLink(link_id=int(doc["link_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
                     kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
@@ -166,6 +174,11 @@ FACT_LINK_MAPPINGS = {"properties": {
     "link_id": LONG, "space": KEYWORD, "from_fact": LONG, "to_fact": LONG, "kind": KEYWORD, "created_at": KEYWORD,
     "source_episode_id": LONG, "quote": {"type": "text", "index": False},
 }}
+AFFIRMATION_MAPPINGS = {"properties": {
+    "affirmation_id": LONG, "space": KEYWORD, "fact_id": LONG, "valid_from": KEYWORD, "recorded_at": KEYWORD,
+    "confidence": {"type": "double"}, "source_episode_id": LONG, "origin": KEYWORD,
+    "quote": {"type": "text", "index": False},
+}}
 ERASED_SPACE_MAPPINGS = {"properties": {"space": {"type": "keyword"}, "erased_at": {"type": "keyword"}}}
 TOMBSTONE_MAPPINGS = {"properties": {
     "space": KEYWORD, "episode_id": LONG, "content_hash": KEYWORD, "forgotten_at": KEYWORD, "reason": {"type": "text", "index": False},
@@ -204,6 +217,7 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
         await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
+        await self.shared.ensure_index("fact_affirmations", AFFIRMATION_MAPPINGS)
         await self.shared.ensure_index("tombstones", TOMBSTONE_MAPPINGS)
         await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
@@ -230,7 +244,8 @@ class ElasticsearchDocumentStore:
     async def drop(self) -> None:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
-        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "tombstones", "meta", "counters", "vectors", "events", "inflight", "erased_spaces")]
+        names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "fact_affirmations", "tombstones",
+                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -296,7 +311,7 @@ class ElasticsearchDocumentStore:
 
         gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
                             links=await count("fact_links"), tombstones=await count("tombstones"))
-        for name in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight"):
+        for name in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight"):
             await self.client.delete_by_query(index=self._idx(name), query=term, refresh=True)
         await self.client.delete(index=self._idx("counters"), id=f"revision:{space}", ignore=[404])
         await self.client.index(index=self._idx("erased_spaces"), id=space, document={"space": space, "erased_at": erased_at},
@@ -525,6 +540,41 @@ class ElasticsearchDocumentStore:
         hits = await self._search("tombstones", query={"bool": {"filter": [{"term": {"space": space}}]}},
                                   size=10_000, sort=[{"episode_id": "asc"}])
         return [_tombstone(h) for h in hits]
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        from elasticsearch import ConflictError
+
+        # One document per (space, fact, day), so a repeat is a conflict and
+        # the first is returned unchanged.
+        doc_id = f"{new.space}|{new.fact_id}|{new.valid_from}"
+        existing = await self._doc("fact_affirmations", doc_id)
+        if existing is None:
+            doc = {"affirmation_id": await self.shared.next_id("fact_affirmations"), **new.__dict__}
+            try:
+                await self.client.index(index=self._idx("fact_affirmations"), id=doc_id, document=doc,
+                                        op_type="create", refresh=self.shared.refresh)
+                return _affirmation(doc)
+            except ConflictError:
+                existing = await self._doc("fact_affirmations", doc_id)
+        if existing is None:
+            raise RuntimeError("Elasticsearch affirmation disappeared after a conflicting write")
+        return _affirmation(existing)
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        query = {"bool": {"filter": [{"term": {"space": space}}, {"term": {"fact_id": fact_id}}]}}
+        hits = await self._search("fact_affirmations", query=query, size=10_000,
+                                  sort=[{"valid_from": "asc"}, {"affirmation_id": "asc"}])
+        return [_affirmation(hit) for hit in hits]
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        if affirmation_ids:
+            query = {"bool": {"filter": [{"term": {"space": space}}, {"terms": {"affirmation_id": list(affirmation_ids)}}]}}
+            await self.client.delete_by_query(index=self._idx("fact_affirmations"), query=query, refresh=True)
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        hits = await self._search("fact_affirmations", query={"term": {"space": space}}, size=10_000,
+                                  sort=[{"affirmation_id": "asc"}])
+        return [_affirmation(hit) for hit in hits]
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         from elasticsearch import ConflictError

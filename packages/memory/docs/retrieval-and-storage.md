@@ -769,6 +769,35 @@ status 2 and the option named:
 - an `--as-of` that is not an RFC 3339 timestamp, or whose UTC
   instant falls before year 1 or after year 9999.
 
+### Restatements and the order facts arrive in
+
+Asserting a claim that already holds returns the fact that holds
+(`restated`). When the restatement starts on a later day than that fact,
+the day is kept as an affirmation. It carries the assertion's
+confidence, origin, source and quote, and the space's revision moves
+once; saying the same again moves nothing. Readers still see one fact.
+
+The affirmation matters when a backfill arrives afterwards with another
+object and cuts the fact short before that day. Told Acme from 2020,
+Acme again from 2023, then Globex from 2021:
+
+- the ledger now holds Acme from 2020 to 2021, Globex from 2021 to
+  2023, and Acme again from 2023;
+- the resumed Acme ends where the first one ended and keeps any
+  exclusion;
+- its evidence is the restatement's;
+- later affirmations move to it.
+
+The same history told in any order leaves the same partition of time;
+a property test checks random histories in random orders. An approved
+proposal that restates what holds is kept as an affirmation too.
+
+All five document stores keep affirmations (`fact_affirmations`), and
+archives carry them. SQLite adds the table without changing the shared
+schema version, so older readers ignore it. On SQLite, a placement's
+writes commit together or not at all. The other stores write them in
+turn, as before. The Rust core does not keep affirmations yet.
+
 ### How the ledger is read
 
 Each graph request reads the space's ledger. It never reads it on a

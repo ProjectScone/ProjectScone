@@ -18,7 +18,11 @@ Two kinds of memory live side by side:
   bytes. Nothing stored is ever rewritten.
 - **Facts**: what is true. Subject, predicate, object, and the interval
   over which it held. A new fact closes the one it supersedes and keeps the
-  reason; asking about a past date returns what was true then.
+  reason; asking about a past date returns what was true then. The order
+  facts arrive in never decides what held. A claim stated again from a
+  later day is kept as an affirmation of the fact that holds. If a late
+  backfill then cuts that fact short, the claim resumes from the day it
+  was stated again.
 
 The engine is written against three small protocols (documents, vectors,
 embedder), so the same code runs in-process with no server, or against

@@ -36,8 +36,9 @@ async def test_component_partitions_history_independent_of_arrival_order(arrival
     revision = await documents.revision('alpha')
     repeated = await assert_placed(context, 'alpha', 'Juniper', 'uses', 'Polaris', valid_from='2023-06-01')
     assert repeated.object == 'Polaris' and len(await documents.list_facts('alpha', True)) == 3
-    assert await documents.revision('alpha') == revision
-    assert events[-1][2]['outcome'] == 'restated'
+    # Said again from a later day: one fact still, and the day is kept.
+    assert await documents.revision('alpha') == revision + 1
+    assert events[-1][2]['outcome'] == 'restated' and events[-1][2]['affirmed'] is True
 
 
 async def test_component_validates_source_before_proposing_and_never_closes_held_fact():
@@ -89,19 +90,14 @@ async def test_component_propagates_source_read_cancellation(monkeypatch):
 
 
 _RETURN = [('Acme', '2020-01-01'), ('Globex', '2021-01-01'), ('Acme', '2023-01-01')]
-_LOST = ("A restatement is returned unchanged and its own start is kept nowhere, so a backfill that "
-         "later cuts the covering fact short erases the reaffirmed stretch. Needs affirmation times "
-         "stored per fact (a schema change on every backend); an owner decision, not yet made.")
 
 
-@pytest.mark.parametrize('arrival', [
-    pytest.param(order, marks=pytest.mark.xfail(strict=True, reason=_LOST)) if order == (0, 2, 1) else order
-    for order in permutations(range(3))])
+@pytest.mark.parametrize('arrival', list(permutations(range(3))))
 async def test_a_value_that_returns_holds_again_whatever_the_arrival_order(arrival):
-    """Acme from 2020, Globex from 2021, Acme again from 2023. Told Acme,
-    Acme again, then the late Globex, the second Acme is folded into the
-    first as a restatement, and the Globex backfill then cuts it short at
-    2021: the ledger says Globex in 2024. Every other order is right."""
+    """Acme from 2020, Globex from 2021, Acme again from 2023, in every
+    order. Told Acme, Acme again, then the late Globex, the second Acme is
+    kept as an affirmation of the first, so the Globex backfill that cuts
+    the first short leaves Acme resuming from 2023."""
     from scone_memory.memory.fact_placement import assert_placed, _covers
     documents = InMemoryDocumentStore()
     context = runtime(documents, [])

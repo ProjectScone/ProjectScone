@@ -6,14 +6,27 @@ preserves historical intervals, restatement identity and proposal isolation.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, replace
+from typing import AsyncIterator, Awaitable, Callable, Optional, cast
 
+from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput, NotFound
 from ..core.models import Fact
 from ..core.ports import DocumentStore, NewFact
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import ORIGINS, check_space, normalise_term, normalise_time
+
+
+@dataclass(frozen=True)
+class Resumption:
+    """A covering fact's claim, stated again after the new fact's start: once
+    the new fact cuts the covering fact short, the claim resumes from
+    ``first``, and the ``later`` affirmations go with it."""
+
+    covering: Fact
+    first: Affirmation
+    later: tuple[Affirmation, ...]
 
 
 @dataclass(frozen=True)
@@ -23,6 +36,7 @@ class Placement:
     bound: Optional[str]
     bound_reason: Optional[str]
     bound_by: Optional[int]
+    resumes: Optional[Resumption] = None
 
 
 @dataclass(frozen=True)
@@ -74,7 +88,12 @@ async def assert_placed(
       person wrote is kept; only the bound moves;
     - the first fact that starts after the new one bounds it: the new
       fact is stored closed at that point. A stale record arriving late
-      never overwrites a fresher one.
+      never overwrites a fresher one;
+    - a restatement from a later day than the fact it restates is kept
+      as an affirmation of that fact. Should a fact with another object
+      later cut the restated fact short before that day, the claim
+      resumes from it as a new fact and bounds the one that cut it, so
+      the order facts arrive in never decides what held.
     """
     check_space(space)
     subject = normalise_term(subject, "subject")
@@ -118,22 +137,32 @@ async def assert_placed(
 
     placement = await runtime.place(space, subject, predicate, object, start)
     if placement.restates is not None:
+        async with atomic(runtime.documents):
+            affirmed = await affirm(runtime.documents, space, placement.restates, start, runtime.clock(),
+                                    confidence=confidence, source_episode_id=source_episode_id, origin=origin,
+                                    quote=quote)
+            if affirmed:
+                await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_assert", {
             "fact_id": placement.restates.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
-            "outcome": "restated", "superseded": [], "latency_ms": _ms(started),
+            "outcome": "restated", "affirmed": affirmed, "superseded": [], "latency_ms": _ms(started),
         })
         return placement.restates
-    fact = await runtime.documents.insert_fact(
-        NewFact(
-            space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
-            valid_until=placement.bound, confidence=confidence,
-            status="closed" if placement.bound else "active",
-            closed_reason=placement.bound_reason, superseded_by=placement.bound_by,
-            source_episode_id=source_episode_id, origin=origin, quote=quote,
+    # The continuation, the new fact, the cut and the revision commit
+    # together where the store can hold a transaction.
+    async with atomic(runtime.documents):
+        placement = await resume(runtime.documents, space, placement)
+        fact = await runtime.documents.insert_fact(
+            NewFact(
+                space=space, subject=subject, predicate=predicate, object=object, valid_from=start,
+                valid_until=placement.bound, confidence=confidence,
+                status="closed" if placement.bound else "active",
+                closed_reason=placement.bound_reason, superseded_by=placement.bound_by,
+                source_episode_id=source_episode_id, origin=origin, quote=quote,
+            )
         )
-    )
-    await runtime.truncate(placement.covering, start, fact.fact_id)
-    await runtime.documents.bump_revision(space)
+        await runtime.truncate(placement.covering, start, fact.fact_id)
+        await runtime.documents.bump_revision(space)
     await runtime.emit(space, "fact_assert", {
         "fact_id": fact.fact_id, "subject": subject, "predicate": predicate, "origin": origin,
         "outcome": "new_closed" if placement.bound else "new_active",
@@ -156,6 +185,19 @@ async def place(documents: DocumentStore, space: str, subject: str, predicate: s
     restates = next((r for r in covering if r.object == object), None)
     later = [r for r in rivals if parse_rfc3339(r.valid_from) > start_dt]
     successor = min(later, key=lambda f: (parse_rfc3339(f.valid_from), f.fact_id)) if later else None
+    resumes = None
+    store = affirmation_store(documents)
+    if store is not None and restates is None:
+        # A covering fact's claim stated again after the new start resumes
+        # there; it lies inside the covering fact, so before any successor.
+        for rival in covering:
+            after = [a for a in await store.affirmations(space, rival.fact_id) if parse_rfc3339(a.valid_from) > start_dt]
+            if after:
+                resumes = Resumption(rival, after[0], tuple(after[1:]))
+                break
+    if resumes is not None:
+        return Placement(covering=covering, restates=None, bound=resumes.first.valid_from, bound_reason=None,
+                         bound_by=None, resumes=resumes)
     return Placement(
         covering=[] if restates else covering,
         restates=restates,
@@ -163,6 +205,62 @@ async def place(documents: DocumentStore, space: str, subject: str, predicate: s
         bound_reason=f"superseded by fact {successor.fact_id}" if successor else None,
         bound_by=successor.fact_id if successor else None,
     )
+
+
+def atomic(documents: DocumentStore) -> AbstractAsyncContextManager[None]:
+    """The store's transaction, when it can hold one across several writes,
+    else nothing: each write then stands alone, as it always has."""
+    hold = getattr(documents, "atomic", None)
+    return cast(AbstractAsyncContextManager[None], hold()) if callable(hold) else _alone()
+
+
+@asynccontextmanager
+async def _alone() -> AsyncIterator[None]:
+    yield
+
+
+async def affirm(documents: DocumentStore, space: str, held: Fact, start: str, recorded_at: str, *,
+                 confidence: float, source_episode_id: Optional[int], origin: str, quote: Optional[str]) -> bool:
+    """Keep a restatement's later start beside the fact it restates, with
+    its evidence. True only when that day was not kept already; one at the
+    fact's own start adds nothing."""
+    store = affirmation_store(documents)
+    if store is None or parse_rfc3339(start) <= parse_rfc3339(held.valid_from):
+        return False
+    if any(kept.valid_from == start for kept in await store.affirmations(space, held.fact_id)):
+        return False
+    await store.add_affirmation(NewAffirmation(
+        space=space, fact_id=held.fact_id, valid_from=start, recorded_at=recorded_at, confidence=confidence,
+        source_episode_id=source_episode_id, origin=origin, quote=quote))
+    return True
+
+
+async def resume(documents: DocumentStore, space: str, placement: Placement) -> Placement:
+    """Write the fact a resumption calls for, before the fact that cuts the
+    covering one is written: the covering fact's claim from its first later
+    affirmation to where the covering fact ended, ending the same way, with
+    the affirmation's evidence and the covering fact's exclusion. The later
+    affirmations move to it, and the placement is bounded by it."""
+    if placement.resumes is None:
+        return placement
+    held, first, later = placement.resumes.covering, placement.resumes.first, placement.resumes.later
+    store = affirmation_store(documents)
+    assert store is not None, "a resumption is only found on a store that keeps affirmations"
+    resumed = await documents.insert_fact(NewFact(
+        space=space, subject=held.subject, predicate=held.predicate, object=held.object, valid_from=first.valid_from,
+        valid_until=held.valid_until, confidence=first.confidence,
+        status="closed" if held.valid_until is not None else "active",
+        closed_reason=held.closed_reason if held.valid_until is not None else None,
+        superseded_by=held.superseded_by if held.valid_until is not None else None,
+        source_episode_id=first.source_episode_id, origin=first.origin, quote=first.quote,
+        excluded_reason=held.excluded_reason))
+    for affirmation in later:
+        await store.add_affirmation(NewAffirmation(
+            space=space, fact_id=resumed.fact_id, valid_from=affirmation.valid_from,
+            recorded_at=affirmation.recorded_at, confidence=affirmation.confidence,
+            source_episode_id=affirmation.source_episode_id, origin=affirmation.origin, quote=affirmation.quote))
+    await store.drop_affirmations(space, [first.affirmation_id, *(a.affirmation_id for a in later)])
+    return replace(placement, bound_reason=f"superseded by fact {resumed.fact_id}", bound_by=resumed.fact_id)
 
 
 async def truncate(documents: DocumentStore, covering: list[Fact], start: str, by_fact_id: int) -> None:

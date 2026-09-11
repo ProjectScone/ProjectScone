@@ -375,20 +375,19 @@ def _works(year, company, predicate="works_at", subject="alice"):
             "valid_from": f"{year}-01-01T00:00:00Z"}
 
 
-@pytest.mark.parametrize("rows, missing", [
-    ((_works(2020, "Acme"), _works(2023, "Acme"), _works(2021, "Globex")), 1),
-    ((_works(2020, "Acme"), _works(2021, "Globex"), _works(2023, "Acme")), 0),
-    ((_works(2021, "Globex"), _works(2023, "Acme")), 0),
-    ((_works(2023, "Globex"), _works(2023, "Acme")), 0),
+@pytest.mark.parametrize("rows", [
+    (_works(2020, "Acme"), _works(2023, "Acme"), _works(2021, "Globex")),
+    (_works(2020, "Acme"), _works(2021, "Globex"), _works(2023, "Acme")),
+    (_works(2021, "Globex"), _works(2023, "Acme")),
+    (_works(2023, "Globex"), _works(2023, "Acme")),
 ])
-async def test_what_holds_is_the_fixtures_latest_claim_whatever_order_it_was_told(tmp_path, rows, missing):
+async def test_what_holds_is_the_fixtures_latest_claim_whatever_order_it_was_told(tmp_path, rows):
     """Acme from 2020, Globex from 2021, Acme again from 2023: at 2025 the
-    fixture says Acme. Told in the first order, the ledger folds the 2023
-    Acme into the 2020 one and a late Globex then cuts it short, so the
-    view says Globex; the bench must call that missing, not rightly out of
-    view."""
+    fixture says Acme, however it is told. The bench judges by that
+    timeline, never by the ledger's answer, so a ledger that let the order
+    decide (as it once folded the 2023 Acme away) is caught as missing."""
     report = await run_entity_graph_benchmark(_rows(tmp_path, *rows))
-    assert (report.claims_missing, report.claims_out_of_view) == (missing, 1)
+    assert (report.claims_missing, report.claims_out_of_view) == (0, 1)
 
 
 async def test_a_label_in_another_spelling_of_its_claim_is_scored(tmp_path):
