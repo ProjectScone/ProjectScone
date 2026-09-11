@@ -86,3 +86,28 @@ async def test_component_propagates_source_read_cancellation(monkeypatch):
         await assert_placed(runtime(documents, events), 'alpha', 'juniper', 'uses', 'Vega',
             source_episode_id=1, quote='Vega')
     assert await documents.list_facts('alpha', True) == [] and events == []
+
+
+_RETURN = [('Acme', '2020-01-01'), ('Globex', '2021-01-01'), ('Acme', '2023-01-01')]
+_LOST = ("A restatement is returned unchanged and its own start is kept nowhere, so a backfill that "
+         "later cuts the covering fact short erases the reaffirmed stretch. Needs affirmation times "
+         "stored per fact (a schema change on every backend); an owner decision, not yet made.")
+
+
+@pytest.mark.parametrize('arrival', [
+    pytest.param(order, marks=pytest.mark.xfail(strict=True, reason=_LOST)) if order == (0, 2, 1) else order
+    for order in permutations(range(3))])
+async def test_a_value_that_returns_holds_again_whatever_the_arrival_order(arrival):
+    """Acme from 2020, Globex from 2021, Acme again from 2023. Told Acme,
+    Acme again, then the late Globex, the second Acme is folded into the
+    first as a restatement, and the Globex backfill then cuts it short at
+    2021: the ledger says Globex in 2024. Every other order is right."""
+    from scone_memory.memory.fact_placement import assert_placed, _covers
+    documents = InMemoryDocumentStore()
+    context = runtime(documents, [])
+    for index in arrival:
+        value, start = _RETURN[index]
+        await assert_placed(context, 'alpha', 'alice', 'works_at', value, valid_from=start)
+    facts = await documents.facts_for('alpha', 'alice', 'works_at')
+    for moment, expected in (('2020-06-01', 'Acme'), ('2022-06-01', 'Globex'), ('2024-06-01', 'Acme')):
+        assert [fact.object for fact in facts if _covers(fact, parse_rfc3339(moment + 'T00:00:00.000Z'))] == [expected]
