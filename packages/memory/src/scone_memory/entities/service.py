@@ -46,6 +46,7 @@ from ..core.timeutil import parse_rfc3339
 from .project import EntityProjection, project_entities
 from . import read as reading
 from .read import LedgerRead, read_ledger
+from .roles import RoleIndex, role_index
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -108,6 +109,7 @@ class _Held:
     digest: str
     boundaries: list[datetime]
     views: OrderedDict[_Key, tuple[EntityProjection, int]]
+    roles: RoleIndex | None = None
 
     def key(self, mode: "StatusMode", when: datetime) -> _Key:
         if mode not in ("current", "history"):
@@ -137,6 +139,18 @@ class EntityService:
         if held is None or not held.views:
             return None
         return next(reversed(held.views.values()))[0]
+
+    def roles(self, space: str) -> RoleIndex | None:
+        """Which facts touch each entity, from the ledger read held for the
+        space, of whatever revision; None when nothing is held. It never
+        reads the store: a caller on a recall path compares its revision
+        with the space's and says when it lags."""
+        held = self._held.get(space)
+        if held is None:
+            return None
+        if held.roles is None:
+            held.roles = role_index(held.ledger)
+        return held.roles
 
     def forget(self, space: str) -> None:
         self._held.pop(space, None)
@@ -281,7 +295,8 @@ class EntityService:
             if previous is not None and previous.digest == digest:
                 views = OrderedDict((key, (replace(projection, revision=ledger.revision), counted))
                                     for key, (projection, counted) in previous.views.items())
-                fresh = _Held(ledger, digest, previous.boundaries, views)
+                fresh = _Held(ledger, digest, previous.boundaries, views,
+                              previous.roles.restamped(ledger.revision) if previous.roles else None)
             else:
                 fresh = _Held(ledger, digest, _boundaries(ledger.facts), OrderedDict())
             if ledger.consistent:

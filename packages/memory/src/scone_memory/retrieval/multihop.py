@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from itertools import chain, islice
-from typing import Literal, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, Sequence, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,6 +20,9 @@ from ..core.ports import TextFilter
 from ..core.timeutil import now_rfc3339, parse_rfc3339
 from ..memory.engine import check_space
 from ..memory.identity import join_match, lookup_keys
+
+if TYPE_CHECKING:
+    from ..entities.roles import RoleIndex
 
 
 def subject_lookup_keys(value: str) -> tuple[str, ...]:
@@ -66,6 +69,9 @@ class MultiHopLimits(BaseModel):
     max_store_calls: int = Field(default=256, ge=1, le=1024)
     max_candidates: int = Field(default=256, ge=1, le=2048)
     per_node_limit: int = Field(default=32, ge=1, le=128)
+    #: An entity touched by more facts than this is not walked through by a
+    #: reverse join; a seed about it is still expanded.
+    hub_degree: int = Field(default=64, ge=1, le=4096)
 
 
 class MultiHopEdge(BaseModel):
@@ -128,8 +134,10 @@ def _source_matches(episode: Episode, scope: TextFilter, excluded_session: str |
 
 class _Walker:
     def __init__(self, documents: MultiHopDocuments, space: str, scope: TextFilter,
-                 limits: MultiHopLimits, include_history: bool, exclude_session_id: str | None) -> None:
+                 limits: MultiHopLimits, include_history: bool, exclude_session_id: str | None,
+                 roles: "RoleIndex | None" = None) -> None:
         self.documents, self.space, self.scope, self.limits = documents, space, scope, limits
+        self.roles = roles
         self.include_history, self.exclude_session_id = include_history, exclude_session_id
         self.boundary = scope.as_of or now_rfc3339()
         # Validate caller timestamps before any store access, including an empty seed set.
@@ -325,6 +333,35 @@ class _Walker:
                          edge=MultiHopEdge(id=f"chain:{current.fact_id}:{fact.fact_id}", from_fact=current.fact_id,
                              to_fact=fact.fact_id, kind="subject_object", source_fact_ids=[current.fact_id, fact.fact_id]))
 
+    async def objects(self, current: Fact, depth: int) -> None:
+        """Facts whose object names this fact's subject: the reverse of the
+        subject join, drawn from the role index and re-read like any other."""
+        if self.roles is None:
+            return
+        if depth > 0 and self.roles.degree(current.subject) > self.limits.hub_degree:
+            self.incomplete("hub_skipped", truncated=False)
+            return
+        limit = self.window()
+        if not limit:
+            return
+        candidates = self.roles.facts_touching(current.subject, role="object", limit=limit)
+        if len(candidates) >= limit:
+            self.incomplete("candidate_window")
+        for fact_id in candidates[:limit]:
+            if fact_id == current.fact_id:
+                continue
+            if not self.candidate():
+                return
+            fact = await self.fact(fact_id)
+            if fact is None:
+                continue
+            if not matches_subject_object(fact.object, current.subject):
+                self.result.counts.rejected += 1
+                continue
+            self.add(fact, parent=current.fact_id, depth=depth + 1, direction="reverse",
+                     edge=MultiHopEdge(id=f"chain:{fact.fact_id}:{current.fact_id}", from_fact=fact.fact_id,
+                         to_fact=current.fact_id, kind="subject_object", source_fact_ids=[fact.fact_id, current.fact_id]))
+
     async def revalidate(self) -> None:
         """Fresh bounded ledger/source checks, then prune dependent paths.
 
@@ -389,7 +426,8 @@ class _Walker:
 async def expand_multihop(documents: MultiHopDocuments, space: str, *, seeds: RecallResult | None = None,
                           seed_fact_ids: Sequence[int] = (), scope: TextFilter | None = None,
                           limits: MultiHopLimits | None = None, include_history: bool = False,
-                          exclude_session_id: str | None = None) -> MultiHopResult:
+                          exclude_session_id: str | None = None, roles: "RoleIndex | None" = None,
+                          reverse_joins: bool | None = None) -> MultiHopResult:
     """Return verified facts, retained relations and one discovery path per fact.
 
     ``seed_fact_ids`` must already be authorized by the caller. A recall seed
@@ -401,13 +439,25 @@ async def expand_multihop(documents: MultiHopDocuments, space: str, *, seeds: Re
     Coverage means exhaustion of these seeds' reachable, eligible ledger under
     the two supported traversal rules. It never claims query/answer completeness.
     Candidate windows are postfiltered and may miss eligible records; this is
-    reported. Store work is bounded by calls and rows, output by serialized UTF-8
+    reported.
+
+    With ``roles``, an entity role index, traversal also takes reverse
+    joins: from a fact to the facts whose object names its subject. The
+    index only proposes candidates; each is re-read and must pass the join
+    rule. An index older than the ledger is reported as
+    ``entity_roles_stale``, and asking for reverse joins without one as
+    ``entity_roles_unavailable``. Store work is bounded by calls and rows, output by serialized UTF-8
     bytes. Individual source reads use the existing document API and may load a
     large retained episode; this API does not promise a bound on source bytes.
     """
     check_space(space)
     walker = _Walker(documents, space, scope or TextFilter(), limits or MultiHopLimits(),
-                     include_history, exclude_session_id)
+                     include_history, exclude_session_id, roles)
+    if (reverse_joins if reverse_joins is not None else roles is not None) and roles is None:
+        walker.incomplete("entity_roles_unavailable", truncated=False)
+    if roles is not None and isinstance(documents, RevisionedDocuments) and walker.call():
+        if await documents.revision(space) != roles.revision:
+            walker.incomplete("entity_roles_stale", truncated=False)
     recalled = chain(seeds.facts, seeds.history if include_history else ()) if seeds is not None else iter(())
     candidates = chain(((fact.fact_id, fact) for fact in recalled), ((fact_id, None) for fact_id in seed_fact_ids))
     cap = walker.limits.max_candidates
@@ -433,5 +483,6 @@ async def expand_multihop(documents: MultiHopDocuments, space: str, *, seeds: Re
         if fact is not None:
             await walker.links(fact, depth)
             await walker.subjects(fact, depth)
+            await walker.objects(fact, depth)
     await walker.revalidate()
     return walker.finish()
