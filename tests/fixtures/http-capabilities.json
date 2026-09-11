@@ -56,7 +56,8 @@
       "graph.path": true,
       "graph.export": true,
       "graph.context": true,
-      "graph.timeline": true
+      "graph.timeline": true,
+      "graph.sources": true
     }
   }
 }

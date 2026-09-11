@@ -393,6 +393,32 @@ The MCP server offers the same reads as tools:
 These sit beside the six tools shared with the Rust server, and none of
 them writes.
 
+#### `GET /v1/graph/sources`
+
+One source followed through (`episode=`, an episode id):
+
+- **sections:** from its Markdown headings, with byte spans. Plain text
+  has none.
+- **chunks:** the stored byte spans, each with the section it starts in.
+  At most `max_chunks` are listed (default 64).
+- **claims:** the facts citing the episode, at most `max_claims`
+  (default 200). Each carries its quote's first exact UTF-8 byte span,
+  the number of times the quote occurs, the section and chunks the span
+  falls in, its grounding (`quote_verified`, `quote_not_found` or
+  `source_unquoted`) and the entities it names.
+- **entities:** those the claims name, each listing its claims.
+- **mentions:** names of known entities found in the text, reported
+  apart from claims, because a name appearing is not the source asserting
+  anything about it. A lowercase single word is never taken as a name,
+  and an entity a claim already names is not repeated.
+
+Spans are byte offsets into the unchanged content, like chunk spans, so
+`content.encode()[start:end]` is exactly the quote even after non-ASCII
+text. Caps are reported as `chunk_limit` and `claim_limit`. A store that
+cannot list a source's claims says `claims_unavailable`. A missing
+episode is a 404 and a forgotten one a 410, as for the episode itself.
+Advertised as `graph.sources`.
+
 #### `GET /v1/graph/timeline`
 
 One entity's facts in valid time (`entity=`, a name or id). Every fact

@@ -98,7 +98,7 @@ def _plain(text: str) -> str:
 _INDEXES: OrderedDict[str, dict[str, tuple[Entity, ...]]] = OrderedDict()
 
 
-def _name_index(projection: EntityProjection) -> dict[str, tuple[Entity, ...]]:
+def name_index(projection: EntityProjection) -> dict[str, tuple[Entity, ...]]:
     """Every entity's key and spellings as plain words, kept per projection."""
     found = _INDEXES.get(projection.digest)
     if found is not None:
@@ -120,7 +120,7 @@ def _name_index(projection: EntityProjection) -> dict[str, tuple[Entity, ...]]:
 def mentioned(projection: EntityProjection, question: str, *, limit: int) -> list[Entity]:
     """Entities a question names: the longest run of its words that is an
     entity's name, at each position, case and punctuation aside."""
-    index = _name_index(projection)
+    index = name_index(projection)
     words = _WORD.findall(question.casefold())
     found: list[Entity] = []
     position = 0

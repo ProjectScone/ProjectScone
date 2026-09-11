@@ -22,6 +22,7 @@ from ..core.errors import InvalidInput, NotFound
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.context import ContextLimits, graph_context
+from ..entities.sources import sources_view
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
 from ..entities.export import ExportFormat, export_graph
@@ -322,6 +323,16 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
                 "candidates": list(packet.candidates),
                 "coverage": {"reasons": packet.coverage.get("reasons", []), "read": packet.coverage.get("read", {}),
                              "hubs_not_crossed": packet.coverage.get("hubs_not_crossed", [])}}
+
+    @app.get("/v1/graph/sources")
+    async def get_sources(
+        episode: int = Query(ge=1), max_chunks: int = Query(default=64, ge=1, le=1000),
+        max_claims: int = Query(default=200, ge=1, le=1000), space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """One source followed through: its sections, chunks, the claims quoting
+        it with exact byte spans, the entities they name, and mentions of known
+        entities kept apart. A missing episode is a 404, a forgotten one a 410."""
+        return await sources_view(engine, space, episode, max_chunks=max_chunks, max_claims=max_claims)
 
     @app.get("/v1/graph/timeline", response_model=None)
     async def get_timeline(
