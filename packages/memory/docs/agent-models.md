@@ -355,6 +355,19 @@ conflicts. Sequential records retain their previous encrypted payload shape so
 older local readers can still inspect them. New parallel records require a reader
 that supports scheduling. Dynamic handoffs remain separate work.
 
+## Finish a sequential workflow early
+
+Native `WorkflowRunner` accepts `completion=WorkflowCompletion(version, when)`.
+The synchronous predicate receives detached invocation data and completed results;
+it must return a boolean and depend only on that data. Change its version when
+the policy changes. It must not call a model or perform external work.
+
+A true condition stops remaining steps. The actual completed prefix is retained,
+and `read_result` verifies that prefix and its completion condition without
+executing omitted steps. Unknown prior attempts still prevent completion/replay.
+Default workflows retain their existing journal signatures. Completion conditions
+cannot currently be combined with parallel dependency scheduling.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.

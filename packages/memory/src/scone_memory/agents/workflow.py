@@ -64,6 +64,23 @@ class WorkflowStep:
 
 
 @dataclass(frozen=True)
+class WorkflowCompletion:
+    """Pure synchronous completion policy, revision-bound like a step.
+
+    The predicate must depend only on its detached invocation and results.
+    Change version whenever that policy changes. It must never invoke models,
+    perform external writes or use mutable external state.
+    """
+    version: str
+    when: Callable[[StepContext], bool]
+
+    def __post_init__(self) -> None:
+        _name(self.version)
+        if not callable(self.when) or inspect.iscoroutinefunction(self.when):
+            raise WorkflowError('invalid_completion')
+
+
+@dataclass(frozen=True)
 class WorkflowResult:
     run_id: str
     status: str
@@ -190,6 +207,7 @@ class WorkflowRunner:
         max_payload_bytes: int = 256000, deadline: float = 30.0, max_retries: int = 1,
         verify_before_step: bool = False,
         dependencies: Mapping[str, Sequence[str]] | None = None, max_parallel: int = 1,
+        completion: WorkflowCompletion | None = None,
     ):
         if type(key) is not bytes or len(key) != 32:
             raise WorkflowError('key_must_be_32_bytes')
@@ -218,6 +236,9 @@ class WorkflowRunner:
         self._dependencies = _dependencies(steps, dependencies) if dependencies is not None else None
         if dependencies is not None and any(step.retryable for step in steps):
             raise WorkflowError('parallel_retries_unsupported')
+        if completion is not None and (not isinstance(completion, WorkflowCompletion) or dependencies is not None):
+            raise WorkflowError('invalid_completion')
+        self._completion = WorkflowCompletion(completion.version, completion.when) if completion is not None else None
         self._parallel = max_parallel
         self._steps = tuple(steps)
         self._verifier = source_verifier
@@ -235,6 +256,8 @@ class WorkflowRunner:
         if self._dependencies is not None:
             revision = {'steps': revision, 'dependencies': {name: list(values) for name, values in self._dependencies.items()},
                         'max_parallel': max_parallel}
+        if self._completion is not None:
+            revision = {'steps': revision, 'completion': self._completion.version}
         self._revision = hashlib.sha256(_encode(revision, 256000)).hexdigest()
         self._lock_fd = -1
         self._db: sqlite3.Connection
@@ -406,8 +429,10 @@ class WorkflowRunner:
             if progress is None:
                 return None
             expected = tuple(step.step_id for step in self._steps)
+            partial = progress.completed_steps != expected
             if (progress.status not in {'completed', 'verification_unavailable'}
-                    or progress.inflight is not None or progress.completed_steps != expected):
+                    or progress.inflight is not None or (partial and (self._completion is None
+                    or progress.completed_steps != expected[:len(progress.completed_steps)]))):
                 raise WorkflowError('not_completed')
             token = hmac.new(self._key, run_id.encode(), hashlib.sha256).hexdigest()
             row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (token,)).fetchone()
@@ -416,10 +441,12 @@ class WorkflowRunner:
             state = cast(dict[str, JSONValue], json.loads(self._unseal(token, row[0])))
             await asyncio.wait_for(self._verify(token, self._context(run_id, space, clean_scope, clean_input, state), state),
                                    timeout=self._deadline)
+            if partial and not self._finished(self._context(run_id, space, clean_scope, clean_input, state)):
+                raise WorkflowError('not_completed')
             state.update(status='completed', error_class=None)
             self._save(token, state)
             self._clear_checkpoints(token)
-            return WorkflowResult(run_id, 'completed', cast(dict[str, JSONValue], _copy(state['results'], self._maximum)), expected)
+            return WorkflowResult(run_id, 'completed', cast(dict[str, JSONValue], _copy(state['results'], self._maximum)), progress.completed_steps)
         except asyncio.TimeoutError:
             raise WorkflowError('verification_unavailable') from None
         except sqlite3.Error:
@@ -496,6 +523,19 @@ class WorkflowRunner:
             self._clear_checkpoints(token)
             raise WorkflowError('sources_invalid')
 
+    def _finished(self, context: StepContext) -> bool:
+        if self._completion is None:
+            return False
+        try:
+            result = self._completion.when(context)
+            if type(result) is not bool:
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise WorkflowError('completion_failed')
+            return result
+        except Exception:
+            raise WorkflowError('completion_failed') from None
+
     async def _execute(self, token: str, state: dict[str, JSONValue], run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
         if state['status'] == 'sources_invalid':
             self._clear_checkpoints(token)
@@ -509,6 +549,18 @@ class WorkflowRunner:
         for step in self._steps:
             if step.step_id in results:
                 continue
+            try:
+                finished = self._completion is not None and self._finished(self._context(run_id, space, scope, inputs, state))
+            except WorkflowError:
+                state.update(status='failed', error_class='CompletionConditionError')
+                self._save(token, state)
+                raise
+            if finished:
+                if any(name not in results for name in attempts):
+                    state.update(status='outcome_unknown', error_class=None)
+                    self._save(token, state)
+                    raise WorkflowError('outcome_unknown')
+                break
             if self._verify_before_step:
                 await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
             previous = cast(int, attempts.get(step.step_id, 0))
