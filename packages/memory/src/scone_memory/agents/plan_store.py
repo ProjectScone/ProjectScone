@@ -1,30 +1,25 @@
 """Encrypted, revision-checked task plans with explicit host-model bindings."""
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import hmac
-import os
 from pathlib import Path
 import re
 import sqlite3
-import stat
 from typing import Self
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from ._encrypted_store import EncryptedRecordStore
 from .catalog import AgentCatalog
 from .task_workflow import AgentTaskPlan
-from .workflow import WorkflowError, _integer, _name, _private_file
+from .workflow import WorkflowError, _integer, _name
 from ..core.validation import check_space
 
 _APP_ID = 0x5343504C
-_MAX_BYTES = 128000
 _MAX_REVISION = 2**63 - 1
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 
@@ -87,85 +82,19 @@ class AgentPlanStore:
     No model is invoked.
     """
     def __init__(self, path: str | Path, *, key: bytes, max_plans: int = 4096) -> None:
-        if type(key) is not bytes or len(key) != 32:
-            raise WorkflowError('key_must_be_32_bytes')
         _integer(max_plans, 1, 100000)
-        self._cipher, self._key, self._maximum = AESGCM(key), key, max_plans
-        self._closed = False
-        descriptor = -1
-        try:
-            target = Path(path).absolute()
-            parent = target.parent.stat(follow_symlinks=False)
-            if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid()
-                    or parent.st_mode & 0o022):
-                raise WorkflowError('private_directory_required')
-            descriptor = _private_file(target)
+        self._maximum, self._key = max_plans, key
+        self._storage = EncryptedRecordStore(path, key=key, table='agent_plans',
+            metadata='agent_plan_meta', application_id=_APP_ID, domain='scone-agent-plans-v1', label='plan')
 
-            def unchanged_file() -> None:
-                opened = os.fstat(descriptor)
-                current = target.stat(follow_symlinks=False)
-                if (not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid()
-                        or current.st_mode & 0o077 or current.st_nlink != 1
-                        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
-                    raise WorkflowError('private_file_required')
-
-            unchanged_file()
-            self._db = sqlite3.connect(target, timeout=1, isolation_level=None)
-            unchanged_file()
-            self._db.execute('PRAGMA synchronous=FULL')
-            with self._access(write=True) as db:
-                app = db.execute('PRAGMA application_id').fetchone()[0]
-                version = db.execute('PRAGMA user_version').fetchone()[0]
-                names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")}
-                if not app and not version and not names:
-                    db.execute('CREATE TABLE agent_plans (token TEXT PRIMARY KEY, payload BLOB NOT NULL)')
-                    db.execute('CREATE TABLE agent_plan_meta (payload BLOB NOT NULL)')
-                    db.execute('INSERT INTO agent_plan_meta VALUES (?)', (self._seal('key-check', b'scone-agent-plans-v1'),))
-                    db.execute(f'PRAGMA application_id={_APP_ID}')
-                    db.execute('PRAGMA user_version=1')
-                elif app != _APP_ID or version != 1 or names != {'agent_plans', 'agent_plan_meta'}:
-                    raise WorkflowError('foreign_plan_store')
-                markers = db.execute('SELECT payload FROM agent_plan_meta LIMIT 2').fetchall()
-                if len(markers) != 1 or self._unseal('key-check', markers[0][0]) != b'scone-agent-plans-v1':
-                    raise WorkflowError('plan_key_or_integrity')
-        except BaseException as error:
-            if hasattr(self, '_db'):
-                self._db.close()
-            if isinstance(error, (OSError, sqlite3.Error)):
-                raise WorkflowError('plan_store_unavailable') from None
-            raise
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-
-    @contextmanager
-    def _access(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        if self._closed:
-            raise WorkflowError('plan_store_closed')
-        try:
-            self._db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
-            try:
-                yield self._db
-                self._db.execute('COMMIT')
-            except BaseException:
-                self._db.execute('ROLLBACK')
-                raise
-        except sqlite3.Error:
-            raise WorkflowError('plan_store_unavailable') from None
+    def _access(self, *, write: bool = False) -> AbstractContextManager[sqlite3.Connection]:
+        return self._storage._access(write=write)
 
     def _seal(self, token: str, payload: bytes) -> bytes:
-        if len(payload) > _MAX_BYTES:
-            raise WorkflowError('plan_payload_limit')
-        nonce = os.urandom(12)
-        return nonce + self._cipher.encrypt(nonce, payload, ('scone-agent-plans-v1:' + token).encode())
+        return self._storage._seal(token, payload)
 
     def _unseal(self, token: str, payload: object) -> bytes:
-        if not isinstance(payload, bytes) or not 28 <= len(payload) <= _MAX_BYTES + 28:
-            raise WorkflowError('plan_key_or_integrity')
-        try:
-            return self._cipher.decrypt(payload[:12], payload[12:], ('scone-agent-plans-v1:' + token).encode())
-        except (InvalidTag, ValueError):
-            raise WorkflowError('plan_key_or_integrity') from None
+        return self._storage._unseal(token, payload)
 
     def _prefix(self, space: str) -> str:
         check_space(space)
@@ -225,6 +154,4 @@ class AgentPlanStore:
             return AgentPlanPage(items, rows[limit - 1][0] if len(rows) > limit else None)
 
     def close(self) -> None:
-        if not self._closed:
-            self._db.close()
-            self._closed = True
+        self._storage.close()

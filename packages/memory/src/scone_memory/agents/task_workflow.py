@@ -202,6 +202,11 @@ class AgentWorkflow:
     async def run(self, run_id: str, question: str) -> WorkflowResult:
         return await self._runner.run(run_id, space=self._space, scope=self._binding_scope, inputs=self._question(question))
 
+    async def read_result(self, run_id: str, question: str) -> WorkflowResult | None:
+        """Read a complete, freshly verified answer without executing an agent."""
+        return await self._runner.read_result(run_id, space=self._space, scope=self._binding_scope,
+                                              inputs=self._question(question))
+
     def status(self, run_id: str, question: str) -> WorkflowStatus | None:
         return self._runner.status(run_id, space=self._space, scope=self._binding_scope, inputs=self._question(question))
 

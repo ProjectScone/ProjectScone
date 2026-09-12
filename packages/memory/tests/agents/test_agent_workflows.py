@@ -437,3 +437,75 @@ async def test_before_step_verification_outage_does_not_start_an_uncertain_attem
     assert (await job.run('r',space='alpha',scope={},inputs='q')).status=='completed'
     assert calls==[1]
     job.close()
+
+
+async def test_result_read_never_starts_an_unknown_or_failed_step(tmp_path):
+    calls=[]
+    async def fails(context):
+        calls.append('called')
+        raise RuntimeError('model outcome unknown')
+    work=runner(tmp_path/'read.db',[WorkflowStep('model','1',fails)])
+    assert await work.read_result('r',space='alpha',scope={},inputs='question') is None
+    assert calls==[]
+    with pytest.raises(WorkflowError):await work.run('r',space='alpha',scope={},inputs='question')
+    with pytest.raises(WorkflowError,match='not_completed'):
+        await work.read_result('r',space='alpha',scope={},inputs='question')
+    assert calls==['called']
+    work.close()
+
+
+async def test_result_read_revalidates_without_reexecution_and_preserves_outage_receipts(tmp_path):
+    calls=[];verification='valid'
+    async def step(context):calls.append('model');return 'saved answer'
+    async def verify(context):
+        if verification=='outage':raise OSError('unavailable')
+        return verification=='valid'
+    work=runner(tmp_path/'read.db',[WorkflowStep('model','1',step)],source_verifier=verify)
+    first=await work.run('r',space='alpha',scope={},inputs='question')
+    verification='outage'
+    with pytest.raises(WorkflowError,match='verification_unavailable'):
+        await work.read_result('r',space='alpha',scope={},inputs='question')
+    assert work.status('r',space='alpha',scope={},inputs='question').completed_steps==('model',)
+    verification='valid'
+    assert (await work.read_result('r',space='alpha',scope={},inputs='question')).results==first.results
+    assert calls==['model']
+    verification='invalid'
+    with pytest.raises(WorkflowError,match='sources_invalid'):
+        await work.read_result('r',space='alpha',scope={},inputs='question')
+    assert work.status('r',space='alpha',scope={},inputs='question').completed_steps==()
+    work.close()
+
+
+async def test_result_read_cancellation_does_not_change_completed_work(tmp_path):
+    entered=asyncio.Event();hold=False;calls=[]
+    async def step(context):calls.append('model');return 'answer'
+    async def verify(context):
+        if hold:
+            entered.set();await asyncio.Event().wait()
+        return True
+    work=runner(tmp_path/'read.db',[WorkflowStep('model','1',step)],source_verifier=verify)
+    await work.run('r',space='alpha',scope={},inputs='question');hold=True
+    read=asyncio.create_task(work.read_result('r',space='alpha',scope={},inputs='question'))
+    await entered.wait();read.cancel()
+    with pytest.raises(asyncio.CancelledError):await read
+    assert work.status('r',space='alpha',scope={},inputs='question').status=='completed'
+    hold=False
+    assert (await work.read_result('r',space='alpha',scope={},inputs='question')).results=={'model':'answer'}
+    assert calls==['model'];work.close()
+
+
+async def test_result_read_finishes_checkpoint_cleanup_after_verification_outage(tmp_path):
+    calls=[];unavailable=True
+    async def step(context):
+        calls.append('model');context.checkpoints.put('receipt',b'intermediate work');return 'answer'
+    async def verify(context):
+        if context.completed and unavailable:raise ConnectionError('store unavailable')
+        return True
+    work=runner(tmp_path/'read.db',[WorkflowStep('model','1',step)],source_verifier=verify)
+    with pytest.raises(WorkflowError,match='verification_unavailable'):
+        await work.run('r',space='alpha',scope={},inputs='question')
+    assert work.status('r',space='alpha',scope={},inputs='question').checkpoint_count==1
+    unavailable=False
+    assert (await work.read_result('r',space='alpha',scope={},inputs='question')).status=='completed'
+    assert work.status('r',space='alpha',scope={},inputs='question').checkpoint_count==0
+    assert calls==['model'];work.close()

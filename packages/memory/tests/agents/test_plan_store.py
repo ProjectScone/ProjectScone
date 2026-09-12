@@ -155,7 +155,7 @@ def test_concurrent_editors_have_exactly_one_winner(tmp_path):
 
 def test_replaced_path_is_refused_before_sqlite_can_initialize_target(tmp_path,monkeypatch):
     import sqlite3
-    from scone_memory.agents import plan_store
+    from scone_memory.agents import _encrypted_store as plan_store
     target=tmp_path/'unrelated.db';target.touch(mode=0o644)
     path=tmp_path/'plans.db';original=plan_store._private_file
     def swap(name):

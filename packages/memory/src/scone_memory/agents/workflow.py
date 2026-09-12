@@ -346,6 +346,56 @@ class WorkflowRunner:
                               cast(str | None, state['inflight']), dict(cast(dict[str, int], state['attempts'])),
                               cast(str | None, state['error_class']), self._checkpoint_count(token))
 
+    async def read_result(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue],
+                          inputs: JSONValue) -> WorkflowResult | None:
+        """Revalidate completed results without executing any workflow step.
+
+        Missing runs return None. Incomplete, failed or interrupted work is never
+        resumed by this read. Verification outages preserve completed receipts;
+        confirmed invalid evidence is invalidated under the normal verifier policy.
+        """
+        _name(run_id)
+        _name(space)
+        if self._closed:
+            raise WorkflowError('closed')
+        if self._running:
+            raise WorkflowError('busy')
+        if not isinstance(scope, Mapping):
+            raise WorkflowError('invalid_payload')
+        clean_scope = cast(dict[str, JSONValue], _copy(dict(scope), self._maximum))
+        clean_input = _copy(inputs, self._maximum)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise WorkflowError('busy') from None
+        self._running = True
+        try:
+            progress = self.status(run_id, space=space, scope=clean_scope, inputs=clean_input)
+            if progress is None:
+                return None
+            expected = tuple(step.step_id for step in self._steps)
+            if (progress.status not in {'completed', 'verification_unavailable'}
+                    or progress.inflight is not None or progress.completed_steps != expected):
+                raise WorkflowError('not_completed')
+            token = hmac.new(self._key, run_id.encode(), hashlib.sha256).hexdigest()
+            row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (token,)).fetchone()
+            if row is None:
+                raise WorkflowError('journal_unavailable')
+            state = cast(dict[str, JSONValue], json.loads(self._unseal(token, row[0])))
+            await asyncio.wait_for(self._verify(token, self._context(run_id, space, clean_scope, clean_input, state), state),
+                                   timeout=self._deadline)
+            state.update(status='completed', error_class=None)
+            self._save(token, state)
+            self._clear_checkpoints(token)
+            return WorkflowResult(run_id, 'completed', cast(dict[str, JSONValue], _copy(state['results'], self._maximum)), expected)
+        except asyncio.TimeoutError:
+            raise WorkflowError('verification_unavailable') from None
+        except sqlite3.Error:
+            raise WorkflowError('journal_unavailable') from None
+        finally:
+            self._running = False
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+
     async def run(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
         _name(run_id)
         _name(space)

@@ -131,6 +131,10 @@ storage outage pauses verification and preserves completed work. Cancellation
 or interruption during a model call leaves an uncertain outcome that cannot be
 automatically replayed; use a new run ID for an intentional new execution.
 `status` returns progress metadata, not revalidated answer content.
+`await workflow.read_result(run_id, question)` verifies completed results without
+executing any task. Missing runs return `None`; incomplete or uncertain runs are
+refused. Verification outages preserve receipts, and successful completion also
+cleans intermediate checkpoints. Cancelling a read does not cancel the saved run.
 
 Handoffs are bounded JSON in a separate user message marked as untrusted data.
 They cannot change system instructions, model selection or the fixed tool scope.
@@ -208,6 +212,33 @@ plan identity. These routes edit plans only; they do not start model execution.
 The application closes its plan store when it shuts down. Deleting a memory space
 blocks HTTP access but does not physically erase its separate plan store or
 backups; the host must include those in its retention policy.
+
+## Retain a run request independently of later edits
+
+`AgentRunStore` records an immutable invocation snapshot: run ID, space, selected
+plan revision and model bindings, question, fixed recall scope, optional excluded
+session and creation time. The original plan remains attached to the run even
+when the editable plan changes. Registering the same ID and identical invocation
+returns the original record; changing any bound input raises `RunConflict`.
+
+```python
+from scone_memory.agents.run_store import AgentRunStore
+
+runs = AgentRunStore("agent-runs.sqlite", key=key)
+try:
+    request = runs.register("team-space", "request-1", plan=stored,
+        question="What should our team do next?",
+        scope=RecallScope.validated(where={"project": "approved-project"}))
+finally:
+    runs.close()
+```
+
+The host must authorize the space and call `request.plan.checked_plan(agents)`
+before execution. Registration itself calls no model and does not start or resume
+work. Run requests and execution receipts use separate stores. The registry shares
+the plan store's private-file, encryption, payload and pagination protections,
+with a distinct schema and encryption domain. It defaults to 4,096 run records.
+The host owns retention and cleanup; records are not automatically expired.
 
 ## Current boundary
 
