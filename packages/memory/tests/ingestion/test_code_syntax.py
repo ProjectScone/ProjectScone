@@ -161,3 +161,74 @@ def test_the_two_readers_never_disagree_about_who_owns_a_declaration():
             assert owners[obj] == subject, (obj, owners[obj], subject)
     # And the parser sees the arrow const the line reader cannot.
     assert ("web/app.ts", "web/app.ts:hold") in tree - line, tree - line
+
+
+@pytest.mark.parametrize("source, why", [
+    ("export function leaf() { return 1; }\n"
+     "export function caller({leaf}: {leaf: () => number}) { return leaf(); }\n",
+     "a destructured object parameter"),
+    ("export function leaf() { return 1; }\n"
+     "export function caller([leaf]: Array<() => number>) { return leaf(); }\n",
+     "a destructured array parameter"),
+    ("export function leaf() { return 1; }\n"
+     "export const caller = leaf => leaf();\n",
+     "an arrow parameter written without brackets"),
+    ("export function leaf() { return 1; }\n"
+     "export function caller() { try { throw null; } catch (leaf) { return leaf(); } }\n",
+     "a catch parameter"),
+    ("export function leaf() { return 1; }\n"
+     "export function caller() { if (true) { var leaf = () => 2; } return leaf(); }\n",
+     "a var declared in a nested block, which JavaScript hoists to the function"),
+    ("export function leaf(p) { return p; }\n"
+     "export function caller() { const {leaf} = deps; return leaf(); }\n",
+     "a destructured local"),
+    ("export function leaf(p) { return p; }\n"
+     "export function caller(...leaf) { return leaf(); }\n",
+     "a rest parameter"),
+])
+def test_every_way_a_name_can_be_bound_shadows_the_declaration_beside_it(source, why):
+    """Every one of these was a false edge.
+
+    A scope stack is only as good as its idea of what binds a name, and
+    mine knew about plain parameters and `const`. Destructuring, a
+    bracketless arrow parameter, `catch`, rest, and `var`'s hoisting to
+    the **function** rather than the block are all ordinary JavaScript
+    and all of them left the caller bound to a global it never called.
+    Found by Codex's reviewer against a tree with no parse error at all,
+    which is the point: a syntax tree does not make a reader right, it
+    only gives it the chance to be.
+    """
+    assert not [one for one in claims(source) if one[1] == "calls"], why
+
+
+def test_a_hoisted_call_is_found_whether_or_not_the_declaration_is_exported():
+    """`export function` wraps the declaration in an `export_statement`,
+    and a scan of a scope's direct children walks straight past it. So a
+    call to a function declared later in the file bound when the callee
+    was local and vanished when it was exported -- the same code, read
+    two ways, by a rule about a keyword."""
+    plain = claims("function caller() { return leaf(); }\n"
+                   "function leaf() { return 1; }\n")
+    exported = claims("export function caller() { return leaf(); }\n"
+                      "export function leaf() { return 1; }\n")
+    assert ("web/app.ts:caller", "calls", "web/app.ts:leaf") in plain, plain
+    assert ("web/app.ts:caller", "calls", "web/app.ts:leaf") in exported, exported
+
+
+def test_a_call_this_file_could_not_parse_is_not_a_call():
+    """`return leaf( ;` is not a call, it is a file someone is still
+    typing. tree-sitter recovers and offers a `call_expression` anyway,
+    and a reader that takes it records an edge from something nobody
+    wrote."""
+    assert not [one for one in claims("function leaf() { return 1; }\n"
+                                      "function caller() { return leaf( ; }\n")
+                if one[1] == "calls"]
+
+
+def test_a_declaration_is_claimed_once():
+    """`export const caller = leaf => leaf();` was reported twice --
+    once from the scope's own scan and once from the pass over its
+    children. Two identical facts are not worse than one, but they say
+    the reader does not know what it has seen."""
+    found = [one for one in claims("export const caller = (p) => p;\n") if one[1] == "defines"]
+    assert len(found) == len(set(found)) == 1, found
