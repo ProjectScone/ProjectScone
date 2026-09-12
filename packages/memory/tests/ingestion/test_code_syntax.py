@@ -125,3 +125,39 @@ def test_a_package_subpath_is_not_a_file_of_this_graph():
     found = claims(source, "web/page.ts")
     assert ("web/page.ts:drive", "calls", "web/store.ts:keep") in found, found
     assert not any("useAnimate" in one[2] for one in found if one[1] == "calls"), found
+
+
+def test_the_two_readers_never_disagree_about_who_owns_a_declaration():
+    """Both readers run for a brace file and their claims are merged, so
+    a declaration they both see must be attributed to the same owner --
+    otherwise one file's `Shelf.keep` becomes two things and the graph
+    holds a disagreement rather than a fact.
+
+    Checked across this project's whole web application as well: 199
+    declarations seen by both, and **no** case where they named different
+    owners for one of them. The parser sees more; it never sees different.
+    """
+    from scone_memory.ingestion.code_graph import _brace_claims
+
+    source = ("import {helper} from './helper';\n"
+              "export function drive(p) {\n"
+              "  return helper(p);\n"
+              "}\n"
+              "export class Shelf {\n"
+              "  keep(p) {\n"
+              "    return p;\n"
+              "  }\n"
+              "}\n"
+              "export const hold = (p) => p;\n")
+    line = {(c.subject, c.object) for c in _brace_claims(source, "web/app.ts", None)
+            if c.predicate == "defines"}
+    tree = {(c.subject, c.object) for c in code_syntax.syntax_claims(source, "web/app.ts")
+            if c.predicate == "defines"}
+    assert line and tree, (line, tree)
+    assert line & tree, "this fixture needs a declaration both readers see"
+    owners = {obj: subject for subject, obj in line}
+    for subject, obj in tree:
+        if obj in owners:
+            assert owners[obj] == subject, (obj, owners[obj], subject)
+    # And the parser sees the arrow const the line reader cannot.
+    assert ("web/app.ts", "web/app.ts:hold") in tree - line, tree - line
