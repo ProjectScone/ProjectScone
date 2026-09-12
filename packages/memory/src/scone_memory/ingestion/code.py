@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import re
 from typing import Literal, Optional, Sequence
 
-from .chunker import DEFAULT_TARGET, Span, chunk_spans
+from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
 
 Language = Literal["python", "braces"]
 
@@ -417,6 +417,12 @@ def _split(content: str, unit: CodeSpan, target: int, found: Sequence[Declaratio
         pieces.append(CodeSpan(cursor, cut, unit.names))
         cursor = cut
     pieces.append(CodeSpan(cursor, unit.end, unit.names))
+    # What is left over at the end of a declaration is the end of that
+    # declaration, and a few lines of it alone say nothing. It goes back
+    # to the piece it was cut from, as the ordinary chunker's tail does.
+    if len(pieces) > 1 and len(content[pieces[-1].start : pieces[-1].end].strip()) < MIN_CHUNK:
+        tail = pieces.pop()
+        pieces[-1] = CodeSpan(pieces[-1].start, tail.end, unit.names)
     return pieces
 
 

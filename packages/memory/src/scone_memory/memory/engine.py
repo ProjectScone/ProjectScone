@@ -143,6 +143,7 @@ class MemoryEngine:
         events: Optional[EventLog] = None,
         record_queries: bool = False,
         contextual_embeddings: bool = False,
+        code_aware: bool = True,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -159,6 +160,10 @@ class MemoryEngine:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
             raise InvalidInput(_other_scale(abstention, embedder.id, embedder.dim))
+        #: Whether a source stored under a name that says it is code is cut
+        #: at its declarations. Names say it, never the content: a note that
+        #: quotes code is prose.
+        self.code_aware = code_aware
         #: The measured floor this engine abstains by, when one was given.
         self.abstention = abstention
         #: Which claims a profile is made of; by default, all of them.
@@ -438,7 +443,7 @@ class MemoryEngine:
     def _ingestion_runtime(self) -> ingestion_batch.IngestionRuntime:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit,
+            self._embed_text, self._emit, code_aware=self.code_aware,
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:

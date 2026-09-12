@@ -13,7 +13,8 @@ from ..core.errors import InvalidInput
 from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
-from .chunker import byte_spans, chunk_spans
+from .chunker import Span, byte_spans, chunk_spans
+from .code import code_language, code_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 
 EMBED_BATCH = 64
@@ -30,6 +31,18 @@ class IngestionRuntime:
     chunk_target: int
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
+    #: Whether a source stored under a name that says it is code is cut at
+    #: its declarations rather than every chunk_target characters.
+    code_aware: bool = True
+
+
+def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
+    """Where to cut: at declarations when the source is code and the name
+    it was stored under says which language, and by length otherwise."""
+    language = code_language(source) if runtime.code_aware else None
+    if language is None:
+        return chunk_spans(content, runtime.chunk_target)
+    return list(code_spans(content, runtime.chunk_target, language=language))
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
@@ -64,7 +77,7 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             continue
         seen[digest] = len(results)
         results.append(None)
-        spans = chunk_spans(content, runtime.chunk_target)
+        spans = spans_for(runtime, content, record.source)
         fresh.append(
             _Pending(
                 slot=len(results) - 1,
@@ -174,7 +187,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
         else:
             chunks = await runtime.documents.chunks_of(space, episode.episode_id)
             if not chunks:
-                spans = chunk_spans(episode.content, runtime.chunk_target)
+                spans = spans_for(runtime, episode.content, episode.source)
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(

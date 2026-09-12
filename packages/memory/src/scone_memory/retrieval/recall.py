@@ -13,6 +13,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from ..core.errors import InvalidInput
+from ..ingestion.code import code_language, declaration_at, line_span
 from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
@@ -355,6 +356,13 @@ async def recall(
     for item in items:
         chunk = chunks[item.chunk_id]
         episode = episodes.get(chunk.episode_id)
+        # Where in the file this came from, worked out from the episode
+        # rather than stored: the same span always answers the same way,
+        # and a chunk written before any of this can still answer.
+        language = code_language(episode.source) if episode else None
+        held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
+                if episode is not None and language is not None else None)
+        lines = line_span(episode.content, chunk.start, chunk.end, "bytes") if episode is not None else None
         result_items.append(
             RecallItem(
                 chunk_id=chunk.chunk_id,
@@ -368,6 +376,11 @@ async def recall(
                 source=episode.source if episode else None,
                 tags=episode.tags if episode else (),
                 metadata=dict(episode.metadata) if episode else {},
+                start=chunk.start,
+                end=chunk.end,
+                first_line=lines[0] if lines else None,
+                last_line=lines[1] if lines else None,
+                declaration=held.name if held is not None else None,
             )
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None

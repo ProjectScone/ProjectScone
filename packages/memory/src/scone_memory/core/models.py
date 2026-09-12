@@ -328,6 +328,18 @@ class RecallItem(BaseModel):
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: The chunk's own UTF-8 byte span of its episode, half-open, so a
+    #: caller can quote the source exactly and cite where it stops.
+    start: int = 0
+    end: int = 0
+    #: The 1-based lines that span covers, when the episode was still
+    #: there to count them.
+    first_line: Optional[int] = None
+    last_line: Optional[int] = None
+    #: The declaration this chunk is inside, qualified by everything that
+    #: holds it ("Engine.forget"), when the source is code and one holds
+    #: all of it.
+    declaration: Optional[str] = None
 
 
 class RerankTrace(BaseModel):
