@@ -35,6 +35,33 @@ or `None` when the request never reached a server) and `.message` (the
 server's `{"error": ...}` text, or the plain-text body axum's own extractor
 rejections use).
 
+## Response limits
+
+`Scone(..., max_response_bytes=16 * 1024 * 1024)` bounds decoded response bytes
+before JSON parsing, including error bodies. Set a larger positive integer when
+a known document or agent result needs it. An oversized response raises
+`SconeError` with its HTTP status and no retained body. Receiving that error does
+not tell you whether a preceding write completed; inspect the durable resource
+before deciding to resume or retry it. The client adds no automatic retries.
+
+The transport streams encoded bytes into a bounded buffer and advertises only
+`gzip, deflate`. It accepts identity, gzip (up to 1024 members), and wrapped or raw
+deflate; other encodings, truncated compressed bodies, and invalid trailers are
+refused. Compressed wire bytes are capped at twice `max_response_bytes` plus
+64 KiB, and decompression has its own output cap. These are byte limits, not a
+limit on the Python objects subsequently created by JSON parsing. The configured
+`timeout` still controls connection and idle read timeouts, not a total deadline.
+
+The client sets `Accept-Encoding: gzip, deflate` after copying caller headers;
+caller-supplied values cannot opt into an unsupported coding. Successful JSON
+responses are not also decoded into an unused error-body string.
+
+Each response is closed, including failed reads. An injected `requests.Session`
+remains caller-owned. If a custom adapter or response hook already buffers or
+decodes the body, its earlier allocation is outside these bounds; the cached
+body is checked before the client parses it. Custom session retry policies are
+also caller-controlled.
+
 ## Server behavior worth knowing
 
 - **Source and event time are supported.** `add(..., source=..., created_at=...)`
@@ -78,3 +105,132 @@ See the framework [contribution guide](../../CONTRIBUTING.md),
 [citation formats](../../CITING.md), and [citation metadata](../../CITATION.cff).
 Research and academic use must credit ProjectScone contributors, JudgeHuman and ProjectScone
 as required by the included [license](LICENSE).
+
+## Agent workflow resources
+
+The independently installed client includes typed catalog, plan, and run
+resources for hosts that advertise the corresponding `agents.*` capabilities.
+`expected_space` verifies responses and mutation admission; it does not override
+the space assigned to the bearer key.
+
+```python
+from scone import Scone, ModelTask, TaskPlan
+
+with Scone("http://127.0.0.1:7437", api_key="your-space-key") as memory:
+    agents = memory.agents(expected_space="alpha")
+    choices = agents.catalog()
+    # Use agent/model IDs actually returned by this host's catalog.
+    plan = TaskPlan("research", (
+        ModelTask("answer", "researcher", "local-careful", "Answer with evidence."),
+    ))
+    saved = agents.save_plan(plan, expected_revision=0)
+    progress = agents.start("research-1", plan=saved, question="What changed?")
+    original = agents.request("research-1")
+    agents.status("research-1").match(original)
+```
+
+`agents.plans()` and `agents.runs()` return one bounded page with an explicit
+`next_after` cursor. `agents.plan(id)`, `agents.policy()`, and
+`agents.cancel(run_id)` provide inspection and cancellation. `HumanInput` tasks
+and `HandoffPlan`/`HandoffAgent` preserve their native plan formats and explicit
+model choices. Resource construction is local; reads and plan saves do not
+execute a model. Only an explicit `start` submits a run. Errors never trigger an
+automatic retry, resume, or alternate model selection.
+
+New workflow response models reject malformed scalars, mismatched identities,
+and changed acknowledgement bindings. The client preserves server HTTP errors
+and refuses redirects. JSON is encoded as UTF-8 so valid multibyte inputs do not
+expand into ASCII escapes beyond the server's request budget. Python 3.9 remains
+supported, and the distribution includes `py.typed` for static type checking.
+
+Human inputs use separate reply and execution operations:
+
+```python
+pending, = agents.inputs("run-1")
+answered = agents.respond(pending, response="Proceed with the careful analysis.")
+# Persist this continuation ID and selected reply for an explicit retry.
+status = agents.continue_run(
+    "run-1", continuation_id="approval-1", responses=(answered,),
+)
+```
+
+A reply alone never resumes a run. The client checks fresh input identities
+before each write and confirms the selected activation after continuation.
+Transport failures and uncertain acknowledgements raise `SconeError`; the client
+never retries a write automatically. Callers can read `inputs()` and `status()`
+without execution, then explicitly retry the original response or continuation
+ID and selection. A successful continuation confirms admission, not completion.
+The native server remains responsible for atomic revision and source checks.
+
+For a real local agent API contract test, point `SCONE_TEST_NATIVE_PYTHON` at
+an interpreter with the repository's native framework and API dependencies:
+
+```sh
+SCONE_TEST_NATIVE_PYTHON=/path/to/native/python python -m pytest -q tests/test_native_agents.py
+```
+
+The test launches an isolated loopback server, restarts it after saving a reply,
+and verifies that only the explicitly selected model executes after continuation.
+It does not contact a model provider or the live memory service.
+
+Durable document jobs retain their original upload and extraction request:
+
+```python
+jobs = client.document_jobs(expected_space="alpha")
+formats = jobs.formats()
+original = jobs.upload(b"# Notes\n\nAda studies stars.", media_type="text/markdown")
+status = jobs.start("import-1", attachment_id=original.attachment_id, filename="notes.md")
+request = jobs.request("import-1")
+status = jobs.status("import-1")
+# Once completed, read currently verified original/manifest/episode identities.
+result = jobs.result("import-1")
+```
+
+Callers choose when to poll. Starting an existing import only returns its status;
+it never implicitly resumes a stopped attempt. For an explicit recovery, read the
+current request and pass that exact snapshot to `jobs.resume(request)`. Cancellation
+uses `jobs.cancel(request)`. Both operations compare the saved request before writing,
+send its control revision, and verify the acknowledgement afterward. A stale snapshot
+raises `SconeError`; no automatic retry occurs. Document recovery can explicitly retry
+an interrupted extraction/index operation whose outcome is unknown.
+
+`jobs.list(limit=20, after=page.next_after)` reads retained history. `jobs.result()`
+does not run extraction, even when source verification previously failed or the
+attempt limit has been reached. Missing or currently unverifiable results raise an
+error. The result's extraction filename is checked against the immutable job request;
+the original blob may retain a different first-upload filename after deduplication.
+
+For PDF OCR, pass `pdf_ocr=PdfOcr("missing_text", "columns_ltr")` to `start()` after
+checking the host's `formats.pdf_ocr_available` and advertised choices. Users select
+OCR behavior; the host owns the parser implementation, revision, and processing limits.
+Upload and job admission are separate explicit writes. Uploaded bytes must fit the
+host's advertised input limit and the client's 25 MiB ceiling.
+
+Completed agent outputs are typed and checked against the saved execution request:
+
+```python
+from scone import TaskResult, HandoffResult, ModelOutput, HumanOutput
+
+result = agents.result("run-1")
+if isinstance(result, TaskResult):
+    for output in result.results.values():
+        if isinstance(output, ModelOutput):
+            print(output.model_id, output.text, output.evidence_ids)
+        elif isinstance(output, HumanOutput):
+            print("Human reply", output.text, output.activation_id)
+elif isinstance(result, HandoffResult):
+    print(result.status, result.final.text if result.final else None)
+```
+
+Model receipts retain the selected model, binding, dependency IDs, call counts,
+and immutable evidence packets. Packet identifiers and path references must agree
+with the returned records; nested packet data is read-only. A human output must
+match a freshly read activated reply and cannot carry model/evidence fields.
+A handoff-limit result preserves actual hops and has no final answer.
+
+`result()` performs only reads. For interactive runs it reads input receipts first,
+then requests the source-verified result last. It never runs another model or
+restarts a workflow. The server verifies current source access, retained content,
+and native entity-classification rules; client-side packet checks establish wire
+consistency and do not independently prove that a model's answer is true. A deleted
+or unavailable source is an error, rather than a fallback to an old result.

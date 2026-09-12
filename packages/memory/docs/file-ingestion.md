@@ -374,9 +374,29 @@ still permanently invalidates that run.
 This is one caller-owned active document per journal. It does not provide a
 background queue, distributed worker leases, or a persisted chunking plan.
 Cancellation interrupts the active call; an explicit
-retry resumes eligible stages. For retained PDFs, the separate `PdfOcrWorkflow`
-provides encrypted per-page OCR checkpoints and indexing recovery; see the
-[PDF OCR guide](pdf-ocr.md#resume-completed-pages-after-interruption).
+retry resumes eligible stages. With `DocumentOcr(...).parser(selection)`, or a
+`BuiltinDocumentParser` configured with `OcrPdfParser`, the extraction step also
+saves completed OCR pages in its existing encrypted journal. Resume re-inspects
+the PDF, then reuses those observations without rendering or recognizing the
+completed pages again. Native-text pages retain their embedded text. The final
+manifest is identical to an uninterrupted extraction using the same observations.
+
+Page receipts bind original bytes, PDF inspection, OCR options, extraction limits
+and installed parser/renderer versions; the outer workflow additionally binds
+space, run and the caller's parser revision. Change the revision when the
+recognizer, trained data or settings change. A changed binding or corrupt receipt
+fails explicitly. One binding receipt is retained even when no page needs OCR.
+The existing whole-extraction deadline still applies on each attempt; it is not
+a new per-page time allowance. A completed page does not mean the whole source
+is searchable. Stage completion and final evidence verification remain required.
+
+Custom parsers can implement `CheckpointedDocumentParser.parse_checkpointed`
+using the optional `ExtractionCheckpoints` protocol. A subclass overriding
+`parse` must also explicitly override `parse_checkpointed` to enable recovery;
+an inherited recovery method never bypasses custom extraction or redaction.
+No optional agents/cryptography import is needed to use the parser contracts.
+For independently executed page steps with separate page deadlines, use
+[PdfOcrWorkflow](pdf-ocr.md#resume-completed-pages-after-interruption).
 
 Indexing saves each complete, validated embedding batch inside the encrypted
 journal before calling the next batch. After cancellation or process failure
@@ -388,7 +408,7 @@ changing model behavior without changing that identity cannot be detected.
 Changed chunking or contextual input also prevents reuse. No episode is written
 until every vector validates. Malformed provider batches are never saved.
 
-`job.status(...).checkpoint_count` reports retained intermediate batches,
+`job.status(...).checkpoint_count` reports retained intermediate receipts (OCR binding/pages and embedding batches),
 separately from completed extraction/index steps. Each receipt is limited to
 16 MiB; one run permits at most 4,096 receipts and 128 MiB of encrypted receipt
 data. Missing/deleted evidence invalidates the run and removes its receipts on
@@ -587,8 +607,8 @@ extraction. Recognition errors do not fall back to another provider or silently
 accept a partial extraction. The existing bounded ingestion lane, 30-second
 extraction deadline, pixel/region limits and original-backed indexing apply.
 These HTTP imports remain synchronous: after an uncertain write, inspect the
-source library instead of automatically repeating the import. Native per-page
-checkpoint recovery remains the separate `PdfOcrWorkflow` interface.
+source library instead of automatically repeating the import. Use the durable
+document-job service below for explicit restart recovery, including OCR pages.
 
 
 ## Durable local document jobs
@@ -652,8 +672,8 @@ are not durable jobs.
   cannot mutate jobs, and stale controls cannot affect newer attempts.
 
 After a restart, incomplete jobs remain passive until an explicit resume. A
-resume reuses completed extraction/indexing stages and saved embedding batches;
-these generic document jobs do **not** promise per-page OCR recovery. Each failed
+resume reuses completed extraction/indexing stages, saved embedding batches and
+completed OCR pages when using the host's configured document OCR parser. Each failed
 stage waits for an explicit resume, within the saved attempt budget (1–4 total
 admissions). Async cancellation and deadlines are cooperative. Cancellation may
 follow a partial write; inspect status and retained source evidence before

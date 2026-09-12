@@ -8,6 +8,7 @@ from typing import Protocol
 
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
+from ..extraction_checkpoint import CheckpointedDocumentParser, CheckpointedPdfParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from ..pdf import PdfLimits, PdfParser, PypdfParser, validate_pdf
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
@@ -33,16 +34,31 @@ class BuiltinDocumentParser:
             raise InvalidInput('parser extensions must be lowercase dotted suffixes')
 
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits = DocumentLimits()) -> ParsedDocument:
+        return await self._parse(data, filename, limits)
+
+    async def parse_checkpointed(self, data: bytes, filename: str, limits: DocumentLimits,
+                                 checkpoints: ExtractionCheckpoints) -> ParsedDocument:
+        return await self._parse(data, filename, limits, checkpoints)
+
+    async def _parse(self, data: bytes, filename: str, limits: DocumentLimits,
+                     checkpoints: ExtractionCheckpoints | None = None) -> ParsedDocument:
         suffix = extension(filename)
         if not isinstance(data, bytes) or not data or len(data) > limits.max_input_bytes:
             raise InvalidInput('document exceeds its input byte limit or is empty')
         if suffix in self._parsers:
-            parsed = await self._parsers[suffix].parse(data, filename, limits)
+            parser = self._parsers[suffix]
+            if checkpoints is not None and isinstance(parser, CheckpointedDocumentParser) and checkpoint_dispatch_allowed(parser):
+                parsed = await parser.parse_checkpointed(data, filename, limits, checkpoints)
+            else:
+                parsed = await parser.parse(data, filename, limits)
         elif suffix == '.pdf':
             pdf_limits = PdfLimits(max_input_bytes=limits.max_input_bytes,
                 max_text_bytes=limits.max_text_bytes, max_pages=min(1000, limits.max_segments),
                 timeout_seconds=limits.timeout_seconds)
-            pdf = await self._pdf.parse(data, pdf_limits)
+            if checkpoints is not None and isinstance(self._pdf, CheckpointedPdfParser) and checkpoint_dispatch_allowed(self._pdf):
+                pdf = await self._pdf.parse_checkpointed(data, pdf_limits, checkpoints)
+            else:
+                pdf = await self._pdf.parse(data, pdf_limits)
             validate_pdf(pdf, pdf_limits)
             encoded = pdf.text.encode()
             parsed = ParsedDocument(format='pdf', parser=pdf.parser, segments=tuple(

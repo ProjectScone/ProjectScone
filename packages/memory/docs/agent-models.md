@@ -545,3 +545,62 @@ and sequential recovery are implemented natively.
 Saved plan editing is available through the native store and
 authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.
+
+## Human input and explicit continuation
+
+Hosts with `agents.inputs` support `InteractiveAgentPlan`, a declared task graph
+containing model tasks and human-input tasks. Each model task retains its own
+catalog-selected model. Input tasks have an explicit prompt, dependencies, and a
+UTF-8 response budget of 1–4,000 bytes:
+
+```python
+from scone_memory.agents.interactive_plan import HumanInputTask, InteractiveAgentPlan
+from scone_memory.agents.task_workflow import AgentTask
+
+plan = InteractiveAgentPlan(kind="interactive", workflow_id="review", tasks=(
+    HumanInputTask(kind="input", task_id="direction", prompt="Which direction should we explore?",
+                   max_response_bytes=1000),
+    AgentTask(task_id="answer", agent_id="researcher", model_id="local-careful",
+              prompt="Explore the chosen direction.", depends_on=("direction",)),
+))
+```
+
+Save and start this plan through the existing plan/run APIs. Reaching an input
+task persists its prompt and dependency context, then lets independent tasks
+finish. A pending input consumes neither a model attempt nor a concurrency slot,
+even when the run allows only one model task at a time. Once independent work
+drains, the run reports `awaiting_input` and releases active-run capacity.
+
+The HTTP operations deliberately separate saving a reply from authorizing use:
+
+| Operation | Route | Body |
+| --- | --- | --- |
+| Inspect prompts and saved replies | `GET /v1/agent-runs/{run_id}/inputs` | — |
+| Save one reply | `POST /v1/agent-runs/{run_id}/inputs/{task_id}/response` | `{"response":"North","expected_revision":1}` |
+| Continue with selected replies | `POST /v1/agent-runs/{run_id}/continue` | `{"continuation_id":"continue-1","responses":{"direction":2}}` |
+
+Input revision 1 is pending, 2 has a saved reply, and 3 has an explicit
+continuation authorization. Consumption is recorded separately in the workflow
+journal's completed steps. Replies are single-assignment; retrying the same
+reply with `expected_revision: 1` is idempotent. A different reply conflicts.
+A continuation ID binds the exact response selection. After an uncertain HTTP
+response, inspect the same run and retry the same continuation ID and selection
+if needed. A persisted activation does not itself prove model execution.
+
+Continuation requires exclusive run ownership, no active sibling execution, and
+current host admission limits. A reopened host with a lower parallel-task limit
+refuses a run that exceeds that limit, preserving its immutable configuration.
+Source evidence, scope, and model bindings are rechecked before disclosure,
+response persistence, and downstream execution. Temporary verification outages
+withhold output while preserving receipts for a later explicit check.
+
+Run requests, replies, and continuation receipts are encrypted locally. Reopening
+the service, reading a result, or retrying the original start of a waiting run
+does not consume an unactivated reply. Interrupted model attempts with unknown
+outcomes remain refused. Human receipts have `kind: "human_input"`; they do not
+claim retained evidence or model-call counts.
+
+In the console, choose **Human input** as a task type, save a reply in the run
+view, then choose **Continue with selected replies**. Model tasks keep their
+individual model selectors. Human input does not grant arbitrary tool or write
+authority.

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..agents.catalog import Identifier
 from ..core.errors import InvalidInput
+from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection
 from ..ingestion.formats.registry import BuiltinDocumentParser
 from ..ingestion.formats.types import DocumentLimits
@@ -73,7 +74,7 @@ class DocumentJobsConfig(BaseModel):
 
 
 def load_document_imports(path: str, memory: MemoryEngine, *, document_ocr: DocumentOcr | None = None,
-                          ocr_identity: str = '') -> DocumentImportService:
+                          ocr_identity: str = '', document_media: DocumentMedia | None = None) -> DocumentImportService:
     """Open private state without admitting jobs or calling a parser.
 
     The operator revision must change when native OCR executables, trained data
@@ -104,9 +105,11 @@ def load_document_imports(path: str, memory: MemoryEngine, *, document_ocr: Docu
             'dependencies': dependencies, 'ocr': selection.model_dump() if selection else None,
             'ocr_identity': ocr_identity if selection else None,
             'dpi': document_ocr.dpi if selection and document_ocr else None}
+        if document_media is not None and selection is None:
+            fingerprint['media_revision'] = document_media.revision
         revision = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
         if selection is None:
-            return ImportParserBinding(revision, BuiltinDocumentParser())
+            return ImportParserBinding(revision, document_media.parser() if document_media else BuiltinDocumentParser())
         if document_ocr is None:
             raise InvalidInput('document OCR is not configured on this server')
         return ImportParserBinding(revision, document_ocr.parser(selection))

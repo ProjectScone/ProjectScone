@@ -236,3 +236,30 @@ async def test_media_transcriber_object_and_empty_results(ffmpeg: str) -> None:
 
     with pytest.raises(InvalidInput, match='nonempty'):
         await MediaDocumentParser(empty, ffmpeg_executable=ffmpeg).parse(silent_wav(), 'audio.wav')
+
+
+@pytest.mark.parametrize('change', [
+    {'start_seconds': -1.0}, {'end_seconds': 0.0}, {'end_seconds': float('nan')},
+    {'start_seconds': float('inf')}, {'start_seconds': True}, {'end_seconds': False},
+    {'start_seconds': 0.1, 'end_seconds': 0.05}, {'text': '   '},
+])
+async def test_provider_model_copies_cannot_bypass_timestamp_validation(ffmpeg: str, change) -> None:
+    async def malformed(data: bytes) -> tuple[TranscriptionSegment, ...]:
+        return (TranscriptionSegment(text='fixture', start_seconds=0.0, end_seconds=0.05).model_copy(update=change),)
+    with pytest.raises(InvalidInput, match='invalid segment'):
+        await MediaDocumentParser(malformed, ffmpeg_executable=ffmpeg).parse(silent_wav(), 'audio.wav')
+
+
+async def test_non_executable_decoder_is_refused_before_advertising(tmp_path):
+    path = tmp_path / 'decoder'
+    path.write_text('not executable')
+    path.chmod(0o600)
+    with pytest.raises(InvalidInput):
+        MediaDocumentParser(structural_transcriber, ffmpeg_executable=str(path))
+
+
+async def test_provider_transcript_requires_encodable_utf8(ffmpeg):
+    async def malformed(data):
+        return (TranscriptionSegment(text='fixture', start_seconds=0.0, end_seconds=0.05).model_copy(update={'text':'bad\ud800text'}),)
+    with pytest.raises(InvalidInput, match='invalid segment'):
+        await MediaDocumentParser(malformed, ffmpeg_executable=ffmpeg).parse(silent_wav(), 'audio.wav')

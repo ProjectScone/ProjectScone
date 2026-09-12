@@ -391,6 +391,9 @@ async def test_timeout_does_not_release_worker_or_publish_late_upload(
     with pytest.raises(SconeError, match="timed out"):
         await task
     assert monotonic() - started < 1.8
+    # The upload's captured deadline has fired. Give the following read a
+    # normal budget: this assertion tests serialization, not emulator speed.
+    blobs.timeout_s = 10
     waiting = asyncio.create_task(blobs.held("alpha"))
     await asyncio.sleep(.02)
     assert not waiting.done()

@@ -247,6 +247,7 @@ class FeedbackBody(BaseModel):
 
 
 
+from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
 from ..ingestion.import_service import DocumentImportService
 
@@ -266,6 +267,7 @@ def create_app(
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
     filesystem=None,
+    document_media: DocumentMedia | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -424,7 +426,7 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
-            "documents.files": True, "documents.provenance": True,
+            "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -444,6 +446,7 @@ def create_app(
             features["agents.handoffs"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.inputs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         if document_import_service is not None:
             features["documents.jobs"] = True
@@ -470,7 +473,8 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
-    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr)
+    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
+                                              assert_current_space=assert_current_space, document_media=document_media)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)

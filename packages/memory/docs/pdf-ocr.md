@@ -135,7 +135,58 @@ new run id; extraction/indexing retries preserve the chosen order and source
 mapping. Page OCR checkpoints retain the original recognizer observations,
 then deterministically rebuild the ordered text on resume.
 
+## Inspect possible tables without repeating OCR
+
+The original `aligned-rows-v1` strategy groups retained OCR rectangles into
+candidate cells and checks for common column gaps across at least three
+consecutive rows. It returns `geometry_inferred` results; it does not identify
+semantic headers, merged or multi-line cells, or missing values. Aligned prose
+can resemble a table, and irregular tables can remain unassigned. This is an
+inspection feature, not table-aware indexing or an accuracy benchmark.
+
+```python
+from scone_memory.ocr import infer_tables
+
+layout = infer_tables(page.regions)
+for table in layout.tables:
+    for cell in table.cells:
+        print(cell.row, cell.column, cell.text, cell.regions)
+print("Unassigned source regions:", layout.unassigned)
+```
+
+`cell.regions` and `unassigned` are zero-based indices into the supplied page's
+region sequence. Every region occurs exactly once across those two groups.
+Cell text joins its referenced observations with spaces; the original region
+text, UTF-8 offsets and displayed-page boxes remain the evidence. Rows and
+columns are zero-based. Candidate cells are returned in row-major order.
+
+The HTTP API advertises `documents.ocr.tables` and provides an authenticated,
+read-only `GET /v1/episodes/{episode_id}/document/ocr-tables?page=1` for retained
+PDF documents with OCR provenance. The response binds the layout to the space,
+episode, page, original and manifest SHA-256 identifiers, and page text SHA-256.
+It validates retained provenance and rechecks the episode and current key scope
+before returning. Source deletion or changed provenance prevents publication.
+This route does not invoke OCR, update memory, or save an analysis receipt.
+
+The console offers explicit analysis, paged candidate rows, source-region
+selection, an unassigned-text inventory, and a JSON download with source
+references. It verifies response binding and region coverage before displaying
+results. Users should inspect the scan and referenced regions before relying
+on the inferred cells.
+
+Analysis accepts at most 5,000 regions and 2,000,000 UTF-8 text bytes per page,
+64 candidates, 1,000 rows per candidate and 2–12 columns. Exceeding an analysis
+limit fails explicitly rather than publishing a partial inventory. The function
+requires no OCR executable, model, network service or optional rendering package.
+
 ## Resume completed pages after interruption
+
+The generic `DocumentIngestionWorkflow` and configured HTTP document jobs now
+retain completed OCR page observations inside their existing extraction-step
+journal; see [generic document recovery](file-ingestion.md#durable-extraction-checkpoints).
+They keep the whole-extraction deadline per attempt and the generic document
+manifest. The separate interface below provides independently timed page steps
+and PDF-specific receipts.
 
 Install `scone-memory[pdf-ocr,agents]` and use `PdfOcrWorkflow` for scans that
 need durable page progress. Retain the source first and supply a persistent
@@ -221,7 +272,7 @@ The implementation draws architectural inspiration from separate OCR processing
 stages and geometry preservation in the read-only PaddleOCR reference. No source
 code, runtime, model, or weight from that project is included. Its leaderboard
 results do not apply to Scone. This milestone does not implement neural detection,
-learned document layout, table structure recovery, or generative document parsing.
+learned document layout, semantic table structure recovery, or generative document parsing.
 
 Generated PDF/image fixtures exercise real Tesseract recognition and source
 resolution, mixed native/scanned pages, UTF-8 offsets, invalid output, deadlines,
