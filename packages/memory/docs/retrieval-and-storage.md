@@ -265,6 +265,40 @@ tenth (14 right, 4 wrong). What the planner refuses to read is counted
 apart, because leaving a question to ordinary recall is not the same as
 answering it wrongly.
 
+### A codebase is already a graph
+
+With `code_graph=True`, remembering a source file also records what the
+file says about itself, as ordinary claims:
+
+```
+app/planner.py        defines  app/planner.py:plan
+app/planner.py:Engine defines  app/planner.py:Engine.recall
+app/planner.py        imports  json
+app/planner.py:plan   calls    app/planner.py:tidy
+```
+
+No model is called and nothing leaves the machine: it is Python's own
+parser, so it is exact where the parser is exact and silent everywhere
+else — a file that does not parse says nothing rather than guessing.
+Every claim is quoted from the line it was read on, cited to the episode
+the file was stored as, and marked `extracted` rather than `stated`,
+because nobody said it: it was read.
+
+**It will not guess.** A call to something the file cannot see — another
+module's function, a method on a value whose type nobody stated — is
+left out rather than pointed at a name that might mean anything. A graph
+with edges nobody can check is worse than a smaller graph. What it does
+resolve: a bare name that is one of the file's own declarations, and
+`self.method` inside the class that defines it.
+
+Because they are claims, everything else already works on them. "What
+calls this?" is `graph match` over `calls`; the path from one function to
+another is `graph path`; and a vocabulary that says `defines` is the
+other side of `defined_in`, or that `imports` carries through, makes the
+graph answer more without any of it being written down twice. It is off
+unless asked for, because it writes to the ledger and a space's owner
+decides what goes in theirs.
+
 ### How long a claim held
 
 "How long did Alice work at Acme?" is answered from the claim's own valid

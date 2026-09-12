@@ -145,6 +145,7 @@ class MemoryEngine:
         record_queries: bool = False,
         contextual_embeddings: bool = False,
         code_aware: bool = True,
+        code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -170,6 +171,11 @@ class MemoryEngine:
         #: at its declarations. Names say it, never the content: a note that
         #: quotes code is prose.
         self.code_aware = code_aware
+        #: Whether remembering a source file also records what it says about
+        #: itself — what it defines, imports and calls — as ordinary claims.
+        #: Off unless asked for: it writes to the ledger, and a space's owner
+        #: decides what goes in their ledger.
+        self.code_graph = code_graph
         #: The measured floor this engine abstains by, when one was given.
         self.abstention = abstention
         #: Which claims a profile is made of; by default, all of them.
@@ -453,7 +459,32 @@ class MemoryEngine:
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
-        return await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
+        added = await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
+        if self.code_graph:
+            await self._map_code(space, records, added)
+        return added
+
+    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> None:
+        """What a source file says about itself, recorded as claims like any
+        other: quoted from the line they were read on, cited to the episode
+        they came from, and marked extracted rather than stated, because
+        nobody said them — they were read.
+
+        A file already in the space is not read again: its claims are
+        already here, and asserting them again would say the same thing
+        twice for no reason."""
+        from ..ingestion.code import code_language
+        from ..ingestion.code_graph import code_claims
+
+        for record, outcome in zip(records, added):
+            if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
+                continue
+            language = code_language(record.source)
+            when = record.created_at or self.clock()
+            for claim in code_claims(record.content, record.source, language=language):
+                await self.assert_fact(space, claim.subject, claim.predicate, claim.object,
+                                       valid_from=when, source_episode_id=outcome.episode_id,
+                                       quote=claim.quote, origin="extracted")
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
