@@ -20,6 +20,10 @@ jobs:
         run: python -m mypy --config-file packages/memory/mypy.ini packages/memory/src/scone_memory
       - name: Check the HTTP client in strict mode
         run: python -m mypy --strict packages/scone-client/scone
+      - name: Verify standalone agent client against the native API
+        env:
+          SCONE_TEST_NATIVE_PYTHON: python
+        run: python -m pytest -q packages/scone-client/tests/test_native_agents.py
 
   terraform:
     name: Terraform configuration and recovery guards

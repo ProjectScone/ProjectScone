@@ -9,6 +9,7 @@
 """
 
 from ._wire import Capabilities
+from .agent_inputs import InputRecord
 from .agents import AgentClient, PlanPage, RunPage
 from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
@@ -22,6 +23,7 @@ __all__ = [
     "Scone",
     "Capabilities",
     "AgentClient",
+    "InputRecord",
     "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
     "ModelChoice", "ModelTask", "RunPolicy", "RunRequest", "RunStatus", "SavedPlan", "TaskPlan",
     "SconeError",

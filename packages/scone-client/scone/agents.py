@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ._wire import ResourceClient, address, bounded_body, cursor, identifier, integer, invalid, items, record, text
+from .agent_inputs import InputRecord
 from .agent_models import (AgentChoice, HandoffPlan, Plan, RunPolicy, RunRequest, RunStatus,
                            SavedPlan, TaskPlan, parse_catalog)
 
@@ -117,3 +118,73 @@ class AgentClient(ResourceClient):
         self._check('agents.runs', mutation=True)
         return RunStatus.from_json(self._client._request('POST', path, json={}),
                                    expected_space=self.expected_space, run_id=run_id)
+
+
+    def inputs(self, run_id: str) -> tuple[InputRecord, ...]:
+        path = '/v1/agent-runs/' + address(run_id) + '/inputs'
+        self._check('agents.runs').require('agents.inputs')
+        request = self.request(run_id)
+        row = record(self._client._request('GET', path))
+        if row.get('space') != self.expected_space or row.get('run_id') != run_id:
+            raise invalid('input collection identity')
+        values = tuple(InputRecord.from_json(value, expected_space=self.expected_space, run_id=run_id)
+                       for value in items(row.get('items'), 32))
+        if len({value.task_id for value in values}) != len(values):
+            raise invalid('duplicate input records')
+        for value in values:
+            value.match(request)
+        return values
+
+    def respond(self, pending: InputRecord, *, response: str) -> InputRecord:
+        if not isinstance(pending, InputRecord) or pending.space != self.expected_space:
+            raise invalid('input identity')
+        text(response, pending.max_response_bytes)
+        path = '/v1/agent-runs/' + address(pending.run_id) + '/inputs/' + address(pending.task_id) + '/response'
+        body = bounded_body({'response': response, 'expected_revision': 1})
+        self._check('agents.runs', mutation=True).require('agents.inputs')
+        pending.match(self.request(pending.run_id))
+        current = next((value for value in self.inputs(pending.run_id) if value.task_id == pending.task_id), None)
+        if (current is None or not current.same_input(pending)
+                or (current.response is not None and current.response != response)):
+            raise invalid('input changed before reply')
+        saved = InputRecord.from_json(self._client._request('POST', path, json=body),
+                                      expected_space=self.expected_space, run_id=pending.run_id)
+        if not saved.same_input(pending) or saved.response != response or saved.revision < 2:
+            raise invalid('reply acknowledgement')
+        return saved
+
+    def continue_run(self, run_id: str, *, continuation_id: str,
+                     responses: tuple[InputRecord, ...]) -> RunStatus:
+        path = '/v1/agent-runs/' + address(run_id) + '/continue'
+        identifier(continuation_id)
+        if not isinstance(responses, tuple) or not 1 <= len(responses) <= 32:
+            raise invalid('input selection')
+        for value in responses:
+            if (not isinstance(value, InputRecord) or value.space != self.expected_space
+                    or value.run_id != run_id or value.revision not in (2, 3)
+                    or value.response is None or (value.revision == 3 and value.activation_id != continuation_id)):
+                raise invalid('input selection')
+        selected = {identifier(value.task_id): value for value in responses}
+        if len(selected) != len(responses):
+            raise invalid('duplicate input selection')
+        body = bounded_body({'continuation_id': continuation_id, 'responses': {key: 2 for key in selected}})
+        self._check('agents.runs', mutation=True).require('agents.inputs')
+        request = self.request(run_id)
+        for value in responses:
+            value.match(request)
+        current = {value.task_id: value for value in self.inputs(run_id)}
+        for task_id, value in selected.items():
+            latest = current.get(task_id)
+            if (latest is None or not latest.same_reply(value) or latest.revision not in (2, 3)
+                    or (latest.activation_id is not None and latest.activation_id != continuation_id)):
+                raise invalid('activation acknowledgement: selected reply changed')
+        prior_group = {value.task_id for value in current.values() if value.activation_id == continuation_id}
+        if prior_group and prior_group != set(selected):
+            raise invalid('activation acknowledgement: selection changed')
+        status = RunStatus.from_json(self._client._request('POST', path, json=body),
+                                     expected_space=self.expected_space, run_id=run_id)
+        status.match(request)
+        activated = {value.task_id: value for value in self.inputs(run_id) if value.activation_id == continuation_id}
+        if set(activated) != set(selected) or any(not activated[key].same_reply(value) for key, value in selected.items()):
+            raise invalid('activation acknowledgement')
+        return status
