@@ -8,6 +8,7 @@ from ..core.errors import InvalidInput
 from .extraction_checkpoint import ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.media import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaDocumentParser
 from .formats.media_checkpoint import TRANSCRIPTION_CHECKPOINT_KEY
+from .formats.media_windows import WINDOW_BINDING_KEY
 from .formats.registry import BuiltinDocumentParser
 from .formats.types import DocumentLimits, ParsedDocument
 
@@ -54,7 +55,8 @@ class DocumentMedia:
             revision = self.revision.encode('ascii')
             saved_revision = checkpoints.get('media-host-binding')
             if saved_revision is None:
-                if checkpoints.get(TRANSCRIPTION_CHECKPOINT_KEY) is not None:
+                if (checkpoints.get(TRANSCRIPTION_CHECKPOINT_KEY) is not None
+                        or checkpoints.get(WINDOW_BINDING_KEY) is not None):
                     raise InvalidInput('media transcription checkpoint has no host revision binding')
                 checkpoints.put('media-host-binding', revision)
             elif saved_revision != revision:

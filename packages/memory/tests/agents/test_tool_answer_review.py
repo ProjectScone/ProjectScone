@@ -147,12 +147,14 @@ async def test_review_is_cancelled_at_the_original_tool_deadline(engine):
     from scone_memory.agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits
     from scone_memory.integrations.scoped_tools import ScopedMemoryTools
     from scone_memory.retrieval.recall_scope import RecallScope
-    entered, stopped = asyncio.Event(), asyncio.Event()
+    entered, stopped, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
     class Reviewer:
         async def review(self, *args):
             entered.set()
             try:
-                await asyncio.Event().wait()
+                await asyncio.sleep(.3)
+                returned.set()
+                return AnswerReviewDecision(status='supported')
             finally:
                 stopped.set()
     conversation = TextConversation(engine, 'alpha', 'review-deadline',
@@ -160,11 +162,12 @@ async def test_review_is_cancelled_at_the_original_tool_deadline(engine):
         review_policy='require_supported')
     result = await EvidenceToolLoop(Script(ToolStep(content=DRAFT)), ScopedMemoryTools(engine, 'alpha', scope=RecallScope.validated()),
         limits=ToolLoopLimits(timeout_s=.1)).run([{'role':'user', 'content':'Juniper?'}])
-    # The reviewer has a 20s limit, but cannot extend this completed tool turn.
-    async with asyncio.timeout(1):
+    # Ignoring the original deadline lets a late supported verdict escape.
+    # The watchdog only bounds a hang; it does not decide deadline correctness.
+    async with asyncio.timeout(10):
         with pytest.raises(RuntimeError) as error:
             await conversation._review_tool_draft('Juniper?', result)
-    assert entered.is_set() and stopped.is_set()
+    assert entered.is_set() and stopped.is_set() and not returned.is_set()
     assert error.value.answer_review['status'] == 'unavailable'
 
 
