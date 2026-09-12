@@ -172,6 +172,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", required=True)
     p = sub.add_parser("include", help="undo exclude")
     p.add_argument("fact_id", type=int)
+    p = sub.add_parser("reconsider", help="undo decline: put a declined fact back for review")
+    p.add_argument("fact_id", type=int)
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("reopen", help="undo a close made by hand: the fact holds again")
+    p.add_argument("fact_id", type=int)
+    p.add_argument("--reason", required=True)
 
     p = sub.add_parser("audit-grounding",
                        help="re-check extracted facts against the text they came from")
@@ -1324,7 +1330,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print("nothing awaiting review", file=out)
         return 0
 
-    if args.command in ("approve", "decline", "exclude", "include"):
+    if args.command in ("approve", "decline", "exclude", "include", "reconsider", "reopen"):
         import getpass
 
         actor = f"cli:{getpass.getuser()}"
@@ -1334,6 +1340,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             fact = await engine.decline(space, args.fact_id, args.reason, actor=actor)
         elif args.command == "exclude":
             fact = await engine.exclude(space, args.fact_id, args.reason, actor=actor)
+        elif args.command == "reconsider":
+            fact = await engine.reconsider(space, args.fact_id, args.reason, actor=actor)
+        elif args.command == "reopen":
+            fact = await engine.reopen(space, args.fact_id, args.reason, actor=actor)
         else:
             fact = await engine.include(space, args.fact_id, actor=actor)
         emit(fact.model_dump()) if args.json else print(fact_line(fact), file=out)

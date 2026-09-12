@@ -227,6 +227,58 @@ async def include(runtime: FactReviewRuntime, space: str, fact_id: int, actor: O
     return included
 
 
+async def reconsider(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str,
+                     actor: Optional[str] = None) -> Fact:
+    """Put a declined claim back for review.
+
+    A review is a person's judgement, and people are wrong sometimes; a
+    system that records judgements with no way to revise them teaches its
+    users not to judge. Nothing is erased: the decline stays in the event
+    log with its reason, and this is recorded beside it."""
+    check_space(space)
+    reason = _reason(reason)
+    fact = await runtime.documents.get_fact(space, fact_id)
+    if fact is None:
+        raise NotFound(f"fact {fact_id} not found in {space!r}")
+    if fact.status != "declined":
+        raise InvalidInput(f"fact {fact_id} is {fact.status}, not declined; there is nothing to take back")
+    back = fact.model_copy(update={"status": "proposed", "closed_reason": None})
+    await runtime.documents.update_fact(back)
+    await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_review", {"fact_id": fact_id, "decision": "reconsidered",
+                                              "reason": reason, "actor": actor})
+    return back
+
+
+async def reopen(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str,
+                 actor: Optional[str] = None) -> Fact:
+    """Take back a close: the claim holds again, from where it always did.
+
+    Only a close somebody made by hand. A claim another claim superseded
+    is not reopened behind that claim's back — both would hold at once,
+    one of them saying the other is wrong — so the claim that superseded
+    it is named and a person decides what they meant."""
+    check_space(space)
+    reason = _reason(reason)
+    fact = await runtime.documents.get_fact(space, fact_id)
+    if fact is None:
+        raise NotFound(f"fact {fact_id} not found in {space!r}")
+    if fact.status != "closed":
+        raise InvalidInput(f"fact {fact_id} is {fact.status}: it holds now, and nothing needs reopening")
+    if fact.superseded_by:
+        raise InvalidInput(
+            f"fact {fact_id} was superseded by fact {fact.superseded_by}; reopening it would leave both "
+            f"holding at once, one saying the other is wrong. Close or decline fact "
+            f"{fact.superseded_by} first if that is what you meant")
+    again = fact.model_copy(update={"status": "active", "valid_until": None, "closed_reason": None,
+                                    "superseded_by": None})
+    await runtime.documents.update_fact(again)
+    await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "action": "reopen", "reason": reason,
+                                             "actor": actor})
+    return again
+
+
 async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
     check_space(space)
     reason = _reason(reason)

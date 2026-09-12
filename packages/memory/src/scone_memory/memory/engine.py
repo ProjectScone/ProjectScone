@@ -1040,6 +1040,16 @@ class MemoryEngine:
         """Undo exclude."""
         return await fact_review.include(self._review_runtime(), space, fact_id, actor=actor)
 
+    async def reconsider(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+        """Undo decline: a declined claim goes back to being a proposal.
+        The decline stays in the event log with its reason."""
+        return await fact_review.reconsider(self._review_runtime(), space, fact_id, reason, actor=actor)
+
+    async def reopen(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+        """Undo a close somebody made by hand: the claim holds again. A
+        claim another claim superseded is refused, naming that claim."""
+        return await fact_review.reopen(self._review_runtime(), space, fact_id, reason, actor=actor)
+
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
 

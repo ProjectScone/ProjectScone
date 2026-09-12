@@ -118,7 +118,8 @@ class FactBody(BaseModel):
 #: What each role may do, by request. Reads are open to every role; the
 #: decisions of review belong to review and full; every other write belongs
 #: to write and full. A key with no role recorded is full.
-_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/v1/facts/decide")
+_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", "/reopen",
+                 "/v1/facts/decide")
 
 
 def _is_decision(path: str) -> bool:
@@ -344,6 +345,7 @@ def create_app(
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
+            "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
@@ -804,6 +806,20 @@ def create_app(
     @app.post("/v1/facts/{fact_id}/include")
     async def post_fact_include(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         return fact_json(await engine.include(space, fact_id, actor=actor))
+
+    @app.post("/v1/facts/{fact_id}/reconsider")
+    async def post_fact_reconsider(fact_id: int, body: CloseBody, space: str = Depends(space_for),
+                                   actor: str = Depends(actor_for)) -> dict:
+        """Undo a decline: the claim goes back to being a proposal. The
+        decline stays in the event log with its reason."""
+        return fact_json(await engine.reconsider(space, fact_id, body.reason, actor=actor))
+
+    @app.post("/v1/facts/{fact_id}/reopen")
+    async def post_fact_reopen(fact_id: int, body: CloseBody, space: str = Depends(space_for),
+                               actor: str = Depends(actor_for)) -> dict:
+        """Undo a close somebody made by hand: the claim holds again. A
+        claim another claim superseded is refused, naming that claim."""
+        return fact_json(await engine.reopen(space, fact_id, body.reason, actor=actor))
 
     @app.post("/v1/facts/{fact_id}/close")
     async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:

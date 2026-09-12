@@ -522,6 +522,30 @@ What both measurements say is that the lever here is the embedder, not
 the question: with a hash embedder the lexical lane is doing the work,
 and cleverness around the query does not add to it.
 
+## Taking back a review decision
+
+A review is a person's judgement, and people are wrong sometimes. A
+system that records judgements with no way to revise them teaches its
+users not to judge, so each one can be taken back:
+
+| Decision | Taken back by | Refused when |
+| --- | --- | --- |
+| `exclude` | `include` | — |
+| `decline` | `reconsider` | the claim was never declined |
+| `close` (by hand) | `reopen` | the claim holds, or another claim superseded it |
+
+A claim another claim superseded is not reopened behind that claim's
+back: both would hold at once, one saying the other is wrong. The refusal
+names the claim that superseded it, so a person can decide what they
+actually meant.
+
+Nothing is erased. The decision taken back stays in the event log with
+its reason, and the one that takes it back is recorded beside it, so the
+history of what people decided reads in full. Both are review decisions,
+so a key with the write role cannot make them and one with the review
+role can. `POST /v1/facts/{id}/reconsider`, `POST /v1/facts/{id}/reopen`,
+`scone reconsider`, `scone reopen`.
+
 ## Two claims that begin at the same instant
 
 Valid time cannot separate them, so something else does: the order they
