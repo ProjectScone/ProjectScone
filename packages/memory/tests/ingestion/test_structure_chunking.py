@@ -339,3 +339,58 @@ async def test_what_the_engine_actually_stored_covers_the_document():
         await engine.close()
     for phrase in ("café", "| A | 3 |", "naïve assumption", "The clause", "Closing prose"):
         assert any(phrase in chunk.text for chunk in stored), phrase
+
+
+def test_a_heading_stays_with_the_table_it_names():
+    """Found by measuring the feature on a real corpus rather than by
+    reasoning about it.
+
+    Making a table its own unit separated it from the heading directly
+    above, which is the same harm one level up: the header row says what
+    the columns mean and the heading says what the table means. Four of
+    the six residual cases in our own docs were exactly this.
+    """
+    content = ("## Coverage\n\n| Reader | Evidence | Limits |\n| --- | --- | --- |\n"
+               "| pdf | page spans | no OCR |\n| csv | row spans | none |\n\n" + PROSE)
+    found = structured_spans(content)
+    holding = [content[s.start:s.end] for s in found.spans if "| pdf | page spans" in
+               content[s.start:s.end]]
+    assert len(holding) == 1, found.record()
+    assert holding[0].lstrip().startswith("## Coverage"), holding[0][:40]
+    assert found.tables == 1, found.record()
+
+
+def test_two_headings_above_a_table_both_stay_with_it():
+    """A heading with no body of its own before a subheading is not an
+    orphan -- but neither of them should be cut from the table the pair
+    introduces."""
+    content = ("# Storage\n\n## Implemented adapters\n\n| Interface | Implementations |\n"
+               "| --- | --- |\n| store | memory, sqlite |\n\n" + PROSE)
+    found = structured_spans(content)
+    holding = [content[s.start:s.end] for s in found.spans
+               if "| store | memory, sqlite |" in content[s.start:s.end]]
+    assert len(holding) == 1, found.record()
+    assert holding[0].lstrip().startswith("# Storage"), holding[0][:60]
+
+
+def test_a_heading_above_a_table_leaves_the_prose_before_it_behind():
+    """The shape the corpus actually has, which my first fix missed.
+
+    I attached a heading to its table only when the whole packed group
+    was headings. In a real document the group usually begins with a
+    short prose section and ends with the heading, so the rule never
+    fired -- three residual cases in our own docs, all of this shape.
+    The group has to split before its trailing heading, not refuse to
+    split at all.
+    """
+    content = ("## Background\n\nA short paragraph about adapters.\n\n"
+               "## Implemented adapters\n\n| Interface | Implementations |\n|---|---|\n"
+               "| store | memory, sqlite |\n\n" + PROSE)
+    found = structured_spans(content)
+    holding = [content[s.start:s.end] for s in found.spans
+               if "| store | memory, sqlite |" in content[s.start:s.end]]
+    assert len(holding) == 1, found.record()
+    assert holding[0].lstrip().startswith("## Implemented adapters"), holding[0][:60]
+    # and the paragraph before it is still in some chunk
+    covered = "".join(content[s.start:s.end] for s in found.spans)
+    assert "A short paragraph about adapters." in covered

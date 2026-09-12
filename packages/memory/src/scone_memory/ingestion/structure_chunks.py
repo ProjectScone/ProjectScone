@@ -264,23 +264,49 @@ def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
         spans.extend(before)
         by_size += len(before)
 
+    def only_a_marker(unit: Unit) -> bool:
+        """A unit that is its own first line and nothing else.
+
+        A heading above a table is such a unit, because the table became
+        a unit of its own. The heading says what the table means, the
+        same job one level up from the header row, so it belongs in the
+        table's chunk rather than left at the end of the one before.
+        """
+        body = content[unit.start:unit.end].split("\n", 1)
+        return unit.kind != "table" and (len(body) == 1 or not body[1].strip())
+
     group: tuple[int, int] | None = None
+    # Where the group's trailing run of marker-only units begins, if its
+    # last unit is one. A group usually starts with a prose section and
+    # ends with the heading above a table, so it has to split before that
+    # run rather than refuse to split at all.
+    run: int | None = None
     for index, unit in enumerate(read):
         end = unit.end if index + 1 < len(read) else tail
         whole = unit.kind == "table"
         if end - unit.start > target or whole:
+            # Only a heading running right up to the table counts: a gap
+            # means prose between them, and that prose is its own unit.
+            joins = whole and group is not None and run is not None and group[1] == unit.start
             if group is not None:
-                spans.append(Span(*group))
-                at_boundary += 1
-                group = None
+                if joins and run is not None:
+                    if run > group[0]:
+                        spans.append(Span(group[0], run))
+                        at_boundary += 1
+                else:
+                    spans.append(Span(*group))
+                    at_boundary += 1
             if whole:
+                start = run if joins and run is not None else unit.start
+                group, run = None, None
                 # A table's header is what its rows mean. Splitting it
                 # hands back rows nobody can read.
-                spans.append(Span(unit.start, end))
+                spans.append(Span(start, end))
                 at_boundary += 1
                 kept_tables += 1
-                over += 1 if end - unit.start > target else 0
+                over += 1 if end - start > target else 0
                 continue
+            group, run = None, None
             inside = [Span(unit.start + s.start, unit.start + s.end)
                       for s in chunk_spans(content[unit.start:end], target)]
             spans.extend(inside)
@@ -289,12 +315,15 @@ def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
             continue
         if group is None:
             group = (unit.start, end)
+            run = unit.start if only_a_marker(unit) else None
         elif end - group[0] <= target:
             group = (group[0], end)
+            run = (run if run is not None else unit.start) if only_a_marker(unit) else None
         else:
             spans.append(Span(*group))
             at_boundary += 1
             group = (unit.start, end)
+            run = unit.start if only_a_marker(unit) else None
     if group is not None:
         spans.append(Span(*group))
         at_boundary += 1
