@@ -239,6 +239,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42, help="seed for --sample (default 42, the harness's default)")
     p.add_argument("--include-abstention", action="store_true", help="count items with no evidence session in the denominator")
     p.add_argument("--history", action="store_true", help="ask every recall for the closed chain behind matched facts (experiment 3)")
+    p.add_argument("--merge", action="store_true",
+                   help="join neighbouring chunks of one episode into the passage holding them "
+                        "before scoring, to measure what that changes")
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
@@ -833,7 +836,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries)
+                             cross_queries=args.cross_queries, merge=args.merge)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:

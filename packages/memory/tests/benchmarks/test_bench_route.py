@@ -123,3 +123,23 @@ async def test_the_score_is_a_record_that_can_be_kept(dataset):
     assert record["questions"] == 2 and record["routes"]["temporal"] >= 1
     assert record["dataset"].endswith("items.json")
     assert isinstance(scored, RouteScore)
+
+
+async def test_the_bench_can_run_with_passage_merging(dataset):
+    """A feature the bench cannot run is a feature nobody can judge."""
+    from scone_memory.bench.runner import load_items, run
+
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+
+    async def make():
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                  HashEmbedder(), chunk_target=90).open()
+
+    items = load_items(dataset)
+    plain = await run(make, items, ks=(1, 2), limit=3, dataset=str(dataset))
+    joined = await run(make, items, ks=(1, 2), limit=3, dataset=str(dataset), merge=True)
+    assert plain.items == joined.items == len(items)
+    # The claim under test: merging cannot invent or lose an episode, so
+    # recall at the recall limit is the same. Anything else would mean it
+    # was changing what came back rather than how it was packed.
+    assert plain.recall_any[2] == joined.recall_any[2], (plain.recall_any, joined.recall_any)
