@@ -1,8 +1,8 @@
 """One tool contract, rendered for whichever API is calling.
 
-A model that can search, trace relationships, add memory and read a profile
-needs three things described once: what the tools are called, what arguments they
-take, and what running them returns. Keeping that in one place is what
+A model that can search, trace relationships, add memory, read a profile
+and read the entity graph needs three things described once: what the
+tools are called, what arguments they take, and what running them returns. Keeping that in one place is what
 makes the OpenAI-shaped and Anthropic-shaped bindings share a contract.
 Hosts choose which tools to offer and execute; this does not register tools
 with separate HTTP, MCP or framework services automatically.
@@ -19,11 +19,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
-from ..core.errors import SconeError
+from ..core.errors import InvalidInput, SconeError
+from ..core.validation import KINDS, normalise_time
 from ..memory.engine import MemoryEngine
 
 #: The most a search may return however the model asks.
 MAX_ITEMS = 20
+#: The graph tools' bounds, shared with the HTTP routes, MCP and the CLI.
+from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
+from ..filesystem import (DEFAULT_ENTRIES, DEFAULT_HITS, FilesystemPolicy,  # noqa: E402
+                          MAX_FILE_BYTES)
+from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
+from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
+from ..entities.changes import DEFAULT_CHANGES, MAX_CHANGES  # noqa: E402
+from ..entities.duplicates import DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_PAIRS  # noqa: E402
+from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                  MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
+                                  MAX_LIMIT as TEMPORAL_MAX_LIMIT)
+from ..entities.view import STATUS_MODES  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,20 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                       "description": f"How many passages to return, 1 to {MAX_ITEMS}. Defaults to 5."},
             "tags": {"type": "array", "items": {"type": "string"},
                      "description": "Only passages carrying every one of these tags."},
+            "kind": {"type": "string",
+                     "description": f"Only episodes of this kind: {', '.join(KINDS)}."},
+            "source_prefix": {"type": "string",
+                              "description": "Only episodes whose source starts with this text, read literally."},
+            "since": {"type": "string",
+                      "description": "Only episodes that happened at or after this instant (RFC 3339)."},
+            "until": {"type": "string",
+                      "description": "Only episodes that happened at or before this instant (RFC 3339)."},
+            "where": {"type": "object", "additionalProperties": {"type": "string"},
+                      "description": ("Only episodes whose recorded metadata matches every one of these "
+                                      "key/value pairs exactly. Metadata narrows a search; it never grants "
+                                      "access to a space.")},
+            "as_of": {"type": "string",
+                      "description": "Answer as the space stood at this instant (RFC 3339). Defaults to now."},
         }, ["query"]),
     ),
     ToolSpec(
@@ -93,9 +120,238 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                      "description": "Every supporting source must carry all these tags."},
         }, ["seed_fact_id"]),
     ),
+    ToolSpec(
+        name="graph_context",
+        summary=("What the entity graph records around some names, or around the entities a question "
+                 "names: one line per item, coverage first, then entities, the paths between them, "
+                 "relations by hop and values. Every line cites the facts behind it, re-read now."),
+        parameters=_schema({
+            "names": {"type": "array", "items": {"type": "string"},
+                      "description": f"Entities to centre on, by name or id; at most {MAX_NAMES}."},
+            "question": {"type": "string", "description": "A question; the entities it names become the centre."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": ("Byte budget for the packet text, 512 to 64000. Defaults to 8000. "
+                                          "Candidates and ids around it are capped separately.")},
+            "similar": {"type": "boolean",
+                        "description": "Also centre on up to three entities the question resembles, each with its score."},
+            "min_similarity": {"type": "number", "minimum": -1, "maximum": 1,
+                               "description": "Keep out resembling entities below this cosine similarity."},
+        }, []),
+    ),
+    ToolSpec(
+        name="explain_entity",
+        summary=("One entity: its relations in both directions and its values, each citing its facts. "
+                 "An ambiguous name lists the candidates to choose from."),
+        parameters=_schema({
+            "name": {"type": "string", "description": "The entity, by name or id."},
+        }, ["name"]),
+    ),
+    ToolSpec(
+        name="connect_entities",
+        summary=("How two entities connect: the shortest paths between them, each hop with its "
+                 "direction and the facts behind it. Nothing is shown that no fact supports."),
+        parameters=_schema({
+            "source": {"type": "string", "description": "One entity, by name or id."},
+            "target": {"type": "string", "description": "The other entity, by name or id."},
+            "max_hops": {"type": "integer", "minimum": 1, "maximum": 4,
+                         "description": "Longest path to look for, 1 to 4. Defaults to 3."},
+        }, ["source", "target"]),
+    ),
+    ToolSpec(
+        name="graph_schema",
+        summary=("What the entity graph is made of: the kinds its entities have, the predicates its "
+                 "facts use and which kinds each joins, most used first. Read it to know what to ask."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "How many predicates to list, 1 to 1000. Defaults to 200."},
+            "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 64_000,
+                          "description": "Byte budget for the listed predicates, 1024 to 64000. Defaults to 16000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="graph_match",
+        summary=("A structured question over the entity graph, as triple patterns joined by shared "
+                 "variables: every way they hold together, one row per answer, each citing its facts "
+                 "re-read now. Constants name entities exactly; near misses come back as suggestions. "
+                 "Read graph_schema first to know the predicates."),
+        parameters=_schema({
+            "where": {"type": "array", "minItems": 1, "maxItems": MAX_PATTERNS,
+                      "items": {"type": "object", "properties": {
+                          "subject": {"type": "string"}, "predicate": {"type": "string"},
+                          "object": {"type": "string"}},
+                          "required": ["subject", "predicate", "object"], "additionalProperties": False},
+                      "description": ("1 to 6 patterns; a term starting with ? is a variable, as in "
+                                      "{subject: '?who', predicate: 'works_at', object: '?org'} and "
+                                      "{subject: '?org', predicate: 'based_in', object: 'Lisbon'}.")},
+            "returns": {"type": "array", "items": {"type": "string"},
+                        "description": "The variables to answer with. Defaults to every variable."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
+                      "description": f"Rows to answer, 1 to {MAX_ROWS}. Defaults to {DEFAULT_ROWS}."},
+            "status": {"type": "string", "enum": list(STATUS_MODES),
+                       "description": "current (default), history, proposed or all."},
+            "as_of": {"type": "string", "description": "RFC 3339 instant to ask at. Defaults to now."},
+            "together": {"type": "boolean",
+                         "description": "Join only facts that held at one moment (default true)."},
+            "follows": {"type": "boolean",
+                        "description": ("Also match what follows from the claims under this space's vocabulary "
+                                        "(default false): that an employer employs whoever works there, and so "
+                                        "on. A row that used one says which meaning it followed, and still "
+                                        "cites the claims underneath.")},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, ["where"]),
+    ),
+    ToolSpec(
+        name="graph_overview",
+        summary=("The entity graph at a glance, for a question about the whole of it: each community's "
+                 "size, kinds, predicates, central entities and a few of its facts, cited and re-read now. "
+                 "A question puts the communities it concerns first and says what each matched."),
+        parameters=_schema({
+            "question": {"type": "string", "description": "A question about the whole graph, if there is one."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_COMMUNITIES,
+                      "description": f"Communities to digest, 1 to {MAX_COMMUNITIES}. Defaults to {DEFAULT_COMMUNITIES}."},
+            "facts": {"type": "integer", "minimum": 0, "maximum": MAX_FACTS_EACH,
+                      "description": f"Facts cited for each, 0 to {MAX_FACTS_EACH}. Defaults to {DEFAULT_FACTS_EACH}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="graph_changes",
+        summary=("What changed in the entity graph between two moments: claims that moved from one object to "
+                 "another, relations that began and ended, values that changed and entities that came and went, "
+                 "each citing its facts re-read now. Ask it at the start of a session with the last one's time."),
+        parameters=_schema({
+            "since": {"type": "string", "description": "RFC 3339 moment to compare from."},
+            "until": {"type": "string", "description": "RFC 3339 moment to compare to. Defaults to now."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_CHANGES,
+                      "description": f"Changes to list, 1 to {MAX_CHANGES}. Defaults to {DEFAULT_CHANGES}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, ["since"]),
+    ),
+    ToolSpec(
+        name="find_duplicates",
+        summary=("Pairs of entities in the graph that may be one thing under two names, most likely first, "
+                 "each saying why and citing the neighbours they share. Suggestions only: nothing is merged."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_PAIRS,
+                      "description": f"Pairs to suggest, 1 to {MAX_PAIRS}. Defaults to {DEFAULT_PAIRS}."},
+            "min_score": {"type": "number", "minimum": 0, "maximum": 1,
+                          "description": "Suggest only pairs at least this likely, 0 to 1. Defaults to 0.5."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="graph_health",
+        summary=("What in the knowledge graph wants attention: claims resting on nothing, kinds that disagree or "
+                 "are missing, entities nothing links to, predicates used once, and names that may be one thing. "
+                 "Counts with examples; it changes nothing."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                      "description": "Examples shown for each concern, 1 to 100. Defaults to 10."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="temporal_answer",
+        summary=("A question about dates answered by computation: how long between two events, how long ago one "
+                 "was, which came first, what order they were in. Each event is grounded to a passage and the day "
+                 "it records, and the arithmetic is shown. It answers nothing when the question is not one it "
+                 "reads, an event is not in memory, or an event's day is not decided."),
+        parameters=_schema({
+            "question": {"type": "string", "minLength": 1, "maxLength": 1000,
+                         "description": "The question to answer."},
+            "now": {"type": "string", "description": "The moment to answer from (RFC 3339). Defaults to now."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": TEMPORAL_MAX_LIMIT,
+                      "description": f"Passages read for each event, 1 to {TEMPORAL_MAX_LIMIT}. "
+                                     f"Defaults to {TEMPORAL_LIMIT}."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": TEMPORAL_BYTES_LIMIT,
+                          "description": f"Byte budget for the answer text. Defaults to {TEMPORAL_BYTES}."},
+        }, ["question"]),
+    ),
+    ToolSpec(
+        name="list_path",
+        summary=("What is under a path in this space's tree: /episodes, /facts, /entities and /notes. "
+                 "The tree is a view of memory, so listing it changes nothing."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "The directory, starting with /. Defaults to /."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "Entries to answer with, 1 to 1000. Defaults to 100."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Where to continue a listing."},
+        }, []),
+    ),
+    ToolSpec(
+        name="read_path",
+        summary=("One file of the tree: an episode exactly as it was stored, every claim about a subject "
+                 "with its facts cited, an entity's relations and values, or a note. Reading changes nothing."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "The file, starting with / and ending .md"},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1_000_000,
+                          "description": "Bytes to answer with. Defaults to 64000; a longer file says it was cut."},
+        }, ["path"]),
+    ),
+    ToolSpec(
+        name="search_paths",
+        summary=("Paths whose content answers a query, best first, each with the words that matched. "
+                 "The searching is ordinary recall; what it adds is where to look."),
+        parameters=_schema({
+            "query": {"type": "string", "description": "What to look for."},
+            "under": {"type": "string", "description": "A directory to search under. Defaults to /."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                      "description": "Paths to answer with, 1 to 200. Defaults to 10."},
+        }, ["query"]),
+    ),
+    ToolSpec(
+        name="write_note",
+        summary=("Write a note under /notes. A note is an ordinary memory whose source is its path, so it "
+                 "is recalled and cited like anything else. Pass the version a read gave you and the write "
+                 "is refused if the note moved since; without it, the newest note stands."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "Where to write, under /notes, ending .md"},
+            "text": {"type": "string", "description": "What the note says."},
+            "if_version": {"type": "integer", "minimum": 1,
+                           "description": "The version read_path gave for this note."},
+        }, ["path", "text"]),
+    ),
 )
 
+_GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health",
+                          "temporal_answer"})
+#: The tree. ``write_note`` is offered only when a policy allows writing:
+#: an absent tool is a clearer refusal than an error a model may argue
+#: with, and a model that cannot see a tool does not plan around it.
+_TREE_TOOLS = frozenset({"list_path", "read_path", "search_paths", "write_note"})
+
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
+
+
+def _narrowing(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """The filters a search was asked for, checked here so that one this
+    space cannot answer is refused in words rather than ignored. A filter
+    silently dropped is worse than one refused: the caller believes it
+    narrowed the search and it did not."""
+    # A kind that is not one is refused by the engine, which names it; a
+    # second check here would be a second place to keep the list of kinds
+    # in step, and no test could tell the two apart.
+    kind = arguments.get("kind")
+    for name in ("since", "until", "as_of"):
+        given = arguments.get(name)
+        if given is not None:
+            try:
+                normalise_time(str(given))
+            except (InvalidInput, ValueError):
+                raise InvalidInput(f"{name} must be an RFC 3339 instant, not {given!r}") from None
+    where = arguments.get("where")
+    if where is not None and not isinstance(where, Mapping):
+        raise InvalidInput("where takes key and value pairs")
+    return {name: value for name, value in
+            {"kind": kind, "source_prefix": arguments.get("source_prefix"),
+             "since": arguments.get("since"), "until": arguments.get("until"),
+             "where": dict(where) if where else None}.items() if value}
 
 
 def _chosen(names: Optional[Sequence[str]]) -> tuple[ToolSpec, ...]:
@@ -133,8 +389,19 @@ def check(spec: ToolSpec, arguments: Mapping[str, Any]) -> Optional[str]:
             return f"{name} must be text"
         if kind == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
             return f"{name} must be a whole number"
-        if kind == "array" and not (isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value)):
+        if kind == "array" and rule["items"]["type"] == "object" and not (
+                isinstance(value, (list, tuple)) and all(isinstance(v, Mapping) for v in value)):
+            return f"{name} must be a list of patterns"
+        if kind == "array" and rule["items"]["type"] == "string" and not (
+                isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value)):
             return f"{name} must be a list of text"
+        if "enum" in rule and value not in rule["enum"]:
+            return f"{name} must be one of {', '.join(rule['enum'])}"
+        if kind == "boolean" and not isinstance(value, bool):
+            return f"{name} must be true or false"
+        if kind == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                 or not rule.get("minimum", 0) <= value <= rule.get("maximum", MAX_ITEMS)):
+            return f"{name} must be a number from {rule.get('minimum')} to {rule.get('maximum')}"
         if kind == "integer" and not rule.get("minimum", 0) <= value <= rule.get("maximum", MAX_ITEMS):
             return f"{name} must be from {rule.get('minimum')} to {rule.get('maximum')}"
     return None
@@ -143,10 +410,20 @@ def check(spec: ToolSpec, arguments: Mapping[str, Any]) -> Optional[str]:
 class ToolBox:
     """The tools bound to one engine and one space."""
 
-    def __init__(self, engine: MemoryEngine, space: str, *, tools: Optional[Sequence[str]] = None) -> None:
+    def __init__(self, engine: MemoryEngine, space: str, *, tools: Optional[Sequence[str]] = None,
+                 filesystem: "FilesystemPolicy | None" = None) -> None:
+        from ..filesystem import FilesystemPolicy, MemoryFilesystem
+
         self.engine = engine
         self.space = space
-        self.tools = _chosen(tools)
+        #: The tree these tools see, under the policy the owner gave. Read
+        #: only unless they said otherwise, and the writing tool is not
+        #: offered at all when it is: a model that cannot see a tool does
+        #: not plan around it, which is a clearer refusal than an error.
+        self.filesystem = MemoryFilesystem(engine, space, filesystem or FilesystemPolicy())
+        chosen = _chosen(tools)
+        self.tools = tuple(tool for tool in chosen
+                           if tool.name != "write_note" or self.filesystem.policy.writable)
         self._by_name = {tool.name: tool for tool in self.tools}
 
     def openai(self) -> list[dict]:
@@ -171,17 +448,31 @@ class ToolBox:
             return {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
     async def _call(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        if name in _GRAPH_TOOLS:
+            return await self._graph(name, arguments)
+        if name in _TREE_TOOLS:
+            return await self._tree(name, arguments)
         if name == "search_memory":
+            # Everything the engine can narrow by, so a model asks for what
+            # it wants rather than reading the space and deciding itself.
+            narrowed = _narrowing(arguments)
             found = await self.engine.recall(
                 self.space, arguments["query"],
                 limit=min(int(arguments.get("limit") or 5), MAX_ITEMS),
                 tags=tuple(arguments.get("tags") or ()),
+                as_of=arguments.get("as_of"),
+                **narrowed,
             )
             return {
                 "items": [{"episode_id": i.episode_id, "chunk_id": i.chunk_id, "text": i.text,
                            "score": i.score, "source": i.source, "created_at": i.created_at}
                           for i in found.items],
                 "facts": [self._fact(f) for f in found.facts],
+                # What it was narrowed by, so a model can tell a narrow
+                # search from an empty space.
+                "narrowed": {name: value for name, value in
+                             {**narrowed, "tags": list(arguments.get("tags") or ()),
+                              "as_of": arguments.get("as_of")}.items() if value},
             }
         if name == "add_memory":
             added = await self.engine.remember(
@@ -200,6 +491,128 @@ class ToolBox:
             "recent": [{"episode_id": r.episode_id, "text": r.excerpt, "created_at": r.created_at}
                        for r in profile.recent],
         }
+
+    async def _tree(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        """The tree, under its policy. Refusals come back as answers with
+        the reason in them, because a model reads a refusal and tries
+        something else where an exception would end its turn."""
+        if name == "list_path":
+            listing = await self.filesystem.list(str(arguments.get("path") or "/"),
+                                                 limit=int(arguments.get("limit") or DEFAULT_ENTRIES),
+                                                 offset=int(arguments.get("offset") or 0))
+            return listing.record()
+        if name == "read_path":
+            page = await self.filesystem.read(str(arguments["path"]),
+                                              max_bytes=int(arguments.get("max_bytes") or MAX_FILE_BYTES))
+            return page.record()
+        if name == "search_paths":
+            found = await self.filesystem.search(str(arguments["query"]),
+                                                 under=str(arguments.get("under") or "/"),
+                                                 limit=int(arguments.get("limit") or DEFAULT_HITS))
+            return found.record()
+        written = await self.filesystem.write(str(arguments["path"]), str(arguments["text"]),
+                                              if_version=arguments.get("if_version"))
+        return written.record()
+
+    async def _graph(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        """The graph tools read the current projection at one instant and
+        answer with the packet the HTTP route gives."""
+        from ..entities.context import ContextLimits, graph_connections, graph_context
+        from ..entities.schema import schema_record
+
+        names = list(arguments.get("names") or ())
+        for side in ("name", "source", "target"):
+            if side in arguments:
+                names.append(arguments[side])
+        if len(names) > MAX_NAMES or any(not 1 <= len(entry) <= MAX_NAME for entry in names):
+            raise InvalidInput(f"names: at most {MAX_NAMES}, each 1 to {MAX_NAME} characters")
+        when = self.engine.clock()
+        if name == "graph_match":
+            from ..core.validation import normalise_time
+            from ..entities.match import MAX_BYTES, MatchQueryError, graph_match
+
+            status = arguments.get("status", "current")
+            moment = normalise_time(arguments["as_of"]) if arguments.get("as_of") else when
+            limit, together = arguments.get("limit", DEFAULT_ROWS), arguments.get("together", True)
+            try:
+                found = await graph_match(self.engine, self.space, list(arguments["where"]),
+                                          returns=arguments.get("returns"), limit=limit, status=status, as_of=moment,
+                                          together=together, follows=bool(arguments.get("follows", False)),
+                                          max_bytes=arguments.get("max_bytes", MAX_BYTES))
+            except MatchQueryError as refused:
+                raise InvalidInput(str(refused)) from None
+            return found.record(self.space, status=status, as_of=moment, together=together, limit=limit,
+                                follows=bool(arguments.get("follows", False)))
+        if name == "graph_health":
+            from ..entities.health import DEFAULT_EXAMPLES, MAX_BYTES as HEALTH_BYTES, graph_health
+
+            health = await graph_health(self.engine, self.space, as_of=when,
+                                        limit=arguments.get("limit", DEFAULT_EXAMPLES),
+                                        max_bytes=arguments.get("max_bytes", HEALTH_BYTES))
+            return health.record(self.space, status="current", as_of=when)
+        if name == "temporal_answer":
+            from ..retrieval.temporal import TemporalError, temporal_answer
+
+            try:
+                answered = await temporal_answer(self.engine, self.space, arguments["question"],
+                                                 now=arguments.get("now"),
+                                                 limit=arguments.get("limit", TEMPORAL_LIMIT),
+                                                 max_bytes=arguments.get("max_bytes", TEMPORAL_BYTES))
+            except TemporalError as refused:
+                raise InvalidInput(str(refused)) from None
+            return answered.record(self.space)
+        if name == "find_duplicates":
+            from ..entities.duplicates import MAX_BYTES as DUPLICATES_BYTES, likely_duplicates
+
+            # The schema bounds every argument as the finder does.
+            suggested = await likely_duplicates(self.engine, self.space, as_of=when,
+                                                limit=arguments.get("limit", DEFAULT_PAIRS),
+                                                min_score=arguments.get("min_score", DEFAULT_MIN_SCORE),
+                                                max_bytes=arguments.get("max_bytes", DUPLICATES_BYTES))
+            return suggested.record(self.space, status="current", as_of=when)
+        if name == "graph_changes":
+            from ..entities.changes import MAX_BYTES as CHANGES_BYTES, ChangesError, graph_changes
+
+            try:
+                changed = await graph_changes(self.engine, self.space, since=arguments["since"],
+                                              until=arguments.get("until") or when,
+                                              limit=arguments.get("limit", DEFAULT_CHANGES),
+                                              max_bytes=arguments.get("max_bytes", CHANGES_BYTES))
+            except ChangesError as refused:
+                raise InvalidInput(str(refused)) from None
+            return changed.record(self.space)
+        if name == "graph_overview":
+            from ..entities.overview import MAX_BYTES as OVERVIEW_BYTES, OverviewError, graph_overview
+
+            question = arguments.get("question")
+            try:
+                overview = await graph_overview(self.engine, self.space, question=question, as_of=when,
+                                                limit=arguments.get("limit", DEFAULT_COMMUNITIES),
+                                                facts_each=arguments.get("facts", DEFAULT_FACTS_EACH),
+                                                max_bytes=arguments.get("max_bytes", OVERVIEW_BYTES))
+            except OverviewError as refused:
+                raise InvalidInput(str(refused)) from None
+            return overview.record(self.space, status="current", as_of=when, question=question)
+        if name == "graph_schema":
+            return await schema_record(self.engine, self.space, as_of=when, limit=arguments.get("limit", 200),
+                                       max_bytes=arguments.get("max_bytes", 16_000))
+        if name == "connect_entities":
+            packet = await graph_connections(self.engine, self.space, arguments["source"], arguments["target"],
+                                             max_hops=arguments.get("max_hops", 3), as_of=when)
+        elif name == "explain_entity":
+            packet = await graph_context(self.engine, self.space, names=[arguments["name"]], as_of=when,
+                                         limits=ContextLimits(max_hops=1))
+        else:
+            question = arguments.get("question")
+            if not names and not question:
+                raise InvalidInput("give names or a question")
+            if question is not None and not 1 <= len(question) <= MAX_QUESTION:
+                raise InvalidInput(f"question must be 1 to {MAX_QUESTION} characters")
+            packet = await graph_context(self.engine, self.space, names=names, question=question, as_of=when,
+                                         limits=ContextLimits(max_bytes=arguments.get("max_bytes", 8_000)),
+                                         similar=bool(arguments.get("similar", False)),
+                                         min_similarity=arguments.get("min_similarity"))
+        return packet.record(self.space, "current", when)
 
     @staticmethod
     def _fact(fact) -> dict:

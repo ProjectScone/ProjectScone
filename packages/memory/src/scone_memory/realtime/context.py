@@ -105,6 +105,7 @@ class ContextReceipt(TypedDict):
     low_confidence: bool | None
     error_type: str | None
     retrieval_mode: NotRequired[str]
+    query_formulation: NotRequired[dict[str, object]]
     records_considered: NotRequired[int]
     has_more: NotRequired[bool]
     next_before: NotRequired[int | None]
@@ -253,6 +254,10 @@ class MemoryContext:
         try:
             plan = plan_conversation_retrieval(query)
             receipt["retrieval_mode"] = plan.mode
+            if plan.formulation is not None:
+                receipt["query_formulation"] = {
+                    "method": plan.formulation.method, "source_chars": plan.formulation.source_chars,
+                    "query_chars": len(plan.formulation.text), "kept": [list(span) for span in plan.formulation.kept]}
             coverage: dict[str, object] = {"mode": "ranked_search"}
             logger.info("recall.routed", extra={"event": "recall.routed",
                         "session_id": self._session_id, "stage": plan.mode})

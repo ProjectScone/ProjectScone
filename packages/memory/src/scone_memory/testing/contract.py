@@ -439,7 +439,8 @@ async def test_a_forgotten_episode_is_known_to_have_existed(engine):
 
     skipped = await engine.import_records("default", dump)
     assert (skipped.episodes, skipped.tombstoned) == (0, 1), "the archive carries what was forgotten here"
-    assert await engine.documents.episode_by_hash("default", dump[0]["content_hash"]) is None
+    [carried] = [record for record in dump if record["type"] == "episode"]
+    assert await engine.documents.episode_by_hash("default", carried["content_hash"]) is None
     back = await engine.import_records("default", dump, resurrect=True)
     assert (back.episodes, back.tombstoned) == (1, 0)
     assert (await engine.tombstone("default", first.episode_id)).forgotten_at == receipt.forgotten_at, "resurrection does not erase the decision"

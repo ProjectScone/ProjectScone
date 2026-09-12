@@ -147,6 +147,24 @@ Recent [storage and parsing measurements](docs/scaling-validation.md):
 | Qdrant HNSW effort, `ef=32` → `128` | Recall@10 94.17% → 100%; median 1.862 → 1.975 ms | 20,000 synthetic 64-D vectors; unfiltered queries |
 | S3 attachment-link verification | 1 MiB GET → HEAD with zero body bytes | Moto request/byte counts; supported versioned checksums |
 
+Code retrieval, measured with `scone bench-code` on this package's own source
+(273 files, 737 documented functions, hash embedder, k=5):
+
+| Asked | Cut at declarations | Cut by length |
+|---|---:|---:|
+| The docstring, as written | 94% found their own definition | 95% |
+| "what &lt;the name&gt; does" | 44% | 44% |
+| A returned chunk that is a whole declaration | 40% | 35% |
+
+Read that honestly: **cutting code at its declarations does not find more.** What
+it changes is what comes back — a whole function rather than the end of one and
+the start of the next — which is what makes a citation quotable, and it is why
+every recalled chunk now carries its byte span, its lines and the declaration
+holding it. The gap worth closing is the second row: asked in a person's words,
+two in five questions never return the function's own definition, and that is an
+embedder question rather than a chunker one. The corpus is this repository, so it
+is a measurement of behaviour, not a held-out benchmark result.
+
 Synthetic nearest-neighbor recall is separate from semantic retrieval and answer
 accuracy. Emulator byte counts are not AWS throughput. No ten-million-vector
 capacity result is claimed; the detailed guide retains the validation targets,

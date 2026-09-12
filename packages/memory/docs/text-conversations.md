@@ -96,6 +96,18 @@ facts. That block never enters shared history or captured transcripts. The
 default 8,000-byte budget omits whole passages rather than silently clipping them.
 A low-confidence result supplies no source block.
 
+Recall accepts at most 1,000 characters of query. A longer message, such as a
+pasted draft followed by a question, is searched with verbatim excerpts of
+itself, up to that limit: questions first (latest first), then the closing and
+opening sentences, then the sentences whose words are rarest in the message. An
+excerpt that alone exceeds the limit keeps its head and tail, cut at spaces.
+Nothing is paraphrased or generated. The receipt's `query_formulation` records
+the method, the message and query lengths, and each kept `[start, end)`
+character span of the message. Shorter messages are searched as written and
+carry no `query_formulation`. The same excerpting applies to
+`integrations.chat.recall_context` and the LangChain and LlamaIndex retrievers;
+direct `recall`, HTTP, MCP and CLI calls still refuse over-long queries.
+
 `MemoryContext(..., neighbor_chunks=1)` and
 `TextConversation(..., neighbor_chunks=1)` optionally read one stored chunk on
 each side of a ranked passage. The radius accepts 0..4 and defaults to 0.

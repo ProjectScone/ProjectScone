@@ -137,9 +137,17 @@ async def test_forged_candidates_are_revalidated_and_never_repaired():
         await assessor(path()).assess('bound question', (CHAIN[0].model_copy(update={'id':'fact:0'}),))
 
 
-async def test_identity_matching_is_exact_not_normalized():
-    result = await assessor(EvidenceRequirement(kind='fact', subject='ASTER', predicate='depends on')).assess('bound question', CHAIN)
-    assert result.status == 'insufficient'
+async def test_identity_matching_follows_the_ledgers_rule_not_resemblance():
+    # The ledger stores 'ASTER' and 'aster' as one subject, so a requirement
+    # spelled either way finds it. A different spelling is still a different
+    # name, and a value whose case carries meaning is never folded.
+    folded = await assessor(EvidenceRequirement(kind='fact', subject='ASTER', predicate='depends on')).assess('bound question', CHAIN)
+    assert folded.status == 'sufficient' and folded.selected_ids == ('fact:1',)
+    other = await assessor(EvidenceRequirement(kind='fact', subject='asters', predicate='depends on')).assess('bound question', CHAIN)
+    assert other.status == 'insufficient'
+    units = (fact(1, 'disk', 'unit', 'MB'),)
+    value = await assessor(EvidenceRequirement(kind='fact', subject='disk', predicate='unit', object='mb')).assess('bound question', units)
+    assert value.status == 'insufficient'
 
 
 @pytest.mark.parametrize('requirements', [(), [path()], (path(), path()), (path(),) * 9])
@@ -268,3 +276,19 @@ async def test_native_path_witness_is_atomic_scoped_and_fresh(engine, monkeypatc
             assert {row.subject for row in result.recall.facts} == {'aster', 'cedar'}
             assert result.evidence_basis == 'unselected_candidates'
             assert result.model_selected_ids == ()
+
+
+@pytest.mark.parametrize('value', ['"ship it"', 'it', 'It rained. We stayed in.', 'MB'])
+async def test_an_exact_recorded_value_witnesses_a_requirement_without_becoming_a_hop(value):
+    said = (fact(1, 'team', 'said', value),)
+    direct = EvidenceRequirement(kind='fact', subject='team', predicate='said', object=value)
+    inverse = EvidenceRequirement(kind='fact', predicate='said', object=value)
+    assert (await assessor(direct).assess('bound question', said)).status == 'sufficient'
+    assert (await assessor(inverse).assess('bound question', said)).status == 'sufficient'
+    reached = (fact(1, 'invoice', 'assigned to', 'team'), fact(2, 'team', 'said', value))
+    reach = EvidenceRequirement(kind='reachable_fact', subject='invoice', predicate='said', object=value,
+                                via=('assigned to',), max_hops=2)
+    assert (await assessor(reach).assess('bound question', reached)).status == 'sufficient'
+    through = (fact(1, 'start', 'relates', value), fact(2, value, 'relates', 'finish'))
+    route = EvidenceRequirement(kind='path', subject='start', predicate='relates', object='finish')
+    assert (await assessor(route).assess('bound question', through)).status == 'insufficient'

@@ -17,7 +17,9 @@ async def test_catalog_exposes_scoped_profile_and_pending_sources(engine: Memory
         source_episode_id=cited.episode_id, quote="Juniper uses Polaris.")
     await engine.assert_fact("alpha", "Juniper", "needs", "review", proposed=True)
 
-    result = await catalog.profile(engine.documents, "alpha", clock=engine.clock)
+    # A profile is read through the engine now: the read behind it is
+    # bounded and fenced, which needs more than the store.
+    result = await catalog.profile(engine, "alpha")
     assert isinstance(result, Profile)
     assert all(isinstance(item, RecentActivity) for item in result.recent)
     assert result.static_facts == [accepted]

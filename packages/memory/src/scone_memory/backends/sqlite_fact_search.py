@@ -4,6 +4,8 @@ Pure SQL triggers keep a dirty queue compatible with old clients and raw writes.
 Only the queried space is tokenized, in batches, before an indexed lookup. The
 cache is disposable and does not change the semantic schema version. Savepoints
 preserve caller transactions and roll back partial cache work on any failure.
+The marker names the tokenizer and the Unicode tables it read, so postings
+written under other token rules are rebuilt rather than trusted.
 
 SQL orders posting matches; exact Python validity/scope checks precede the
 result limit. Only selected IDs are hydrated as full Fact records by the store.
@@ -17,13 +19,15 @@ from contextlib import contextmanager
 import json
 import sqlite3
 from typing import Protocol, cast
+import unicodedata
 from uuid import uuid4
 
 from ..core.ports import TextFilter
 from ..core.timeutil import parse_rfc3339
-from ..retrieval.lexical import tokenize
+from ..retrieval.lexical import TOKENIZER_VERSION, tokenize
 
 _VERSION_KEY = "fact_search_postings_version"
+_VERSION = f"2;tokenizer={TOKENIZER_VERSION};unicode={unicodedata.unidata_version}"
 _DDL = (
     "CREATE TABLE IF NOT EXISTS fact_search_postings (space TEXT NOT NULL, term TEXT NOT NULL, fact_id INTEGER NOT NULL, PRIMARY KEY(space,term,fact_id)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS fact_search_by_fact ON fact_search_postings(fact_id)",
@@ -112,7 +116,7 @@ def initialize_fact_search(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE meta SET value=value WHERE 0")
         complete, objects = _derived_schema(conn)
         row = conn.execute("SELECT value FROM meta WHERE key=?",(_VERSION_KEY,)).fetchone()
-        if complete and row is not None and row[0] == "1":
+        if complete and row is not None and row[0] == _VERSION:
             return
         if not complete:
             # Remove only our reserved names, using each object's actual type.
@@ -127,7 +131,7 @@ def initialize_fact_search(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM fact_search_postings")
         conn.execute("DELETE FROM fact_search_dirty")
         conn.execute("INSERT INTO fact_search_dirty(fact_id,space) SELECT id,space FROM facts")
-        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",(_VERSION_KEY,"1"))
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",(_VERSION_KEY,_VERSION))
 
 
 def _synchronize(conn: sqlite3.Connection, space: str) -> None:

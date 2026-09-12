@@ -113,8 +113,10 @@ async def test_general_question_uses_scoped_store_evidence_without_similarity(me
     assert receipt["evidence_graph_status"] == "prepared"
     graph = receipt["evidence_graph"]
     assert {node["id"] for node in graph["nodes"] if node["kind"] != "concept"} == {"query:current", f"episode:{allowed.episode_id}", f"chunk:{chunks[0].chunk_id}"}
-    assert {node["label"] for node in graph["nodes"] if node["kind"] == "concept"} == {"Juniper", "Polaris"}
-    assert {edge["kind"] for edge in graph["edges"]} == {"returned", "chunked_into", "mentions"}
+    # No claim is about anything here, so nothing is drawn as a concept:
+    # capitalised words in a passage are not entities.
+    assert [node for node in graph["nodes"] if node["kind"] == "concept"] == []
+    assert {edge["kind"] for edge in graph["edges"]} == {"returned", "chunked_into"}
     assert "evidence_graph" not in request[0]["content"]
 
 

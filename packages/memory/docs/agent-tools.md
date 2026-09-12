@@ -8,8 +8,12 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same four contracts: `search_memory`, `add_memory`, `read_profile`,
-and `trace_memory`. Hosts can allowlist a subset. The host executes returned
+render the same fourteen contracts: `search_memory`, `add_memory`, `read_profile`,
+`trace_memory`, the eight entity-graph reads `graph_context`,
+`explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
+`graph_overview`, `graph_changes` and `find_duplicates`, the graph's own
+`graph_health`, and the computed `temporal_answer`. Hosts can
+allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
 
@@ -33,6 +37,115 @@ not infer aliases or join merely similar names.
 Contradictions remain separate evidence, never a path continuation or an
 automatically chosen winner. Quote retention is checked; factual accuracy is
 not certified. Source text remains untrusted data for the receiving model.
+
+The graph reads are the ones the MCP server offers as `memory_graph_context`,
+`memory_entity`, `memory_connections`, `memory_graph_schema`,
+`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes` and
+`memory_entity_duplicates`, beside the computed `memory_temporal_answer`:
+
+- `list_path`, `read_path` and `search_paths` walk the space's tree:
+  `/episodes`, `/facts`, `/entities` and `/notes`. Listing and reading
+  change nothing, a path that tries to leave the space is refused rather
+  than resolved, and a search answers in paths, using ordinary recall
+  underneath.
+- `write_note` writes under `/notes`, and is **not offered at all** unless
+  the toolbox was given a filesystem policy that allows writing: a model
+  that cannot see a tool does not plan around it, which is a clearer
+  refusal than an error it may argue with. A note is an ordinary memory
+  whose source is its path. Passing the `version` a read gave refuses a
+  write onto a note that moved since.
+- `search_memory` narrows by everything the engine can: `tags`, `kind`,
+  `source_prefix`, `since`, `until`, `where` (recorded metadata, matched
+  exactly) and `as_of`. A filter this space cannot answer is refused in
+  words rather than ignored — a filter ignored is worse than one refused,
+  because the caller believes it narrowed the search and it did not — and
+  the answer carries `narrowed`, so a model can tell a narrow search from
+  an empty space. Metadata narrows a search; it never grants access to a
+  space.
+- `graph_context` returns what the entity graph records around up to 24
+  names, or around the entities a question names. Lines beginning
+  `follows:` are worked out from the claims rather than claimed, and say
+  which meaning they follow from. `max_bytes` (512 to
+  64,000) bounds the packet text. The candidates and ids around it are
+  capped on their own: 24 candidates at most, with names clipped to 120
+  characters. With `similar: true`, a question also finds up to three
+  entities it resembles by vector, each marked with its score. Only a
+  `min_similarity` you pass keeps weak matches out.
+- `explain_entity` returns one entity's relations in both directions and
+  its values, or the candidates for an ambiguous name. Where the space
+  says what its predicates mean, `follows` lists what follows from the
+  claims about the entity, each naming the claims and relations it was
+  worked out from. What follows is never listed as a claim, and its id
+  carries an `imp:` prefix rather than a relation's `rel:`.
+- `connect_entities` returns the shortest paths between two entities,
+  within `max_hops` (1 to 4).
+- `graph_schema` returns what the graph is made of: its entity kinds,
+  its predicates and the kinds each predicate joins. It is the
+  `/v1/graph/schema` JSON, for a model to read before it asks anything.
+  `max_bytes` (1,024 to 64,000, default 16,000) bounds the listed
+  predicates, and a predicate over 200 characters is shown clipped.
+- `graph_match` answers a structured question: `where` is 1 to 6
+  patterns `{subject, predicate, object}` joined by `?variables`, as in
+  `?who works_at ?org` and `?org based_in "Lisbon"`. It answers the
+  `/v1/graph/match` JSON: one row per answer, each citing its facts
+  re-read now. Constants name entities exactly, and near misses come back
+  as candidates. With `status: "history"`, only facts that held at one
+  moment are joined unless `together` is false. With `follows: true`, it
+  also matches what follows from the claims under the space's vocabulary
+  — that an employer employs whoever works there — and a row that used
+  one says which meaning it followed while still citing the claims
+  underneath; without it, only claims are matched. `returns`, `limit`
+  (1 to 100), `as_of` and `max_bytes` bound it, as the route does.
+- `graph_overview` answers a question about the whole graph: each
+  community's size, kinds, predicates, central entities and up to `facts`
+  of its facts, cited and re-read now, with the communities a `question`
+  concerns first. It is the `/v1/graph/overview` JSON.
+- `graph_changes` answers what changed between `since` and `until` (now
+  by default): claims that moved, relations that began and ended, values
+  that changed and entities that came and went, each citing its facts. It
+  is the `/v1/graph/changes` JSON; ask it at the start of a session with
+  the last one's time.
+- `find_duplicates` suggests pairs of entities that may be one thing under
+  two names, each saying why and citing the neighbours they share. It is
+  the `/v1/entities/duplicates` JSON. It merges nothing.
+- `graph_health` counts what in the graph wants attention: claims resting
+  on nothing, kinds that disagree or are missing, entities nothing links
+  to, predicates used once, and names that may be one thing. It is the
+  `/v1/graph/health` JSON, and changes nothing.
+- `temporal_answer` answers a question about dates by computation: how long
+  between two events, how long ago one was, which came first, what order
+  they were in. Each event is grounded to a passage and the day it records,
+  and the arithmetic is shown. It answers nothing, and says why, when the
+  question is not one it reads, an event is not in memory, or an event's
+  day is not decided.
+
+Each reads the current projection of the box's space at one instant. The
+first three answer with the JSON that `/v1/graph/context` returns: the
+packet text, its status, seeds, candidates and coverage, and the instant
+it read at. `graph_schema` answers with the `/v1/graph/schema` JSON.
+Every line cites the facts behind it, re-read at that instant, and
+coverage says what was left out. A name over 200 characters, a question
+over 2,000 characters, or a bound out of range comes back as a result
+with `ok: false`.
+
+```python
+box = ToolBox(engine, "default", tools=["graph_context", "connect_entities"])
+around = await box.run("graph_context", {"question": "who works with Alice Chen?"})
+route = await box.run("connect_entities", {"source": "Alice Chen", "target": "Lisbon"})
+```
+
+A structured question, the whole graph at a glance, and what changed
+since a session last looked:
+
+```python
+box = ToolBox(engine, "default", tools=["graph_schema", "graph_match", "graph_overview", "graph_changes"])
+rows = await box.run("graph_match", {"where": [
+    {"subject": "?who", "predicate": "works_at", "object": "?org"},
+    {"subject": "?org", "predicate": "based_in", "object": "Lisbon"},
+], "returns": ["?who"]})
+groups = await box.run("graph_overview", {"question": "what are the main groups here?"})
+since = await box.run("graph_changes", {"since": "2025-06-01T00:00:00Z"})
+```
 
 The trace is read-only and bounded: 16 facts, 32 edges, 256 traversal store
 calls/candidates, eight paths, and a two-second async timeout. Two additional

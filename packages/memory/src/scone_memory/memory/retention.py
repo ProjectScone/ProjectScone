@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Optional
 
 from ..backends.blobs import BlobStore
+from ..core.affirmations import affirmation_store
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, ForgetStatus, SpaceReceipt, Tombstone
 from ..core.ports import DocumentStore, EventLog, NewEvent, NewTombstone, VectorIndex
@@ -43,7 +44,9 @@ async def episode_or_gone(runtime: RetentionRuntime, space: str, episode_id: int
     """The episode, or Gone when a tombstone says it was forgotten, or
     NotFound when the id never meant anything here."""
     found = await runtime.documents.get_episode(space, episode_id)
-    if found is not None:
+    # A record for another space or id is a faulty store's answer, not this
+    # episode: it is treated as missing, never shown.
+    if found is not None and found.space == space and found.episode_id == episode_id:
         return found
     stone = await runtime.documents.tombstone(space, episode_id)
     if stone is not None:
@@ -144,8 +147,9 @@ async def expire(runtime: RetentionRuntime, space: str, policy: Mapping[str, flo
 
 async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> ForgetReceipt:
     """What forgetting the episode would take with it and leave, with
-    nothing removed. The claims and links that cite it are reported,
-    not closed: a source being gone is a fact about the evidence."""
+    nothing removed. The claims, links and kept restatements that cite it
+    are reported, not closed: a source being gone is a fact about the
+    evidence."""
     check_space(space)
     await runtime.episode_or_gone(space, episode_id)
     carried = [a.attachment_id for a in await runtime.blobs.for_episode(space, episode_id)]
@@ -156,6 +160,8 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         for link in await runtime.documents.fact_links(space, fact.fact_id):
             if link.source_episode_id == episode_id:
                 citing_links[link.link_id] = link.link_id
+    store = affirmation_store(runtime.documents)
+    kept = await store.space_affirmations(space) if store is not None else []
     return ForgetReceipt(
         episode_id=episode_id,
         chunks=len(await runtime.documents.chunks_of(space, episode_id)),
@@ -163,6 +169,7 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         attachments_kept=[a for a in carried if a not in released],
         facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
         links_citing=sorted(citing_links),
+        affirmations_citing=sorted(a.affirmation_id for a in kept if a.source_episode_id == episode_id),
     )
 
 
@@ -289,6 +296,8 @@ async def _finish_forget(runtime: RetentionRuntime, store: RetirementStore, pend
         "attachments_released": len(receipt.attachments_released),
         "facts_citing": len(receipt.facts_citing), "links_citing": len(receipt.links_citing),
     }
+    if receipt.affirmations_citing:
+        payload["affirmations_citing"] = len(receipt.affirmations_citing)
     if runtime.events is not None:
         # Stable payload/key makes a lost append acknowledgement retryable.
         # A retry's latency is not the latency of the original deletion.

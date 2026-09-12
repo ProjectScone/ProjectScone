@@ -29,6 +29,13 @@
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
+    SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
+    SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
+    SCONE_RELATION_SYMMETRIC=married_to       which read the same both ways
+    SCONE_RELATION_TRANSITIVE=part_of         which carry through
+    SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
+    SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
+    SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
     SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
                                  alternatively load preprovisioned CPU model files; both required
@@ -152,6 +159,13 @@ class Settings:
     derive: bool = False
     contextual_embeddings: bool = False
     demote_restated: bool = True
+    many_valued: tuple[str, ...] = ()
+    relation_inverse: tuple[str, ...] = ()
+    relation_symmetric: tuple[str, ...] = ()
+    relation_transitive: tuple[str, ...] = ()
+    abstention_policy: str | None = None
+    profile_predicates: tuple[str, ...] = ()
+    profile_without: tuple[str, ...] = ()
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
@@ -354,6 +368,18 @@ class Settings:
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
+            many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
+                                   if item.strip()),
+            relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
+                                     if item.strip()),
+            relation_transitive=tuple(item.strip() for item in env.get("SCONE_RELATION_TRANSITIVE", "").split(",")
+                                      if item.strip()),
+            abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
+            profile_predicates=tuple(item.strip() for item in env.get("SCONE_PROFILE_PREDICATES", "").split(",")
+                                     if item.strip()),
+            profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
+                                  if item.strip()),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
@@ -453,6 +479,42 @@ def parse_key_roles(many: Optional[str], one: Optional[str]) -> tuple[dict[str, 
 def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
     """The key -> space half of parse_key_roles, for callers that only want spaces."""
     return parse_key_roles(many, one)[0]
+
+
+def build_profile_policy(settings: Settings):
+    """Which claims a profile is made of, as the operator configured it."""
+    from ..memory.catalog import ProfilePolicy
+
+    return ProfilePolicy.of(predicates=settings.profile_predicates, without=settings.profile_without)
+
+
+def build_relation_meanings(settings: Settings):
+    """What the space's predicates mean to each other, as the operator
+    wrote it, or None when nothing was configured and the graph holds only
+    what was said."""
+    from ..entities.meanings import RelationMeanings
+
+    opposites: dict[str, str] = {}
+    for pair in settings.relation_inverse:
+        one, sep, other = pair.partition(":")
+        if not sep or not one.strip() or not other.strip():
+            raise InvalidInput(
+                f"SCONE_RELATION_INVERSE takes pairs written predicate:its opposite, separated by commas; "
+                f"{pair!r} is not one")
+        opposites[one] = other
+    if not (opposites or settings.relation_symmetric or settings.relation_transitive):
+        return None
+    return RelationMeanings(inverse=opposites, symmetric=settings.relation_symmetric,
+                            transitive=settings.relation_transitive)
+
+
+def build_abstention(settings: Settings):
+    """The measured floor to abstain by, when the operator configured one.
+    A policy that cannot be read is refused here, not ignored: abstaining
+    by a floor nobody measured is what this avoids."""
+    from ..retrieval.abstention import AbstentionPolicy
+
+    return AbstentionPolicy.read(settings.abstention_policy) if settings.abstention_policy else None
 
 
 def build_embedder(settings: Settings):
@@ -604,7 +666,11 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout")
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
+#: Settings carried into an engine that are read from a file, not a value.
+FILE_SETTINGS = ("abstention_policy",)
+#: Settings carried into an engine through a policy they build.
+POLICY_SETTINGS = ("profile_predicates", "profile_without")
 
 
 def _environment_integer(name: str, value: str) -> int:
@@ -686,6 +752,10 @@ async def build_in_process_engine(settings: Settings, embedder):
         rerank_limit=settings.rerank_limit,
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
+        many_valued=settings.many_valued,
+        relation_meanings=build_relation_meanings(settings),
+        abstention=build_abstention(settings),
+        profile_policy=build_profile_policy(settings),
     ).open()
 
 
@@ -856,6 +926,10 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_limit=settings.rerank_limit,
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
+        many_valued=settings.many_valued,
+        relation_meanings=build_relation_meanings(settings),
+        abstention=build_abstention(settings),
+        profile_policy=build_profile_policy(settings),
         blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

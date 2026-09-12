@@ -21,6 +21,7 @@ except ImportError as e:  # pragma: no cover - exercised only without the extra
 
 from ..core.models import RecallResult
 from ..memory.sync import SyncMemoryEngine
+from ..retrieval.query_formulation import formulate_query
 from ..retrieval.reranking import MAX_CANDIDATE_LIMIT
 from .turns import Turn, item_metadata, next_seq, read_turn, turn_records
 
@@ -85,11 +86,11 @@ class SconeRetriever(BaseRetriever):
                 "candidate_limit": self.candidate_limit, "rerank": self.rerank}
 
     def _get_relevant_documents(self, query: str, *, run_manager: Any = None) -> list[Document]:
-        result = _sync(self.memory).recall(self.space, query, **self._recall_kwargs())
+        result = _sync(self.memory).recall(self.space, formulate_query(query).text, **self._recall_kwargs())
         return documents(result, self.include_facts)
 
     async def _aget_relevant_documents(self, query: str, *, run_manager: Any = None) -> list[Document]:
-        result = await _async(self.memory).recall(self.space, query, **self._recall_kwargs())
+        result = await _async(self.memory).recall(self.space, formulate_query(query).text, **self._recall_kwargs())
         return documents(result, self.include_facts)
 
 

@@ -12,11 +12,12 @@ import json
 import math
 from typing import cast
 
-from ..core.errors import InvalidInput
+from ..core.errors import InvalidInput, SconeError
 from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
-from .chunker import byte_spans, chunk_spans
+from .chunker import Span, byte_spans, chunk_spans
+from .code import code_language, code_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 
 EMBED_BATCH = 64
@@ -87,6 +88,9 @@ class IngestionRuntime:
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
     embedding_checkpoint: EmbeddingCheckpoint | None = None
+    #: Whether a source stored under a name that says it is code is cut at
+    #: its declarations rather than every chunk_target characters.
+    code_aware: bool = True
 
 
 def validated_record(space: str, record: Record, when: str) -> NewEpisode:
@@ -118,7 +122,7 @@ def validated_record(space: str, record: Record, when: str) -> NewEpisode:
 
 
 def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    spans = chunk_spans(new.content, runtime.chunk_target)
+    spans = spans_for(runtime, new.content, new.source)
     return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
                     spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
 
@@ -130,7 +134,54 @@ async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_
     return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
 
 
-async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
+async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
+    """A batch where every record stands or falls on its own.
+
+    The records that pass are stored together, so they still deduplicate
+    against each other the way a batch does; the ones that do not are
+    answered where they were asked, in order, so a caller can line the
+    answers up against what they sent."""
+    kept: list[Record] = []
+    where: list[int] = []
+    answers: list[Added | None] = []
+    for record in records:
+        try:
+            validated_record(space, record, runtime.clock())
+        except SconeError as wrong:
+            answers.append(Added(episode_id=-1, outcome="failed", reason=str(wrong)))
+            continue
+        where.append(len(answers))
+        answers.append(None)
+        kept.append(record)
+    if kept:
+        for slot, outcome in zip(where, await remember_many(runtime, space, kept)):
+            answers[slot] = outcome
+    return [answer if answer is not None else Added(episode_id=-1, outcome="failed",
+                                                    reason="nothing was stored for it")
+            for answer in answers]
+
+
+
+def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
+    """Where to cut: at declarations when the source is code and the name
+    it was stored under says which language, and by length otherwise."""
+    language = code_language(source) if runtime.code_aware else None
+    if language is None:
+        return chunk_spans(content, runtime.chunk_target)
+    return list(code_spans(content, runtime.chunk_target, language=language))
+
+
+async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
+                        partial: bool = False) -> list[Added]:
+    """Store a batch. One bad record refuses the whole batch, because a
+    caller who sent one usually wants to fix it and send the lot again,
+    and a half-stored batch nobody asked for is worse than a refusal.
+
+    ``partial`` is for the caller who is importing from somewhere messy
+    and wants what can be stored: each record is judged on its own, a bad
+    one comes back as failed with the reason, and the rest are stored."""
+    if partial:
+        return await _each(runtime, space, records)
     when = runtime.clock()
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
@@ -239,7 +290,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
         else:
             chunks = await runtime.documents.chunks_of(space, episode.episode_id)
             if not chunks:
-                spans = chunk_spans(episode.content, runtime.chunk_target)
+                spans = spans_for(runtime, episode.content, episode.source)
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(

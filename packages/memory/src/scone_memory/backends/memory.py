@@ -19,12 +19,14 @@ from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.timeutil import is_before_or_at
+from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
+from ..core.affirmations import Affirmation, NewAffirmation
 
 
 class InMemoryDocumentStore:
@@ -46,12 +48,17 @@ class InMemoryDocumentStore:
         self._facts_by_source: dict[tuple[str, int], list[int]] = defaultdict(list)
         self._fact_graph_keys: dict[int, tuple[str, int | None]] = {}
         self._tombstones: dict[tuple[str, int], Tombstone] = {}
+        self._affirmations: dict[int, Affirmation] = {}
+        self._affirmation_keys: dict[tuple[str, int, str], int] = {}
+        self._affirmation_ids = count(1)
         self._episode_ids = count(1)
         self._chunk_ids = count(1)
         self._fact_ids = count(1)
         self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
+        #: Fact writes per space, only ever growing: the ledger stamp.
+        self._fact_writes: dict[str, int] = defaultdict(int)
         self._inflight: set[tuple[str, str]] = set()
         self._deleted: dict[str, str] = {}
         self._jobs: dict[tuple[str, str], IngestJob] = {}
@@ -85,6 +92,8 @@ class InMemoryDocumentStore:
         for key in [key for key in self._chunks_by_episode if key[0] == space]:
             del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
+        if fact_ids:
+            self._fact_writes[space] += 1
         for fact_id in fact_ids:
             del self._facts[fact_id]
             self._fact_subject_keys.pop(fact_id, None)
@@ -102,6 +111,9 @@ class InMemoryDocumentStore:
             del self._link_keys[link_key]
         for stone_key in stones:
             del self._tombstones[stone_key]
+        for affirmation_id in [i for i, a in self._affirmations.items() if a.space == space]:
+            gone = self._affirmations.pop(affirmation_id)
+            self._affirmation_keys.pop((gone.space, gone.fact_id, gone.valid_from), None)
         self._inflight = {mark for mark in self._inflight if mark[0] != space}
         for retirement in [key for key in self._retirement_keys if key[0] == space]:
             await self.clear_retirement(*retirement)
@@ -291,6 +303,7 @@ class InMemoryDocumentStore:
     async def insert_fact(self, new: NewFact) -> Fact:
         fact = Fact(fact_id=next(self._fact_ids), **new.__dict__)
         self._facts[fact.fact_id] = fact
+        self._fact_writes[fact.space] += 1
         key = (fact.space, fact.subject)
         self._facts_by_subject[key].append(fact.fact_id)
         self._fact_subject_keys[fact.fact_id] = key
@@ -300,6 +313,8 @@ class InMemoryDocumentStore:
     async def update_fact(self, fact: Fact) -> None:
         if fact.fact_id not in self._facts:
             raise KeyError(fact.fact_id)
+        # A row leaving a space changes that space's ledger too.
+        self._fact_writes[self._facts[fact.fact_id].space] += 1
         old_key = self._fact_subject_keys[fact.fact_id]
         new_key = (fact.space, fact.subject)
         if old_key != new_key:
@@ -309,6 +324,7 @@ class InMemoryDocumentStore:
             insort(self._facts_by_subject[new_key], fact.fact_id)
             self._fact_subject_keys[fact.fact_id] = new_key
         self._facts[fact.fact_id] = fact
+        self._fact_writes[fact.space] += 1
 
         self._index_graph_fact(fact)
 
@@ -347,6 +363,17 @@ class InMemoryDocumentStore:
             for f in self._facts.values()
             if f.space == space and (include_closed or f.status == "active")
         ]
+
+    async def ledger_stamp(self, space: str) -> str:
+        return str(self._fact_writes[space])
+
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import ledger_page_limit
+
+        cap = ledger_page_limit(limit)
+        ids = self._facts_by_space.get(space, [])  # sorted ascending, kept by _index_graph_fact
+        end = len(ids) if before_id is None else bisect_left(ids, before_id)
+        return [self._facts[fact_id] for fact_id in reversed(ids[max(0, end - cap):end])] if cap else []
 
     async def facts_for(self, space: str, subject: str, predicate: str) -> list[Fact]:
         return [
@@ -393,6 +420,30 @@ class InMemoryDocumentStore:
     async def chunk_index(self, space: str) -> list[tuple[int, int]]:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""
         return sorted((c.chunk_id, c.episode_id) for c in self._chunks.values() if c.space == space)
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        key = (new.space, new.fact_id, new.valid_from)
+        existing = self._affirmation_keys.get(key)
+        if existing is not None:
+            return self._affirmations[existing]
+        affirmation = Affirmation(affirmation_id=next(self._affirmation_ids), **new.__dict__)
+        self._affirmations[affirmation.affirmation_id] = affirmation
+        self._affirmation_keys[key] = affirmation.affirmation_id
+        return affirmation
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        return sorted((a for a in self._affirmations.values() if a.space == space and a.fact_id == fact_id),
+                      key=lambda a: (a.valid_from, a.affirmation_id))
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        for affirmation_id in affirmation_ids:
+            gone = self._affirmations.get(affirmation_id)
+            if gone is not None and gone.space == space:
+                del self._affirmations[affirmation_id]
+                del self._affirmation_keys[(gone.space, gone.fact_id, gone.valid_from)]
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        return sorted((a for a in self._affirmations.values() if a.space == space), key=lambda a: a.affirmation_id)
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         key = (new.space, new.from_fact, new.to_fact, new.kind)
@@ -442,10 +493,79 @@ class InMemoryVectorIndex:
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
         self.dim: Optional[int] = None
+        self._writer: tuple[str, str] | None = None
+        #: Writes that have taken the record and not yet returned, by writer.
+        #: While another embedder's write can still land, nothing is vouched for.
+        self._pending: dict[str, int] = {}
 
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
         return sorted(p.chunk_id for p in self._points.values() if p.space == space)
+
+    async def written_by(self) -> tuple[str, str] | None:
+        return self._writer
+
+    async def holds_vectors(self) -> bool:
+        return bool(self._points)
+
+    async def swap_writer(self, expected: tuple[str, str] | None, record: tuple[str, str], *,
+                          require_empty: bool = False) -> bool:
+        if self._writer != expected or (require_empty and self._points):
+            return False
+        # A record that vouches for one writer cannot be set while another
+        # writer's vectors may still land.
+        if record[1] in ("written", "declared") and self._foreign_pending(record[0]):
+            return False
+        self._writer = record
+        return True
+
+    def _foreign_pending(self, writer: str) -> bool:
+        return any(name != writer for name in self._pending)
+
+    def _finished(self, writer: str) -> None:
+        self._pending[writer] -= 1
+        if not self._pending[writer]:
+            del self._pending[writer]
+
+    async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
+        # Write through upsert, so a subclass that changes writing still
+        # decides it. The record changes before anything can yield, the write
+        # counts as pending until it returns, and the rule is applied again
+        # once it has landed.
+        before = self._writer
+        self._writer = settled = after_write(before, writer, bool(self._points))
+        self._pending[writer] = self._pending.get(writer, 0) + 1
+        try:
+            await self.upsert(points)
+        except BaseException:
+            self._finished(writer)
+            # Nothing landed in an empty index: leave no claim behind, but only
+            # when no other write still counts on it and nobody changed it.
+            if before is None and not self._points and not self._pending and self._writer == settled:
+                self._writer = None
+            raise
+        self._finished(writer)
+        self._writer = after_write(self._writer, writer, True)
+
+    async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                        tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
+                        writer: str) -> list[tuple[int, float]]:
+        # While another embedder's write is pending the record never vouches
+        # for anyone else: writes change it before they yield, and swap_writer
+        # refuses to vouch past them.
+        record = self._writer
+        if not vouches(record, writer, bool(self._points)):
+            raise VectorsNotComparable(f"stored vectors are recorded as "
+                                       f"{record[0] if record else 'unrecorded'}, not {writer}")
+        found = await self.search(space, vector, limit, as_of, tags, where)
+        # A search override may yield; any write that changed the record
+        # while it ran may have put another writer's vectors into it.
+        if self._writer != record:
+            raise VectorsNotComparable("the vectors' writer changed during the search")
+        return found
+
+    async def spaces_with_vectors(self) -> list[str]:
+        return sorted({p.space for p in self._points.values()})
 
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:

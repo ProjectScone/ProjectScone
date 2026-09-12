@@ -10,15 +10,60 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from dataclasses import dataclass
 from typing import Optional
 
+from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
-from ..core.models import Added, Fact, LINK_KINDS
+from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
 from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
 from ..ingestion.records import Record, content_hash
 
 
+#: What this version of the archive format is called. An archive says it
+#: in its first record, and an importer refuses a profile it does not
+#: know rather than reading it hopefully.
+ARCHIVE_PROFILE = "scone.archive/1"
+#: What this profile carries. Everything a space holds that is not in
+#: this list is named in the header as not carried, so that nobody reads
+#: a dump of an illustrated space as the whole of it.
+ARCHIVE_CARRIES = ("episodes", "facts", "fact_links", "affirmations")
+
+#: The fields each kind of record may carry, taken from the models the
+#: exporter writes from rather than written out here: a list kept by hand
+#: goes stale the first time a model gains a field, and then refuses an
+#: archive this engine could have read perfectly well. A record carrying
+#: anything outside these is refused, because importing the part we
+#: recognise would look like a success and quietly drop the rest.
+KNOWN_FIELDS: dict[str, frozenset[str]] = {
+    "archive": frozenset({"type", "profile", "space", "wrote_at", "engine", "carries", "not_carried"}),
+    "episode": frozenset({"type", "space", "episode_id", "kind", "content", "content_hash",
+                          "source", "tags", "metadata", "created_at", "dedup_key"}),
+    "fact": frozenset({"type", "space"}) | frozenset(Fact.model_fields),
+    "fact_link": frozenset({"type", "space"}) | frozenset(FactLink.model_fields),
+    "affirmation": frozenset({"type", "space"}) | frozenset(Affirmation.model_fields),
+}
+
+
+@dataclass
+class MergeReceipt:
+    """What a merge would move, or did. ``moved`` says which it was, so a
+    preview and a deed are never mistaken for each other."""
+
+    space: str
+    into: str
+    episodes: int = 0
+    facts: int = 0
+    moved: bool = False
+
+    def record(self) -> dict[str, object]:
+        return {"space": self.space, "into": self.into, "episodes": self.episodes,
+                "facts": self.facts, "moved": self.moved}
+
+
 @dataclass
 class ImportSummary:
+    #: The profile the archive was read as: what its header said, or the
+    #: first profile when it had no header.
+    profile: str = ARCHIVE_PROFILE
     episodes: int = 0
     #: Episodes already present in the target.
     deduplicated: int = 0
@@ -31,6 +76,10 @@ class ImportSummary:
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
+    #: Restatements kept beside their facts, and those whose fact is not in
+    #: the archive or whose target keeps none.
+    affirmations: int = 0
+    affirmations_skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,9 +91,20 @@ class ArchiveRuntime:
     remember_many: Callable[[str, Sequence[Record]], Awaitable[list[Added]]]
 
 
-async def export_records(documents: DocumentStore, space: str) -> AsyncIterator[dict]:
-    """Yield original episodes, facts and unique links; no derived vectors."""
+async def export_records(documents: DocumentStore, space: str, *, wrote_at: str = "",
+                         left_behind: Optional[Mapping[str, int]] = None) -> AsyncIterator[dict]:
+    """Yield what the space is made of: a header saying what this archive
+    is and what it does not carry, then original episodes, facts, unique
+    links and restatements. No derived vectors: they are rebuilt by the
+    ingestion that reads this.
+
+    ``left_behind`` counts what the space holds that this profile does not
+    carry. The host counts it, because the document store is not where
+    those things live."""
     counts = await documents.counts(space)
+    yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at,
+           "carries": list(ARCHIVE_CARRIES),
+           "not_carried": {name: count for name, count in (left_behind or {}).items() if count}}
     for episode in await documents.recent_episodes(space, max(counts.episodes, 1)):
         yield {
             "type": "episode",
@@ -69,6 +129,12 @@ async def export_records(documents: DocumentStore, space: str) -> AsyncIterator[
             if link.link_id not in seen:
                 seen.add(link.link_id)
                 yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
+    # A restatement's later start is history too: without it a backfill
+    # in the new store would erase a value that returned.
+    store = affirmation_store(documents)
+    if store is not None:
+        for affirmation in await store.space_affirmations(space):
+            yield {"type": "affirmation", **affirmation.model_dump(exclude={"space"})}
 
 
 async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[Mapping], *,
@@ -79,8 +145,18 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
     source_ids: list[Optional[int]] = []
     facts: list[Mapping] = []
     links: list[Mapping] = []
+    affirmations: list[Mapping] = []
     for record in records:
         kind = record.get("type", "episode")
+        _check_fields(kind, record)
+        if kind == "archive":
+            said = str(record.get("profile") or "")
+            if said and said != ARCHIVE_PROFILE:
+                raise InvalidInput(
+                    f"this archive says it is {said}; this engine reads {ARCHIVE_PROFILE}, and reading "
+                    f"a format it does not know would drop whatever it did not recognise")
+            summary.profile = said or ARCHIVE_PROFILE
+            continue
         if kind == "episode":
             episode = _rederived(Record.from_dict(record), record.get("space"), space)
             # Forgetting was a decision; an archive that carries the
@@ -95,6 +171,8 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             facts.append(record)
         elif kind == "fact_link":
             links.append(record)
+        elif kind == "affirmation":
+            affirmations.append(record)
         else:
             raise InvalidInput(f"unknown record type {kind!r}")
     # Ids are store-local (spec 3.1). Provenance in the dump names the
@@ -164,7 +242,32 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             continue
         await runtime.documents.insert_fact_link(new_link)
         summary.links += 1
-    if summary.facts or summary.links:
+    store = affirmation_store(runtime.documents)
+    for record in affirmations:
+        fact_id = fact_map.get(int(record["fact_id"]))
+        valid_from = normalise_time(str(record["valid_from"]))
+        if store is None or fact_id is None or any(
+                kept.valid_from == valid_from for kept in await store.affirmations(space, fact_id)):
+            summary.affirmations_skipped += 1
+            continue
+        # A premise is named by its new id; one not in the archive is
+        # dropped, like a link to it, and counted with them.
+        premises = []
+        for kind, to_fact in record.get("links") or ():
+            target = fact_map.get(int(to_fact))
+            if kind in DEPENDENCY_KINDS and target is not None:
+                premises.append((str(kind), target))
+            else:
+                summary.links_skipped += 1
+        source = record.get("source_episode_id")
+        await store.add_affirmation(NewAffirmation(
+            space=space, fact_id=fact_id, valid_from=valid_from,
+            recorded_at=normalise_time(str(record["recorded_at"])) if record.get("recorded_at") else runtime.clock(),
+            confidence=float(record.get("confidence", 1.0)),
+            source_episode_id=id_map.get(int(source)) if source is not None else None,
+            origin=str(record.get("origin", "stated")), quote=record.get("quote"), links=tuple(premises)))
+        summary.affirmations += 1
+    if summary.facts or summary.links or summary.affirmations:
         await runtime.documents.bump_revision(space)
     return summary
 
@@ -192,3 +295,16 @@ def _rederived(record: Record, source_space: Optional[str], space: str) -> Recor
     if record.content_hash == content_hash(str(source_space), record.content):
         return dataclasses.replace(record, content_hash=None)
     return record
+
+
+def _check_fields(kind: str, record: Mapping) -> None:
+    """Refuse a record carrying anything this version cannot keep, naming
+    every field it did not know."""
+    known = KNOWN_FIELDS.get(kind)
+    if known is None:
+        return  # an unknown type is refused where types are decided
+    strange = sorted(set(record) - known)
+    if strange:
+        raise InvalidInput(
+            f"a {kind} record carries {', '.join(strange)}, which this engine does not keep; "
+            f"importing the rest would drop it silently")

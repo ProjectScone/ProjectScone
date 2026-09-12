@@ -13,7 +13,8 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys
+from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
+from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -27,6 +28,8 @@ from ..ingestion.records import (
     content_hash as content_hash, contextual_prefix as contextual_prefix,
 )
 from ..retrieval import fact_recall
+from ..entities.meanings import RelationMeanings
+from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
@@ -35,6 +38,8 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core.validation import (
+    entity_key as entity_key,
+    many_valued_predicates,
     ORIGINS as ORIGINS,
     STATUSES as STATUSES,
     SPACE_NAME as SPACE_NAME,
@@ -92,6 +97,7 @@ from ..core.ports import (
     VectorIndex,
 )
 from ..core.timeutil import format_rfc3339, now_rfc3339, parse_rfc3339
+from ..entities.service import EntityService
 
 #: Event kinds an outside process may append (long-running jobs
 #: reporting progress). Engine kinds cannot be forged through this path.
@@ -149,6 +155,8 @@ class MemoryEngine:
         events: Optional[EventLog] = None,
         record_queries: bool = False,
         contextual_embeddings: bool = False,
+        code_aware: bool = True,
+        code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -157,27 +165,60 @@ class MemoryEngine:
         rerank_limit: int = 32,
         rerank_max_bytes: int = 64000,
         rerank_timeout: float = 1.0,
+        many_valued: Iterable[str] = (),
+        relation_meanings: "RelationMeanings | None" = None,
+        abstention: AbstentionPolicy | None = None,
+        profile_policy: "catalog.ProfilePolicy | None" = None,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
+        if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
+            raise InvalidInput(_other_scale(abstention, embedder.id, embedder.dim))
+        #: What this space's predicates mean to each other: which are
+        #: opposites, which read the same both ways, which carry through.
+        #: None means the graph holds only what was said.
+        self.relation_meanings = relation_meanings
+        #: Whether a source stored under a name that says it is code is cut
+        #: at its declarations. Names say it, never the content: a note that
+        #: quotes code is prose.
+        self.code_aware = code_aware
+        #: Whether remembering a source file also records what it says about
+        #: itself — what it defines, imports and calls — as ordinary claims.
+        #: Off unless asked for: it writes to the ledger, and a space's owner
+        #: decides what goes in their ledger.
+        self.code_graph = code_graph
+        #: The measured floor this engine abstains by, when one was given.
+        self.abstention = abstention
+        #: Which claims a profile is made of; by default, all of them.
+        self.profile_policy = profile_policy or catalog.ProfilePolicy()
+        similarity_floor = abstention.floor if abstention is not None else similarity_floor
         self.candidate_limit = validate_candidate_limit(candidate_limit)
         validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
         if reranker is not None and not callable(getattr(reranker, "rerank", None)):
             raise InvalidInput("reranker must provide an async rerank method")
         self.reranker = reranker
+        #: Predicates configured to hold many values at once; every other
+        #: predicate holds one value at a time. Named, never inferred.
+        self.many_valued = many_valued_predicates(many_valued)
         self.rerank_limit = rerank_limit
         self.rerank_max_bytes = rerank_max_bytes
         self.rerank_timeout = rerank_timeout
         self.documents = documents
-        self.vectors = vectors
+        #: Every write goes through the index's writer check when it keeps one.
+        self.vectors = vector_identity.guard(vectors, lambda: vector_identity.writer_of(self))
         self.embedder = embedder
         #: Where an attachment's bytes live. In memory unless a store is
         #: given, so an engine with no configured blob directory keeps
         #: nothing across a restart rather than writing somewhere unasked.
         self.blobs = blobs if blobs is not None else InMemoryBlobStore()
         self._closed = False
+        #: Whether this engine's vectors can be compared with the stored
+        #: ones; settled by open(). See memory.vector_identity.
+        self.vector_identity: vector_identity.VectorIdentity | None = None
         self.max_attachment_bytes = MAX_ATTACHMENT_BYTES
         self.chunk_target = chunk_target
+        #: Each space's entity projection, held between graph requests.
+        self.entities = EntityService(self)
         self.clock = clock
         #: (space, premise ids) of every group a derivation pass has sent.
         self._derive_seen: set[tuple[str, frozenset[int]]] = set()
@@ -224,10 +265,41 @@ class MemoryEngine:
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
+        self.vector_identity = await vector_identity.settle(self)
         report = await self.recover()
         if report.retirements_pending:
             raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
         return self
+
+    @property
+    def vector_block(self) -> str | None:
+        """Why stored vectors must not be compared with this engine's, as of the
+        last check, or None."""
+        return None if self.vector_identity is None else self.vector_identity.blocked
+
+    async def check_vectors(self) -> vector_identity.VectorIdentity:
+        """Read who wrote the stored vectors now. Another process may have
+        rebuilt or written them since this engine opened."""
+        self.vector_identity = await vector_identity.observe(self)
+        return self.vector_identity
+
+    async def reembed_vectors(self) -> vector_identity.ReembedReport:
+        """Re-embed every stored chunk with this engine's embedder and record it
+        as the writer, which turns a disabled vector lane back on."""
+        try:
+            report = await vector_identity.rebuild(self)
+        except BaseException:
+            await self.check_vectors()
+            raise
+        self.vector_identity = vector_identity.VectorIdentity(
+            "rebuilt", vector_identity.writer_of(self), vector_identity.writer_of(self))
+        return report
+
+    async def adopt_vector_identity(self) -> vector_identity.VectorIdentity:
+        """Vouch that vectors stored before writers were recorded came from this
+        engine's embedder and settings. The declaration is recorded as such."""
+        self.vector_identity = await vector_identity.declare(self)
+        return self.vector_identity
 
     async def close(self) -> None:
         """Release every store this engine holds.
@@ -245,6 +317,7 @@ class MemoryEngine:
         if self._closed:
             return
         self._closed = True
+        await self.entities.aclose()
         first: Optional[BaseException] = None
         for store in (self.documents, self.vectors, self.events, self.blobs):
             closer = getattr(store, "close", None)
@@ -330,7 +403,8 @@ class MemoryEngine:
             raise InvalidInput("replace derives its identity from dedup_key; content_hash is only for import")
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
-        configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target)
+        configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
+                         self.code_aware, self.code_graph)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -346,7 +420,8 @@ class MemoryEngine:
             await self._living(space)
             if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
                     or self.vectors is not runtime.vectors
-                    or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target) != configuration):
+                    or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
+                        self.code_aware, self.code_graph) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -366,6 +441,9 @@ class MemoryEngine:
             await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
+            if self.code_graph:
+                prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
+                await self._map_code(space, [prepared], [added])
         except Exception as error:
             await self._emit(space, "remember", {
                 "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
@@ -411,7 +489,8 @@ class MemoryEngine:
         return await self.blobs.get(space, attachment_id)
 
     async def remember_many(self, space: str, records: Iterable[Record], *,
-                            embedding_checkpoint: EmbeddingCheckpoint | None = None) -> list[Added]:
+                            embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                            partial: bool = False) -> list[Added]:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
         instead of one per record, and one revision bump. Outcomes come
         back in input order; a record identical to an earlier one in the
@@ -421,13 +500,21 @@ class MemoryEngine:
         fails leaves no orphan episodes. If a store fails after the first
         write, the episodes written so far are deleted again and the
         error is raised; a batch either lands whole or not at all.
+
+        ``partial`` is for a caller importing from somewhere messy: each
+        record is judged on its own, one that cannot be stored comes back
+        as ``failed`` with the reason, and the rest are stored. Without it
+        a single bad record refuses the whole batch, which is the right
+        default — a caller who sent one usually wants to fix it and send
+        the lot again, and a half-stored batch nobody asked for is worse
+        than a clear refusal.
         """
         await self._living(space)
         check_space(space)
         started = time.perf_counter()
         records = list(records)
         try:
-            resolved = await self._remember_many(space, records, embedding_checkpoint=embedding_checkpoint)
+            resolved = await self._remember_many(space, records, embedding_checkpoint=embedding_checkpoint, partial=partial)
         except Exception as e:
             await self._emit(space, "remember", {
                 "records": len(records), "error": f"{type(e).__name__}: {e}",
@@ -449,12 +536,34 @@ class MemoryEngine:
     def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit, embedding_checkpoint,
+            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record], *,
-                             embedding_checkpoint: EmbeddingCheckpoint | None = None) -> list[Added]:
-        return await ingestion_batch.remember_many(self._ingestion_runtime(embedding_checkpoint), space, records)
+                             embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                             partial: bool = False) -> list[Added]:
+        added = await ingestion_batch.remember_many(self._ingestion_runtime(embedding_checkpoint), space, records,
+                                                    partial=partial)
+        if self.code_graph:
+            await self._map_code(space, records, added)
+        return added
+
+    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> None:
+        """What a source file says about itself, recorded as claims like any
+        other: quoted from the line they were read on, cited to the episode
+        they came from, and marked extracted rather than stated, because
+        nobody said them — they were read.
+
+        A file already in the space is not read again: its claims are
+        already here, and asserting them again would say the same thing
+        twice for no reason."""
+        from ..ingestion.code_graph import record_claims
+
+        for record, outcome in zip(records, added):
+            if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
+                continue
+            await record_claims(self, space, episode_id=outcome.episode_id, content=record.content,
+                                path=record.source, when=record.created_at or self.clock())
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
@@ -503,8 +612,9 @@ class MemoryEngine:
 
     async def impact(self, space: str, episode_id: int) -> ForgetReceipt:
         """What forgetting the episode would take with it and leave, with
-        nothing removed. The claims and links that cite it are reported,
-        not closed: a source being gone is a fact about the evidence."""
+        nothing removed. The claims, links and kept restatements that cite
+        it are reported, not closed: a source being gone is a fact about
+        the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
 
     async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
@@ -612,6 +722,40 @@ class MemoryEngine:
     async def _space_receipt(self, space: str) -> SpaceReceipt:
         return await retention.space_receipt(self._retention_runtime(), space)
 
+    async def merge_space(self, space: str, *, into: str, confirm: Optional[str] = None,
+                          preview: bool = False) -> "archive.MergeReceipt":
+        """Move everything one space holds into another.
+
+        It is the archive read out of one and into the other, so
+        everything that makes an import honest holds: identity is
+        re-derived for the space it lands in, what was forgotten there
+        stays forgotten, and claims arrive with their history. With
+        ``preview`` nothing moves and the receipt says what would.
+
+        The space merged from is closed for good afterwards. Everything it
+        held is somewhere else now, and leaving the name open would invite
+        somebody to write into a space whose contents have moved and find
+        them missing."""
+        check_space(space)
+        check_space(into)
+        if space == into:
+            raise InvalidInput(f"a space is not merged into itself ({space!r})")
+        await self._living(space)
+        await self._living(into)
+        counts = await self.documents.counts(space)
+        facts = len(await self.documents.list_facts(space, include_closed=True))
+        if preview:
+            return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts)
+        if confirm != space:
+            raise InvalidInput(
+                f"confirm must repeat the space being merged ({space!r}); a whole space does not move "
+                f"by accident")
+        records = [record async for record in self.export(space)]
+        await self.import_records(into, records)
+        await self.delete_space(space)
+        return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts,
+                                    moved=True)
+
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""
         return await retention.space_impact(self._retention_runtime(), space)
@@ -622,7 +766,10 @@ class MemoryEngine:
         space with their vectors, then the event trail; mark the space
         deleted so no write re-creates it. Returns the receipt
         ``space_impact`` would have shown, with the counts of the deed."""
-        return await retention.delete_space(self._retention_runtime(), space)
+        try:
+            return await retention.delete_space(self._retention_runtime(), space)
+        finally:
+            self.entities.forget(space)
 
     async def episode(self, space: str, episode_id: int) -> Episode:
         check_space(space)
@@ -655,6 +802,7 @@ class MemoryEngine:
         conditions: Mapping[str, object] | None = None,
         candidate_limit: int | None = None,
         rerank: bool = True,
+        graph_boost: bool = False,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -678,7 +826,30 @@ class MemoryEngine:
         It sees only verified retained scoped passages within separate count,
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
-        ``rerank=False`` explicitly disables the configured adapter."""
+        ``rerank=False`` explicitly disables the configured adapter.
+
+        ``graph_boost`` adds the entity lane: passages naming the question's
+        entities or their neighbours in the knowledge graph. The projection
+        is built for it within the graph budget (and kept); if it is not
+        ready in time the other lanes answer and ``degraded`` says so."""
+        if self.vector_identity is not None:
+            await self.check_vectors()
+        projection = None
+        unavailable = None
+        notes: list[str] = []
+        if graph_boost:
+            from ..entities.read import load_projection
+            from ..entities.service import ProjectionBuilding
+
+            try:  # an invalid moment degrades the lane here, and recall then refuses it as always
+                projection, read = await load_projection(self, space, mode="current", as_of=as_of)
+                capped = read.get("reasons")
+                if isinstance(capped, list) and capped:
+                    notes.append("entity: graph_read_capped " + " ".join(map(str, capped)))
+            except ProjectionBuilding:
+                unavailable = "projection_building"
+            except Exception as error:  # noqa: BLE001 - the optional lane degrades, recall answers
+                unavailable = f"{type(error).__name__}: {error}"
         runtime = RecallRuntime(
             documents=self.documents, vectors=self.vectors, embedder=self.embedder,
             clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
@@ -686,9 +857,13 @@ class MemoryEngine:
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
             demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
+            floor_dim=self.abstention.dim if self.abstention is not None else None,
+            vector_block=self.vector_block,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
-                            kind, source_prefix, since, until, conditions, candidate_limit, rerank)
+                            kind, source_prefix, since, until, conditions, candidate_limit, rerank,
+                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable,
+                            entity_notes=notes)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
@@ -895,7 +1070,7 @@ class MemoryEngine:
 
     def _placement_runtime(self) -> fact_placement.FactPlacementRuntime:
         return fact_placement.FactPlacementRuntime(self.documents, self.clock, self._emit,
-            self._place, self._truncate)
+            self._place, self._truncate, self.many_valued)
 
     async def _assert_placed(
         self,
@@ -909,14 +1084,16 @@ class MemoryEngine:
         origin: str = "stated",
         proposed: bool = False,
         quote: Optional[str] = None,
+        links: Sequence[tuple[str, int]] = (),
     ) -> Fact:
         """Place a claim using the temporal ledger component."""
         return await fact_placement.assert_placed(self._placement_runtime(), space, subject, predicate, object,
             valid_from=valid_from, confidence=confidence, source_episode_id=source_episode_id,
-            origin=origin, proposed=proposed, quote=quote)
+            origin=origin, proposed=proposed, quote=quote, links=links)
 
     async def _place(self, space: str, subject: str, predicate: str, object: str, start: str, exclude_id: Optional[int] = None) -> "_Placement":
-        return await fact_placement.place(self.documents, space, subject, predicate, object, start, exclude_id)
+        return await fact_placement.place(self.documents, space, subject, predicate, object, start, exclude_id,
+                                          many_valued=predicate in self.many_valued)
 
     async def _truncate(self, covering: list[Fact], start: str, by_fact_id: int) -> None:
         await fact_placement.truncate(self.documents, covering, start, by_fact_id)
@@ -981,6 +1158,16 @@ class MemoryEngine:
         """Undo exclude."""
         return await fact_review.include(self._review_runtime(), space, fact_id, actor=actor)
 
+    async def reconsider(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+        """Undo decline: a declined claim goes back to being a proposal.
+        The decline stays in the event log with its reason."""
+        return await fact_review.reconsider(self._review_runtime(), space, fact_id, reason, actor=actor)
+
+    async def reopen(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+        """Undo a close somebody made by hand: the claim holds again. A
+        claim another claim superseded is refused, naming that claim."""
+        return await fact_review.reopen(self._review_runtime(), space, fact_id, reason, actor=actor)
+
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
 
@@ -1001,7 +1188,7 @@ class MemoryEngine:
     # -- overviews --------------------------------------------------------
 
     async def profile(self, space: str, limit: int = 10) -> Profile:
-        return await catalog.profile(self.documents, space, limit, clock=self.clock)
+        return await catalog.profile(self, space, limit, policy=self.profile_policy)
 
     async def tags(self, space: str) -> dict[str, int]:
         return await catalog.tags(self.documents, space)
@@ -1079,6 +1266,7 @@ class MemoryEngine:
     async def status(self, space: str) -> Status:
         return await catalog.status(self.documents, space, identity=lambda: {
             "embedder": self.embedder.id, "document_store": self.documents.name, "vector_index": self.vectors.name,
+            "abstention": self.abstention.record() if self.abstention is not None else None,
         })
 
     # -- portability ------------------------------------------------------
@@ -1089,7 +1277,13 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders."""
         check_space(space)
-        async for record in archive.export_records(self.documents, space):
+        # What the space holds that an archive does not carry is counted
+        # here, where the blob store is, and said in the header: a dump of
+        # an illustrated space is not the whole of it, and nobody should
+        # have to find that out by restoring one.
+        left_behind = {"attachments": len(await self.blobs.linked(space))}
+        async for record in archive.export_records(self.documents, space, wrote_at=self.clock(),
+                                                   left_behind=left_behind):
             yield record
 
     async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
@@ -1120,13 +1314,12 @@ def _ms(since: float) -> float:
 
 def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     """Claims grouped by subject, joined one hop through shared names: a
-    claim whose object is another claim's subject puts both subjects in one
-    group, so "mark works_at acme" and "acme based_in lisbon" meet. Pure;
-    order is by the smallest fact id in each group."""
+    claim whose object names another claim's subject (``join_match``) puts
+    both subjects in one group, so "mark works_at acme" and "acme based_in
+    lisbon" meet. Pure; order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
 
-    def key(name: str) -> str:
-        return name.strip().casefold()
+    key = entity_key
 
     def find(x: str) -> str:
         parent.setdefault(x, x)
@@ -1140,12 +1333,21 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
         if ra != rb:
             parent[rb] = ra
 
-    subjects = {key(f.subject) for f in facts}
+    subjects: dict[str, set[str]] = {}
+    for f in facts:
+        subjects.setdefault(key(f.subject), set()).add(f.subject)
     for f in facts:
         find(key(f.subject))
-        if key(f.object) in subjects:
+        if any(join_match(f.object, named) for named in subjects.get(key(f.object), ())):
             union(key(f.subject), key(f.object))
     grouped: dict[str, list[Fact]] = {}
     for f in facts:
         grouped.setdefault(find(key(f.subject)), []).append(f)
     return sorted((sorted(g, key=lambda f: f.fact_id) for g in grouped.values()), key=lambda g: g[0].fact_id)
+
+
+def _other_scale(policy: AbstentionPolicy, embedder_id: str, dim: int) -> str:
+    """Why a floor cannot be carried from one embedder to another."""
+    return (f"the abstention policy was measured with embedder {policy.embedder_id} "
+            f"({policy.dim}-d); this engine embeds with {embedder_id} ({dim}-d), and one "
+            f"embedder's similarities say nothing about another's")

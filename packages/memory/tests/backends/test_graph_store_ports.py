@@ -45,3 +45,22 @@ async def test_graph_store_expands_quoted_chain_without_unbounded_reads(engine):
     assert result.paths[-1].fact_ids == [row.fact_id for row in facts]
     assert result.coverage.complete
     assert 'PRIVATE' not in result.model_dump_json()
+
+
+async def test_induced_links_stay_inside_the_set_and_are_bounded(engine):
+    """The links among a set of facts: both ends in the set, only the first
+    16 ids considered, at most 49 links, ascending link id, one space."""
+    store = engine.documents
+    assert callable(getattr(store, "fact_links_between", None))
+    facts = await chain(engine)
+    ids = [row.fact_id for row in facts]
+    first = await link(engine, facts[0], facts[1])
+    second = await link(engine, facts[1], facts[2])
+    third = await link(engine, facts[0], facts[2], 'contradicts')
+    assert await store.fact_links_between('alpha', ids[:2], 49) == [first]
+    assert await store.fact_links_between('alpha', ids, 49) == [first, second, third]
+    assert await store.fact_links_between('alpha', ids, 1) == [first]
+    assert await store.fact_links_between('alpha', ids, 0) == []
+    assert await store.fact_links_between('foreign', ids, 49) == []
+    padded = [ids[0], ids[1], *range(10_000, 10_014), ids[2]]
+    assert len(padded) == 17 and await store.fact_links_between('alpha', padded, 49) == [first]

@@ -24,3 +24,58 @@ def graph_fact_read_limit(source_episode_id: int | None, limit: int) -> int:
     if type(limit) is not int:
         raise ValueError('fact read limit must be an integer')
     return max(0, min(limit, MAX_GRAPH_FACTS + 1))
+
+
+#: The most rows one ledger page may hold.
+MAX_LEDGER_PAGE = 1000
+
+
+@runtime_checkable
+class LedgerPager(Protocol):
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """One page of the space's ledger for a whole-space projection.
+
+        Newest fact ids first, every status (proposed, closed and excluded
+        facts included), only ``space``, only ids below ``before_id`` (None
+        starts at the newest), at most ``limit`` rows and never more than
+        ``MAX_LEDGER_PAGE``. Pages chain: the next cursor is the last id.
+        A page may hold fewer rows than asked; only an empty page says the
+        ledger is exhausted. A page should cost work in proportion to its
+        rows, not to the size of the ledger.
+        """
+        ...
+
+
+def ledger_page_limit(limit: int) -> int:
+    if type(limit) is not int:
+        raise ValueError("ledger page limit must be an integer")
+    return max(0, min(limit, MAX_LEDGER_PAGE))
+
+
+def checked_ledger_page(rows: list[Fact], *, space: str, before_id: int | None, limit: int) -> str | None:
+    """What is wrong with a page a store returned, or None. A reader refuses
+    a page that breaks the contract rather than projecting from it."""
+    if not isinstance(rows, list):
+        return "not_a_list"
+    if not all(isinstance(row, Fact) for row in rows):
+        return "not_a_fact"
+    if len(rows) > limit:
+        return "too_long"
+    if any(row.space != space for row in rows):
+        return "other_space"
+    ids = [row.fact_id for row in rows]
+    if any(later >= earlier for earlier, later in zip(ids, ids[1:])):
+        return "not_newest_first"
+    if before_id is not None and ids and ids[0] >= before_id:
+        return "not_before_cursor"
+    return None
+
+
+@runtime_checkable
+class LedgerStamp(Protocol):
+    async def ledger_stamp(self, space: str) -> str:
+        """A value that changes whenever any fact row of the space is
+        written, and never otherwise: storing an episode leaves it alone.
+        Cheap to read, so a cache can tell an unchanged ledger from a moved
+        revision without reading the facts."""
+        ...

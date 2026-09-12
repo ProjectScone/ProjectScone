@@ -36,8 +36,9 @@ async def test_component_partitions_history_independent_of_arrival_order(arrival
     revision = await documents.revision('alpha')
     repeated = await assert_placed(context, 'alpha', 'Juniper', 'uses', 'Polaris', valid_from='2023-06-01')
     assert repeated.object == 'Polaris' and len(await documents.list_facts('alpha', True)) == 3
-    assert await documents.revision('alpha') == revision
-    assert events[-1][2]['outcome'] == 'restated'
+    # Said again from a later day: one fact still, and the day is kept.
+    assert await documents.revision('alpha') == revision + 1
+    assert events[-1][2]['outcome'] == 'restated' and events[-1][2]['affirmed'] is True
 
 
 async def test_component_validates_source_before_proposing_and_never_closes_held_fact():
@@ -86,3 +87,23 @@ async def test_component_propagates_source_read_cancellation(monkeypatch):
         await assert_placed(runtime(documents, events), 'alpha', 'juniper', 'uses', 'Vega',
             source_episode_id=1, quote='Vega')
     assert await documents.list_facts('alpha', True) == [] and events == []
+
+
+_RETURN = [('Acme', '2020-01-01'), ('Globex', '2021-01-01'), ('Acme', '2023-01-01')]
+
+
+@pytest.mark.parametrize('arrival', list(permutations(range(3))))
+async def test_a_value_that_returns_holds_again_whatever_the_arrival_order(arrival):
+    """Acme from 2020, Globex from 2021, Acme again from 2023, in every
+    order. Told Acme, Acme again, then the late Globex, the second Acme is
+    kept as an affirmation of the first, so the Globex backfill that cuts
+    the first short leaves Acme resuming from 2023."""
+    from scone_memory.memory.fact_placement import assert_placed, _covers
+    documents = InMemoryDocumentStore()
+    context = runtime(documents, [])
+    for index in arrival:
+        value, start = _RETURN[index]
+        await assert_placed(context, 'alpha', 'alice', 'works_at', value, valid_from=start)
+    facts = await documents.facts_for('alpha', 'alice', 'works_at')
+    for moment, expected in (('2020-06-01', 'Acme'), ('2022-06-01', 'Globex'), ('2024-06-01', 'Acme')):
+        assert [fact.object for fact in facts if _covers(fact, parse_rfc3339(moment + 'T00:00:00.000Z'))] == [expected]
