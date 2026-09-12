@@ -223,11 +223,14 @@ class DirectorySyncService:
         return self._runs.outcomes(space, run_id, limit=limit, after=after)
 
     async def start(self, space: str, run_id: str, *, collection_id: str, delete_missing: bool = False,
+                    expected_configuration: str | None = None,
                     admission_guard: Callable[[], None] | None = None) -> SyncServiceStatus:
         await self._space(space)
         collection = self._collection(space, collection_id)
         spec = SyncRunSpec(collection_id=collection_id, configuration=self._configuration(collection),
             delete_missing=delete_missing, deadline_s=self._deadline, max_attempts=self._attempts)
+        if expected_configuration is not None and expected_configuration != spec.configuration:
+            raise WorkflowError('sync_configuration_changed')
         if delete_missing and not collection.allow_delete_missing:
             raise WorkflowError('sync_delete_forbidden')
         prior = self._runs.get(space, run_id)

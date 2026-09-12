@@ -20,6 +20,7 @@ class StartSync(BaseModel):
     run_id: Identifier
     collection_id: Identifier
     delete_missing: bool = False
+    expected_configuration: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 
 class ControlSync(BaseModel):
@@ -92,7 +93,7 @@ def mount_directory_sync_routes(app: FastAPI, service: DirectorySyncService,
             body = await _decode(request, StartSync)
             assert_current_space(request, space)
             value = await service.start(space, body.run_id, collection_id=body.collection_id,
-                delete_missing=body.delete_missing, admission_guard=lambda: assert_current_space(request, space))
+                delete_missing=body.delete_missing, expected_configuration=body.expected_configuration, admission_guard=lambda: assert_current_space(request, space))
             assert_current_space(request, space)
             return _response(asdict(value), 202)
         except (WorkflowError, ValueError, OSError) as error:
@@ -136,7 +137,7 @@ def mount_directory_sync_routes(app: FastAPI, service: DirectorySyncService,
         try:
             value = await service.result(space, run_id, limit=limit, after=after)
             assert_current_space(request, space)
-            return _response(asdict(value))
+            return _response({'space': space, 'run_id': run_id, **asdict(value)})
         except (WorkflowError, ValueError, OSError) as error:
             return _failure(error)
 

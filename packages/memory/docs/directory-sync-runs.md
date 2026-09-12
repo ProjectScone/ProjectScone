@@ -202,3 +202,5 @@ journal.
 
 Documents controls, standalone client methods, scheduling, remote connectors and
 distributed workers remain separate work.
+
+Clients can include `expected_configuration` from collection discovery in a start request. The host refuses a changed collection with `409 sync_configuration_changed` before registering or starting the run. Clients should retain the original run ID and this configuration across uncertain responses. Omitting the field preserves programmatic callers that intentionally select the current host configuration.

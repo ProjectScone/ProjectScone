@@ -300,3 +300,40 @@ async def test_collection_labels_follow_ledger_unicode_response_contract(env):
             assert response.json()['items'][0]['label'] == label
     finally:
         await host.aclose()
+
+
+async def test_start_binds_discovered_configuration_before_admission(setup):
+    client, _, host, entered, release, _, _ = setup
+    catalog = (await client.get('/v1/sync-collections', headers=auth())).json()['items'][0]
+    body = {'run_id': 'scan', 'collection_id': 'notes', 'expected_configuration': '0' * 64}
+    refused = await client.post('/v1/sync-runs', json=body, headers=auth())
+    assert refused.status_code == 409, refused.text
+    assert refused.json()['code'] == 'sync_configuration_changed'
+    assert await host.request('alpha', 'scan') is None
+    assert not entered.is_set()
+    body['expected_configuration'] = catalog['configuration']
+    admitted = await client.post('/v1/sync-runs', json=body, headers=auth())
+    assert admitted.status_code == 202, admitted.text
+    await asyncio.wait_for(entered.wait(), 3)
+    release.set()
+    await settled(host)
+    assert (await client.post('/v1/sync-runs', json=body, headers=auth())).status_code == 202
+
+
+@pytest.mark.parametrize('value', [True, 'short', 'A' * 64, 42])
+async def test_start_rejects_malformed_expected_configuration(setup, value):
+    client, _, host, _, _, _, _ = setup
+    response = await client.post('/v1/sync-runs', headers=auth(), json={
+        'run_id': 'scan', 'collection_id': 'notes', 'expected_configuration': value})
+    assert response.status_code == 422
+    assert await host.request('alpha', 'scan') is None
+
+
+async def test_result_envelope_binds_authenticated_space_and_run(setup):
+    client, _, host, _, release, _, _ = setup
+    release.set()
+    await client.post('/v1/sync-runs', headers=auth(), json={'run_id': 'scan', 'collection_id': 'notes'})
+    await settled(host)
+    result = (await client.get('/v1/sync-runs/scan/result', headers=auth())).json()
+    assert result['space'] == 'alpha'
+    assert result['run_id'] == 'scan'
