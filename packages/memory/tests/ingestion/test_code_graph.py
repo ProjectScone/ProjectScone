@@ -197,3 +197,69 @@ def test_naming_a_relative_import_does_not_depend_on_what_arrived_first():
         seen.append(claims)
     assert seen[0] == seen[1] == seen[2], [sorted(one - seen[0]) for one in seen[1:]]
     assert ("pkg/api/routes.py", "imports", "pkg/core/errors.py") in seen[0], sorted(seen[0])
+
+
+def test_a_brace_relative_import_names_a_file_spelt_like_the_one_importing_it():
+    """TypeScript had no cross-file edge at all.
+
+    Measured over 58 files of this project's own web application: 39
+    import edges, every one of them naming an external package, and **0
+    files with a dependant**. `./store` could be store.ts, store.tsx,
+    store.js, store.jsx or store/index.ts, and the extractor left it out
+    rather than choose.
+
+    It names the file the way the importing file is spelt -- a `.ts` file
+    importing `./store` means `store.ts` far more often than anything
+    else, and a project mixing extensions across one import is rare. The
+    guess is a *candidate*: which spelling the graph actually holds is
+    settled at read time, where every file is visible, exactly as a
+    Python package's `__init__.py` is.
+    """
+    source = ("import {keep} from './store';\n"
+              "import {Api} from '../core/api';\n"
+              "import React from 'react';\n"
+              "export function put(p: string) { return keep(p); }\n")
+    found = code_claims(source, "web/memory/page.tsx", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert "web/memory/store.tsx" in imports, imports
+    assert "web/core/api.tsx" in imports, imports
+    # An external package still names itself and gains no path.
+    assert "react" in imports, imports
+
+
+def test_a_brace_import_that_already_names_its_file_keeps_that_name():
+    """A web application imports stylesheets and images by relative path,
+    and those paths carry their own extension. Appending the importing
+    file's extension to them produced `source-content.css.tsx` and
+    `scone-mark-small.png.tsx` -- names for files that cannot exist.
+
+    Measured before this: of 40 distinct import targets naming a path in
+    this project's web application, 24 landed on nothing, and nearly all
+    of them were this.
+    """
+    source = ("import './page.css';\n"
+              "import mark from '../assets/logo.png';\n"
+              "import {keep} from './store';\n")
+    found = code_claims(source, "web/memory/page.tsx", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert "web/memory/page.css" in imports, imports
+    assert "web/assets/logo.png" in imports, imports
+    # And one with no extension of its own still takes the importer's.
+    assert "web/memory/store.tsx" in imports, imports
+
+
+def test_from_dot_import_names_its_module_without_a_resolver_too():
+    """`from .code import x` and `from . import code` name a module the
+    same way and were treated differently: the first went through the
+    import list, the second only bound its alias when a resolver existed.
+    So `core.Base` stayed an unbound word and the base class it named
+    could not be placed in a file."""
+    source = ("from . import core\n"
+              "from .shared import Helper\n\n\n"
+              "class Shelf(core.Base):\n"
+              "    pass\n")
+    found = code_claims(source, "pkg/ingestion/graph.py", language="python")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    inherits = {(claim.subject, claim.object) for claim in found if claim.predicate == "inherits"}
+    assert "pkg/ingestion/core.py" in imports, imports
+    assert ("pkg/ingestion/graph.py:Shelf", "pkg/ingestion/core.py:Base") in inherits, inherits

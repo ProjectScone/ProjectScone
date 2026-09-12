@@ -233,18 +233,32 @@ def labels_of(projection: "EntityProjection", entity_id: str) -> str:
     return ""
 
 
+#: Spellings one stem may be written under. An import names one of them
+#: and the graph may hold another; `index` and `__init__` are the two
+#: ways a directory answers to its own name.
+SUFFIXES = ("py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs")
+
+
+def _spellings(stem: str, suffix: str) -> tuple[str, ...]:
+    """The files a candidate named ``stem.suffix`` could have meant, the
+    likeliest first: the same directory under another extension, then the
+    directory itself answering to its own name."""
+    others = (suffix, *(one for one in SUFFIXES if one != suffix))
+    return (*(f"{stem}.{one}" for one in others),
+            f"{stem}/__init__.py",
+            *(f"{stem}/index.{one}" for one in others))
+
+
 def _unresolved(target: str, joined: bool) -> str:
     """The sentence to add when a file's dependants could not have been
     found, whatever the file is. Empty when the graph did resolve its
     imports, because a notice that appears every time is skipped."""
     if joined or "/" not in target:
         return ""
-    return ("; and no file in this graph imports another, so a file's dependants may be missing "
-            "here for a reason that is not about the file: a relative import in the brace "
-            "family names `./store`, which could be store.ts, store.tsx, store.js or "
-            "store/index.ts, and only somebody who read the tree can say which -- "
-            "`scone sync --graph` does, `engine.remember` and the episodes route cannot. "
-            "Python names its own file and does not need that")
+    return ("; and no file in this graph imports another at all, so a file's dependants could "
+            "not have appeared here whatever the file is -- this graph may hold one file, or "
+            "only files whose imports name packages outside it, or a language whose imports "
+            "this reader does not extract")
 
 
 def _whole(value: object, name: str, top: int) -> int:
@@ -285,12 +299,10 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     limit_hit = bool(covered.get("reasons")) or (
         isinstance(seen, int) and isinstance(allowed, int) and seen >= allowed)
     # Whether this graph holds an import edge between two of its own
-    # files at all. Python names the file a relative import points at by
-    # arithmetic on the importing path, so it does not need a resolver;
-    # the brace family does, because `./store` could carry any of five
-    # extensions and one file cannot choose. "Nothing rests on this" is
-    # hedged already, and it is still not enough when the real reason is
-    # that no file here imports any other.
+    # files at all. "Nothing rests on this" is hedged already, and it is
+    # still not enough when the real reason is that no file here imports
+    # any other: then the answer would have been empty for every file,
+    # and that is a fact about the graph rather than about the target.
     joined = any(one.predicate == "imports" and "/" in str(labels_of(projection, one.object_id))
                  for one in projection.relations)
     said = f"read as {mode} at {moment.isoformat()}"
@@ -332,23 +344,54 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # Reverse adjacency over dependency relations only: object -> the
     # subjects that rest on it.
     rests_on: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    # A relative import names `core/errors.py` because a module is the
-    # common case and one file cannot know it was a package. Here the
-    # whole graph can be consulted, so a `core/errors/__init__.py` it
-    # holds collects the edges recorded against the module spelling of
-    # its own name. Matched at read time on purpose: at write time it
-    # would depend on which file arrived first.
+    # An import names a file the only way the importing file can spell
+    # it: `core/errors` as `errors.py` because a module is commoner than
+    # a package, `./store` from a `.tsx` file as `store.tsx`. Either may
+    # be the wrong spelling of a real file, and here -- unlike at write
+    # time, where it would depend on which file arrived first -- the
+    # whole graph can say which spelling it actually holds.
+    #
+    # Only a name nothing was ever ingested for is redirected. A file
+    # that was read is the subject of its own edges; a candidate is the
+    # object of somebody else's and the subject of none. So `store.ts`
+    # and `store.tsx` both genuinely existing stay two files.
     held = {entity.label: entity.entity_id for entity in projection.entities}
-    package = {entity_id: held[f"{entity_label[:-3]}/__init__.py"]
-               for entity_label, entity_id in held.items()
-               if entity_label.endswith(".py")
-               and f"{entity_label[:-3]}/__init__.py" in held}
+    ingested = {relation.subject_id for relation in projection.relations}
+    package: dict[str, str] = {}
+    for entity_label, entity_id in held.items():
+        file_part, _, symbol = entity_label.partition(":")
+        if "/" not in file_part:
+            continue
+        stem, _, suffix = file_part.rpartition(".")
+        if not stem or not suffix:
+            continue
+        tail = f":{symbol}" if symbol else ""
+        # Python shadows a module with a package of the same name, so an
+        # edge naming `core.py` belongs to `core/__init__.py` whenever
+        # the graph holds both -- a rule the language states, not a
+        # resemblance. Everything else only redirects a name nothing was
+        # ever ingested for, because no rule says `store.ts` beats
+        # `store.tsx` and two real files must stay two files.
+        shadow = f"{stem}/__init__.py{tail}"
+        if suffix == "py" and shadow in held and held[shadow] != entity_id:
+            package[entity_id] = held[shadow]
+            continue
+        if entity_id in ingested or (symbol and held.get(file_part) in ingested):
+            continue
+        real = next((held[f"{one}{tail}"] for one in _spellings(stem, suffix)
+                     if f"{one}{tail}" in held and held[f"{one}{tail}"] != entity_id
+                     and (held[one] in ingested if one in held else False)), None)
+        if real is not None:
+            package[entity_id] = real
     for relation in projection.relations:
         if relation.predicate in DEPENDS_ON and relation.subject_id != relation.object_id:
-            rests_on[relation.object_id].append((relation.subject_id, relation.predicate))
-            same = package.get(relation.object_id)
-            if same is not None and same != relation.subject_id:
-                rests_on[same].append((relation.subject_id, relation.predicate))
+            # Moved, not copied. The name the edge was recorded under
+            # stood in for the file the graph actually holds, so leaving
+            # a copy behind would have the importer resting on both a
+            # real file and a spelling of it.
+            on = package.get(relation.object_id, relation.object_id)
+            if on != relation.subject_id:
+                rests_on[on].append((relation.subject_id, relation.predicate))
 
     # The walk bounds how many it may hold and nothing else. A byte
     # bound here as well would be a second bound spending the same budget

@@ -354,12 +354,17 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                     for alias in child.names:
                         if came:
                             imported[alias.asname or alias.name] = (came[0], alias.name)
-                elif resolve is not None and child.level:
+                elif child.level:
                     # "from . import alpha, beta" names a module per alias.
                     # Reusing the first resolved module for all of them sent
-                    # `beta.Parent` to alpha's file.
+                    # `beta.Parent` to alpha's file. Named by arithmetic
+                    # when nobody read the tree, the same as the form
+                    # above -- these two spellings of one import were
+                    # treated differently, so `core.Base` stayed an
+                    # unbound word and its base class could not be placed.
                     for alias in child.names:
-                        where = resolve(path, child.level, alias.name)
+                        where = (resolve(path, child.level, alias.name) if resolve is not None
+                                 else _stem(path, child.level, alias.name))
                         if where:
                             imported[alias.asname or alias.name] = (where, None)
             else:
@@ -678,12 +683,41 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
-    """An import as it can be named. One written relative to this file is
-    left to whoever knows the tree, because this file cannot say what it
-    points at; anything else is a package, and names itself."""
+    """An import as it can be named. Anything not written relative to this
+    file is a package, and names itself.
+
+    A relative one is resolved by whoever walked the tree when there is
+    such a person, because they can *confirm* a file exists. When there
+    is not -- `engine.remember` and the episodes route see one file each
+    -- it is named the way the importing file is spelt: a `.ts` file
+    importing `./store` means `store.ts` far more often than anything
+    else, and one import mixing extensions is rare.
+
+    That is a candidate, not a resolution, and the difference is where it
+    is settled. Which spelling the graph actually holds is a question for
+    read time, when every file is visible; the same answer a Python
+    package's `__init__.py` gets. Leaving it out instead cost every
+    cross-file edge a TypeScript project has: measured over 58 files of
+    this project's own web application, 39 import edges all naming
+    external packages and 0 files with a dependant.
+    """
     if not module.startswith("."):
         return module
-    return resolve(path, 1, module) if resolve is not None else None
+    if resolve is not None:
+        return resolve(path, 1, module)
+    # ``./store`` and ``../core/api`` are already paths; only the leading
+    # dots are relative, and posixpath.normpath settles them.
+    stem = posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
+    if stem.startswith("..") or stem in (".", "/"):
+        return None
+    # A path that already names its file keeps that name: a web
+    # application imports `./page.css` and `../assets/logo.png` by
+    # relative path, and appending the importer's extension to those
+    # produced `page.css.tsx`, a name for a file that cannot exist.
+    if "." in posixpath.basename(stem):
+        return stem
+    suffix = posixpath.splitext(path)[1]
+    return f"{stem}{suffix}" if suffix else None
 
 
 def _at_impl(lines: list[str], line: int) -> bool:
