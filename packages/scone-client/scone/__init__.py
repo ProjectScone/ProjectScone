@@ -17,6 +17,9 @@ from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, M
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
 from .client import DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, Scone
 from .document_jobs import DocumentJobs, DocumentPage
+from .directory_sync import DirectorySyncRuns
+from .directory_models import (SyncCollection, SyncSpec, SyncRecord, SyncStatus, SyncPage,
+                               SyncSourceOutcome, SyncScanIssue, SyncOutcome, SyncOutcomePage)
 from .document_models import (DocumentAttachment, DocumentFormat, DocumentFormats, DocumentRequest, DocumentResult, DocumentSpec,
                               DocumentStatus, DocumentStored, ParserLimits, PdfOcr)
 from .errors import SconeError
@@ -30,6 +33,8 @@ __all__ = [
     "AgentClient",
     "InputRecord",
     "AgentResult", "HandoffHop", "HandoffResult", "HumanOutput", "ModelOutput", "TaskResult", "EvidencePacket",
+    "DirectorySyncRuns", "SyncCollection", "SyncSpec", "SyncRecord", "SyncStatus", "SyncPage",
+    "SyncSourceOutcome", "SyncScanIssue", "SyncOutcome", "SyncOutcomePage",
     "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
     "DocumentSpec", "DocumentStatus", "DocumentStored", "ParserLimits", "PdfOcr",
     "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",

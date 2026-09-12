@@ -204,3 +204,10 @@ Documents controls, standalone client methods, scheduling, remote connectors and
 distributed workers remain separate work.
 
 Clients can include `expected_configuration` from collection discovery in a start request. The host refuses a changed collection with `409 sync_configuration_changed` before registering or starting the run. Clients should retain the original run ID and this configuration across uncertain responses. Omitting the field preserves programmatic callers that intentionally select the current host configuration.
+
+HTTP result pages include `space` and `run_id` alongside `items` and `next_after`.
+Clients must match these identities before displaying a historical page. The
+standalone client exposes these operations through
+`memory.directory_sync(expected_space=...)`, including configuration-bound start,
+revision-guarded resume/cancel, and explicitly paged results. The Documents console
+uses the same protocol when `documents.sync` is advertised.
