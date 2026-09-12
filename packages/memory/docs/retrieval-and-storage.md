@@ -66,30 +66,6 @@ with the lane off and for all 20 with it on. A single synthetic set
 shows the mechanism works; whether it helps on real questions is for
 the retrieval benchmarks to show before the default changes.
 
-## Measured and not shipped
-
-Two cheap ideas for better recall were measured on this machine and left
-out, because they did not earn their place. Both are written down so the
-next person does not spend the day finding out again.
-
-- **Restricting recall to the dates a question names.** On the 40 dated
-  questions of `bench-data/temporal-40.json`, the session the expected
-  answer rests on reaches the top five for 36 of 40 either way, and the
-  two sets differ: an event is often told on a day other than the one the
-  question names. The days bound the search only for a question about a
-  day, where the day is what is being asked for.
-- **Splitting a question into parts and fusing the searches.** On 40
-  stratified questions of `bench-data/longmemeval_s.json`, 12 split at
-  all, and fusing changed nothing at five (36 either way) while finding
-  every expected session for one more question. On 40 multi-session
-  questions, where it should help most, 6 split and it gained one
-  question at five. A question people ask memory is usually one clause,
-  and splitting it on conjunctions mostly finds the same passages twice.
-
-What both measurements say is that the lever here is the embedder, not
-the question: with a hash embedder the lexical lane is doing the work,
-and cleverness around the query does not add to it.
-
 ## A profile: who the space is about
 
 A profile answers "who is this about" without being asked a question:
@@ -280,6 +256,30 @@ right and 6 wrong), and so is widening what counts as undecided past a
 tenth (14 right, 4 wrong). What the planner refuses to read is counted
 apart, because leaving a question to ordinary recall is not the same as
 answering it wrongly.
+
+## Measured and not shipped
+
+Two cheap ideas for better recall were measured on this machine and left
+out, because they did not earn their place. Both are written down so the
+next person does not spend the day finding out again.
+
+- **Restricting recall to the dates a question names.** On the 40 dated
+  questions of `bench-data/temporal-40.json`, the session the expected
+  answer rests on reaches the top five for 36 of 40 either way, and the
+  two sets differ: an event is often told on a day other than the one the
+  question names. The days bound the search only for a question about a
+  day, where the day is what is being asked for.
+- **Splitting a question into parts and fusing the searches.** On 40
+  stratified questions of `bench-data/longmemeval_s.json`, 12 split at
+  all, and fusing changed nothing at five (36 either way) while finding
+  every expected session for one more question. On 40 multi-session
+  questions, where it should help most, 6 split and it gained one
+  question at five. A question people ask memory is usually one clause,
+  and splitting it on conjunctions mostly finds the same passages twice.
+
+What both measurements say is that the lever here is the embedder, not
+the question: with a hash embedder the lexical lane is doing the work,
+and cleverness around the query does not add to it.
 
 ## What survives a crash
 
