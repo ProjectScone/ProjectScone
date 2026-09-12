@@ -20,7 +20,8 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
-from scone_memory.retrieval.code_context import MAX_IMPORT_LINES, MAX_IMPORTS, code_context
+from scone_memory.retrieval.code_context import (MAX_IMPORT_LINES, MAX_IMPORTS,
+                                                  MAX_QUOTED_BYTES, code_context)
 
 pytestmark = pytest.mark.asyncio
 
@@ -713,3 +714,61 @@ async def test_the_whole_context_has_a_byte_budget_and_says_what_it_dropped():
     for bad in (0, -1, 1.5, True):
         with pytest.raises(InvalidInput):
             await code_context(engine, "default", found.items, max_bytes=bad)
+
+
+async def test_an_import_is_its_own_statement_and_not_its_whole_line():
+    """`import os; secret = "..."` is two statements and only the first is
+    an import. Quoting whole physical lines reported the second as import
+    context -- and so did `def f(): import os; return secret`, and the
+    JavaScript form.
+
+    This is the third time in this module that I made one quotation
+    character-precise and left its neighbour line-shaped. Both go through
+    one helper now, which is the fix for the class rather than the case.
+    """
+    for source, name, expected in (
+        ('import os; payload = "SENTINEL"\n\n\ndef work() -> str:\n'
+         '    return os.sep + payload + " and a body long enough to be a chunk"\n',
+         "inline.py", "import os"),
+        ('import json\n\n\ndef example():\n    import os; return "SENTINEL" + os.sep\n',
+         "suite.py", "import os"),
+        ('import fs from "fs"; const payload = "SENTINEL";\n\n'
+         'function work() {\n  return fs.sep + payload + " a body long enough here";\n}\n',
+         "inline.ts", 'import fs from "fs";'),
+    ):
+        engine = await memory(source, source=name, target=60)
+        try:
+            found = await engine.recall("default", "work example payload body chunk sep",
+                                        limit=6)
+            context = await code_context(engine, "default", found.items)
+        finally:
+            await engine.close()
+        one = next(iter(context.by_chunk.values()), None)
+        assert one is not None, (name, context.record())
+        brought = [i.text for i in one.imports]
+        assert expected in brought, (name, brought)
+        for text in brought:
+            assert "SENTINEL" not in text, (name, text)
+            assert text in source, (name, "quoted, never assembled")
+
+
+async def test_one_very_long_import_line_is_bounded_in_bytes_too():
+    """A twelve-line bound says nothing about one line fifty thousand
+    characters long: the line count was the only bound, so a single
+    enormous identifier came back whole and unclipped."""
+    source = ("from module import " + "n" * 50_000 + "\n"
+              "import json\n\n\ndef work() -> str:\n"
+              "    return json.dumps({}) + \" a body long enough to be its own chunk\"\n")
+    engine = await memory(source, source="huge.py", target=70)
+    try:
+        found = await engine.recall("default", "work json dumps body chunk", limit=6)
+        context = await code_context(engine, "default", found.items)
+    finally:
+        await engine.close()
+    one = next(iter(context.by_chunk.values()), None)
+    assert one is not None, context.record()
+    big = [i for i in one.imports if i.text.startswith("from module")]
+    assert big, [i.text[:20] for i in one.imports]
+    assert len(big[0].text.encode()) <= MAX_QUOTED_BYTES, len(big[0].text.encode())
+    assert big[0].clipped is True, big[0].clipped
+    assert context.long_imports >= 1, context.record()

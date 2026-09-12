@@ -53,15 +53,18 @@ MAX_IMPORTS = 200
 #: Episodes read in one call, and the most a caller may ask for. A read
 #: that fails counts against it: it is work done.
 MAX_EPISODES = 100
-#: Lines a signature may run to. A header longer than this is quoted to
-#: here and says it was clipped.
-MAX_SIGNATURE_LINES = 12
-#: Lines one import may run to. ``MAX_IMPORTS`` bounds how many are
-#: listed and says nothing about how long one may be, so a parenthesised
-#: import spanning hundreds of lines was quoted whole -- and two hundred
-#: of those is an unbounded answer. The signature beside it had been
-#: bounded all along, which is the half-measure this module kept making.
-MAX_IMPORT_LINES = 12
+#: Lines any quotation from a source may run to, and bytes it may reach.
+#: One pair for signatures and imports alike: keeping two invited exactly
+#: what happened -- the signature became character-precise and
+#: byte-bounded while the import beside it stayed line-shaped, three
+#: separate times.
+MAX_QUOTED_LINES = 12
+MAX_QUOTED_BYTES = 4_000
+#: Kept as the older name for the signature bound, which reads better at
+#: its use and is the same number.
+MAX_SIGNATURE_LINES = MAX_QUOTED_LINES
+#: The same bound, under the name the import path reads by.
+MAX_IMPORT_LINES = MAX_QUOTED_LINES
 #: Bytes of context one call may return, and the most a caller may ask
 #: for. Bounding each quote does not bound the answer: a hundred episodes
 #: of two hundred imports is a six-hundred kilobyte reply out of a module
@@ -330,6 +333,37 @@ def _line_starts(content: str) -> list[int]:
     return at
 
 
+def _quoted(content: str, start: int, end: int) -> tuple[str, bool]:
+    """A construct's own characters, bounded in lines **and** in bytes.
+
+    One helper for every quotation here, because writing the bound twice
+    is how a signature came to be character-precise and byte-bounded
+    while the import beside it was neither. A twelve-line bound says
+    nothing about one line fifty thousand characters long, and a
+    whole-line quote of `import os; secret = "..."` reports a statement
+    that is not an import at all.
+
+    Trimmed on a character boundary in a single pass: slicing a ``str``
+    cannot split a character, where slicing its encoding can -- and
+    decoding a cut byte string leniently is the mistake that put a
+    window's span and its text out of step.
+    """
+    text = content[start:end]
+    lines = text.split("\n")
+    clipped = len(lines) > MAX_QUOTED_LINES
+    text = "\n".join(lines[:MAX_QUOTED_LINES])
+    if len(text.encode()) > MAX_QUOTED_BYTES:
+        total, cut = 0, len(text)
+        for index, char in enumerate(text):
+            size = len(char.encode())
+            if total + size > MAX_QUOTED_BYTES:
+                cut = index
+                break
+            total += size
+        text, clipped = text[:cut], True
+    return text, clipped
+
+
 def _looks_like_a_header(text: str, language: str) -> bool:
     """Whether a quoted span is plausibly the header it claims to be.
 
@@ -362,10 +396,8 @@ def _signature(content: str, lines: list[str], blank: list[str], starts: list[in
                              line=declaration.first_line,
                              text=lines[declaration.first_line - 1].rstrip("\r"),
                              clipped=True)
-        text = content[span[0]:span[1]]
-        held = text.split("\n")
-        clipped = len(held) > MAX_SIGNATURE_LINES
-        text = "\n".join(line.rstrip("\r") for line in held[:MAX_SIGNATURE_LINES])
+        text, clipped = _quoted(content, span[0], span[1])
+        text = "\n".join(line.rstrip("\r") for line in text.split("\n"))
         if not _looks_like_a_header(text, language):
             return Signature(name=declaration.name, kind=declaration.kind,
                              line=declaration.first_line,
@@ -375,8 +407,9 @@ def _signature(content: str, lines: list[str], blank: list[str], starts: list[in
                          line=content[:span[0]].count("\n") + 1,
                          text=text, clipped=clipped)
     start = declaration.first_line
-    at, clipped = _brace_header(blank, starts, start)
-    text = content[starts[start - 1]:at].strip("\n")
+    at, over = _brace_header(blank, starts, start)
+    text, cut = _quoted(content, starts[start - 1], at)
+    text, clipped = text.strip("\n"), over or cut
     if not _looks_like_a_header(text, language):
         return Signature(name=declaration.name, kind=declaration.kind, line=start,
                          text=(lines[start - 1].rstrip("\r") if start - 1 < len(lines)
@@ -402,22 +435,48 @@ def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, .
             tree = ast.parse(content)
         except (SyntaxError, ValueError, RecursionError):
             return (), False
-        at: list[tuple[int, int]] = []
+        starts = _line_starts(content)
+        at: list[tuple[int, int, int]] = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                at.append((node.lineno, node.end_lineno or node.lineno))
-        for first, last in sorted(at):
+                # The statement's own characters. Quoting whole lines
+                # reported `import os; secret = "..."` as an import, and
+                # `def f(): import os; return secret` likewise -- a
+                # statement that is not an import, labelled as one.
+                begin = starts[node.lineno - 1] + node.col_offset
+                stop = (starts[(node.end_lineno or node.lineno) - 1]
+                        + (node.end_col_offset if node.end_col_offset is not None
+                           else len(content)))
+                at.append((node.lineno, begin, stop))
+        for first, begin, stop in sorted(at):
             if len(found) >= limit:
                 return tuple(found), True
-            held = lines[first - 1:last]
-            found.append(Imported(line=first, text="\n".join(held[:MAX_IMPORT_LINES]),
-                                  clipped=len(held) > MAX_IMPORT_LINES))
+            text, clipped = _quoted(content, begin, stop)
+            found.append(Imported(line=first, text=text, clipped=clipped))
         return tuple(found), False
+    starts = _line_starts(content)
+    blank = masked(content, prose=False).split("\n")
     for number, line in enumerate(lines, 1):
         if _BROUGHT_IN.match(line):
             if len(found) >= limit:
                 return tuple(found), True
-            found.append(Imported(line=number, text=line))
+            # To the statement's own semicolon where there is one, found
+            # in the blanked copy so a `;` inside a string cannot end it.
+            # `import fs from "fs"; const secret = "..."` is two
+            # statements and only the first is an import.
+            quiet = blank[number - 1] if number - 1 < len(blank) else line
+            depth, cut = 0, len(line)
+            for column, char in enumerate(quiet):
+                if char in "([{":
+                    depth += 1
+                elif char in ")]}":
+                    depth = max(0, depth - 1)
+                elif char == ";" and depth == 0:
+                    cut = column + 1
+                    break
+            begin = starts[number - 1]
+            text, clipped = _quoted(content, begin, begin + cut)
+            found.append(Imported(line=number, text=text, clipped=clipped))
     return tuple(found), False
 
 
