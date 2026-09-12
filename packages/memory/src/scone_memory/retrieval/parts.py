@@ -117,6 +117,7 @@ async def recall_parts(
     source_prefix: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
+    conditions: Mapping[str, object] | None = None,
     rerank: bool = True,
     graph_boost: bool = False,
     parts_limit: int = MAX_PARTS,
@@ -132,7 +133,7 @@ async def recall_parts(
     read = decompose(question, limit=parts_limit)
     narrowing = {"as_of": as_of, "tags": tags, "where": where, "kind": kind,
                  "source_prefix": source_prefix, "since": since, "until": until,
-                 "rerank": rerank, "graph_boost": graph_boost}
+                 "conditions": conditions, "rerank": rerank, "graph_boost": graph_boost}
     results = [await engine.recall(space, part.text, limit=limit, **narrowing)  # type: ignore[arg-type]
                for part in read.parts]
 

@@ -37,7 +37,11 @@ class PartsScore:
 
     dataset: str
     k: int
+    #: Questions read. With a limit this is fewer than the file holds, and
+    #: `questions_found` is what it holds -- the report prints this number
+    #: as "of <dataset>", so on its own it would understate the corpus.
     questions: int = 0
+    questions_found: int = 0
     #: Questions the rule split. The rest are untouched by the feature.
     split: int = 0
     #: On the split questions only: a returned passage from any session
@@ -49,18 +53,25 @@ class PartsScore:
     #: Split questions where a part's own search found nothing.
     parts_unanswered: int = 0
 
+    @property
+    def capped(self) -> bool:
+        return self.questions < self.questions_found
+
     def record(self) -> dict[str, object]:
         return {"dataset": self.dataset, "k": self.k, "questions": self.questions,
+                "questions_found": self.questions_found, "capped": self.capped,
                 "split": self.split, "whole_any": self.whole_any, "parted_any": self.parted_any,
                 "whole_all": self.whole_all, "parted_all": self.parted_all,
                 "parts_unanswered": self.parts_unanswered}
 
     def text(self) -> str:
+        read = (f"{self.questions} of {self.questions_found} question(s)" if self.capped
+                else f"{self.questions} question(s)")
         if not self.split:
-            return (f"parts: the rule split none of {self.questions} question(s) of {self.dataset}, "
+            return (f"parts: the rule split none of {read} of {self.dataset}, "
                     f"so splitting changes nothing on this file. Nothing is measured by comparing "
                     f"a question with itself.")
-        return (f"parts: {self.split} of {self.questions} question(s) of {self.dataset} split at k="
+        return (f"parts: {self.split} of {read} of {self.dataset} split at k="
                 f"{self.k}. On those: any-evidence {self.whole_any} whole vs {self.parted_any} "
                 f"parted; all-evidence {self.whole_all} whole vs {self.parted_all} parted "
                 f"({self.parted_all - self.whole_all:+d} question(s)). "
@@ -80,7 +91,8 @@ def _scored(item: BenchItem, seen: set[str]) -> tuple[bool, bool]:
 async def run_parts_bench(dataset: str | Path, *, limit: Optional[int] = None,
                           k: int = 10) -> PartsScore:
     """Ask every question both ways on its own memory, and count."""
-    items = load_items(dataset)[:limit]
+    every = load_items(dataset)
+    items = every[:limit]
     split = whole_any = parted_any = whole_all = parted_all = unanswered = 0
     for item in items:
         if not decompose(item.question).split:
@@ -99,6 +111,7 @@ async def run_parts_bench(dataset: str | Path, *, limit: Optional[int] = None,
         parted_any += one
         parted_all += both
         unanswered += bool(parted.unanswered)
-    return PartsScore(dataset=str(dataset), k=k, questions=len(items), split=split,
+    return PartsScore(dataset=str(dataset), k=k, questions=len(items),
+                      questions_found=len(every), split=split,
                       whole_any=whole_any, parted_any=parted_any, whole_all=whole_all,
                       parted_all=parted_all, parts_unanswered=unanswered)

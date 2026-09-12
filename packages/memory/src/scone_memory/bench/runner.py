@@ -197,6 +197,10 @@ class RunReport:
     items: int
     scored: int  # items in the denominator
     include_abstention: bool
+    #: Whether passage merging was on. Recorded because a saved run whose
+    #: metadata cannot say which configuration produced it is not evidence
+    #: of anything.
+    merge: bool
     ks: list[int]
     recall_any: dict[int, float]
     recall_all: dict[int, float]
@@ -255,6 +259,7 @@ async def run(
     progress: Optional[Callable[[int, int], None]] = None,
     history: bool = False,
     cross_queries: bool = False,
+    merge: bool = False,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -263,7 +268,14 @@ async def run(
     back; it changes nothing unless facts exist in the item's space.
     ``cross_queries`` asks each item's store one other item's question
     whose evidence is absent (see cross_partner) after the real recall;
-    those results feed the abstention sweep only."""
+    those results feed the abstention sweep only.
+
+    ``merge`` joins neighbouring chunks of one episode into the passage
+    holding them before anything is scored. It cannot change *which*
+    episodes came back, so it cannot change session recall at the recall
+    limit -- but it compacts the list, so an episode below the cut can
+    move above it, and recall at a k smaller than the limit can change in
+    either direction. That is the thing worth measuring."""
     import asyncio
     from datetime import datetime, timezone
 
@@ -299,6 +311,21 @@ async def run(
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
             pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            if merge:
+                from ..retrieval.merging import merge_neighbours
+
+                joined = await merge_neighbours(engine, space, pack.items)
+                # The byte count has to be recomputed, not carried over.
+                # Merging replaces fragments with the span containing them,
+                # which across a gap is *longer* than the fragments were --
+                # keeping recall's number would report a context reduction
+                # that never happened, and a measurement published from it
+                # would be wrong in the flattering direction. The
+                # definition here is recall's own: the bytes of the text
+                # actually handed back.
+                pack = pack.model_copy(update={
+                    "items": list(joined.items),
+                    "returned_bytes": sum(len(i.text.encode()) for i in joined.items)})
             result.recall_ms = round((time.perf_counter() - t0) * 1000, 3)
             result.retrieved_sessions = [i.source or "" for i in pack.items]
             result.returned_bytes = pack.returned_bytes
@@ -346,7 +373,8 @@ async def run(
             verdicts[key] = verdicts.get(key, 0) + 1
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
-        dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention, ks=list(ks),
+        dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
+        merge=merge, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, by_type=by_type,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),

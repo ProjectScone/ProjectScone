@@ -99,7 +99,8 @@ async def test_invalid_selection_is_rejected_without_attachment_read_or_ocr(host
     assert recognizer.calls == 0
 
 
-async def test_non_pdf_and_unauthorized_request_never_use_ocr(host):
+async def test_non_pdf_and_unauthorized_request_never_use_ocr(host, monkeypatch):
+    monkeypatch.setattr('scone_memory.ingestion.document_ocr.find_spec', lambda _: object())
     client, memory, recognizer = host
     body = await upload(client, b'ordinary text', 'note.txt')
     body['pdf_ocr'] = {'mode': 'all_pages', 'reading_order': 'provider'}
@@ -112,7 +113,8 @@ async def test_non_pdf_and_unauthorized_request_never_use_ocr(host):
     assert (await memory.documents.counts('alpha')).episodes == 0
 
 
-async def test_discovery_and_unconfigured_refusal(host):
+async def test_discovery_and_unconfigured_refusal(host, monkeypatch):
+    monkeypatch.setattr('scone_memory.ingestion.document_ocr.find_spec', lambda _: object())
     client, memory, _ = host
     catalog = (await client.get('/v1/documents/formats')).json()
     assert catalog['pdf_ocr'] == {'available': True, 'modes': ['missing_text', 'all_pages'],
@@ -124,6 +126,31 @@ async def test_discovery_and_unconfigured_refusal(host):
         response = await plain.post('/v1/documents', json={'attachment_id': 'a'*64,
             'pdf_ocr': {'mode': 'all_pages', 'reading_order': 'provider'}})
         assert response.status_code == 422 and 'configured' in response.text
+
+
+@pytest.mark.parametrize('missing', ['pypdf', 'pypdfium2'])
+async def test_configured_ocr_without_a_dependency_refuses_before_reading(host, monkeypatch, missing):
+    client, memory, recognizer = host
+    monkeypatch.setattr('scone_memory.ingestion.document_ocr.find_spec',
+                        lambda name: None if name == missing else object())
+    reads = []
+
+    async def unexpected_read(*args, **kwargs):
+        reads.append(args)
+        raise AssertionError('unavailable OCR must not read original attachments')
+
+    monkeypatch.setattr(memory, 'attachment', unexpected_read)
+    assert (await client.get('/v1/documents/formats')).json()['pdf_ocr']['available'] is False
+    body = {'attachment_id': 'a' * 64, 'filename': 'scan.pdf',
+            'pdf_ocr': {'mode': 'all_pages', 'reading_order': 'provider'}}
+    for key, status in [('write', 422), ('other', 422), ('read', 403)]:
+        response = await client.post('/v1/documents', json=body,
+                                     headers={'authorization': f'Bearer {key}'})
+        assert response.status_code == status, response.text
+        if status == 422:
+            assert 'pdf-ocr extra' in response.text
+    assert reads == [] and recognizer.calls == 0
+    assert (await memory.documents.counts('alpha')).episodes == 0
 
 
 async def test_different_choices_have_distinct_retained_extraction_identity(host):

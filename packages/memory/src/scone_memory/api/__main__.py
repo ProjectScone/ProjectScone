@@ -10,6 +10,8 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..runtime.agent_runtime import AgentRuntime
+    from ..ingestion.document_ocr import DocumentOcr
+    from ..ingestion.import_service import DocumentImportService
     from ..realtime.catalog import PersonaCatalog
     from ..runtime.model_runtime import DynamicLocalCatalog
 
@@ -21,26 +23,34 @@ from .app import create_app
 
 def build_app(settings: Settings, engine):
     from ..runtime.agent_runtime import load_agent_runtime
+    from ..runtime.document_jobs import load_document_imports
+    from ..runtime.document_ocr import build_document_ocr
 
     agents = load_agent_runtime(settings.agents_config, engine) if settings.agents_config else None
+    imports = None
     try:
-        app = _build_app(settings, engine, agents)
+        ocr = build_document_ocr(settings)
+        if settings.document_jobs_config:
+            imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr,
+                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+        app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports)
         return agents.own(app) if agents is not None else app
     except BaseException:
+        if imports is not None:
+            imports.close_idle()
         if agents is not None:
             agents.close_idle()
         raise
 
 
-def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
+def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *,
+               document_ocr: DocumentOcr | None = None,
+               document_import_service: DocumentImportService | None = None):
     """The app ``serve`` runs: the memory API alone, or the conversation
     service composed over it on the same origin when the settings name a
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
     or model factory the operator got wrong, before anything is served."""
     from ..runtime.diagnostics import install_http_diagnostics
-    from ..runtime.document_ocr import build_document_ocr
-
-    document_ocr = build_document_ocr(settings)
     store = None
     model_management = False
     vision_available = None
@@ -74,7 +84,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
 
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
-                          document_ocr=document_ocr,
+                          document_ocr=document_ocr, document_import_service=document_import_service,
                           agent_catalog=agents.catalog if agents else None,
                           agent_plan_store=agents.plans if agents else None,
                           agent_run_service=agents.service if agents else None,
@@ -124,7 +134,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
-                                   document_ocr=document_ocr,
+                                   document_ocr=document_ocr, document_import_service=document_import_service,
                                    agent_catalog=agents.catalog if agents else None,
                                    agent_plan_store=agents.plans if agents else None,
                                    agent_run_service=agents.service if agents else None,
@@ -198,7 +208,13 @@ def main(settings: Optional[Settings] = None) -> None:
                 if agent_runtime is not None:
                     await agent_runtime.aclose()
             finally:
-                await engine.close()
+                try:
+                    target = getattr(getattr(app, 'state', None), 'memory_app', app)
+                    imports = getattr(getattr(target, 'state', None), 'document_import_service', None)
+                    if imports is not None:
+                        await imports.aclose()
+                finally:
+                    await engine.close()
 
     from ._signals import termination_unwinds
     with termination_unwinds():

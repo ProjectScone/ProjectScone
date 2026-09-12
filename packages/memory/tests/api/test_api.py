@@ -430,3 +430,59 @@ def test_a_multi_part_question_can_be_searched_a_part_at_a_time(client):
     assert whole["decomposition"]["split"] is False and "one thing" in whole["why"]
     assert client.get("/v1/recall/parts", params={"q": ""}, headers=auth()).status_code == 422
     assert client.get("/v1/recall/parts", params=asked).status_code == 401
+
+
+def test_parked_records_can_be_retried_on_purpose(client):
+    """Restarting the server retries everything; this retries what you
+    name. Without a worker there is nothing parked in this process, and
+    the endpoint says so rather than pretending it cleared something."""
+    assert client.post("/v1/episodes", json={"content": "Alice Chen works at Acme Robotics."},
+                       headers=auth()).status_code == 200
+    refused = client.post("/v1/consolidate/retry", json={}, headers=auth())
+    assert refused.status_code == 501 and "nothing is parked" in refused.json()["error"]
+    assert client.post("/v1/consolidate/retry", json={}).status_code == 401
+    assert client.post("/v1/consolidate/retry", json={"episodes": [1], "extra": 1},
+                       headers=auth()).status_code == 422
+
+
+def test_a_parted_search_applies_the_same_narrowing_as_an_ordinary_one(client):
+    """A filter a caller passed and the server dropped is worse than one it
+    refused: the page shows results that look narrowed and are not. The
+    record echoes what was applied so a reader can tell."""
+    for text, kind in (("We reverted the billing change after the invoices came out wrong.", "note"),
+                       ("At the Thursday meeting were Priya, Tomas and the auditor.", "file")):
+        assert client.post("/v1/episodes", json={"content": text, "kind": kind},
+                           headers=auth()).status_code == 200
+    asked = {"q": "What did I decide about billing, and who was at the meeting?",
+             "limit": 3, "kind": "note"}
+    narrowed = client.get("/v1/recall/parts", params=asked, headers=auth()).json()
+    assert narrowed["applied"]["kind"] == "note", narrowed["applied"]
+    mine = client.get("/v1/status", headers=auth()).json()["space"]
+    assert narrowed["space"] == mine, "the echo names the space the key authenticated for"
+    assert all("meeting were Priya" not in item["text"] for item in narrowed["items"]), narrowed["items"]
+    unfiltered = {name: value for name, value in asked.items() if name != "kind"}
+    wide = client.get("/v1/recall/parts", params=unfiltered, headers=auth()).json()
+    assert "kind" not in wide["applied"], wide["applied"]
+    assert len(wide["items"]) > len(narrowed["items"]), (wide["items"], narrowed["items"])
+
+
+def test_a_parted_search_refuses_a_filter_it_cannot_honour_rather_than_dropping_it(client):
+    """`history` is the closed chain behind matched facts, which is a
+    per-query notion with no defined meaning merged across parts. Inventing
+    one silently would be worse than not offering it."""
+    assert client.post("/v1/episodes", json={"content": "Billing was reverted."},
+                       headers=auth()).status_code == 200
+    asked = {"q": "What did I decide about billing, and who was at the meeting?", "history": True}
+    refused = client.get("/v1/recall/parts", params=asked, headers=auth())
+    assert refused.status_code == 422, refused.json()
+    assert "history" in refused.json()["error"] and "part" in refused.json()["error"]
+
+
+def test_a_retry_will_not_take_a_boolean_or_a_string_for_an_episode_id(client):
+    """Pydantic coerces true, "1" and 1.0 to the integer 1, so a caller
+    could clear episode 1 without ever naming it. An id is an id."""
+    for wrong in (True, "1", 1.0, None):
+        refused = client.post("/v1/consolidate/retry", json={"episodes": [wrong]}, headers=auth())
+        assert refused.status_code == 422, (wrong, refused.status_code, refused.json())
+    assert client.post("/v1/consolidate/retry", json={"episodes": [1]},
+                       headers=auth()).status_code in (200, 501)

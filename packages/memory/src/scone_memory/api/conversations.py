@@ -103,7 +103,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
-                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None):
+                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -234,6 +234,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if agent_run_service is not None:
                 try:
                     await agent_run_service.aclose()
+                except Exception as error:
+                    cleanup_errors.append(error)
+            if document_import_service is not None:
+                try:
+                    await document_import_service.aclose()
                 except Exception as error:
                     cleanup_errors.append(error)
             if worker is not None:
@@ -1042,6 +1047,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     memory_app = create_app(engine, keys, conversations=True, worker=worker,
                             agent_catalog=agent_catalog, agent_plan_store=agent_plan_store,
                             agent_run_service=agent_run_service, document_ocr=document_ocr,
+                            document_import_service=document_import_service,
                             ingest_concurrency=ingest_concurrency, roles=roles,
                             model_connections_available=model_connections_available, vision_available=vision_available)
     app.state.memory_app = memory_app
