@@ -468,6 +468,10 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         reasons.append(f"hubs_not_crossed {len(hubs)}")
     if cut:
         reasons.append(f"relations_cut {cut}")
+    # The walk that worked out what follows stopped before it had followed
+    # everything, so this packet is missing lines it cannot name.
+    if projection.implied_capped:
+        reasons.append("implied_capped")
     if unverified:
         reasons.append(f"unverified {unverified}")
     seed_lines = [f"entity: {label(entity.entity_id)} ({entity.kind or 'unknown kind'}) {entity.entity_id}"

@@ -511,3 +511,21 @@ def test_a_neighbourhood_cut_to_fewer_implications_says_it_was_cut():
     assert whole is not None and whole.follows_total == 3 and not whole.truncated
     cut = neighbourhood(graph, box.entity_id, limit=1)
     assert cut is not None and cut.follows_total == 3 and len(cut.follows) == 1 and cut.truncated
+
+
+async def test_the_packet_says_when_the_walk_that_found_implications_stopped(monkeypatch):
+    """A packet missing implications because the walk stopped must say so,
+    as the knowledge view and the entity page do."""
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.entities import project as projecting
+    from scone_memory.entities.context import graph_context
+
+    monkeypatch.setattr(projecting, "MAX_WALKED", 1)
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    for n in range(4):
+        await memory.assert_fact(SPACE, f"Box {n}", "part_of", f"Box {n + 1}",
+                                 valid_from="2024-01-01T00:00:00Z")
+    packet = await graph_context(memory, SPACE, names=["Box 0"])
+    assert "implied_capped" in packet.text, packet.text
+    assert "coverage: limited" in packet.text
