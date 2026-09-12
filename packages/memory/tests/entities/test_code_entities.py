@@ -194,12 +194,23 @@ def test_a_phrase_is_still_a_literal_however_it_is_punctuated():
 
 def test_a_qualified_symbol_is_still_recognised():
     """The other half: the shapes our extractor actually emits must keep
-    working, including a path with a space in it."""
+    working, including a path with a space in it.
+
+    Two of these cost a round of review each. `def naïve()` is valid
+    Python and an ASCII-only tail pattern refused it -- Python decides
+    what an identifier is with `str.isidentifier`, and so does this. And
+    a path is not prose however long it runs: the 120-character rule that
+    calls a long object prose used to run first and ate the deep paths
+    that real repositories are full of.
+    """
     from scone_memory.entities.classify import ClassificationContext, classify_object
 
+    deep = "src/" + "a_long_directory_name/" * 6 + "module.py:Holder.keep"
+    assert len(deep) > 120, len(deep)
     context = ClassificationContext()
     for symbol in ("pkg/store.py", "pkg.store", "json", "my module.py:leaf",
                    "pkg/store.py:Shelf", "pkg/store.py:Shelf.keep",
-                   "my long folder/my module.py:Shelf.keep"):
+                   "my long folder/my module.py:Shelf.keep",
+                   "my folder/leaf.py:naïve", "pkg/store.py:日本語", deep):
         said = classify_object(symbol, "defines", context)
         assert said.object_class == "entity", (symbol, said)
