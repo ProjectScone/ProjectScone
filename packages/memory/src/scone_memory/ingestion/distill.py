@@ -186,10 +186,11 @@ class Retried:
     asked: int = 0
     #: Of the cleared ones, how many a later pass will actually look at.
     queued: int = 0
-    #: How many it will not, because a claim already cites the episode and
-    #: a pass only considers episodes nothing cites yet. Clearing one of
-    #: these is real -- the park is gone -- but nothing follows from it,
-    #: and reporting it as cleared alone reads as "queued".
+    #: How many it will not. Clearing one of these was real -- the park
+    #: went -- but nothing follows from it, and reporting it as cleared
+    #: alone reads as "queued". Why it is ineligible is deliberately not
+    #: claimed: a claim may already cite the episode, a concurrent pass may
+    #: have parked it again, or it may have completed while this ran.
     blocked: int = 0
 
     def record(self) -> dict[str, object]:
@@ -203,9 +204,13 @@ class Retried:
         if self.queued:
             lines.append(f"{self.queued} will be looked at again on the next pass")
         if self.blocked:
-            lines.append(f"{self.blocked} will not: a claim already cited the episode, and a "
-                         f"pass only considers episodes nothing cites yet, so clearing the "
-                         f"failure changes nothing on its own")
+            # Deliberately does not name one reason. A record can be
+            # ineligible because a claim already cites it, because a
+            # concurrent worker parked it again, or because it completed
+            # while this ran, and asserting the first would be a guess.
+            lines.append(f"{self.blocked} will not, so clearing the failure changed nothing on "
+                         f"its own: a claim may already cite the episode, a pass may have parked "
+                         f"it again, or it may have completed meanwhile")
         if self.unknown:
             lines.append(f"nothing recorded against {self.unknown} of {self.asked} "
                          f"episode(s) asked for")
@@ -366,12 +371,13 @@ class Distiller:
         unparked = sum(1 for key in going if self._failures[key].count >= self.max_attempts)
         for key in going:
             del self._failures[key]
-        # Clearing a failure is not the same as queueing the work. A pass
-        # only considers episodes no claim cites yet, so an episode whose
-        # extraction failed after writing one fact is never looked at
-        # again, and saying "cleared" alone would promise otherwise.
+        # Clearing a failure is not the same as queueing the work, and
+        # eligibility is read with an await in the middle. A worker can
+        # fail the same episode again while that read is in flight, so what
+        # was eligible before it landed is not what a later pass will see:
+        # the park is re-checked after the await, not before it.
         waiting = {episode.episode_id for episode in await self._pending(space)}
-        queued = sum(1 for key in going if key[1] in waiting)
+        queued = sum(1 for key in going if key[1] in waiting and key not in self._failures)
         return Retried(space=space, cleared=len(going), unparked=unparked,
                        unknown=0 if wanted is None else len(wanted - held),
                        asked=len(going) if wanted is None else len(wanted),

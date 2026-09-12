@@ -149,7 +149,9 @@ async def test_a_retry_does_not_promise_to_reconsider_what_the_next_pass_will_sk
         again = await distiller.retry("default")
         assert again.cleared == 1 and again.unparked == 1, again.record()
         assert again.queued == 0 and again.blocked == 1, again.record()
-        assert "already cited" in again.text(), again.text()
+        assert "changed nothing on its own" in again.text(), again.text()
+        assert "may already cite" in again.text(), \
+            "the reason is offered as one possibility, never asserted"
     finally:
         await engine.close()
 
@@ -160,5 +162,55 @@ async def test_a_retry_of_an_uncited_record_does_say_it_is_queued():
         again = await distiller.retry("default")
         assert again.queued == 1 and again.blocked == 0, again.record()
         assert "next pass" in again.text(), again.text()
+    finally:
+        await engine.close()
+
+
+async def test_a_record_parked_again_while_we_looked_is_not_reported_as_queued():
+    """Eligibility is read with an await in the middle, and a worker can
+    fail the same episode again while it is in flight. Counting what was
+    eligible before that happened reports work as queued that will not
+    happen."""
+    engine, chat, distiller = await parked_engine()
+    [only] = list(distiller.parked("default"))
+    pending = distiller._pending
+
+    async def slow(space):
+        found = await pending(space)
+        # The concurrent worker, landing while we were reading.
+        distiller._failures[(space, only)] = distiller._failures.get(
+            (space, only)) or _again(distiller)
+        return found
+
+    distiller._pending = slow
+    try:
+        again = await distiller.retry("default")
+    finally:
+        distiller._pending = pending
+    assert again.cleared == 1, again.record()
+    assert again.queued == 0 and again.blocked == 1, again.record()
+
+
+def _again(distiller):
+    from scone_memory.ingestion.distill import _Attempts
+
+    attempts = _Attempts()
+    attempts.count = distiller.max_attempts
+    attempts.last_error = "the model is down"
+    return attempts
+
+
+async def test_the_blocked_count_does_not_claim_to_know_why():
+    """A record can be ineligible because a claim cites it, because a
+    worker parked it again, or because it completed meanwhile. The text
+    may not assert the first of those as though it were the only one."""
+    engine, chat, distiller = await parked_engine()
+    try:
+        await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics",
+                                 valid_from="2024-01-01T00:00:00Z")
+        again = await distiller.retry("default")
+        if again.blocked:
+            assert "may" in again.text(), again.text()
+            assert "already cited the episode, and a pass" not in again.text(), again.text()
     finally:
         await engine.close()

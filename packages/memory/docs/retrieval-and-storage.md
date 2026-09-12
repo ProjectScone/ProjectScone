@@ -495,6 +495,60 @@ gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
 `periods` (every stretch, half-open); the working names each stretch. A
 claim that still holds is counted up to the moment asked and says so.
 
+## What a codebase says about itself beyond who calls whom
+
+Call edges are not a code graph. Two questions people actually ask are
+answered by neither `calls` nor `imports`, and both are readable without
+a model:
+
+**Which types are which.** A class hierarchy is how anyone navigates a
+codebase, and nothing in a call graph says a word about it. `inherits`
+edges now come out of the same pass:
+
+```
+pkg/shelf.py:Paper  inherits  pkg/shelf.py:Shelf      # a base this file defines
+pkg/shelf.py:Shelf  inherits  pkg.base.Store          # a base from an import
+web/shelf.ts:Shelf  inherits  Store                   # extends / implements / :
+```
+
+A base the file can see is named by its path, like any other declaration.
+One that arrived through an import whose module resolves to a file is
+named there. Anything else is recorded **as the source wrote it** — the
+same rule imports already follow, because the name is what the file said
+even when its home is unknown. A base that is not a plain name (a
+subscripted generic, a call) is left out rather than guessed at.
+
+**Why the code is the way it is.** The rationale is in the comments and
+the decision it came from is in an ADR or an RFC, and both were
+previously invisible:
+
+```
+pkg/shelf.py:Shelf.open  notes  the index is rebuilt on open because a
+                                half-written index is worse than none
+pkg/shelf.py:Shelf.open  cites  ADR-0007
+pkg/shelf.py:Paper       flags  the paper shelf cannot hold two of the
+                                same thing yet
+```
+
+Three things this gets right that one predicate would not:
+
+- **A rationale and a known problem are different claims.** "Why does
+  this exist" and "what is wrong with it" are different questions;
+  `notes` (`WHY:`, `NOTE:`, `RATIONALE:`) and `flags` (`TODO:`, `FIXME:`,
+  `HACK:`, `XXX:`) answer them separately, and one predicate for both
+  would answer neither.
+- **A citation is a node, not a string.** `ADR-0007`, `ADR 7` and `adr#7`
+  normalise to one name, so every declaration that cites a decision
+  record is reachable from it — which is the point of putting it in a
+  graph rather than in a grep.
+- **Rationale belongs to the thing it explains.** A note is attached to
+  the innermost declaration whose lines contain it, not to the file that
+  happens to hold it, using the same declaration spans recall cites.
+
+Comments are read from the source text because no parser keeps them —
+Python's `ast` drops every one. Only tagged comments become claims: an
+untagged line is a remark, not a statement about the code.
+
 ## Code: cut where the declarations are
 
 A source file stored under a name that says which language it is in
