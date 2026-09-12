@@ -424,7 +424,7 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
-            "documents.files": True, "documents.provenance": True,
+            "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -470,7 +470,8 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
-    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr)
+    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
+                                              assert_current_space=assert_current_space)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
