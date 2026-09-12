@@ -9,6 +9,7 @@ import asyncio
 import base64
 from collections.abc import Awaitable, Callable
 import io
+import hashlib
 import json
 import math
 import os
@@ -161,28 +162,8 @@ class MediaDocumentParser:
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits = DocumentLimits()) -> ParsedDocument:
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds
-        max_samples = int(self._max_duration * _SAMPLE_RATE)
-        with tempfile.TemporaryDirectory(prefix='scone-media-') as directory:
-            source = Path(directory) / 'input.media'
-            source.write_bytes(data)
-            pcm = await run_bounded([self._ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error',
-                '-threads', '1', '-protocol_whitelist', 'file,pipe', '-format_whitelist', _DEMUXERS,
-                '-i', str(source), '-map', '0:a:0', '-vn', '-sn', '-dn',
-                '-t', str((max_samples + 1) / _SAMPLE_RATE), '-ac', '1', '-ar', str(_SAMPLE_RATE),
-                '-threads', '1', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'], b'',
-                timeout=_remaining(deadline), max_output=(max_samples + 1) * 2)
-        if len(pcm) > max_samples * 2:
-            raise InvalidInput('media exceeds its decoded audio duration limit')
-        if not pcm or len(pcm) % 2:
-            raise InvalidInput('media contains no decodable audio')
-        duration = len(pcm) / (2 * _SAMPLE_RATE)
-        buffer = io.BytesIO()
-        with wave.open(buffer, 'wb') as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(_SAMPLE_RATE)
-            wav.writeframes(pcm)
-        transcript = await asyncio.wait_for(self._transcribe(buffer.getvalue()), _remaining(deadline))
+        audio_wav, duration = await self._decode_audio(data, limits, deadline)
+        transcript = await asyncio.wait_for(self._transcribe(audio_wav), _remaining(deadline))
         if not isinstance(transcript, tuple) or not transcript or len(transcript) > limits.max_segments:
             raise InvalidInput('transcription requires a bounded nonempty tuple of segments')
         segments: list[DocumentSegment] = []
@@ -207,9 +188,43 @@ class MediaDocumentParser:
                 metadata={'start_seconds': str(segment.start_seconds), 'end_seconds': str(segment.end_seconds),
                           'audio_stream': '0', 'extraction': 'transcription'}))
         parsed = ParsedDocument(format=suffix, parser='media-transcription', segments=tuple(segments),
-            metadata={'extraction': 'audio-only', 'duration_seconds': str(duration), 'sample_rate': str(_SAMPLE_RATE)})
+            metadata={'extraction': 'audio-only', 'duration_seconds': str(duration), 'sample_rate': str(_SAMPLE_RATE),
+                      'audio_wav_sha256': hashlib.sha256(audio_wav).hexdigest(),
+                      'audio_wav_bytes': str(len(audio_wav))})
         validate_document(parsed, limits)
         return parsed
+
+    async def decode_audio(self, data: bytes, filename: str,
+                           limits: DocumentLimits = DocumentLimits()) -> bytes:
+        """Prepare the exact transcription input without invoking a provider."""
+        _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
+        audio, _ = await self._decode_audio(data, limits, monotonic() + limits.timeout_seconds)
+        return audio
+
+    async def _decode_audio(self, data: bytes, limits: DocumentLimits,
+                            deadline: float) -> tuple[bytes, float]:
+        max_samples = int(self._max_duration * _SAMPLE_RATE)
+        with tempfile.TemporaryDirectory(prefix='scone-media-') as directory:
+            source = Path(directory) / 'input.media'
+            source.write_bytes(data)
+            pcm = await run_bounded([self._ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error',
+                '-threads', '1', '-protocol_whitelist', 'file,pipe', '-format_whitelist', _DEMUXERS,
+                '-i', str(source), '-map', '0:a:0', '-vn', '-sn', '-dn',
+                '-t', str((max_samples + 1) / _SAMPLE_RATE), '-ac', '1', '-ar', str(_SAMPLE_RATE),
+                '-threads', '1', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'], b'',
+                timeout=_remaining(deadline), max_output=(max_samples + 1) * 2)
+        if len(pcm) > max_samples * 2:
+            raise InvalidInput('media exceeds its decoded audio duration limit')
+        if not pcm or len(pcm) % 2:
+            raise InvalidInput('media contains no decodable audio')
+        duration = len(pcm) / (2 * _SAMPLE_RATE)
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(_SAMPLE_RATE)
+            wav.writeframes(pcm)
+        return buffer.getvalue(), duration
 
 
 class _Frame(BaseModel):

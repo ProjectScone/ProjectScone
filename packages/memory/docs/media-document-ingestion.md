@@ -52,7 +52,7 @@ Use the normal workflow:
    `POST /v1/document-jobs` with a caller-chosen import ID for durable execution.
 4. Read the saved episode's `/document` evidence. Each transcription segment keeps
    source times, audio-stream identity and exact retained text. Manifest metadata records
-   the host's transcriber revision. The original
+   the host's transcriber revision and the normalized WAV's SHA-256 and byte count. The original
    attachment remains downloadable and its digest is unchanged.
 
 Video processing transcribes the first audio stream only; it does not inspect or
@@ -71,8 +71,20 @@ space cannot read the source. A changed key scope or write role during synchrono
 transcription is checked again before storage. Forgetting the episode removes its
 readable provenance; evidence reads never re-run recognition.
 
+For checked playback, `GET /v1/episodes/{episode_id}/document/audio` returns the
+same mono 16 kHz PCM WAV bytes passed to the transcriber. It decodes the retained
+original again without calling the transcription model, checks the current host
+revision and recorded WAV digest/length, and rechecks source and caller scope
+before returning `audio/wav`. Decoder work shares the document ingestion slot
+limit. Responses use `Cache-Control: no-store`; clients should also verify the
+manifest's digest and length before creating a temporary playback URL.
+
+Older extractions without the normalized WAV identity remain readable but cannot
+use this checked playback route. A changed decoder output, revision, forgotten
+source or revoked access refuses playback instead of serving unverified audio.
+
 The included integration tests use locally generated audio/video and a scripted
 transcript to verify decoding, timestamps, authentication, retention and restart
-behavior. They do not measure transcription accuracy. Timeline playback, built-in
-model adapters for timestamped document transcription, and video-frame analysis
-remain separate capabilities.
+behavior. They do not measure transcription accuracy. Browser timeline controls,
+built-in model adapters for timestamped document transcription, and video-frame
+analysis remain separate capabilities from this HTTP surface.
