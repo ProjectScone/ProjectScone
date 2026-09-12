@@ -30,6 +30,9 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
     agents = load_agent_runtime(settings.agents_config, engine) if settings.agents_config else None
     imports = None
     try:
+        if document_media is None and settings.document_media_config:
+            from ..runtime.document_media import load_document_media
+            document_media = load_document_media(settings.document_media_config)
         ocr = build_document_ocr(settings)
         if settings.document_jobs_config:
             imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media,
