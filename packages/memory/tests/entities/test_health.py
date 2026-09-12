@@ -235,3 +235,27 @@ async def test_each_concern_says_where_to_see_the_whole_of_it():
     assert where["ungrounded"] == "scone audit-grounding --flagged-only"
     assert where["unconnected"].startswith("/v1/graph/knowledge")
     assert "see scone audit-grounding --flagged-only" in found.text
+
+
+def test_every_concern_points_at_something_that_exists():
+    """A concern that names a route or a command nobody has is worse than
+    one that names none, so every one of them is checked against the app
+    and the parser."""
+    import asyncio
+
+    from scone_memory.api import create_app
+    from scone_memory.entities.health import WHERE
+    from scone_memory.runtime.cli import build_parser
+
+    async def built():
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    app = create_app(asyncio.run(built()), {"key": "alpha"})
+    routes = {getattr(route, "path", "") for route in app.routes}
+    for kind, where in WHERE.items():
+        if where.startswith("/v1/"):
+            assert where.split(",")[0].replace("{id}", "{entity_id}") in routes, kind
+        else:
+            said = where.split()
+            assert said[0] == "scone", kind
+            build_parser().parse_args(said[1:])

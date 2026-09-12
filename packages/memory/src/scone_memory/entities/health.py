@@ -53,8 +53,8 @@ ORDER = tuple(MEANINGS)
 #: place that shows the whole of it, or acts on it.
 WHERE = {
     "ungrounded": "scone audit-grounding --flagged-only",
-    "contested_kind": "/v1/graph/entity, which shows what each hint was",
-    "kind_unknown": "/v1/graph/entity, which shows the claims a kind would come from",
+    "contested_kind": "/v1/entities/{id}, which shows what each hint was",
+    "kind_unknown": "/v1/entities/{id}, which shows the claims a kind would come from",
     "unconnected": "/v1/graph/knowledge, which shows what each entity does have",
     "thin_predicate": "/v1/graph/schema, which counts every predicate",
     "likely_duplicate": "/v1/entities/duplicates, which shows every pair and why",
