@@ -263,11 +263,10 @@ class EntityService:
         from .view import counts
 
         held = await self._ledger(space, timed)
-        # The vocabulary in force is read per request and its identity goes
-        # into the view key. Saving a vocabulary is not a write to the
-        # ledger, so the revision does not move and a cache keyed on the
-        # revision alone would hand back a view built under the old
-        # meanings -- making the save a silent no-op.
+        # The vocabulary in force goes into the view key, so a view built
+        # under one set of relation meanings is never served for another.
+        # It reads no store: the meanings are this process's configuration
+        # while a space cannot hold its own.
         from .vocabulary import read_vocabulary
 
         vocabulary = await read_vocabulary(self._engine, space)
