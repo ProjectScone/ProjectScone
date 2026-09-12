@@ -52,6 +52,27 @@ SAVED = "graph.meanings"
 #: Events read back when looking for the latest save. One space's
 #: vocabulary changes rarely; this is a ceiling, not an expectation.
 MAX_READ = 200
+#: What an event log may say it drops. A log that declares either of these
+#: will evict eventually -- a ring filling with unrelated traffic in
+#: another space, or an age limit passing -- and the record holding this
+#: space's configuration is as evictable as any other. A reader would then
+#: be told the space holds no vocabulary, which by then would be false.
+#:
+#: Configuration a reader depends on cannot live somewhere that may forget
+#: it, so such a log refuses the save instead of losing it later.
+#: ``SqliteEventLog`` and ``MongoEventLog`` are unbounded unless an
+#: operator sets ``max_age_days``; ``InMemoryEventLog`` is always a ring
+#: and so can never hold one.
+_RETENTION = ("max_events", "max_age_days")
+
+
+def _forgets(log: object) -> Optional[str]:
+    """What this log admits it may drop, or None when it promises to keep."""
+    for named in _RETENTION:
+        held = getattr(log, named, None)
+        if isinstance(held, (int, float)) and held > 0:
+            return f"keeps at most {held:g} ({named})"
+    return None
 
 
 class NoEventLog(SconeError):
@@ -77,7 +98,10 @@ class Vocabulary:
     def record(self) -> dict[str, object]:
         return {"source": self.source, "why": self.why, "identity": self.identity,
                 "at": self.at,
-                "meanings": self.meanings.record() if self.meanings else None}
+                # `is None`, never truthiness: RelationMeanings() is falsy,
+                # and a reader handed `meanings: null` cannot tell "the space
+                # says there are none" from "the space says nothing".
+                "meanings": None if self.meanings is None else self.meanings.record()}
 
 
 def _identity(source: str, meanings: Optional[RelationMeanings], at: Optional[str]) -> str:
@@ -85,7 +109,7 @@ def _identity(source: str, meanings: Optional[RelationMeanings], at: Optional[st
     time, so falling back to a process configuration and holding the same
     vocabulary in the space are not the same identity."""
     said = json.dumps({"source": source, "at": at,
-                       "meanings": meanings.record() if meanings else None},
+                       "meanings": None if meanings is None else meanings.record()},
                       sort_keys=True, default=str)
     return hashlib.sha256(said.encode()).hexdigest()[:16]
 
@@ -117,6 +141,13 @@ async def _write(engine: "MemoryEngine", space: str,
             f"this engine keeps no events, so a vocabulary saved for {space!r} would be kept "
             f"nowhere and every reader would carry on with its own configuration. Attach an "
             f"event log to hold one.")
+    forgets = _forgets(engine.events)
+    if forgets is not None:
+        raise NoEventLog(
+            f"this event log {forgets}, so a vocabulary saved for {space!r} could be evicted by "
+            f"unrelated traffic and every reader would silently fall back to its own "
+            f"configuration. Refusing to keep configuration somewhere that may forget it: use a "
+            f"log without a retention bound, or leave the vocabulary to process configuration.")
     # A space that has been deleted takes no writes. A save that reported
     # success into one would be a claim about durable state that nothing
     # will ever honour.
@@ -138,6 +169,16 @@ async def read_vocabulary(engine: "MemoryEngine", space: str) -> Vocabulary:
     """The meanings in force for this space, and where they came from."""
     check_space(space)
     process = engine.relation_meanings
+    forgets = None if engine.events is None else _forgets(engine.events)
+    if forgets is not None:
+        # Said rather than guessed at: this is not "the space holds none",
+        # it is "the space cannot hold one here".
+        return Vocabulary(
+            meanings=process, source="process" if process else "none",
+            why=(f"this event log {forgets}, so the space cannot hold a vocabulary of its own; "
+                 + ("these are this process's configuration" if process
+                    else "and nothing is configured here, so the graph holds only what was said")),
+            identity=_identity("process" if process else "none", process, None))
     if engine.events is None:
         return Vocabulary(
             meanings=process, source="process" if process else "none",

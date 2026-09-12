@@ -16,6 +16,8 @@ it.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from scone_memory import (HashEmbedder, InMemoryDocumentStore, InMemoryEventLog,
@@ -30,9 +32,22 @@ EMPLOYS = RelationMeanings(inverse={"works_at": "employs"})
 LIVES = RelationMeanings(symmetric=["married_to"])
 
 
-async def memory(meanings=None, events=True):
+#: A durable sink for these tests, not the in-memory ring. A vocabulary is
+#: configuration a reader depends on, so it may only be kept somewhere that
+#: promises to keep it -- which makes the real SQLite log the honest thing
+#: to test against.
+def _kept(tmp):
+    from scone_memory.observability.events import SqliteEventLog
+
+    return SqliteEventLog(tmp / "events.db")
+
+
+async def memory(meanings=None, events=True, tmp=None):
+    import tempfile
+
+    where = tmp or pathlib.Path(tempfile.mkdtemp())
     return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
-                              events=InMemoryEventLog() if events else None,
+                              events=_kept(where) if events else None,
                               relation_meanings=meanings).open()
 
 
@@ -72,21 +87,25 @@ async def test_what_the_space_holds_beats_what_the_process_was_told():
         await engine.close()
 
 
-async def test_a_reader_with_no_configuration_of_its_own_sees_the_space_s():
-    """The case that is broken today: a second process, configured with
-    nothing, must still read the graph the same way as the first."""
-    saved = await memory(meanings=EMPLOYS)
-    log = saved.events
+async def test_a_reader_with_no_configuration_of_its_own_sees_the_space_s(tmp_path):
+    """The case that is broken without this: a second process, configured
+    with nothing, must read the graph the same way as the first.
+
+    Two engines over the same durable log on disk, which is what two
+    processes actually are -- not one log object passed between them.
+    """
+    saved = await memory(meanings=EMPLOYS, tmp=tmp_path)
     try:
         await save_meanings(saved, "default", EMPLOYS)
     finally:
         await saved.close()
     other = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
-                               events=log).open()
+                               events=_kept(tmp_path)).open()
     try:
         held = await read_vocabulary(other, "default")
         assert held.source == "space" and held.meanings is not None
-        assert held.meanings.opposite("works_at") == "employs"
+        assert held.meanings.opposite("works_at") == "employs", \
+            "a process told nothing still reads the vocabulary the space holds"
     finally:
         await other.close()
 
@@ -234,5 +253,47 @@ async def test_a_deleted_space_holds_no_vocabulary():
             await save_meanings(engine, "doomed", EMPLOYS)
         with pytest.raises(NotFound):
             await clear_meanings(engine, "doomed")
+    finally:
+        await engine.close()
+
+
+async def test_an_explicitly_empty_vocabulary_serialises_as_empty_not_as_nothing():
+    """The same truthiness fault in two more places: `record()` and the
+    identity. A reader handed `meanings: null` cannot tell "the space says
+    there are none" from "the space says nothing"."""
+    engine = await memory(meanings=EMPLOYS)
+    try:
+        await save_meanings(engine, "default", RelationMeanings())
+        held = await read_vocabulary(engine, "default")
+        said = held.record()
+        assert said["source"] == "space"
+        assert isinstance(said["meanings"], dict), said["meanings"]
+        assert said["meanings"]["inverse"] == {}, said["meanings"]
+    finally:
+        await engine.close()
+
+
+async def test_a_log_that_may_evict_its_events_cannot_hold_a_vocabulary():
+    """The durability flaw. An event log is allowed to be a ring buffer or
+    to expire by age, so unrelated traffic in another space could evict the
+    one record that held this space's configuration -- and the reader would
+    then be told "the space holds no vocabulary", which by then is false.
+
+    Configuration a reader depends on cannot live somewhere that may
+    forget it, so a log that declares a bound refuses the save outright
+    rather than accepting one it might lose.
+    """
+    from scone_memory.observability.events import InMemoryEventLog as Bounded
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=Bounded(max_events=2),
+                                relation_meanings=EMPLOYS).open()
+    try:
+        with pytest.raises(NoEventLog) as refused:
+            await save_meanings(engine, "alpha", RelationMeanings())
+        assert "keeps at most" in str(refused.value), str(refused.value)
+        held = await read_vocabulary(engine, "alpha")
+        assert held.source == "process"
+        assert "cannot hold" in held.why, held.why
     finally:
         await engine.close()
