@@ -283,6 +283,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
+    tree = p.add_subparsers(dest="fs_command", required=True)
+    t = tree.add_parser("ls", help="what is under a path")
+    t.add_argument("path", nargs="?", default="/")
+    t.add_argument("--limit", type=int, default=100, help="entries to show (1 to 1000)")
+    t.add_argument("--offset", type=int, default=0, help="where to continue a listing")
+    t = tree.add_parser("cat", help="one file of the tree")
+    t.add_argument("path")
+    t.add_argument("--max-bytes", type=int, default=64_000, help="bytes to show; a longer file says it was cut")
+    t = tree.add_parser("find", help="paths whose content answers a query")
+    t.add_argument("query")
+    t.add_argument("--under", default="/", help="a directory to search under")
+    t.add_argument("--limit", type=int, default=10, help="paths to answer with (1 to 200)")
+    t = tree.add_parser("write", help="write a note under /notes, reading it from stdin")
+    t.add_argument("path")
+    t.add_argument("--writable", action="store_true",
+                   help="say so before writing; without it the tree is read only")
+    t.add_argument("--if-version", type=int, help="the version cat reported, to refuse a write onto a newer note")
+
     p = sub.add_parser("bench-code",
                        help="measure what recall does with code, on a corpus of source files (no model called)")
     p.add_argument("root", help="a directory of source files, e.g. src/scone_memory")
@@ -471,6 +490,56 @@ async def tune_command(args: argparse.Namespace, settings: Settings, out) -> int
                        base=settings)
     print(json.dumps(tuned.record()) if args.json else tuned.text(), file=out)
     return 0
+
+
+async def filesystem_command(args: argparse.Namespace, engine: MemoryEngine, stdin, out) -> int:
+    """The tree at the command line. Writing needs --writable, so that a
+    mistyped path cannot write where somebody only meant to look."""
+    from ..filesystem import FilesystemPolicy, MemoryFilesystem, PathConflict, PathRefused
+
+    space = args.space
+    writable = bool(getattr(args, "writable", False))
+    tree = MemoryFilesystem(engine, space, FilesystemPolicy(writable=writable))
+    try:
+        if args.fs_command == "ls":
+            listing = await tree.list(args.path, limit=args.limit, offset=args.offset)
+            if getattr(args, "json", False):
+                print(_ledger_json(listing.record()), file=out)
+                return 0
+            for entry in listing.entries:
+                size = "" if entry.bytes is None else f"  {entry.bytes} bytes"
+                print(f"{entry.path}{'/' if entry.kind == 'directory' else ''}{size}", file=out)
+            if listing.truncated:
+                print(f"({listing.total} in all; --offset {listing.next_offset} for more)", file=out)
+            return 0
+        if args.fs_command == "cat":
+            page = await tree.read(args.path, max_bytes=args.max_bytes)
+            if getattr(args, "json", False):
+                print(_ledger_json(page.record()), file=out)
+                return 0
+            print(page.text, file=out)
+            if page.truncated:
+                print(f"({page.bytes} bytes shown; --max-bytes for more)", file=out)
+            return 0
+        if args.fs_command == "find":
+            found = await tree.search(args.query, under=args.under, limit=args.limit)
+            if getattr(args, "json", False):
+                print(_ledger_json(found.record()), file=out)
+                return 0
+            for hit in found.hits:
+                print(f"{hit.path}: {hit.excerpt}", file=out)
+            if not found.hits:
+                print("nothing found", file=out)
+            return 0
+        text = stdin.read()
+        written = await tree.write(args.path, text, if_version=args.if_version)
+        if getattr(args, "json", False):
+            print(_ledger_json(written.record()), file=out)
+        else:
+            print(f"{written.path}: {written.bytes} bytes, version {written.version}", file=out)
+        return 0
+    except (PathRefused, PathConflict) as refused:
+        raise InvalidInput(str(refused)) from None
 
 
 async def bench_code_command(args: argparse.Namespace, settings: Settings, out) -> int:
@@ -1035,6 +1104,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
         return 0
 
+    if args.command == "fs":
+        return await filesystem_command(args, engine, stdin, out)
     if args.command == "doctor":
         report = await engine.doctor(space)
         if args.json:

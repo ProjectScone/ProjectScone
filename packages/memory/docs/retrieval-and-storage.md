@@ -408,6 +408,11 @@ things are true.
 - **`search`** answers a query in paths, using the engine's ordinary
   recall underneath: a passage written as a note is answered at its note
   path, and a matching claim at the page of its subject.
+- **At the command line**: `scone fs ls /`, `scone fs cat
+  /episodes/1.md`, `scone fs find "desks"`, and `scone fs write
+  /notes/plan.md --writable` reading the note from stdin. Writing needs
+  the flag that says so, so a mistyped path cannot write where somebody
+  only meant to look.
 - **Over HTTP**: `GET /v1/fs`, `GET /v1/fs/read`, `GET /v1/fs/search` and
   `POST /v1/fs/notes`, with the refusals keeping their meanings — a path
   that cannot mean anything is a 422, a write to a tree nobody made
