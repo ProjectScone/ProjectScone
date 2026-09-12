@@ -186,7 +186,7 @@ class MediaDocumentParser:
         # Deferred because the receipt schema uses the public segment type above.
         from .media_checkpoint import CompletedTranscription, read_transcription, save_transcription, transcription_binding
 
-        from .media_windows import WINDOW_BINDING_KEY, transcribe_windows
+        from .media_windows import WINDOW_BINDING_KEY, transcribe_windows, window_ranges
 
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds
@@ -197,13 +197,17 @@ class MediaDocumentParser:
         saved = read_transcription(checkpoints, binding) if checkpoints is not None else None
         audio_wav, duration = await self._decode_audio(data, limits, deadline)
         audio_hash = hashlib.sha256(audio_wav).hexdigest()
+        coverage = saved.coverage if saved is not None else None
         if saved is not None:
             if (saved.audio_sha256 != audio_hash or saved.audio_bytes != len(audio_wav)
                     or saved.duration_seconds != duration):
                 raise InvalidInput('media transcription checkpoint does not match the decoded audio')
+            if coverage is not None and (self._chunk_seconds is None
+                    or coverage.windows != len(window_ranges(audio_wav[44:], self._chunk_seconds))):
+                raise InvalidInput('media transcription checkpoint coverage does not match the audio windows')
             transcript = saved.segments
         elif self._chunk_seconds is not None:
-            transcript, _ = await transcribe_windows(audio_wav, seconds=self._chunk_seconds, binding=binding,
+            transcript, coverage = await transcribe_windows(audio_wav, seconds=self._chunk_seconds, binding=binding,
                 transcribe=self._transcribe, limits=limits, deadline=deadline, checkpoints=checkpoints)
         else:
             remaining = _remaining(deadline)
@@ -217,13 +221,15 @@ class MediaDocumentParser:
         _remaining(deadline)
         if checkpoints is not None and saved is None:
             save_transcription(checkpoints, CompletedTranscription(binding=binding, audio_sha256=audio_hash,
-                audio_bytes=len(audio_wav), duration_seconds=duration, segments=validated))
+                audio_bytes=len(audio_wav), duration_seconds=duration, segments=validated, coverage=coverage))
         _remaining(deadline)
         if self._chunk_seconds is not None:
             from .media_windows import WINDOW_IMPLEMENTATION
             parsed = ParsedDocument.model_validate({**parsed.model_dump(), 'metadata': {
                 **parsed.metadata, 'transcription_windows': WINDOW_IMPLEMENTATION,
-                'chunk_seconds': str(self._chunk_seconds)}})
+                'chunk_seconds': str(self._chunk_seconds),
+                **({'transcription_window_count': str(coverage.windows),
+                    'transcription_empty_windows': str(coverage.empty_windows)} if coverage is not None else {})}})
         return parsed
 
     async def decode_audio(self, data: bytes, filename: str,
