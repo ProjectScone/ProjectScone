@@ -15,7 +15,7 @@ them. The counts are of what was read, and a capped read says so.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -48,6 +48,8 @@ MEANINGS = {
     "unconnected": "entities nothing links to and that link to nothing",
     "thin_predicate": "predicates one claim uses and nothing else does",
     "likely_duplicate": "pairs of names that may be one thing",
+    "contested_instant": ("claims about one thing that begin at the same instant and say different "
+                          "things, so the order they arrived in decided which holds"),
 }
 ORDER = tuple(MEANINGS)
 #: Where to go with each concern. A count is only useful beside the
@@ -60,6 +62,8 @@ WHERE = {
     "unconnected": "/v1/graph/knowledge, which shows what each entity does have",
     "thin_predicate": "/v1/graph/schema, which counts every predicate",
     "likely_duplicate": "/v1/entities/duplicates, which shows every pair and why",
+    "contested_instant": ("scone facts, where the closed one says it was superseded at the same "
+                          "instant; a person decides which is right, since the ledger cannot"),
 }
 
 
@@ -151,6 +155,24 @@ def _found(projection: EntityProjection, limit: int,
     if thin:
         concerns.append(_concern("thin_predicate", [{"predicate": one_line(predicate, 60)}
                                                     for predicate in thin[:limit]], len(thin)))
+
+    # Two claims about one subject and predicate that begin at the same
+    # instant and say different things: valid time cannot separate them, so
+    # arrival order did. Saying the same thing twice at one moment is
+    # agreement, not a collision, so only differing claims count.
+    at_once: dict[tuple[str, str, str], dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for role in projection.roles:
+        claim = said.get(role.fact_id)
+        if claim:
+            at_once[(role.subject_id, role.predicate, role.valid_from)][claim].append(role.fact_id)
+    collided = [(where, claims) for where, claims in at_once.items() if len(claims) > 1]
+    if collided:
+        label = {entity.entity_id: entity.label for entity in projection.entities}
+        concerns.append(_concern("contested_instant", [
+            {"subject": one_line(label.get(subject, subject)), "predicate": one_line(predicate, 60),
+             "began": began,
+             "claims": [{"fact_id": ids[0], "claim": one_line(claim)} for claim, ids in claims.items()]}
+            for (subject, predicate, began), claims in collided[:limit]], len(collided)))
 
     totals = {"entities": len(projection.entities), "relations": len(projection.relations),
               "values": len(projection.attributes), "claims": len(said), "predicates": len(used)}

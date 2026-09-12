@@ -212,9 +212,18 @@ async def place(documents: DocumentStore, space: str, subject: str, predicate: s
         covering=[] if restates else covering,
         restates=restates,
         bound=successor.valid_from if successor else None,
-        bound_reason=f"superseded by fact {successor.fact_id}" if successor else None,
+        bound_reason=_bound_reason(successor, start_dt) if successor else None,
         bound_by=successor.fact_id if successor else None,
     )
+
+
+def _bound_reason(successor: Fact, start: datetime) -> str:
+    """Why a claim stopped holding, as ``truncate`` words it: a claim cut
+    short at the instant it began is a collision, not a history."""
+    if parse_rfc3339(successor.valid_from) == start:
+        return (f"superseded at the same instant by fact {successor.fact_id}, "
+                f"which was recorded later")
+    return f"superseded by fact {successor.fact_id}"
 
 
 def atomic(documents: DocumentStore) -> AbstractAsyncContextManager[None]:
@@ -303,8 +312,14 @@ async def write_resumption(documents: DocumentStore, space: str, resumes: Resump
 async def truncate(documents: DocumentStore, covering: list[Fact], start: str, by_fact_id: int) -> None:
     for rival in covering:
         reason = rival.closed_reason
-        if reason is None or reason.startswith("superseded by fact "):
-            reason = f"superseded by fact {by_fact_id}"
+        if reason is None or reason.startswith("superseded "):
+            # A claim cut short at the very instant it began never held for
+            # any length of time: valid time could not separate the two, so
+            # the order they were recorded in decided it. That is a fact
+            # about the recording rather than about the world, and it reads
+            # differently because it means something different.
+            reason = (f"superseded at the same instant by fact {by_fact_id}, which was recorded later"
+                      if rival.valid_from == start else f"superseded by fact {by_fact_id}")
         await documents.update_fact(
             rival.model_copy(update={"status": "closed", "valid_until": start, "closed_reason": reason, "superseded_by": by_fact_id})
         )

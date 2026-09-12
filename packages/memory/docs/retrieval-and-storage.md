@@ -455,6 +455,23 @@ What both measurements say is that the lever here is the embedder, not
 the question: with a hash embedder the lexical lane is doing the work,
 and cleverness around the query does not add to it.
 
+## Two claims that begin at the same instant
+
+Valid time cannot separate them, so something else does: the order they
+were recorded in. That is a fact about the recording, not about the
+world, and a reader who cannot see the difference will read arrival
+order as history.
+
+- The closed one says **"superseded at the same instant by fact 2, which
+  was recorded later"**, which reads differently from an ordinary
+  supersession because it means something different: the claim never held
+  for any length of time.
+- `graph health` counts them as **`contested_instant`**, with the subject,
+  the predicate, the instant and both claims, and points at `scone facts`.
+  The ledger cannot decide which is right; a person can.
+- Saying the same thing twice at one moment is agreement, not a
+  collision, and is not counted.
+
 ## What an archive says it is
 
 `scone export` writes a header first:
