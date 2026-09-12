@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 import io
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from time import monotonic
 from typing import Protocol
 import wave
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
@@ -28,7 +29,7 @@ from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDo
 
 IMAGE_EXTENSIONS = frozenset({'.png', '.jpg', '.jpeg', '.gif', '.webp', '.tif', '.tiff', '.bmp'})
 AUDIO_EXTENSIONS = frozenset({'.wav', '.mp3', '.flac', '.ogg', '.oga', '.opus', '.aac', '.m4a'})
-VIDEO_EXTENSIONS = frozenset({'.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpeg', '.mpg', '.ts'})
+VIDEO_EXTENSIONS = frozenset({'.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpeg', '.mpg', '.ts', '.mpegts'})
 _DEMUXERS = 'wav,mp3,flac,ogg,aac,mov,matroska,webm,avi,mpeg,mpegts'
 _SAMPLE_RATE = 16_000
 
@@ -150,6 +151,7 @@ class MediaDocumentParser:
     def __init__(self, transcriber: MediaTranscriber | TranscriptionCallback, *,
                  ffmpeg_executable: str, max_duration_seconds: float = 60.0) -> None:
         if (not Path(ffmpeg_executable).is_absolute() or not Path(ffmpeg_executable).is_file()
+                or not os.access(ffmpeg_executable, os.X_OK)
                 or not math.isfinite(max_duration_seconds) or not 0 < max_duration_seconds <= 600):
             raise InvalidInput('configure an existing absolute ffmpeg path and duration in (0, 600]')
         self._transcribe = transcriber if callable(transcriber) else transcriber.transcribe
@@ -189,10 +191,15 @@ class MediaDocumentParser:
         for number, segment in enumerate(transcript, 1):
             if not isinstance(segment, TranscriptionSegment):
                 raise InvalidInput('transcription provider returned an invalid segment')
+            try:
+                segment = TranscriptionSegment.model_validate(segment.model_dump())
+                text_size = len(segment.text.encode('utf-8'))
+            except (ValidationError, UnicodeError):
+                raise InvalidInput('transcription provider returned an invalid segment') from None
             if segment.start_seconds < previous_start or segment.end_seconds > duration + 1 / _SAMPLE_RATE:
                 raise InvalidInput('transcription timestamps are unordered or outside decoded audio')
             previous_start = segment.start_seconds
-            size += len(segment.text.encode()) + (2 if segments else 0)
+            size += text_size + (2 if segments else 0)
             if size > limits.max_text_bytes:
                 raise InvalidInput('transcription exceeds its extracted text byte limit')
             segments.append(DocumentSegment(text=segment.text,

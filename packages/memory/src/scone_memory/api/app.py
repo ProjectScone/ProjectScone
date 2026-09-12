@@ -247,6 +247,7 @@ class FeedbackBody(BaseModel):
 
 
 
+from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
 from ..ingestion.import_service import DocumentImportService
 
@@ -266,6 +267,7 @@ def create_app(
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
     filesystem=None,
+    document_media: DocumentMedia | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -471,7 +473,7 @@ def create_app(
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
-                                              assert_current_space=assert_current_space)
+                                              assert_current_space=assert_current_space, document_media=document_media)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
