@@ -1,7 +1,7 @@
 """What in the graph wants attention, counted and named.
 
-A knowledge graph goes wrong quietly. A claim rests on a source nobody
-can check it against, or on nothing at all. Two hints about an entity's
+A knowledge graph goes wrong quietly. A claim names a source nobody can
+check it against, or names none at all and rests on whoever wrote it. Two hints about an entity's
 kind disagree, so it has none. Nothing says what an entity is. An
 entity sits with nothing linking to it, or a predicate appears once and
 never again, which is what a bad extraction looks like. Two names may be
@@ -41,7 +41,8 @@ MAX_CHECKED = 500
 ATTEMPTS = 2
 #: What each concern means, in one line, for whoever reads the answer.
 MEANINGS = {
-    "ungrounded": "claims whose source is gone or cannot be checked, or that have none",
+    "ungrounded": "claims that name a source but cannot be checked against it",
+    "unsourced": "claims nothing cites a source for, which rest on whoever wrote them",
     "contested_kind": "entities whose kind hints disagree, so they have no kind",
     "kind_unknown": "entities nothing says the kind of",
     "unconnected": "entities nothing links to and that link to nothing",
@@ -53,6 +54,7 @@ ORDER = tuple(MEANINGS)
 #: place that shows the whole of it, or acts on it.
 WHERE = {
     "ungrounded": "scone audit-grounding --flagged-only",
+    "unsourced": "scone facts, which lists every claim and where it came from",
     "contested_kind": "/v1/entities/{id}, which shows what each hint was",
     "kind_unknown": "/v1/entities/{id}, which shows the claims a kind would come from",
     "unconnected": "/v1/graph/knowledge, which shows what each entity does have",
@@ -107,15 +109,19 @@ def _found(projection: EntityProjection, limit: int,
 
     # A claim checked against the sources kept now is judged by that; one
     # past the budget is judged by what the projection recorded, where
-    # "quoted" is all the record can say.
-    resting = [(role.fact_id, grounding[role.fact_id] if role.fact_id in grounding else role.grounding)
-               for role in projection.roles
-               if (grounding[role.fact_id] != "quote_verified" if role.fact_id in grounding
-                   else role.grounding != "quoted")]
-    if resting:
-        concerns.append(_concern("ungrounded", [
-            {"fact_id": fact_id, "claim": one_line(said.get(fact_id, "")), "grounding": how}
-            for fact_id, how in resting[:limit]], len(resting)))
+    # "quoted" is all the record can say. A claim that names no source is
+    # not a failed check: it rests on whoever wrote it, which is a
+    # different thing to know.
+    how_of = {role.fact_id: grounding[role.fact_id] if role.fact_id in grounding else role.grounding
+              for role in projection.roles}
+    unchecked = [(fact_id, how) for fact_id, how in how_of.items()
+                 if how not in ("quote_verified", "quoted", "stated", "unsourced")]
+    unsourced = [(fact_id, how) for fact_id, how in how_of.items() if how in ("stated", "unsourced")]
+    for kind, found in (("ungrounded", unchecked), ("unsourced", unsourced)):
+        if found:
+            concerns.append(_concern(kind, [
+                {"fact_id": fact_id, "claim": one_line(said.get(fact_id, "")), "grounding": how}
+                for fact_id, how in found[:limit]], len(found)))
 
     contested = [entity for entity in projection.entities if entity.kind_status == "conflict"]
     if contested:
@@ -208,7 +214,7 @@ async def _look(engine: "MemoryEngine", space: str, limit: int, status: "StatusM
     for concern in concerns:
         shown = ", ".join(_example(example) for example in cast(list[dict[str, object]], concern["examples"]))
         lines.append(f"{concern['kind']}: {concern['count']} "
-                     f"{'claims' if concern['kind'] == 'ungrounded' else 'found'} "
+                     f"{'claims' if concern['kind'] in ('ungrounded', 'unsourced') else 'found'} "
                      f"({concern['meaning']}): {shown}; see {concern['where']}")
     tail = [] if concerns else [f"result: nothing to fix{'' if complete else ' among the facts read'}"]
     text = _fit([*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,

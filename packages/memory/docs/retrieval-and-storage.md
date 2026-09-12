@@ -743,13 +743,16 @@ answer. It reads and changes nothing.
 | `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
 | `status`, `as_of` | `current`, now | Which facts count, and when |
 
-- **ungrounded**: claims whose source is gone, cannot be checked against
-  them (no quote), or never existed. Grounding is checked against the
-  sources kept now, not against what the projection recorded when the
-  claim was written, so a claim whose source was forgotten reads as
-  `quote_source_missing`. At most 500 claims are checked that way; past
-  that the projection's own record is used and the coverage says
-  `grounding_checked N of M`.
+- **ungrounded**: claims that name a source but cannot be checked against
+  it, because the source is gone, the claim has no quote, or the quote is
+  not in the source. Grounding is checked against the sources kept now,
+  not against what the projection recorded when the claim was written, so
+  a claim whose source was forgotten reads as `quote_source_missing`. At
+  most 500 claims are checked that way; past that the projection's record
+  is used and the coverage says `grounding_checked N of M`.
+- **unsourced**: claims nothing cites a source for. They rest on whoever
+  wrote them, which is how a claim asserted by hand is meant to work, so
+  they are counted apart from claims whose checks failed.
 - **contested_kind**: entities whose kind hints disagree, so they have no
   kind. **kind_unknown**: entities nothing implies a kind for.
 - **unconnected**: entities nothing links to and that link to nothing.

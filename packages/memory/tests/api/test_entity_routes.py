@@ -891,8 +891,9 @@ def test_health_counts_what_wants_attention(seeded):
     found = client.get("/v1/graph/health", params={"limit": 2}, headers=auth()).json()
     assert found["status"] == "concerns" and found["space"] == "alpha"
     kinds = {concern["kind"]: concern["count"] for concern in found["concerns"]}
-    assert kinds["ungrounded"] >= 1 and set(kinds) <= {"ungrounded", "contested_kind", "kind_unknown",
-                                                       "unconnected", "thin_predicate", "likely_duplicate"}
+    assert kinds["unsourced"] >= 1 and set(kinds) <= {"ungrounded", "unsourced", "contested_kind",
+                                                      "kind_unknown", "unconnected", "thin_predicate",
+                                                      "likely_duplicate"}
     assert all(len(concern["examples"]) <= 2 for concern in found["concerns"])
     assert client.get("/v1/graph/health", params={"limit": 0}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2

@@ -29,18 +29,21 @@ def concerns(found) -> dict[str, int]:
     return {concern["kind"]: concern["count"] for concern in found.concerns}
 
 
-async def test_a_claim_resting_on_nothing_is_counted_and_named():
-    """A claim from a source with no quote cannot be checked against it;
-    one with no source at all rests on whoever wrote it."""
+async def test_a_claim_that_cannot_be_checked_is_counted_apart_from_one_nobody_sourced():
+    """A claim from a source with no quote cannot be checked against it. A
+    claim with no source rests on whoever wrote it, which is a different
+    thing to know, so the two are counted apart."""
     engine = await engine_with(("alice chen", "works_at", "Acme Robotics"))
     added = await engine.remember("alpha", "Alice Chen works at Acme Robotics, everyone says.")
     await engine.assert_fact("alpha", "bob stone", "works_at", "Globex", valid_from=DAY,
                              source_episode_id=added.episode_id)
     found = await graph_health(engine, "alpha")
-    assert concerns(found)["ungrounded"] == 2
+    assert concerns(found) | {"ungrounded": 1, "unsourced": 1} == concerns(found)
     ungrounded = next(c for c in found.concerns if c["kind"] == "ungrounded")
-    assert any("bob stone works_at Globex" in example["claim"] for example in ungrounded["examples"])
-    assert "ungrounded: 2 claims" in found.text
+    assert [example["claim"] for example in ungrounded["examples"]] == ["bob stone works_at Globex"]
+    unsourced = next(c for c in found.concerns if c["kind"] == "unsourced")
+    assert [example["claim"] for example in unsourced["examples"]] == ["alice chen works_at Acme Robotics"]
+    assert "ungrounded: 1 claims" in found.text and "unsourced: 1 claims" in found.text
 
 
 async def test_entities_whose_kinds_disagree_are_named():
@@ -149,6 +152,7 @@ async def test_a_claim_whose_source_was_forgotten_no_longer_reads_as_grounded():
     ungrounded = next(c for c in found.concerns if c["kind"] == "ungrounded")
     assert ungrounded["count"] == 2
     assert all(example["grounding"] == "quote_source_missing" for example in ungrounded["examples"])
+    assert not any(c["kind"] == "unsourced" for c in found.concerns), "these named a source; it is gone"
     assert found.status == "concerns"
 
 
@@ -232,9 +236,9 @@ async def test_each_concern_says_where_to_see_the_whole_of_it():
     engine = await engine_with(("alice chen", "works_at", "Acme Robotics"), ("project atlas", "status", "ready"))
     found = await graph_health(engine, "alpha")
     where = {concern["kind"]: concern["where"] for concern in found.concerns}
-    assert where["ungrounded"] == "scone audit-grounding --flagged-only"
+    assert where["unsourced"].startswith("scone facts,")
     assert where["unconnected"].startswith("/v1/graph/knowledge")
-    assert "see scone audit-grounding --flagged-only" in found.text
+    assert "see scone facts," in found.text
 
 
 def test_every_concern_points_at_something_that_exists():
@@ -256,6 +260,7 @@ def test_every_concern_points_at_something_that_exists():
         if where.startswith("/v1/"):
             assert where.split(",")[0].replace("{id}", "{entity_id}") in routes, kind
         else:
-            said = where.split()
+            # The words before the comma are the command; the rest says why.
+            said = where.split(",")[0].split()
             assert said[0] == "scone", kind
             build_parser().parse_args(said[1:])
