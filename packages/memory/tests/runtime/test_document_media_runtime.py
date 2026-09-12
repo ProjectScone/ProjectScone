@@ -155,6 +155,21 @@ def test_chunk_policy_is_opt_in_and_binds_the_host_revision(tmp_path):
     assert disabled.revision == whole.revision
 
 
+def test_whole_file_revision_matches_the_pre_window_host_fixture(monkeypatch):
+    import scone_memory.runtime.document_media as runtime
+
+    executable = '/opt/scone/fixture-ffmpeg'
+    config = runtime.DocumentMediaConfig(schema_version=1, base_url='http://127.0.0.1:9876/v1',
+        model='selected-local-model', model_revision='weights-v1', ffmpeg_executable=executable)
+    is_file, access = Path.is_file, os.access
+    monkeypatch.setattr(runtime, '_read', lambda _: config)
+    monkeypatch.setattr(runtime, '_decoder_digest', lambda _: 'a' * 64)
+    monkeypatch.setattr(Path, 'is_file', lambda path: str(path) == executable or is_file(path))
+    monkeypatch.setattr(os, 'access', lambda path, mode: str(path) == executable or access(path, mode))
+    # Captured from the loader at 4ea58e8, before audio window configuration existed.
+    assert load_document_media('unused').revision == 'media-421b087ae19297b2ca4d743cc8dab3b53d276c46e7b306af1ba824fa05f64422'
+
+
 @pytest.mark.parametrize('chunk_seconds', [True, 0, 121, '30', 1.5])
 def test_invalid_chunk_configuration_is_refused_without_contact(tmp_path, chunk_seconds):
     with pytest.raises(ValueError, match='configuration contents'):
