@@ -531,7 +531,11 @@ bounds, and `coverage.implied_capped` says when a walk stopped early.
 
 Where to see it: `implied` in the knowledge view, `follows` on an
 entity's page, and `follows:` lines in the packet `graph context` writes
-for a model, each naming what it followed from.
+for a model, each naming what it followed from. `scone graph meanings`
+prints the vocabulary this process is running with, and the bounds it
+keeps; it says "as this process is configured", because a vocabulary is
+an engine option and two processes reading one store can disagree about
+what follows.
 
 Names are one entity when their keys match: case folded and spacing
 collapsed, nothing looser. `Lisbon` and `Lisboa` stay two entities. A value
