@@ -27,7 +27,8 @@ def test_the_same_tools_are_offered_in_every_rendering():
     assert [t.name for t in MEMORY_TOOLS] == ["search_memory", "add_memory", "read_profile", "trace_memory",
                                             "graph_context", "explain_entity", "connect_entities", "graph_schema",
                                             "graph_match", "graph_overview", "graph_changes", "find_duplicates",
-                                            "graph_health", "temporal_answer"]
+                                            "graph_health", "temporal_answer",
+                                            "list_path", "read_path", "search_paths", "write_note"]
     openai = openai_schema()
     anthropic = anthropic_schema()
     assert [t["function"]["name"] for t in openai] == [t["name"] for t in anthropic]

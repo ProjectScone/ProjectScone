@@ -26,6 +26,8 @@ from ..memory.engine import MemoryEngine
 MAX_ITEMS = 20
 #: The graph tools' bounds, shared with the HTTP routes, MCP and the CLI.
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION  # noqa: E402
+from ..filesystem import (DEFAULT_ENTRIES, DEFAULT_HITS, FilesystemPolicy,  # noqa: E402
+                          MAX_FILE_BYTES)
 from ..entities.match import DEFAULT_ROWS, MAX_PATTERNS, MAX_ROWS  # noqa: E402
 from ..entities.overview import DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_COMMUNITIES, MAX_FACTS_EACH  # noqa: E402
 from ..entities.changes import DEFAULT_CHANGES, MAX_CHANGES  # noqa: E402
@@ -255,11 +257,59 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                           "description": f"Byte budget for the answer text. Defaults to {TEMPORAL_BYTES}."},
         }, ["question"]),
     ),
+    ToolSpec(
+        name="list_path",
+        summary=("What is under a path in this space's tree: /episodes, /facts, /entities and /notes. "
+                 "The tree is a view of memory, so listing it changes nothing."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "The directory, starting with /. Defaults to /."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "Entries to answer with, 1 to 1000. Defaults to 100."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Where to continue a listing."},
+        }, []),
+    ),
+    ToolSpec(
+        name="read_path",
+        summary=("One file of the tree: an episode exactly as it was stored, every claim about a subject "
+                 "with its facts cited, an entity's relations and values, or a note. Reading changes nothing."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "The file, starting with / and ending .md"},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1_000_000,
+                          "description": "Bytes to answer with. Defaults to 64000; a longer file says it was cut."},
+        }, ["path"]),
+    ),
+    ToolSpec(
+        name="search_paths",
+        summary=("Paths whose content answers a query, best first, each with the words that matched. "
+                 "The searching is ordinary recall; what it adds is where to look."),
+        parameters=_schema({
+            "query": {"type": "string", "description": "What to look for."},
+            "under": {"type": "string", "description": "A directory to search under. Defaults to /."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                      "description": "Paths to answer with, 1 to 200. Defaults to 10."},
+        }, ["query"]),
+    ),
+    ToolSpec(
+        name="write_note",
+        summary=("Write a note under /notes. A note is an ordinary memory whose source is its path, so it "
+                 "is recalled and cited like anything else. Pass the version a read gave you and the write "
+                 "is refused if the note moved since; without it, the newest note stands."),
+        parameters=_schema({
+            "path": {"type": "string", "description": "Where to write, under /notes, ending .md"},
+            "text": {"type": "string", "description": "What the note says."},
+            "if_version": {"type": "integer", "minimum": 1,
+                           "description": "The version read_path gave for this note."},
+        }, ["path", "text"]),
+    ),
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
                           "graph_overview", "graph_changes", "find_duplicates", "graph_health",
                           "temporal_answer"})
+#: The tree. ``write_note`` is offered only when a policy allows writing:
+#: an absent tool is a clearer refusal than an error a model may argue
+#: with, and a model that cannot see a tool does not plan around it.
+_TREE_TOOLS = frozenset({"list_path", "read_path", "search_paths", "write_note"})
 
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
@@ -320,10 +370,20 @@ def check(spec: ToolSpec, arguments: Mapping[str, Any]) -> Optional[str]:
 class ToolBox:
     """The tools bound to one engine and one space."""
 
-    def __init__(self, engine: MemoryEngine, space: str, *, tools: Optional[Sequence[str]] = None) -> None:
+    def __init__(self, engine: MemoryEngine, space: str, *, tools: Optional[Sequence[str]] = None,
+                 filesystem: "FilesystemPolicy | None" = None) -> None:
+        from ..filesystem import FilesystemPolicy, MemoryFilesystem
+
         self.engine = engine
         self.space = space
-        self.tools = _chosen(tools)
+        #: The tree these tools see, under the policy the owner gave. Read
+        #: only unless they said otherwise, and the writing tool is not
+        #: offered at all when it is: a model that cannot see a tool does
+        #: not plan around it, which is a clearer refusal than an error.
+        self.filesystem = MemoryFilesystem(engine, space, filesystem or FilesystemPolicy())
+        chosen = _chosen(tools)
+        self.tools = tuple(tool for tool in chosen
+                           if tool.name != "write_note" or self.filesystem.policy.writable)
         self._by_name = {tool.name: tool for tool in self.tools}
 
     def openai(self) -> list[dict]:
@@ -350,6 +410,8 @@ class ToolBox:
     async def _call(self, name: str, arguments: Mapping[str, Any]) -> dict:
         if name in _GRAPH_TOOLS:
             return await self._graph(name, arguments)
+        if name in _TREE_TOOLS:
+            return await self._tree(name, arguments)
         if name == "search_memory":
             found = await self.engine.recall(
                 self.space, arguments["query"],
@@ -379,6 +441,28 @@ class ToolBox:
             "recent": [{"episode_id": r.episode_id, "text": r.excerpt, "created_at": r.created_at}
                        for r in profile.recent],
         }
+
+    async def _tree(self, name: str, arguments: Mapping[str, Any]) -> dict:
+        """The tree, under its policy. Refusals come back as answers with
+        the reason in them, because a model reads a refusal and tries
+        something else where an exception would end its turn."""
+        if name == "list_path":
+            listing = await self.filesystem.list(str(arguments.get("path") or "/"),
+                                                 limit=int(arguments.get("limit") or DEFAULT_ENTRIES),
+                                                 offset=int(arguments.get("offset") or 0))
+            return listing.record()
+        if name == "read_path":
+            page = await self.filesystem.read(str(arguments["path"]),
+                                              max_bytes=int(arguments.get("max_bytes") or MAX_FILE_BYTES))
+            return page.record()
+        if name == "search_paths":
+            found = await self.filesystem.search(str(arguments["query"]),
+                                                 under=str(arguments.get("under") or "/"),
+                                                 limit=int(arguments.get("limit") or DEFAULT_HITS))
+            return found.record()
+        written = await self.filesystem.write(str(arguments["path"]), str(arguments["text"]),
+                                              if_version=arguments.get("if_version"))
+        return written.record()
 
     async def _graph(self, name: str, arguments: Mapping[str, Any]) -> dict:
         """The graph tools read the current projection at one instant and

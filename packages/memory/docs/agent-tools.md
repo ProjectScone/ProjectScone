@@ -43,6 +43,17 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_graph_match`, `memory_graph_overview`, `memory_graph_changes` and
 `memory_entity_duplicates`, beside the computed `memory_temporal_answer`:
 
+- `list_path`, `read_path` and `search_paths` walk the space's tree:
+  `/episodes`, `/facts`, `/entities` and `/notes`. Listing and reading
+  change nothing, a path that tries to leave the space is refused rather
+  than resolved, and a search answers in paths, using ordinary recall
+  underneath.
+- `write_note` writes under `/notes`, and is **not offered at all** unless
+  the toolbox was given a filesystem policy that allows writing: a model
+  that cannot see a tool does not plan around it, which is a clearer
+  refusal than an error it may argue with. A note is an ordinary memory
+  whose source is its path. Passing the `version` a read gave refuses a
+  write onto a note that moved since.
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. Lines beginning
   `follows:` are worked out from the claims rather than claimed, and say
