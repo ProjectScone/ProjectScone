@@ -56,10 +56,12 @@ _BINDS = frozenset({"function_declaration", "generator_function_declaration",
 _FUNCTIONS = frozenset({"function_declaration", "generator_function_declaration",
                         "method_definition", "arrow_function", "function_expression",
                         "program"})
-#: Scopes that hold `let`, `const`, a parameter or a catch binding.
-_BLOCKS = frozenset({"statement_block", "for_statement", "for_in_statement",
-                     "catch_clause", "class_body"})
-_OPENS = _FUNCTIONS | _BLOCKS
+#: There is no list of scopes. Every node opens one and binds whatever is
+#: declared directly in it, because a whitelist of node types can only be
+#: as complete as its author and anything missing from it fell through to
+#: the file's own declarations -- a switch body and a generator
+#: expression each did. It failed **open**, and for a graph that means
+#: inventing an edge. This cannot be incomplete in that direction.
 #: A declaration whose value is a function: `const keep = (p) => p`. Most
 #: modern TypeScript writes functions this way and the line reader reports
 #: none of them -- 80 in the 60 files first measured.
@@ -118,7 +120,13 @@ def _declares(node: "Node", source: bytes) -> list[str]:
     if node.type in ("required_parameter", "optional_parameter"):
         pattern = node.child_by_field_name("pattern")
         return _pattern(pattern, source) if pattern is not None else []
-    if node.type in _PATTERNS or node.type == "identifier":
+    # Deliberately **not** a bare identifier. Once every node opens a
+    # scope, treating any identifier as a binding made the callee of
+    # `helper(p)` bind `helper` in the call's own scope and shadow the
+    # declaration it names. An identifier binds only where the grammar
+    # puts it in a binding position, which is what the callers below
+    # know and this function cannot.
+    if node.type in _PATTERNS:
         return _pattern(node, source)
     return []
 
@@ -189,13 +197,25 @@ def _declared(node: "Node") -> Optional[str]:
     return None
 
 
-def _bindings(scope: "Node", source: bytes, function: bool):
+def _body_of_a_function(node: "Node") -> bool:
+    """Whether ``node`` is the body a `var` hoists to.
+
+    Not the function itself: a parameter default is evaluated in the
+    parameter environment, which cannot see the body's `var`s.
+    `function caller(x = leaf()) { var leaf = … }` really does call the
+    outer `leaf`, and hoisting to the function hid it.
+    """
+    return node.type == "statement_block" and node.parent is not None \
+        and node.parent.type in _FUNCTIONS
+
+
+def _bindings(scope: "Node", source: bytes):
     """Every name bound directly in ``scope``, with the node that binds it.
 
-    ``var`` is collected only by a function scope, and is looked for
-    through every block inside it, because that is where JavaScript puts
-    it. ``let``, ``const``, parameters and catch bindings belong to the
-    block that wrote them.
+    ``let``, ``const``, parameters and catch bindings belong to the block
+    that wrote them. ``var`` belongs to the enclosing function's **body**
+    and is looked for through every block inside it, because that is
+    where JavaScript puts it.
     """
     for child in _through(scope):
         for name in _declares(child, source):
@@ -203,6 +223,11 @@ def _bindings(scope: "Node", source: bytes, function: bool):
     for child in scope.children:
         if child.type == "formal_parameters":
             for one in child.children:
+                # A binding position: `(a, {b}, ...c)` are all bindings
+                # whatever their node type, which is why this asks the
+                # pattern reader rather than the declaration reader.
+                for name in _pattern(one, source):
+                    yield name, one
                 for name in _declares(one, source):
                     yield name, one
     # `p => p()` has no formal_parameters: the parameter is a field.
@@ -210,7 +235,7 @@ def _bindings(scope: "Node", source: bytes, function: bool):
     if parameter is not None:
         for name in _pattern(parameter, source):
             yield name, parameter
-    if function:
+    if _body_of_a_function(scope) or scope.type == "program":
         for name, node in _hoisted(scope, source):
             yield name, node
 
@@ -233,28 +258,31 @@ def _hoisted(node: "Node", source: bytes):
         yield from _hoisted(child, source)
 
 
+def _qualified(holder: Optional[str], path: str, name: str) -> str:
+    """What a declaration is called, given what holds it.
+
+    A nested `function worker` inside `caller` is `caller.worker`, not
+    `worker`: it was given the same name as an unrelated exported
+    `worker` beside it, so a blast radius named one when only the other
+    called it. Classes already read this way and functions did not.
+    """
+    return f"{holder}.{name}" if holder else f"{path}:{name}"
+
+
 def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional[str]]],
-          imports: dict[str, str], holder: Optional[str], inside: Optional[str],
-          seen: set[str], say) -> None:
-    opened = node.type in _OPENS
-    if opened:
-        scope: dict[str, Optional[str]] = {}
-        for name, binder in _bindings(node, source, node.type in _FUNCTIONS):
-            # A declaration is a thing the graph can name; any other
-            # binding is a value, and a call to it is nobody's edge.
-            whole = None
-            if _declared(binder) is not None:
-                whole = f"{path}:{inside}.{name}" if inside else f"{path}:{name}"
-                # Keyed on the claim, not on the node that made it: a
-                # `var` is bound in its block and hoisted to its
-                # function, so the same declaration is reached twice and
-                # said twice -- 120 duplicate claims over 85 files.
-                if whole not in seen:
-                    seen.add(whole)
-                    say(f"{path}:{inside}" if inside else path, DEFINES, whole,
-                        _line(binder, source))
-            scope.setdefault(name, whole)
-        stack.append(scope)
+          imports: dict[str, str], holder: Optional[str], seen: set[str], say) -> None:
+    scope: dict[str, Optional[str]] = {}
+    for name, binder in _bindings(node, source):
+        # A declaration is a thing the graph can name; any other binding
+        # is a value, and a call to it is nobody's edge.
+        whole = None
+        if _declared(binder) is not None:
+            whole = _qualified(holder, path, name)
+            if whole not in seen:
+                seen.add(whole)
+                say(holder or path, DEFINES, whole, _line(binder, source))
+        scope.setdefault(name, whole)
+    stack.append(scope)
 
     if node.type == "call_expression" and holder is not None and not node.has_error:
         callee = node.child_by_field_name("function")
@@ -263,8 +291,8 @@ def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional
             target: Optional[str] = None
             for depth, one in enumerate(reversed(stack)):
                 if name in one:
-                    # Only the outermost scope holds this file's own
-                    # declarations; anything nearer is a value.
+                    # Only the outermost scope is the file itself;
+                    # anything nearer is a value, not a declaration.
                     target = one[name] if depth == len(stack) - 1 else None
                     break
             else:
@@ -273,16 +301,13 @@ def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional
                 say(holder, CALLS, target, _line(node, source))
 
     for child in node.children:
-        within, mine = inside, holder
+        mine = holder
         if _declared(child) is not None:
             name = next(iter(_declares(child, source)), None)
             if name is not None:
-                mine = f"{path}:{inside}.{name}" if inside else f"{path}:{name}"
-                if child.type in ("class_declaration", "abstract_class_declaration"):
-                    within = f"{inside}.{name}" if inside else name
-        _walk(child, source, path, stack, imports, mine, within, seen, say)
-    if opened:
-        stack.pop()
+                mine = _qualified(holder, path, name)
+        _walk(child, source, path, stack, imports, mine, seen, say)
+    stack.pop()
 
 
 def syntax_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
@@ -308,5 +333,5 @@ def syntax_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
 
     tree = Parser(_TSX if GRAMMARS[suffix] == "tsx" else _TS).parse(source)
     _walk(tree.root_node, source, path, [], _imports(tree.root_node, source, path),
-          None, None, set(), say)
+          None, set(), say)
     return tuple(found)
