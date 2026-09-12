@@ -85,7 +85,8 @@ class DocumentIngestionWorkflow:
     async def _extract(self, context: StepContext) -> JSONValue:
         original, raw = await self._memory.attachment(context.space, cast(str, context.inputs))
         filename = extraction_filename(original, cast(str | None, context.scope.get('filename')))
-        manifest = await prepare_document(raw, filename, parser=self._parser, limits=self._limits)
+        manifest = await prepare_document(raw, filename, parser=self._parser, limits=self._limits,
+                                          extraction_checkpoint=context.checkpoints)
         retained = await self._memory.attach(context.space, encode_manifest(manifest),
                                               'application/json', filename='document-provenance.json')
         if retained.media_type != 'application/json':

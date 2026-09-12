@@ -181,6 +181,13 @@ requires no OCR executable, model, network service or optional rendering package
 
 ## Resume completed pages after interruption
 
+The generic `DocumentIngestionWorkflow` and configured HTTP document jobs now
+retain completed OCR page observations inside their existing extraction-step
+journal; see [generic document recovery](file-ingestion.md#durable-extraction-checkpoints).
+They keep the whole-extraction deadline per attempt and the generic document
+manifest. The separate interface below provides independently timed page steps
+and PDF-specific receipts.
+
 Install `scone-memory[pdf-ocr,agents]` and use `PdfOcrWorkflow` for scans that
 need durable page progress. Retain the source first and supply a persistent
 32-byte journal key and an application revision covering the recognizer's

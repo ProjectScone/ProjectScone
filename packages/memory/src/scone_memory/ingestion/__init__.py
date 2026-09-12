@@ -16,6 +16,7 @@ __all__ += ["HtmlImageContext", "image_contexts_from_html"]
 
 from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
 from .document_source import DocumentSource
+from .extraction_checkpoint import ExtractionCheckpoints, CheckpointedDocumentParser, CheckpointedPdfParser
 from .formats.registry import BuiltinDocumentParser, DocumentParser
 from .formats.types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument
 from .formats.table_types import DocumentTableCell, DocumentTableHeader, DocumentTableContext
@@ -23,6 +24,8 @@ from .formats.table_types import DocumentTableCell, DocumentTableHeader, Documen
 __all__ += ['DocumentIngested', 'DocumentProvenance', 'DocumentSource', 'document_provenance', 'ingest_document',
             'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'DocumentTextRegion', 'ParsedDocument',
             'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested', 'DocumentTableCell', 'DocumentTableHeader', 'DocumentTableContext']
+
+__all__ += ['ExtractionCheckpoints', 'CheckpointedDocumentParser', 'CheckpointedPdfParser']
 
 __all__ += ['DirectorySync', 'DirectorySyncResult', 'SourceReceipt', 'ScanLimits']
 
