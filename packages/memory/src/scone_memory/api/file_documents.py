@@ -7,13 +7,13 @@ from typing import AsyncContextManager
 
 from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document, digest
 from ..ocr.tables import infer_tables
 from ..core.errors import InvalidInput
-from ..ingestion.document_media import DocumentMedia
+from ..ingestion.document_media import DocumentMedia, MEDIA_DOCUMENT_EXTENSIONS
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection, ocr_choices
 from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
 from ..ingestion.formats.types import DocumentLimits
@@ -104,3 +104,38 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             'manifest_sha256': result.manifest.attachment_id,
             'page_text_sha256': digest(segment.text.encode('utf-8')),
             'layout': layout.model_dump(mode='json')})
+
+
+    @app.get('/v1/episodes/{episode_id}/document/audio')
+    async def audio_evidence(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
+                             space: str = Depends(space_for)) -> Response:
+        if document_media is None:
+            raise InvalidInput('document media decoding is not configured on this server')
+        async with ingest_slot(1):
+            result = await document_provenance(engine, space, episode_id)
+            metadata = result.metadata
+            if ('.' + result.format not in MEDIA_DOCUMENT_EXTENSIONS or result.parser != 'media-transcription'
+                    or metadata.get('extraction') != 'audio-only'
+                    or metadata.get('transcriber_revision') != document_media.revision
+                    or not metadata.get('audio_wav_sha256') or not metadata.get('audio_wav_bytes')):
+                raise InvalidInput('document has no matching normalized audio evidence')
+            _, raw = await engine.attachment(space, result.original.attachment_id)
+            assert_current_space(request, space)
+            audio = await document_media.media_parser.decode_audio(raw, result.filename)
+            if (digest(audio) != metadata['audio_wav_sha256']
+                    or str(len(audio)) != metadata['audio_wav_bytes']):
+                raise InvalidInput('decoded audio does not match the retained transcription input')
+            current = await engine.episode(space, episode_id)
+            linked = {attachment.attachment_id for attachment in current.attachments}
+            if (current.kind != 'file'
+                    or current.metadata.get('document_original') != result.original.attachment_id
+                    or current.metadata.get('document_manifest') != result.manifest.attachment_id
+                    or current.metadata.get('document_format') != result.format
+                    or not {result.original.attachment_id, result.manifest.attachment_id} <= linked
+                    or current.content != '\n\n'.join(s.text for s in result.segments)):
+                raise InvalidInput('document changed during audio verification')
+            assert_current_space(request, space)
+        return Response(audio, media_type='audio/wav', headers={
+            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': 'attachment; filename="transcription-audio.wav"',
+        })

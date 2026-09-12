@@ -176,3 +176,51 @@ async def test_video_import_keeps_audio_only_source_times(media_service, tmp_pat
     assert evidence['segments'][0]['metadata']['end_seconds'] == '0.15'
     assert len(calls) == 1
     assert (await client.get(evidence['download_path'])).content == raw
+
+
+async def test_normalized_playback_matches_transcriber_input_without_inference(media_service):
+    from hashlib import sha256
+    client, _, _, calls, _ = media_service
+    uploaded = await client.post('/v1/attachments', content=audio_bytes(), headers={'content-type':'application/octet-stream'})
+    indexed = await client.post('/v1/documents', json={'attachment_id':uploaded.json()['attachment_id'], 'filename':'clip.wav'})
+    assert indexed.status_code == 200, indexed.text
+    episode_id = indexed.json()['added']['episode_id']
+    provenance = (await client.get(f'/v1/episodes/{episode_id}/document')).json()
+    expected = calls[0]
+    assert provenance['metadata']['audio_wav_sha256'] == sha256(expected).hexdigest()
+    assert provenance['metadata']['audio_wav_bytes'] == str(len(expected))
+    path = f'/v1/episodes/{episode_id}/document/audio'
+    audio = await client.get(path, headers={'authorization':'Bearer reader'})
+    assert audio.status_code == 200, audio.text
+    assert audio.headers['content-type'] == 'audio/wav'
+    assert audio.headers['cache-control'] == 'no-store'
+    assert audio.content == expected
+    assert len(calls) == 1, 'playback must never transcribe'
+    assert (await client.get(path, headers={'authorization':'Bearer other'})).status_code == 404
+    await client.delete(f'/v1/episodes/{episode_id}')
+    assert (await client.get(path)).status_code == 410
+
+
+@pytest.mark.parametrize('change', ['bytes', 'forgotten', 'scope'])
+async def test_normalized_playback_refuses_changed_audio_or_final_source(media_service, monkeypatch, change):
+    client, engine, media, _, app = media_service
+    uploaded = await client.post('/v1/attachments', content=audio_bytes(), headers={'content-type':'application/octet-stream'})
+    indexed = await client.post('/v1/documents', json={'attachment_id':uploaded.json()['attachment_id'], 'filename':'clip.wav'})
+    episode_id = indexed.json()['added']['episode_id']
+    original = media.media_parser.decode_audio
+    decoded = []
+    async def changed(*args, **kwargs):
+        audio = await original(*args, **kwargs)
+        decoded.append(True)
+        if change == 'bytes':
+            return audio[:-1] + bytes([audio[-1] ^ 1])
+        if change == 'forgotten':
+            await engine.forget('alpha', episode_id)
+        else:
+            app.state.keys['writer'] = 'beta'
+        return audio
+    monkeypatch.setattr(media.media_parser, 'decode_audio', changed)
+    response = await client.get(f'/v1/episodes/{episode_id}/document/audio')
+    assert decoded == [True]
+    assert response.status_code == {'bytes':422, 'forgotten':410, 'scope':401}[change], response.text
+    assert response.headers['content-type'].startswith('application/json')
