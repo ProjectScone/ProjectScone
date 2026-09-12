@@ -78,3 +78,70 @@ See the framework [contribution guide](../../CONTRIBUTING.md),
 [citation formats](../../CITING.md), and [citation metadata](../../CITATION.cff).
 Research and academic use must credit ProjectScone contributors, JudgeHuman and ProjectScone
 as required by the included [license](LICENSE).
+
+## Agent workflow resources
+
+The independently installed client includes typed catalog, plan, and run
+resources for hosts that advertise the corresponding `agents.*` capabilities.
+`expected_space` verifies responses and mutation admission; it does not override
+the space assigned to the bearer key.
+
+```python
+from scone import Scone, ModelTask, TaskPlan
+
+with Scone("http://127.0.0.1:7437", api_key="your-space-key") as memory:
+    agents = memory.agents(expected_space="alpha")
+    choices = agents.catalog()
+    # Use agent/model IDs actually returned by this host's catalog.
+    plan = TaskPlan("research", (
+        ModelTask("answer", "researcher", "local-careful", "Answer with evidence."),
+    ))
+    saved = agents.save_plan(plan, expected_revision=0)
+    progress = agents.start("research-1", plan=saved, question="What changed?")
+    original = agents.request("research-1")
+    agents.status("research-1").match(original)
+```
+
+`agents.plans()` and `agents.runs()` return one bounded page with an explicit
+`next_after` cursor. `agents.plan(id)`, `agents.policy()`, and
+`agents.cancel(run_id)` provide inspection and cancellation. `HumanInput` tasks
+and `HandoffPlan`/`HandoffAgent` preserve their native plan formats and explicit
+model choices. Resource construction is local; reads and plan saves do not
+execute a model. Only an explicit `start` submits a run. Errors never trigger an
+automatic retry, resume, or alternate model selection.
+
+New workflow response models reject malformed scalars, mismatched identities,
+and changed acknowledgement bindings. The client preserves server HTTP errors
+and refuses redirects. JSON is encoded as UTF-8 so valid multibyte inputs do not
+expand into ASCII escapes beyond the server's request budget. Python 3.9 remains
+supported, and the distribution includes `py.typed` for static type checking.
+
+Human inputs use separate reply and execution operations:
+
+```python
+pending, = agents.inputs("run-1")
+answered = agents.respond(pending, response="Proceed with the careful analysis.")
+# Persist this continuation ID and selected reply for an explicit retry.
+status = agents.continue_run(
+    "run-1", continuation_id="approval-1", responses=(answered,),
+)
+```
+
+A reply alone never resumes a run. The client checks fresh input identities
+before each write and confirms the selected activation after continuation.
+Transport failures and uncertain acknowledgements raise `SconeError`; the client
+never retries a write automatically. Callers can read `inputs()` and `status()`
+without execution, then explicitly retry the original response or continuation
+ID and selection. A successful continuation confirms admission, not completion.
+The native server remains responsible for atomic revision and source checks.
+
+For a real local agent API contract test, point `SCONE_TEST_NATIVE_PYTHON` at
+an interpreter with the repository's native framework and API dependencies:
+
+```sh
+SCONE_TEST_NATIVE_PYTHON=/path/to/native/python python -m pytest -q tests/test_native_agents.py
+```
+
+The test launches an isolated loopback server, restarts it after saving a reply,
+and verifies that only the explicitly selected model executes after continuation.
+It does not contact a model provider or the live memory service.

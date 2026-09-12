@@ -112,6 +112,9 @@ class StubScone:
             def do_GET(self) -> None:
                 self._handle("GET")
 
+            def do_PUT(self) -> None:
+                self._handle("PUT")
+
             def do_POST(self) -> None:
                 self._handle("POST")
 

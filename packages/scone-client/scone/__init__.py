@@ -8,6 +8,11 @@
             print(item.text)
 """
 
+from ._wire import Capabilities
+from .agent_inputs import InputRecord
+from .agents import AgentClient, PlanPage, RunPage
+from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
+                           RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
 from .client import DEFAULT_BASE_URL, DEFAULT_TIMEOUT, Scone
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
@@ -16,6 +21,11 @@ __version__ = "0.2.1"
 
 __all__ = [
     "Scone",
+    "Capabilities",
+    "AgentClient",
+    "InputRecord",
+    "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
+    "ModelChoice", "ModelTask", "RunPolicy", "RunRequest", "RunStatus", "SavedPlan", "TaskPlan",
     "SconeError",
     "Added",
     "Fact",
