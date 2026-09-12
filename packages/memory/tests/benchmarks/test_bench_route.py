@@ -143,3 +143,42 @@ async def test_the_bench_can_run_with_passage_merging(dataset):
     # recall at the recall limit is the same. Anything else would mean it
     # was changing what came back rather than how it was packed.
     assert plain.recall_any[2] == joined.recall_any[2], (plain.recall_any, joined.recall_any)
+
+
+async def test_the_bench_counts_the_bytes_it_actually_returned(tmp_path):
+    """Swapping the items after merging and keeping recall's byte count
+    reports a context reduction that never happened, and a measurement
+    published from it would be wrong in the flattering direction.
+
+    The fixture is built so merging actually fires and the merged span
+    *crosses a gap*: the passage is then one byte longer than the
+    fragments were, which is the direction a stale count hides.
+    """
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.bench.runner import load_items, run
+
+    long_session = (
+        "The harbour crane was repainted in May after the survey found rust on the jib. "
+        "The survey also found the slew ring needed grease, which the yard did that week. "
+        "The crane returned to service on the first of June, a day later than planned.")
+    path = tmp_path / "merging.json"
+    path.write_text(json.dumps([item(
+        "q1", "crane survey rust jib slew grease", "n/a",
+        [long_session, "The bicycle needed a chain."],
+        ["2023/05/20 (Sat) 09:00"] * 2)]), encoding="utf-8")
+
+    async def make():
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                  HashEmbedder(), chunk_target=60).open()
+
+    items = load_items(path)
+    plain = await run(make, items, ks=(1, 3), limit=5, dataset=str(path))
+    joined = await run(make, items, ks=(1, 3), limit=5, dataset=str(path), merge=True)
+
+    assert plain.merge is False and joined.merge is True, \
+        "a saved run whose metadata cannot say which configuration produced it is not evidence"
+    [before], [after] = plain.results, joined.results
+    assert len(after.retrieved_sessions) < len(before.retrieved_sessions), \
+        "the fixture has to actually merge or this proves nothing"
+    assert after.returned_bytes > before.returned_bytes, \
+        (after.returned_bytes, before.returned_bytes)
