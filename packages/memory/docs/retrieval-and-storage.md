@@ -551,6 +551,42 @@ Four things it does deliberately:
   `removed`. A passage longer than the scan bound has its tail reported
   as unexamined rather than silently passed.
 
+### What it covers, and what it refuses to be asked
+
+The first version of this scanned `text` and nothing else. The same
+address came back as the item's `source`, in its `tags`, in a `metadata`
+value and as the `object` of a fact — while the report said one match and
+nothing unscanned, which reads as "this answer was covered". Scrubbing
+the prose and handing the address back in the next field is not
+withholding, it is moving it.
+
+Every text-bearing field of an item is scanned (`text`, `source`, `tags`,
+`metadata` values) and every one of a fact (`subject`, `predicate`,
+`object`, `quote` — the quote is an exact substring of the episode, so it
+carries whatever the episode carried). Metadata *keys* are not scanned,
+and do not need to be: a key is validated to `[a-z][a-z0-9_]{0,31}` at
+every door into a space, so no key can hold any of these patterns.
+
+The report names them, because `unscanned: 0` on its own is a claim about
+coverage that cannot be checked:
+
+```json
+"withheld": {"count": 5, "by_kind": {"email": 5}, "kinds_applied": ["email"],
+             "unscanned": 0, "surfaces": ["text", "source", "tags", "metadata", "facts"]}
+```
+
+**The expansions are refused rather than half-covered.** `evidence_graph`,
+`graph_analysis`, `structural_context`, `multi_hop` and `graph_boost` each
+build their own structure, and withholding does not reach inside them.
+Asking for one of them together with `withhold` is a `422` naming which,
+because the alternative is a report that covers the items and reads as
+covering the answer. Covering them is open work; until it is done the
+limit is a refusal and not a silence.
+
+**The policy is checked before the search runs.** An unknown kind was
+previously refused *after* the whole recall had happened and been logged
+— work spent, and an event recorded, for an answer nobody receives.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments

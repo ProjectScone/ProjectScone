@@ -818,6 +818,28 @@ def create_app(
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
+        policy: tuple[str, ...] = ()
+        if withhold_kinds:
+            from ..retrieval.withhold import chosen_kinds
+
+            # Checked before the search, not after it: a policy naming a
+            # kind that does not exist is a mistake in the request, and
+            # searching first spends the work -- and logs a recall event
+            # -- for an answer nobody receives.
+            policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            # Withholding covers the items and the facts. The expansions
+            # below build their own structures, which it does not reach,
+            # so asking for both is refused rather than answered with a
+            # report that reads as covering the whole response.
+            uncovered = [name for name, asked_for in (
+                ("evidence_graph", evidence_graph), ("graph_analysis", graph_analysis),
+                ("structural_context", structural_context), ("multi_hop", multi_hop),
+                ("graph_boost", graph_boost)) if asked_for]
+            if uncovered:
+                raise InvalidInput(
+                    f"withhold does not reach {', '.join(uncovered)}, and a report that named "
+                    f"only the items would read as covering the whole answer; ask for one or "
+                    f"the other")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
@@ -825,13 +847,15 @@ def create_app(
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
         kept = None
-        if withhold_kinds:
+        if policy:
             from ..retrieval.withhold import withhold
 
-            kept = withhold(result.items,
-                            kinds=tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            kept = withhold(result.items, facts=list(result.facts) + list(result.history),
+                            kinds=policy)
             result = result.model_copy(update={
                 "items": list(kept.items),
+                "facts": list(kept.facts[:len(result.facts)]),
+                "history": list(kept.facts[len(result.facts):]),
                 # The bytes handed back changed, so the count must too.
                 "returned_bytes": sum(len(i.text.encode()) for i in kept.items)})
         response: dict[str, object] = {
@@ -852,7 +876,11 @@ def create_app(
             # that nothing withheld is not a finding of nothing present.
             response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
                                     "kinds_applied": list(kept.kinds_applied),
-                                    "unscanned": kept.unscanned, "why": kept.why}
+                                    "unscanned": kept.unscanned,
+                                    # Beside a count of zero unscanned,
+                                    # what was scanned is the half that
+                                    # stops it reading as coverage.
+                                    "surfaces": list(kept.surfaces), "why": kept.why}
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if graph_boost:

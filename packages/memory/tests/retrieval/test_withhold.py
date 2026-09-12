@@ -129,3 +129,47 @@ async def test_withholding_keeps_the_caller_s_ranking_and_identities():
         await engine.close()
     assert [i.chunk_id for i in held.items] == [i.chunk_id for i in items]
     assert [i.episode_id for i in held.items] == [i.episode_id for i in items]
+
+
+async def test_an_address_is_withheld_from_every_surface_an_item_carries():
+    """A passage is not the only place an item says something.
+
+    An address put in as the source, a tag and a metadata value came back
+    untouched while the report said one match and nothing unscanned --
+    which reads as "this answer was covered" and was not. Scrubbing the
+    prose and handing the same address back in the next field is not
+    withholding, it is moving it.
+    """
+    address = "ana.alves@meridian-health.example"
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    try:
+        await engine.remember("default", f"Write to {address} about the rota.",
+                              source=address, tags=(address,),
+                              metadata={"contact": address, "owner": address})
+        held = withhold(await found(engine, "write rota"))
+    finally:
+        await engine.close()
+    [one] = [item for item in held.items if "rota" in item.text]
+    assert address not in one.text
+    assert address != one.source and address not in (one.source or "")
+    assert not [tag for tag in one.tags if address in tag], one.tags
+    assert not [value for value in one.metadata.values() if address in value], one.metadata
+    # Five places held it -- the prose, the source, the tag and two
+    # metadata values -- so five is the count. A count of one would say
+    # the other four were clean. (A metadata *key* cannot hold an address:
+    # keys are validated to [a-z][a-z0-9_]{0,31} on the way in.)
+    assert held.by_kind["email"] == 5, held.record()
+    assert "text" in held.surfaces and "metadata" in held.surfaces, held.surfaces
+
+
+async def test_the_report_names_the_surfaces_it_scanned():
+    """`unscanned: 0` is a claim about coverage, so what was covered has to
+    be on the record beside it rather than left to be assumed."""
+    engine = await memory("Nothing of interest here.")
+    try:
+        held = withhold(await found(engine, "nothing interest"))
+    finally:
+        await engine.close()
+    assert held.surfaces == ("text", "source", "tags", "metadata"), held.surfaces
+    assert "text, source, tags, metadata" in held.why, held.why

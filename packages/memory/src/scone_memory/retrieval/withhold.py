@@ -37,7 +37,7 @@ from typing import Mapping, Sequence
 
 from ..capture.redact import SECRET_PATTERNS
 from ..core.errors import InvalidInput
-from ..core.models import RecallItem
+from ..core.models import Fact, RecallItem
 
 #: An address. Deliberately narrow: the local part is not allowed spaces
 #: or quotes, so prose around an address is not swallowed with it.
@@ -60,6 +60,13 @@ KINDS: tuple[str, ...] = ("email", "phone", "ip", "card", "secret")
 #: here and the report says the rest was not looked at, because a scan
 #: that stopped early must not read as a scan that found nothing.
 MAX_SCANNED = 200_000
+#: Every field of an item a caller receives text in. Scrubbing the prose
+#: and handing the same address back as the source is not withholding, it
+#: is moving it, so all four are scanned and the report names them.
+SURFACES: tuple[str, ...] = ("text", "source", "tags", "metadata")
+#: A fact's text-bearing fields. ``quote`` is an exact substring of the
+#: episode, so it carries whatever the episode carried.
+FACT_SURFACES: tuple[str, ...] = ("subject", "predicate", "object", "quote")
 
 
 def _luhn(digits: str) -> bool:
@@ -90,20 +97,31 @@ class Withheld:
     #: Kinds actually applied, so a caller can see their choice echoed
     #: rather than assume it took.
     kinds_applied: tuple[str, ...] = ()
-    #: Items longer than the scan bound, whose tails were not examined.
+    #: Facts put through the same net, in the order they were given.
+    facts: tuple[Fact, ...] = ()
+    #: Items or facts with a field longer than the scan bound, whose tail
+    #: was not examined.
     unscanned: int = 0
+    #: The fields scanned. Beside ``unscanned: 0`` this is what stops the
+    #: report reading as coverage of surfaces nobody looked at.
+    surfaces: tuple[str, ...] = ()
     why: str = ""
 
     def record(self) -> dict[str, object]:
-        return {"withheld": self.withheld, "by_kind": dict(self.by_kind),
+        return {"withheld": self.withheld, "facts": len(self.facts),
+                "by_kind": dict(self.by_kind),
                 "kinds_applied": list(self.kinds_applied), "unscanned": self.unscanned,
-                "why": self.why,
+                "surfaces": list(self.surfaces), "why": self.why,
                 "items": [item.model_dump() for item in self.items]}
 
 
-def withhold(items: Sequence[RecallItem], *, kinds: Sequence[str] = KINDS,
-             scan: int = MAX_SCANNED) -> Withheld:
-    """Replace what the named kinds match, and say what was replaced."""
+def chosen_kinds(kinds: Sequence[str]) -> tuple[str, ...]:
+    """The policy, checked on its own.
+
+    Separate from applying it so a caller can refuse a bad policy before
+    doing the work: validating inside ``withhold`` means the search has
+    already run, and been logged, for an answer nobody receives.
+    """
     chosen = tuple(dict.fromkeys(kinds))
     unknown = [kind for kind in chosen if kind not in KINDS]
     if unknown:
@@ -111,6 +129,13 @@ def withhold(items: Sequence[RecallItem], *, kinds: Sequence[str] = KINDS,
                            f"{', '.join(KINDS)}")
     if not chosen:
         raise InvalidInput("withholding nothing is not a policy: name at least one kind")
+    return chosen
+
+
+def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
+             kinds: Sequence[str] = KINDS, scan: int = MAX_SCANNED) -> Withheld:
+    """Replace what the named kinds match, and say what was replaced."""
+    chosen = chosen_kinds(kinds)
     if not 1 <= scan <= MAX_SCANNED:
         raise InvalidInput(f"the scan bound must be from 1 to {MAX_SCANNED}, not {scan}")
 
@@ -118,27 +143,87 @@ def withhold(items: Sequence[RecallItem], *, kinds: Sequence[str] = KINDS,
     kept: list[RecallItem] = []
     unscanned = 0
     for item in items:
-        text = item.text
-        if len(text) > scan:
+        changed: dict[str, object] = {}
+        over = False
+
+        def scanned(value: str) -> str:
+            nonlocal over
+            held, found = _scanned(chosen, value, scan)
+            over = over or len(value) > scan
+            for kind, count in found.items():
+                counted[kind] = counted.get(kind, 0) + count
+            return held
+
+        text = scanned(item.text)
+        if text != item.text:
+            changed["text"] = text
+        if item.source is not None:
+            source = scanned(item.source)
+            if source != item.source:
+                changed["source"] = source
+        tags = tuple(scanned(tag) for tag in item.tags)
+        if tags != item.tags:
+            changed["tags"] = tags
+        # Values only: a metadata key is validated to [a-z][a-z0-9_]{0,31}
+        # at every door into a space, so no key can hold any of these
+        # patterns and scanning keys would be a branch no input reaches.
+        metadata = {key: scanned(value) for key, value in item.metadata.items()}
+        if metadata != dict(item.metadata):
+            changed["metadata"] = metadata
+        if over:
             unscanned += 1
-        head, tail = text[:scan], text[scan:]
-        for kind in chosen:
-            head, found = _apply(kind, head)
-            if found:
-                counted[kind] = counted.get(kind, 0) + found
-        kept.append(item if head + tail == text else item.model_copy(update={"text": head + tail}))
+        kept.append(item.model_copy(update=changed) if changed else item)
+
+    told: list[Fact] = []
+    for fact in facts:
+        moved: dict[str, object] = {}
+        over = False
+
+        def scanned(value: str) -> str:
+            nonlocal over
+            held, found = _scanned(chosen, value, scan)
+            over = over or len(value) > scan
+            for kind, count in found.items():
+                counted[kind] = counted.get(kind, 0) + count
+            return held
+
+        for name in FACT_SURFACES:
+            was = getattr(fact, name)
+            if was is None:
+                continue
+            now = scanned(was)
+            if now != was:
+                moved[name] = now
+        if over:
+            unscanned += 1
+        told.append(fact.model_copy(update=moved) if moved else fact)
 
     total = sum(counted.values())
     why = (f"{total} match(es) of {', '.join(chosen)} withheld from this answer"
            if total else f"the patterns for {', '.join(chosen)} matched nothing here")
+    why += f"; scanned the {', '.join(SURFACES)} of each item"
+    if facts:
+        why += f" and the {', '.join(FACT_SURFACES)} of each fact"
     why += ("; this is a net of patterns, not a guarantee -- nothing withheld is "
             "**not a finding** that there is nothing of these kinds in the text, and the "
             "memory still holds whatever it held")
     if unscanned:
-        why += (f"; {unscanned} passage(s) are longer than the scan bound and their tails were "
+        why += (f"; {unscanned} item(s) have a field longer than the scan bound and its tail was "
                 f"not examined at all")
-    return Withheld(items=tuple(kept), withheld=total, by_kind=counted, kinds_applied=chosen,
-                    unscanned=unscanned, why=why)
+    return Withheld(items=tuple(kept), facts=tuple(told), withheld=total, by_kind=counted,
+                    kinds_applied=chosen, unscanned=unscanned,
+                    surfaces=SURFACES + (("facts",) if facts else ()), why=why)
+
+
+def _scanned(kinds: Sequence[str], text: str, scan: int) -> tuple[str, dict[str, int]]:
+    """One string put through the net, and what each kind matched in it."""
+    head, tail = text[:scan], text[scan:]
+    found: dict[str, int] = {}
+    for kind in kinds:
+        head, count = _apply(kind, head)
+        if count:
+            found[kind] = found.get(kind, 0) + count
+    return head + tail, found
 
 
 def _apply(kind: str, text: str) -> tuple[str, int]:
