@@ -135,7 +135,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
         raise
     # Derived retrieval indices follow schema validation/migration: adding them
     # before check_schema would change the historical backup or failed upgrade.
-    conn.executescript("""BEGIN;
+    # Reserve the writer before reading the schema: a deferred read-to-write
+    # upgrade can fail immediately when another opener commits concurrently.
+    conn.executescript("""BEGIN IMMEDIATE;
 CREATE INDEX IF NOT EXISTS chunks_window ON chunks(space, episode_id, ordinal, id);
 CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
 CREATE INDEX IF NOT EXISTS facts_space_id ON facts(space, id);
