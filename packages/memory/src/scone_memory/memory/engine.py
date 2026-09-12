@@ -158,10 +158,7 @@ class MemoryEngine:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
-            raise InvalidInput(
-                f"the abstention policy was measured with embedder {abstention.embedder_id} "
-                f"({abstention.dim}-d); this engine embeds with {embedder.id} ({embedder.dim}-d), and one "
-                f"embedder's similarities say nothing about another's")
+            raise InvalidInput(_other_scale(abstention, embedder.id, embedder.dim))
         #: The measured floor this engine abstains by, when one was given.
         self.abstention = abstention
         #: Which claims a profile is made of; by default, all of them.
@@ -694,6 +691,7 @@ class MemoryEngine:
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
             demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
+            floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
@@ -1164,3 +1162,10 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     for f in facts:
         grouped.setdefault(find(key(f.subject)), []).append(f)
     return sorted((sorted(g, key=lambda f: f.fact_id) for g in grouped.values()), key=lambda g: g[0].fact_id)
+
+
+def _other_scale(policy: AbstentionPolicy, embedder_id: str, dim: int) -> str:
+    """Why a floor cannot be carried from one embedder to another."""
+    return (f"the abstention policy was measured with embedder {policy.embedder_id} "
+            f"({policy.dim}-d); this engine embeds with {embedder_id} ({dim}-d), and one "
+            f"embedder's similarities say nothing about another's")

@@ -51,6 +51,10 @@ class RecallRuntime:
     contextual_embeddings: bool = False
     demote_restated: bool = True
     similarity_floor: float | None = None
+    #: The width the floor was measured at, when it came from a measured
+    #: policy. The query's own vector is checked against it, because an
+    #: embedder that never reports a width still has one.
+    floor_dim: int | None = None
     #: Why stored vectors cannot be compared with this embedder's, if so.
     vector_block: str | None = None
 
@@ -152,18 +156,29 @@ async def recall(
     }
 
     vector_lane: list[tuple[int, float]] = []
+    width: int | None = None
     if runtime.vector_block is not None:
         degraded.append(f"vectors: {runtime.vector_block}")
     else:
         try:
             t0 = time.perf_counter()
             [qvec] = await runtime.embedder.embed([query])
+            width = len(qvec)
             latency["embed"] = _ms(t0)
             t0 = time.perf_counter()
             vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
             latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
+
+    # A floor is a number on one embedder's scale. The query it is about
+    # to judge says what scale this really is, whatever the embedder said
+    # of itself before it had answered anything.
+    if width is not None and runtime.floor_dim is not None and width != runtime.floor_dim:
+        raise InvalidInput(
+            f"the abstention floor was measured on {runtime.floor_dim}-d similarities; this "
+            f"embedder returns {width}-d vectors, and one width's similarities say nothing "
+            f"about another's")
 
     if candidate_limit is not None or active_reranker is not None:
         vector_lane = vector_lane[:depth]

@@ -98,8 +98,10 @@ class AbstentionPolicy:
     def fits(self, embedder_id: str, dim: int) -> bool:
         """Whether this policy may be used by that embedder. A width of 0
         is one the embedder has not learned yet (a remote one learns it
-        from its first answer), and is not a mismatch; it is checked
-        again where the floor is used."""
+        from its first answer), and is not a mismatch here. It is not a
+        way in either: the engine asks again before every recall, and the
+        width of the query's own vector is checked against the policy's,
+        so a floor is never applied to another width's similarities."""
         return self.embedder_id == embedder_id and dim in (0, self.dim)
 
     @classmethod

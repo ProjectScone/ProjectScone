@@ -143,3 +143,74 @@ async def test_a_policy_whose_width_is_known_to_differ_is_still_refused():
     policy = AbstentionPolicy(floor=0.4, embedder_id=HashEmbedder().id, dim=384, measured={})
     with pytest.raises(InvalidInput, match="384-d"):
         MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), abstention=policy)
+
+
+class _Lazy(HashEmbedder):
+    """A remote embedder as it behaves: it says nothing of its width until
+    it has answered once, and then says what it really is."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__(width)
+        self.width, self.id, self.dim = width, "remote:some-model", 0
+
+    async def embed(self, texts):
+        self.dim = self.width
+        return await super().embed(texts)
+
+
+class _NeverSays(_Lazy):
+    """An embedder that never reports a width at all. Only the vectors it
+    returns say how wide it is."""
+
+    async def embed(self, texts):
+        vectors = await super().embed(texts)
+        self.dim = 0
+        return vectors
+
+
+class _SelfSizing(InMemoryVectorIndex):
+    """An index that takes its width from the first vector written to it,
+    as a hosted one that creates its own collection does."""
+
+    async def ensure(self, dim: int) -> None:
+        self.dim = dim or self.dim
+
+    async def upsert(self, points):
+        if not self.dim and points:
+            self.dim = len(points[0].vector)
+        await super().upsert(points)
+
+
+async def test_a_width_learned_after_startup_is_checked_before_the_floor_is_used():
+    """Unknown at construction is not a pass for ever: once the embedder
+    has answered, a 256-d floor may not judge 128-d similarities."""
+    policy = AbstentionPolicy(floor=0.4, embedder_id="remote:some-model", dim=256, measured={})
+    embedder = _Lazy(128)
+    engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder, abstention=policy)
+    await embedder.embed(["the warm-up call that teaches it its width"])
+    await engine.open()
+    await engine.remember("alpha", "a note about boats and the sea")
+    with pytest.raises(InvalidInput, match="128-d"):
+        await engine.recall("alpha", "boats")
+
+
+async def test_a_width_that_is_never_reported_is_read_from_the_vectors_themselves():
+    """An embedder that never says how wide it is still cannot borrow
+    another width's floor: the query's own vector says what it is."""
+    policy = AbstentionPolicy(floor=0.4, embedder_id="remote:some-model", dim=256, measured={})
+    engine = await MemoryEngine(InMemoryDocumentStore(), _SelfSizing(), _NeverSays(128),
+                                abstention=policy).open()
+    await engine.remember("alpha", "a note about boats and the sea")
+    with pytest.raises(InvalidInput, match="128-d"):
+        await engine.recall("alpha", "boats")
+
+
+async def test_a_width_that_turns_out_to_match_is_used():
+    policy = AbstentionPolicy(floor=0.4, embedder_id="remote:some-model", dim=256, measured={})
+    embedder = _Lazy(256)
+    engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder, abstention=policy)
+    await embedder.embed(["the warm-up call that teaches it its width"])
+    await engine.open()
+    await engine.remember("alpha", "a note about boats and the sea")
+    result = await engine.recall("alpha", "boats")
+    assert result.low_confidence is not None and engine.similarity_floor == 0.4
