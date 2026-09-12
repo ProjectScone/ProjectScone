@@ -158,6 +158,7 @@ class Settings:
     distill_accept_at: Optional[float] = None
     derive: bool = False
     contextual_embeddings: bool = False
+    table_context_embeddings: bool = False
     demote_restated: bool = True
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
@@ -369,6 +370,7 @@ class Settings:
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
+            table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
@@ -671,7 +673,7 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy",)
@@ -751,6 +753,7 @@ async def build_in_process_engine(settings: Settings, embedder):
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
+        table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
         demote_restated=settings.demote_restated,
         candidate_limit=settings.candidate_limit,
@@ -925,6 +928,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         events=events,
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
+        table_context_embeddings=settings.table_context_embeddings,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
         candidate_limit=settings.candidate_limit,
