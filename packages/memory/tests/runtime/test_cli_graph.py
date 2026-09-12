@@ -397,3 +397,26 @@ def test_bench_code_refuses_a_root_that_is_not_a_directory(tmp_path):
     out = io.StringIO()
     code = cli.main(["bench-code", str(missing)], env={}, stdin=io.StringIO(""), out=out)
     assert code == 2, out.getvalue()
+
+
+def test_tune_measures_the_settings_it_is_given(tmp_path):
+    import json as _json
+
+    from tests.benchmarks.test_bench import DATASET
+
+    path = tmp_path / "items.json"
+    path.write_text(_json.dumps(DATASET[:2]), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["tune", str(path), "--sample", "2", "--candidates", "100"], env={},
+                    stdin=io.StringIO(""), out=out)
+    assert code == 0, out.getvalue()
+    said = out.getvalue()
+    assert "2 question(s) at k=5" in said and "the defaults: recall_any" in said
+    assert "SCONE_RECALL_CANDIDATES=100" in said and "take:" in said
+
+
+def test_tune_refuses_a_candidate_limit_that_is_not_a_number(tmp_path):
+    out = io.StringIO()
+    code = cli.main(["tune", str(tmp_path / "nothing.json"), "--candidates", "many"], env={},
+                    stdin=io.StringIO(""), out=out)
+    assert code == 2

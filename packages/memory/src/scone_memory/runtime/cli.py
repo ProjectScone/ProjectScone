@@ -292,6 +292,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-length", action="store_true",
                    help="store the corpus with the ordinary chunker instead of cutting at declarations")
 
+    p = sub.add_parser("tune",
+                       help="measure retrieval settings against each other on a dataset, and say which to take")
+    p.add_argument("dataset", help="a LongMemEval-shaped JSON file")
+    p.add_argument("--sample", type=int, default=30, help="questions per setting, stratified (default 30)")
+    p.add_argument("--k", type=int, default=5, help="the k the settings are scored at (default 5)")
+    p.add_argument("--seed", type=int, default=42, help="the sample's seed (default 42)")
+    p.add_argument("--candidates", default="", help="comma-separated candidate limits to try beside the default")
+    p.add_argument("--restatement", action="store_true", help="also try with restatement demotion off")
+    p.add_argument("--contextual", action="store_true", help="also try with contextual embedding prefixes on")
+
     p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
     p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
     p = sub.add_parser("bench-conflicts",
@@ -431,6 +441,32 @@ async def temporal_command(args: argparse.Namespace, settings: Settings, out) ->
 
     scored = await run_temporal(args.dataset, limit=args.limit)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def tune_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Measure retrieval settings against each other. Its own in-process
+    stores per item, so the configured store is neither read nor written,
+    and nothing is written anywhere: what comes back is a recommendation
+    with its measurement attached."""
+    from ..bench.tune import DEFAULT_SETTINGS, MAX_SETTINGS, Setting, tune
+
+    swept = [DEFAULT_SETTINGS]
+    for entry in (item.strip() for item in args.candidates.split(",")):
+        if not entry:
+            continue
+        if not entry.isdigit() or not 1 <= int(entry) <= 10_000:
+            raise InvalidInput(f"--candidates takes whole numbers from 1 to 10000, not {entry!r}")
+        swept.append(Setting(candidate_limit=int(entry)))
+    if args.restatement:
+        swept.append(Setting(demote_restated=False))
+    if args.contextual:
+        swept.append(Setting(contextual_embeddings=True))
+    if len(swept) > MAX_SETTINGS:
+        raise InvalidInput(f"a sweep measures at most {MAX_SETTINGS} settings")
+    tuned = await tune(args.dataset, settings=swept, k=args.k, sample=args.sample, seed=args.seed,
+                       base=settings)
+    print(json.dumps(tuned.record()) if args.json else tuned.text(), file=out)
     return 0
 
 
@@ -1203,10 +1239,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "calibrate"):
+    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
-                   "calibrate": calibrate_command}[args.command]
+                   "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:

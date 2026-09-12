@@ -340,6 +340,29 @@ interesting one: asked in a person's words, two in five questions do not
 return the function's own definition. That is an embedder question, not a
 chunker one, and it is where the next gain is.
 
+## Choosing settings by measuring them
+
+```bash
+scone tune bench-data/longmemeval_s.json --sample 30 --k 5 --candidates 100,200 --contextual
+```
+
+Every retrieval knob is a choice somebody could argue about, and none is
+right everywhere. `tune` runs the ordinary bench once per setting, over
+the same stratified sample and the same questions, and prints what each
+found. It varies three things and holds everything else at whatever the
+environment says, so what it measures is the difference between the
+settings and nothing else: `SCONE_RECALL_CANDIDATES`,
+`SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
+
+The rule for choosing is stated rather than implied: the setting that
+answered most wins; a tie goes to the quicker; and a change that only
+matches the default is no change at all, so the default stands and the
+answer says "nothing measured better than the defaults". What comes out
+is a recommendation with its measurement attached and the environment
+lines that put it in force — nothing is written anywhere, and no engine
+reads a tuning file behind anyone's back. It uses its own in-process
+stores per item, so the configured store is neither read nor written.
+
 ## Measured and not shipped
 
 Two cheap ideas for better recall were measured on this machine and left
