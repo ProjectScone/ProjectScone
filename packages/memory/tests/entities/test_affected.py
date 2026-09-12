@@ -233,6 +233,17 @@ async def test_the_json_answer_carries_the_shape_and_the_caveat():
         assert said["by_depth"].get("1"), said
         assert any(row[0] == "pkg/api.py" for row in said["entities"]), said
         assert "this graph holds" in said["why"], said["why"]
+        # The budget is a promise about this line of output and nothing
+        # else, so it is checked where the output is: what the CLI prints
+        # is exactly what the answer said it would cost.
+        assert said["bytes_spent"] == len(shown.rstrip("\n").encode()), (
+            said["bytes_spent"], len(shown.rstrip("\n").encode()))
+        narrow = io.StringIO()
+        code = await run(build_parser().parse_args(
+            ["graph", "affected", "pkg.store", "--json", "--max-bytes", str(said["bytes_spent"])]),
+            engine, io.StringIO(""), narrow)
+        assert code == 0, narrow.getvalue()
+        assert len(narrow.getvalue().rstrip("\n").encode()) <= said["bytes_spent"], narrow.getvalue()
     finally:
         await engine.close()
 
@@ -376,6 +387,53 @@ async def wide(count=8):
         await engine.remember("default", f"from pkg.store import Shelf\n\n\ndef put{index}() -> str:\n"
                               f"    return Shelf().keep('{index}')\n", source=f"pkg/reader{index}.py")
     return engine
+
+
+async def test_what_is_kept_is_a_prefix_when_the_dependants_are_not_all_one_size():
+    """The prefix and monotonicity promises held only because every label
+    in my fixture was the same length.
+
+    A raw-byte check inside the walk decided what to append before the
+    serialized trim ever ran. With eight very long names and one short
+    one, the budget left after the long names could still admit the short
+    one, so the answer skipped earlier entries and kept a later, cheaper
+    one -- not a prefix -- and the set could change unpredictably as the
+    budget grew. Two bounds spending one budget in different units, the
+    earlier of them invisible. The walk bounds only the count now; the
+    bound that decides what is served is the one measured on what is
+    served.
+    """
+    import json
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    try:
+        for index in range(8):
+            await engine.assert_fact("default", f"pkg/{index}_{'x' * 1800}.py:Caller",
+                                     "calls", "root.py:Root")
+        await engine.assert_fact("default", "short.py:Caller", "calls", "root.py:Root")
+        whole = await affected(engine, "default", "root.py:Root")
+        assert len(whole.reached) == 9, [len(one.label) for one in whole.reached]
+        assert len({len(one.label) for one in whole.reached}) == 2, "the fixture needs two sizes"
+        steps = []
+        for budget in range(800, whole.bytes_spent + 1, 50):
+            try:
+                steps.append((budget, await affected(engine, "default", "root.py:Root",
+                                                     max_bytes=budget)))
+            except InvalidInput:
+                continue
+    finally:
+        await engine.close()
+
+    assert steps, "no budget in the range produced an answer"
+    kept = [len(answer.reached) for _, answer in steps]
+    assert all(before <= after for before, after in zip(kept, kept[1:])), kept
+    for budget, answer in steps:
+        assert answer.reached == whole.reached[:len(answer.reached)], (budget, [
+            len(one.label) for one in answer.reached])
+        assert len(json.dumps(answer.record()).encode()) <= budget, (budget, answer.bytes_spent)
+        assert answer.bytes_spent == len(json.dumps(answer.record()).encode()), answer.bytes_spent
+        assert answer.not_listed == len(whole.reached) - len(answer.reached), (budget, answer.record())
 
 
 async def test_a_budget_drops_dependants_from_the_tail_and_says_how_many():
