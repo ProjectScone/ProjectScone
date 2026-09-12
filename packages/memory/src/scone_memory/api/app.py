@@ -166,6 +166,11 @@ class BatchBody(BaseModel):
     #: The caller's id for this request. Sending it again returns the job
     #: the first attempt made instead of ingesting the batch a second time.
     request_id: Optional[str] = Field(default=None, max_length=128)
+    #: Store what can be stored and answer for the rest, instead of
+    #: refusing the whole batch over one bad record. For a caller
+    #: importing from somewhere messy; off by default, because a
+    #: half-stored batch nobody asked for is worse than a refusal.
+    partial: bool = False
 
 
 class LinkBody(BaseModel):
@@ -437,8 +442,11 @@ def create_app(
     @app.post("/v1/episodes/batch")
     async def post_episodes(body: BatchBody, space: str = Depends(space_for)) -> dict:
         """One bounded request, one outcome per record in the order sent;
-        the batch lands whole or not at all. Replacement is one record at
-        a time, because it forgets before it stores."""
+        the batch lands whole or not at all, unless ``partial`` asks for
+        what can be stored, in which case a record that cannot be comes
+        back as failed with the reason and the rest are stored.
+        Replacement is one record at a time, because it forgets before it
+        stores."""
         if any(r.replace for r in body.records):
             raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
         if body.request_id:
@@ -456,11 +464,18 @@ def create_app(
             for r in body.records
         ]
         async with ingest_slot(len(records)):
-            added = await engine.remember_many(space, records)
+            added = await engine.remember_many(space, records, partial=body.partial)
         for record, item in zip(body.records, added):
+            if item.outcome == "failed":
+                continue
             for attachment_id in dict.fromkeys(record.attachment_ids):
                 await engine.blobs.link(space, attachment_id, item.episode_id)
-        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
+        # A reader of the old shape sees the old shape: "failed" appears
+        # only for a caller who asked for a partial batch, which is the
+        # only caller who can get one.
+        wanted = ("accepted", "duplicate", "updated", "failed") if body.partial else (
+            "accepted", "duplicate", "updated")
+        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in wanted}
         job = await engine.record_job(space, added, request_id=body.request_id)
         return {"items": [a.model_dump() for a in added], "counts": counts, "job": job_json(job)}
 

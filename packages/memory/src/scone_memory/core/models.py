@@ -402,14 +402,18 @@ class Added(BaseModel):
     """What one remembered record became. ``outcome`` says it plainly:
     accepted (stored), duplicate (a record with this identity was already
     there and the write changed nothing, whether or not its text differed),
-    or updated (a keyed record was replaced; ``replaced`` is the receipt
-    for the episode that went)."""
+    updated (a keyed record was replaced; ``replaced`` is the receipt for
+    the episode that went), or failed (nothing was stored for it, and
+    ``reason`` says what was wrong with it — only possible in a batch the
+    caller asked to be partial)."""
 
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
-    outcome: Literal["accepted", "duplicate", "updated"] = "accepted"
+    outcome: Literal["accepted", "duplicate", "updated", "failed"] = "accepted"
     replaced: Optional[ForgetReceipt] = None
+    #: Why nothing was stored, for a failed record. None for the rest.
+    reason: Optional[str] = None
 
 
 class Status(BaseModel):

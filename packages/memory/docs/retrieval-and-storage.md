@@ -570,6 +570,25 @@ success. So:
   understands it.
 - `ImportSummary.profile` says which profile an import was read as.
 
+## A batch where one record is wrong
+
+One bad record refuses the whole batch. That is the right default: a
+caller who sent one usually wants to fix it and send the lot again, and a
+half-stored batch nobody asked for is worse than a clear refusal.
+
+A caller importing from somewhere messy wants the opposite, and can ask
+for it — `remember_many(..., partial=True)`, or `"partial": true` in the
+body of `POST /v1/episodes/batch`. Each record is then judged on its own:
+one that cannot be stored comes back as `outcome: "failed"` with the
+`reason`, the rest are stored, and the answers stay in the order they
+were sent so a caller can line them up against what they sent. The
+records that do pass are still stored together, so they deduplicate
+against each other the way a batch does.
+
+A reader of the old shape sees the old shape: `failed` appears in the
+counts only for a caller who asked for a partial batch, which is the only
+caller who can get one.
+
 ## What survives a crash
 
 A `remember` marks the episode's identity in the document store before

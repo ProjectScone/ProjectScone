@@ -417,7 +417,8 @@ class MemoryEngine:
         check_space(space)
         return await self.blobs.get(space, attachment_id)
 
-    async def remember_many(self, space: str, records: Iterable[Record]) -> list[Added]:
+    async def remember_many(self, space: str, records: Iterable[Record], *,
+                            partial: bool = False) -> list[Added]:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
         instead of one per record, and one revision bump. Outcomes come
         back in input order; a record identical to an earlier one in the
@@ -427,13 +428,21 @@ class MemoryEngine:
         fails leaves no orphan episodes. If a store fails after the first
         write, the episodes written so far are deleted again and the
         error is raised; a batch either lands whole or not at all.
+
+        ``partial`` is for a caller importing from somewhere messy: each
+        record is judged on its own, one that cannot be stored comes back
+        as ``failed`` with the reason, and the rest are stored. Without it
+        a single bad record refuses the whole batch, which is the right
+        default — a caller who sent one usually wants to fix it and send
+        the lot again, and a half-stored batch nobody asked for is worse
+        than a clear refusal.
         """
         await self._living(space)
         check_space(space)
         started = time.perf_counter()
         records = list(records)
         try:
-            resolved = await self._remember_many(space, records)
+            resolved = await self._remember_many(space, records, partial=partial)
         except Exception as e:
             await self._emit(space, "remember", {
                 "records": len(records), "error": f"{type(e).__name__}: {e}",
@@ -458,8 +467,10 @@ class MemoryEngine:
             self._embed_text, self._emit, code_aware=self.code_aware,
         )
 
-    async def _remember_many(self, space: str, records: Sequence[Record]) -> list[Added]:
-        added = await ingestion_batch.remember_many(self._ingestion_runtime(), space, records)
+    async def _remember_many(self, space: str, records: Sequence[Record], *,
+                             partial: bool = False) -> list[Added]:
+        added = await ingestion_batch.remember_many(self._ingestion_runtime(), space, records,
+                                                    partial=partial)
         if self.code_graph:
             await self._map_code(space, records, added)
         return added
