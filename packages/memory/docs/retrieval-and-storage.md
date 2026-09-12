@@ -529,6 +529,17 @@ Three rules it keeps:
   `max_merged` bytes are left alone and the report says so — silently
   returning most of a document to answer a question about a sentence
   would be worse than not merging.
+- **The caller's ranking survives.** Neighbours are found per episode and
+  emitted in the order they arrived, a merged passage taking the place of
+  its best fragment. Walking a ranked list by episode and appending group
+  by group would rearrange it, which is a change nobody asked for and
+  nothing reports.
+- **A deleted source is not an unreadable one.** If the episode is
+  confirmed absent its text is gone, so the fragments quoting it are
+  dropped rather than served from text this space no longer holds. A
+  store that merely would not answer is a different fact: those fragments
+  stand, and the reason says the merge *failed* rather than that there
+  was nothing to merge.
 
 Opt-in, because it is not yet measured. It changes the shape of an answer
 for certain; whether it changes what is *found* is a question for the

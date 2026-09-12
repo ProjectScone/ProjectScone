@@ -116,3 +116,86 @@ async def test_nothing_is_merged_across_two_different_episodes():
 
 async def test_the_cap_is_a_number_the_caller_can_see():
     assert MAX_MERGED > 0
+
+
+async def test_the_ranking_survives_a_call_that_merges_nothing():
+    """Grouping by episode to look for neighbours must not rearrange the
+    answer. A ranked list is the caller's data, and reordering it silently
+    is a change nobody asked for and nothing reports.
+
+    The order is built by hand because it has to interleave: two chunks of
+    one episode either side of a chunk of another is the only shape that
+    catches a per-episode walk, and a corpus that happens not to produce it
+    proves nothing.
+    """
+    items = [_item(1, episode=1, score=1.0), _item(4, episode=2, score=0.9),
+             _item(2, episode=1, score=0.1)]
+    engine = await memory()
+    try:
+        merged = await merge_neighbours(engine, "default", items, min_leaves=99)
+    finally:
+        await engine.close()
+    assert merged.merged == 0, merged.record()
+    assert [item.chunk_id for item in merged.items] == [1, 4, 2]
+
+
+def _item(chunk_id, *, episode, score):
+    from scone_memory.core.models import RecallItem
+
+    return RecallItem(chunk_id=chunk_id, episode_id=episode, text=f"chunk {chunk_id}",
+                      score=score, created_at="2024-01-01T00:00:00Z",
+                      start=chunk_id * 10, end=chunk_id * 10 + 5)
+
+
+async def test_a_merged_passage_takes_the_place_of_its_best_fragment():
+    engine = await memory()
+    try:
+        found = await engine.recall("default", "crane survey rust jib slew grease", limit=5)
+        best = max((i for i in found.items if (i.source or "") == "crane.txt"),
+                   key=lambda i: i.score)
+        at = [i.chunk_id for i in found.items].index(best.chunk_id)
+        merged = await merge_neighbours(engine, "default", found.items)
+    finally:
+        await engine.close()
+    assert merged.merged == 1 and merged.items[at].chunk_id == best.chunk_id, merged.record()
+
+
+async def test_a_source_that_is_gone_is_not_served_from_a_stale_excerpt():
+    """If the episode was forgotten, its text is deleted and the fragments
+    quoting it must go with it. Returning them under a clean "nothing to
+    join" reason serves deleted content and says nothing was wrong."""
+    engine = await memory()
+    try:
+        found = await engine.recall("default", "crane survey rust jib slew grease", limit=5)
+        [gone] = {item.episode_id for item in found.items if (item.source or "") == "crane.txt"}
+        await engine.forget("default", gone)
+        merged = await merge_neighbours(engine, "default", found.items)
+    finally:
+        await engine.close()
+    assert all(item.episode_id != gone for item in merged.items), merged.record()
+    assert merged.gone == 1 and "no longer there" in merged.why, merged.why
+
+
+async def test_a_source_that_could_not_be_read_keeps_its_fragments_and_says_so():
+    """An unverified read failure is not a deletion. The fragments are a
+    worse answer than the whole passage and a better one than nothing, so
+    they stay -- and the reason says the merge did not happen rather than
+    implying there was nothing to do."""
+    engine = await memory()
+    try:
+        found = await engine.recall("default", "crane survey rust jib slew grease", limit=5)
+        broken = engine.episode
+
+        async def refuse(space, episode_id):
+            raise RuntimeError("the store is unwell")
+
+        engine.episode = refuse
+        try:
+            merged = await merge_neighbours(engine, "default", found.items)
+        finally:
+            engine.episode = broken
+    finally:
+        await engine.close()
+    assert merged.merged == 0 and merged.gone == 0, merged.record()
+    assert merged.unread == 1 and "could not be read" in merged.why, merged.why
+    assert len(merged.items) == len(found.items), "nothing is dropped for an unknown failure"
