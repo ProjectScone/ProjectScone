@@ -23,6 +23,9 @@ Source = "https://github.com/ProjectScone/ProjectScone"
 [tool.setuptools]
 packages = ["scone"]
 
+[tool.setuptools.package-data]
+scone = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

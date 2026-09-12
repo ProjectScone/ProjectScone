@@ -8,11 +8,14 @@ anywhere below: the key decides.
 from __future__ import annotations
 
 import os
+import json as _json
 from types import TracebackType
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
 
 import requests
 
+from ._wire import Capabilities
+from .agents import AgentClient
 from .errors import SconeError
 from .models import Added, Fact, Profile, Recall, Status, Tag
 
@@ -92,6 +95,14 @@ class Scone:
     # ------------------------------------------------------------------
     # endpoints
     # ------------------------------------------------------------------
+
+    def capabilities(self) -> Capabilities:
+        """Read advertised support; an absent optional feature is unsupported."""
+        return Capabilities.from_json(self._request("GET", "/v1/capabilities"))
+
+    def agents(self, *, expected_space: str) -> AgentClient:
+        """Create a typed agent client, checking space without changing authority."""
+        return AgentClient(self, expected_space=expected_space)
 
     def add(
         self,
@@ -204,11 +215,20 @@ class Scone:
         """Send one request and return its decoded JSON body, or raise SconeError."""
         url = f"{self.base_url}{path}"
         try:
+            encoded = _json.dumps(json, ensure_ascii=False, allow_nan=False).encode("utf-8") if json is not None else None
+        except (TypeError, ValueError):
+            raise SconeError("request is not valid JSON") from None
+        try:
             response = self.session.request(
-                method, url, params=params, json=json, timeout=self.timeout
+                method, url, params=params, data=encoded,
+                headers={"Content-Type": "application/json"} if encoded is not None else None,
+                timeout=self.timeout, allow_redirects=False
             )
         except requests.RequestException as exc:
             raise SconeError(f"{method} {url} failed: {exc}") from exc
+
+        if 300 <= response.status_code < 400:
+            raise SconeError("HTTP redirects are not followed", response.status_code)
 
         if not response.ok:
             raise SconeError(_error_message(response), response.status_code, body=response.text)

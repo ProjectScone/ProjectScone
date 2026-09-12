@@ -78,3 +78,40 @@ See the framework [contribution guide](../../CONTRIBUTING.md),
 [citation formats](../../CITING.md), and [citation metadata](../../CITATION.cff).
 Research and academic use must credit ProjectScone contributors, JudgeHuman and ProjectScone
 as required by the included [license](LICENSE).
+
+## Agent workflow resources
+
+The independently installed client includes typed catalog, plan, and run
+resources for hosts that advertise the corresponding `agents.*` capabilities.
+`expected_space` verifies responses and mutation admission; it does not override
+the space assigned to the bearer key.
+
+```python
+from scone import Scone, ModelTask, TaskPlan
+
+with Scone("http://127.0.0.1:7437", api_key="your-space-key") as memory:
+    agents = memory.agents(expected_space="alpha")
+    choices = agents.catalog()
+    # Use agent/model IDs actually returned by this host's catalog.
+    plan = TaskPlan("research", (
+        ModelTask("answer", "researcher", "local-careful", "Answer with evidence."),
+    ))
+    saved = agents.save_plan(plan, expected_revision=0)
+    progress = agents.start("research-1", plan=saved, question="What changed?")
+    original = agents.request("research-1")
+    agents.status("research-1").match(original)
+```
+
+`agents.plans()` and `agents.runs()` return one bounded page with an explicit
+`next_after` cursor. `agents.plan(id)`, `agents.policy()`, and
+`agents.cancel(run_id)` provide inspection and cancellation. `HumanInput` tasks
+and `HandoffPlan`/`HandoffAgent` preserve their native plan formats and explicit
+model choices. Resource construction is local; reads and plan saves do not
+execute a model. Only an explicit `start` submits a run. Errors never trigger an
+automatic retry, resume, or alternate model selection.
+
+New workflow response models reject malformed scalars, mismatched identities,
+and changed acknowledgement bindings. The client preserves server HTTP errors
+and refuses redirects. JSON is encoded as UTF-8 so valid multibyte inputs do not
+expand into ASCII escapes beyond the server's request budget. Python 3.9 remains
+supported, and the distribution includes `py.typed` for static type checking.
