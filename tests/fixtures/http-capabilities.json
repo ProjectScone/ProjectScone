@@ -52,6 +52,7 @@
       "recall.structural_context": true,
       "recall.multi_hop": true,
       "documents.files": true,
+      "documents.sync": false,
       "documents.provenance": true,
       "episodes.forget": true,
       "facts.reconsider": true,
