@@ -1,4 +1,9 @@
-"""Profile validity uses instants, regardless of timestamp spelling."""
+"""Profile validity uses instants, regardless of timestamp spelling.
+
+Which claims hold at the moment asked is what these pin; the order they
+come back in is the profile's own (most restated, then most recent), so
+they compare what is there rather than the order it is in.
+"""
 from __future__ import annotations
 
 import pytest
@@ -21,8 +26,8 @@ async def test_profile_agrees_with_fact_validity_for_equivalent_clocks(
     await engine.assert_fact("alpha", "future", "value", "waiting", valid_from="2025-01-01T00:00:00.001Z")
 
     profile = await engine.profile("alpha")
-    assert [fact.fact_id for fact in profile.static_facts] == [past.fact_id, current.fact_id]
-    assert profile.static_facts == await engine.facts("alpha", as_of=clock)
+    assert {fact.fact_id for fact in profile.static_facts} == {past.fact_id, current.fact_id}
+    assert sorted(profile.static_facts, key=lambda fact: fact.fact_id) == await engine.facts("alpha", as_of=clock)
 
 
 async def test_profile_preserves_exact_interval_boundaries_from_storage(engine: MemoryEngine) -> None:
@@ -46,5 +51,5 @@ async def test_profile_preserves_exact_interval_boundaries_from_storage(engine: 
     before = await engine.documents.list_facts("alpha", include_closed=True)
 
     profile = await engine.profile("alpha")
-    assert [fact.fact_id for fact in profile.static_facts] == expected
+    assert sorted(fact.fact_id for fact in profile.static_facts) == expected
     assert await engine.documents.list_facts("alpha", include_closed=True) == before

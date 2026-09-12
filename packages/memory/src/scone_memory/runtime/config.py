@@ -31,6 +31,8 @@
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
+    SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
+    SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
     SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
                                  alternatively load preprovisioned CPU model files; both required
@@ -156,6 +158,8 @@ class Settings:
     demote_restated: bool = True
     many_valued: tuple[str, ...] = ()
     abstention_policy: str | None = None
+    profile_predicates: tuple[str, ...] = ()
+    profile_without: tuple[str, ...] = ()
     similarity_floor: Optional[float] = None
     candidate_limit: int | None = None
     reranker_factory: str | None = None
@@ -355,6 +359,10 @@ class Settings:
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
             abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
+            profile_predicates=tuple(item.strip() for item in env.get("SCONE_PROFILE_PREDICATES", "").split(",")
+                                     if item.strip()),
+            profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
+                                  if item.strip()),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
@@ -449,6 +457,13 @@ def parse_key_roles(many: Optional[str], one: Optional[str]) -> tuple[dict[str, 
 def parse_keys(many: Optional[str], one: Optional[str]) -> dict[str, str]:
     """The key -> space half of parse_key_roles, for callers that only want spaces."""
     return parse_key_roles(many, one)[0]
+
+
+def build_profile_policy(settings: Settings):
+    """Which claims a profile is made of, as the operator configured it."""
+    from ..memory.catalog import ProfilePolicy
+
+    return ProfilePolicy.of(predicates=settings.profile_predicates, without=settings.profile_without)
 
 
 def build_abstention(settings: Settings):
@@ -612,6 +627,8 @@ ENGINE_SETTINGS = ("contextual_embeddings", "similarity_floor", "demote_restated
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy",)
+#: Settings carried into an engine through a policy they build.
+POLICY_SETTINGS = ("profile_predicates", "profile_without")
 
 
 def _environment_integer(name: str, value: str) -> int:
@@ -695,6 +712,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
         abstention=build_abstention(settings),
+        profile_policy=build_profile_policy(settings),
     ).open()
 
 
@@ -867,6 +885,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
         abstention=build_abstention(settings),
+        profile_policy=build_profile_policy(settings),
         blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

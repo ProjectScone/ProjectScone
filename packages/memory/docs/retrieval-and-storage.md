@@ -66,6 +66,29 @@ with the lane off and for all 20 with it on. A single synthetic set
 shows the mechanism works; whether it helps on real questions is for
 the retrieval benchmarks to show before the default changes.
 
+## A profile: who the space is about
+
+A profile answers "who is this about" without being asked a question:
+the claims that hold, then the space's recent activity. `GET /v1/profile`
+(capability `profile.read`), `scone profile` and the ToolBox tool
+`read_profile` give it.
+
+- **What leads it** is what the space says most often, then most
+  recently. A claim restated three times leads one stated once, because
+  restating a claim is the space saying it matters; ties go to the newer.
+  Each item keeps the evidence it rests on, so a profile item can be
+  traced to the episode and quote behind it.
+- **What counts** is configured, never guessed: `SCONE_PROFILE_PREDICATES`
+  names the only predicates a profile is made of, and
+  `SCONE_PROFILE_WITHOUT` names the ones it never shows. Unset, every
+  predicate counts. Names are read as the ledger reads predicates.
+- **Bounded and said.** At most 20,000 facts are read, and restatements
+  are counted for the newest 200 of what the policy keeps; `coverage`
+  says how many facts were read, what the read left out, the policy in
+  force, how many candidates were considered, and how often each shown
+  claim was restated.
+- Closed, excluded and proposed claims are never profiled, as before.
+
 ## Abstaining, by a floor that was measured
 
 A similarity is a number one embedder produces under one set of settings.

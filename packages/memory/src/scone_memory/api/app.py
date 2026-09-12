@@ -789,7 +789,7 @@ def create_app(
     async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
         profile = await engine.profile(space, limit)
         return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
-                "recent": [asdict(r) for r in profile.recent]}
+                "recent": [asdict(r) for r in profile.recent], "coverage": profile.coverage}
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:

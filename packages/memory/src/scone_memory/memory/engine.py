@@ -153,6 +153,7 @@ class MemoryEngine:
         rerank_timeout: float = 1.0,
         many_valued: Iterable[str] = (),
         abstention: AbstentionPolicy | None = None,
+        profile_policy: "catalog.ProfilePolicy | None" = None,
     ) -> None:
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
@@ -163,6 +164,8 @@ class MemoryEngine:
                 f"embedder's similarities say nothing about another's")
         #: The measured floor this engine abstains by, when one was given.
         self.abstention = abstention
+        #: Which claims a profile is made of; by default, all of them.
+        self.profile_policy = profile_policy or catalog.ProfilePolicy()
         similarity_floor = abstention.floor if abstention is not None else similarity_floor
         self.candidate_limit = validate_candidate_limit(candidate_limit)
         validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
@@ -1011,7 +1014,7 @@ class MemoryEngine:
     # -- overviews --------------------------------------------------------
 
     async def profile(self, space: str, limit: int = 10) -> Profile:
-        return await catalog.profile(self.documents, space, limit, clock=self.clock)
+        return await catalog.profile(self, space, limit, policy=self.profile_policy)
 
     async def tags(self, space: str) -> dict[str, int]:
         return await catalog.tags(self.documents, space)
