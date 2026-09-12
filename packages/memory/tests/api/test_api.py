@@ -486,3 +486,29 @@ def test_a_retry_will_not_take_a_boolean_or_a_string_for_an_episode_id(client):
         assert refused.status_code == 422, (wrong, refused.status_code, refused.json())
     assert client.post("/v1/consolidate/retry", json={"episodes": [1]},
                        headers=auth()).status_code in (200, 501)
+
+
+def test_a_recall_can_withhold_what_a_caller_must_not_receive(client):
+    """The way-out half of redaction. Capture scrubs the agent feed; this
+    memory arrived through the episodes endpoint, which does not scrub, so
+    retrieval is the only place left to catch it."""
+    assert client.post("/v1/episodes", json={
+        "content": "Write to ana.alves@meridian-health.example about AKIAIOSFODNN7EXAMPLE."},
+        headers=auth()).status_code == 200
+    asked = {"q": "write about", "limit": 3}
+    plain = client.get("/v1/recall", params=asked, headers=auth()).json()
+    assert "ana.alves@meridian-health.example" in plain["items"][0]["text"]
+    assert "withheld" not in plain, "withholding is opt-in"
+
+    held = client.get("/v1/recall", params={**asked, "withhold": "email,secret"},
+                      headers=auth()).json()
+    assert "ana.alves@meridian-health.example" not in held["items"][0]["text"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in held["items"][0]["text"]
+    assert held["withheld"]["count"] == 2, held["withheld"]
+    assert held["withheld"]["by_kind"] == {"email": 1, "secret": 1}, held["withheld"]
+    # The sentence that stops the report being read as a safety claim.
+    assert "not a finding" in held["withheld"]["why"], held["withheld"]["why"]
+    # The byte count has to describe what was actually handed back.
+    assert held["returned_bytes"] != plain["returned_bytes"]
+    assert client.get("/v1/recall", params={**asked, "withhold": "astrology"},
+                      headers=auth()).status_code == 422

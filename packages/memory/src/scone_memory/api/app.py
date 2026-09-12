@@ -434,6 +434,7 @@ def create_app(
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "recall.withhold": True,
             "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
@@ -801,6 +802,11 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        withhold_kinds: Optional[str] = Query(
+            default=None, alias="withhold",
+            description="Withhold matches of these kinds from the answer, comma separated "
+                        "(email,phone,ip,card,secret). A net of patterns, never a guarantee: "
+                        "nothing withheld is not a finding that there is nothing to find."),
         rerank: bool = True,
         structural_context: bool = False,
         multi_hop: bool = False,
@@ -818,6 +824,16 @@ def create_app(
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
+        kept = None
+        if withhold_kinds:
+            from ..retrieval.withhold import withhold
+
+            kept = withhold(result.items,
+                            kinds=tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            result = result.model_copy(update={
+                "items": list(kept.items),
+                # The bytes handed back changed, so the count must too.
+                "returned_bytes": sum(len(i.text.encode()) for i in kept.items)})
         response: dict[str, object] = {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
@@ -830,6 +846,13 @@ def create_app(
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
         }
+        if kept is not None:
+            # Carried on the response, because a caller has to be able to
+            # tell what was withheld -- and to read the sentence saying
+            # that nothing withheld is not a finding of nothing present.
+            response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
+                                    "kinds_applied": list(kept.kinds_applied),
+                                    "unscanned": kept.unscanned, "why": kept.why}
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if graph_boost:

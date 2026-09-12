@@ -108,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", type=int, metavar="BYTES",
                    help="return each passage with this many bytes of its episode either side; "
                         "serves the single precise hit that --merge cannot")
+    p.add_argument("--withhold", metavar="KINDS",
+                   help="withhold matches of these kinds from the answer, comma separated "
+                        "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -1276,6 +1279,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost,
         )
+        kept = None
         opened = None
         if args.window:
             from ..retrieval.window import widen
@@ -1283,6 +1287,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             opened = await widen(engine, space, result.items,
                                  before=args.window, after=args.window)
             result = result.model_copy(update={"items": list(opened.items)})
+        if args.withhold:
+            from ..retrieval.withhold import withhold
+
+            kept = withhold(result.items,
+                            kinds=tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            result = result.model_copy(update={"items": list(kept.items)})
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
@@ -1292,8 +1302,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
             emit(said | ({"merged": joined.record()} if joined else {})
-                      | ({"widened": opened.record()} if opened else {}))
+                      | ({"widened": opened.record()} if opened else {})
+                      | ({"withheld": kept.record()} if kept else {}))
             return 0
+        if kept is not None:
+            print(kept.why, file=out)
         if opened is not None:
             print(opened.why, file=out)
         if joined is not None:

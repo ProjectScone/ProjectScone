@@ -495,6 +495,43 @@ gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
 `periods` (every stretch, half-open); the working names each stretch. A
 claim that still holds is counted up to the moment asked and says so.
 
+## Withholding what a caller must not receive
+
+Secrets are scrubbed on the way **in**, but only for the agent feed.
+Memory arrives by many other doors — `remember`, `sync`, document import
+— and none of them scrub, so a space accumulates whatever was put into
+it. A framework whose business is remembering what people said should be
+able to withhold on the way out.
+
+```bash
+scone recall "write to ana about the deploy" --withhold email,secret
+# 2 match(es) of email, secret withheld from this answer; this is a net of
+# patterns, not a guarantee -- nothing withheld is **not a finding** that there
+# is nothing of these kinds in the text, and the memory still holds whatever it
+# held
+# 0.81  2026-09-12  #4  Write to [withheld: email] about [withheld: secret].
+```
+
+`GET /v1/recall?withhold=email,secret` (capability `recall.withhold`).
+Kinds: `email`, `phone`, `ip`, `card`, `secret`.
+
+Four things it does deliberately:
+
+- **The caller names the kinds.** Withholding something nobody asked to
+  withhold damages an answer to protect nothing, and an unknown kind is
+  refused rather than ignored.
+- **A number is checked, not just matched.** A run of sixteen digits is
+  an order reference far more often than a card, so the card kind runs a
+  Luhn check. A false positive here costs the reader the answer.
+- **The report is not a safety claim.** "Nothing withheld" means the
+  patterns matched nothing, *not* that there is nothing to find, and
+  every report says so in those words. A caller who reads it the second
+  way is worse off than one who was told nothing.
+- **Nothing is deleted.** This is what one answer hands back; the memory
+  still holds what it held, which is why the field is `withheld` and not
+  `removed`. A passage longer than the scan bound has its tail reported
+  as unexamined rather than silently passed.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments

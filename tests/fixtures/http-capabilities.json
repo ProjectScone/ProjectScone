@@ -77,6 +77,7 @@
       "answers.temporal": true,
       "answers.routed": true,
       "recall.parts": true,
+      "recall.withhold": true,
       "consolidation.retry": false,
       "graph.health": true,
       "recall.graph_boost": true,
