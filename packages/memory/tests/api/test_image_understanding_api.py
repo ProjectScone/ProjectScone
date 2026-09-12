@@ -38,7 +38,8 @@ async def setup():
         return authorization.split(' ')[1]
 
     app = FastAPI()
-    mount_image_understanding_routes(app, engine, authorize, lambda: vision)
+    mount_image_understanding_routes(app, engine, authorize, lambda: vision,
+                                     assert_current_space=lambda request, space: None)
     with TestClient(app) as client:
         yield engine, client, image, episode, other, vision
 
@@ -100,7 +101,88 @@ async def test_unconfigured_model_does_not_fabricate_a_description():
     image = await engine.attach('alpha', PNG, media_type='image/png')
     episode = await engine.remember('alpha', 'Image', attachment_ids=[image.attachment_id])
     app = FastAPI()
-    mount_image_understanding_routes(app, engine, lambda: 'alpha', lambda: None)
+    mount_image_understanding_routes(app, engine, lambda: 'alpha', lambda: None,
+                                     assert_current_space=lambda request, space: None)
     with TestClient(app) as client:
         response = client.post(f'/v1/episodes/{episode.episode_id}/attachments/{image.attachment_id}/understand', json={'prompt': 'Describe'})
     assert response.status_code == 503
+
+
+@pytest.mark.parametrize('composed', [False, True])
+@pytest.mark.parametrize('phase', ['provider', 'final_attachment_read', 'final_episode_links'])
+@pytest.mark.parametrize('change,status', [
+    ('forget', 410), ('unlink', 404), ('revoke', 401), ('scope', 401), ('role', 403),
+])
+async def test_host_suppresses_result_when_source_or_authority_changes_during_vision(
+    tmp_path, monkeypatch, composed, change, status, phase,
+):
+    from httpx import ASGITransport, AsyncClient
+    from scone_memory.api.__main__ import build_app
+    from scone_memory.runtime.config import Settings
+    from scone_memory.runtime import model_runtime
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    image = await engine.attach('alpha', PNG, media_type='image/png')
+    episode = await engine.remember('alpha', 'Private image', source='private.png',
+                                    attachment_ids=[image.attachment_id])
+    calls = []
+
+    async def change_state():
+        if change == 'forget':
+            await engine.forget('alpha', episode.episode_id)
+        elif change == 'unlink':
+            await engine.blobs.unlink('alpha', episode.episode_id)
+        elif change == 'revoke':
+            memory_app.state.keys.clear()
+        elif change == 'scope':
+            memory_app.state.keys['key'] = 'beta'
+        else:
+            memory_app.state.roles['key'] = 'read'
+
+    original_attachment = engine.attachment
+
+    async def read_attachment(space, attachment_id):
+        retained = await original_attachment(space, attachment_id)
+        if phase == 'final_attachment_read' and calls:
+            await change_state()
+        return retained
+
+    monkeypatch.setattr(engine, 'attachment', read_attachment)
+
+    original_links = engine.blobs.for_episode
+    link_reads = 0
+
+    async def read_links(space, episode_id):
+        nonlocal link_reads
+        retained = await original_links(space, episode_id)
+        link_reads += 1
+        if phase == 'final_episode_links' and link_reads == 3:
+            await change_state()
+        return retained
+
+    monkeypatch.setattr(engine.blobs, 'for_episode', read_links)
+
+    class ChangingVision:
+        async def describe(self, data, media_type, *, prompt, source=None, attachment_id=None):
+            calls.append(prompt)
+            if phase == 'provider':
+                await change_state()
+            return ImageUnderstanding('PRIVATE GENERATED DESCRIPTION', attachment_id, source,
+                                      media_type, 'fixture', 3, 2)
+
+    monkeypatch.setattr(model_runtime, 'local_vision_factory', lambda store: lambda: ChangingVision())
+    settings = Settings(keys={'key': 'alpha'}, roles={'key': 'write'},
+                        model_connections=str(tmp_path / 'models.json'),
+                        conversations_journal=str(tmp_path / 'journal.db') if composed else None)
+    app = build_app(settings, engine)
+    memory_app = getattr(app.state, 'memory_app', app)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post(
+                f'/v1/episodes/{episode.episode_id}/attachments/{image.attachment_id}/understand',
+                json={'prompt': 'Describe'}, headers={'Authorization': 'Bearer key'})
+        assert response.status_code == status, response.text
+        assert 'PRIVATE GENERATED DESCRIPTION' not in response.text
+        assert calls == ['Describe']
+    finally:
+        await engine.close()
