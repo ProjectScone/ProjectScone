@@ -71,8 +71,31 @@ points. Pass the same configuration to both when composing them yourself.
 Change `revision` whenever the model, native decoder, duration limit, or provider
 behavior changes. It is included in the durable parser fingerprint; result reads
 and resume refuse a changed configuration. Loading the service and reading a
-completed result do not transcribe again. Interrupted extraction may need a new
-transcription call on explicit resume; there are no intermediate audio checkpoints.
+completed result do not transcribe again.
+
+Durable native media imports save completed, validated transcript observations in
+the encrypted extraction journal before uploading the document manifest. If that
+upload fails or is interrupted, explicit resume re-decodes the retained original,
+compares the normalized WAV's SHA-256, byte count and duration, then reuses the
+saved observations without another transcription call. The resulting text,
+timestamps, locators and manifest identity stay unchanged. Completed-result reads
+do not perform this decoding; it is only needed to resume incomplete extraction.
+
+Receipts bind the source bytes, exact filename, document limits, decoder settings
+and host transcriber revision. Missing host bindings, changed decoded audio,
+corrupt receipts and journal read failures refuse reuse without falling back to
+the model. Only compact timestamped observations and WAV identity are journaled,
+within the existing 16-MiB receipt limit; decoded WAV bytes are not copied into the
+journal. This supports the native parser's existing text and segment budgets.
+
+The recovery guarantee begins when the receipt write commits. A crash during the
+model call, or between its response and that commit, can still require another
+call on explicit resume. A failed receipt write fails extraction rather than
+claiming completed work. This is recovery of a completed response, not recovery
+inside an unfinished transcription or segmented-audio processing. Custom parsers
+that override `parse` keep their ordinary behavior unless they also opt into
+`parse_checkpointed`; standalone callers must bind model revisions and memory
+scope through the checkpoint-owner contract.
 
 Use the normal workflow:
 
