@@ -344,3 +344,117 @@ async def test_a_truncated_read_is_disclosed_rather_than_answered_as_nothing():
     assert cut.partial_read is True, cut.record()
     assert "truncated" in cut.why, cut.why
     assert "missing from the graph it walked" in cut.why, cut.why
+
+
+async def test_a_name_is_bounded_in_the_bytes_it_costs_not_the_characters():
+    """`MAX_NAME` counted characters, so 200 emoji passed the bound and
+    then cost 5,209 serialized bytes under a 512-byte budget -- because
+    an emoji is four UTF-8 bytes and twelve more once JSON escapes it.
+    A bound on characters is not a bound on an answer's size."""
+    engine = await graphed()
+    try:
+        emoji = "\N{GRINNING FACE}" * MAX_NAME
+        assert len(emoji) == MAX_NAME, len(emoji)
+        with pytest.raises(InvalidInput) as raised:
+            await affected(engine, "default", emoji)
+        assert "byte" in str(raised.value), str(raised.value)
+        # And the bound still admits a name of MAX_NAME plain bytes.
+        assert (await affected(engine, "default", "x" * MAX_NAME)).status
+    finally:
+        await engine.close()
+
+
+async def test_the_answer_s_own_framing_is_charged_against_the_byte_budget():
+    """`max_bytes` bounded the entity list and nothing else, so `target`
+    and `why` -- both of which echo the name -- were spent outside it.
+    Charge the framing first: a budget too small to hold it lists
+    nothing and says the framing spent it, rather than quietly
+    returning ten times what was asked for."""
+    engine = await graphed()
+    try:
+        whole = await affected(engine, "default", "pkg.store")
+        assert whole.reached and whole.framing_bytes > 0, whole.record()
+        tiny = await affected(engine, "default", "pkg.store", max_bytes=1)
+        # The one that proves the charge rather than the flag: four bytes
+        # of room is less than any entity costs, while `max_bytes` here is
+        # hundreds -- so a budget that forgot to subtract its own framing
+        # would list the dependant happily.
+        squeezed = await affected(engine, "default", "pkg.store",
+                                  max_bytes=whole.framing_bytes + 4)
+    finally:
+        await engine.close()
+    assert not tiny.reached, tiny.record()
+    assert tiny.not_listed == len(whole.reached), (tiny.record(), whole.record())
+    assert tiny.framing_spent_budget is True, tiny.record()
+    assert "framing" in tiny.why, tiny.why
+
+    cheapest = min(len(one.label.encode()) + len(one.depends_on.encode()) for one in whole.reached)
+    assert cheapest > 4, cheapest
+    assert squeezed.framing_spent_budget is False, squeezed.record()
+    assert not squeezed.reached, squeezed.record()
+    assert squeezed.not_listed == len(whole.reached), (squeezed.record(), whole.record())
+
+
+async def test_a_dependency_excluded_while_the_graph_was_read_is_not_reported():
+    """`_living` fences the space and nothing fenced the facts. A
+    projection is a snapshot; excluding `web.py imports api` the instant
+    after it was taken still reported web as a dependant, from a read
+    the answer called `current`. The ledger fence catalog already uses
+    is the one this needed."""
+    engine = await graphed()
+    try:
+        before = await affected(engine, "default", "pkg.api")
+        assert any(one.label == "pkg/web.py" for one in before.reached), before.record()
+
+        projection = engine.entities.projection
+        excluded = False
+
+        async def exclude_the_moment_it_is_read(space, **kw):
+            nonlocal excluded
+            answer = await projection(space, **kw)
+            if not excluded:
+                excluded = True
+                for fact in await engine.facts(space):
+                    if fact.predicate == "imports" and "web" in fact.subject:
+                        await engine.exclude(space, fact.fact_id, "moved")
+            return answer
+
+        engine.entities.projection = exclude_the_moment_it_is_read  # type: ignore[assignment]
+        try:
+            after = await affected(engine, "default", "pkg.api")
+        finally:
+            engine.entities.projection = projection  # type: ignore[assignment]
+    finally:
+        await engine.close()
+    assert excluded, "the test never reached the fact it meant to exclude"
+    assert not any(one.label == "pkg/web.py" for one in after.reached), after.record()
+
+
+async def test_a_ledger_that_will_not_hold_still_is_said_rather_than_passed_off():
+    """The retry answers the common case, where one write lands mid-read.
+    A ledger written on every attempt cannot be answered from any single
+    moment, and the answer says so instead of stamping a moment it was
+    never true at."""
+    engine = await graphed()
+    try:
+        projection = engine.entities.projection
+        reads = 0
+
+        async def write_under_every_read(space, **kw):
+            nonlocal reads
+            answer = await projection(space, **kw)
+            reads += 1
+            await engine.remember(space, f"pkg/churn{reads}.py holds nothing.", source=f"c{reads}.md")
+            return answer
+
+        engine.entities.projection = write_under_every_read  # type: ignore[assignment]
+        try:
+            restless = await affected(engine, "default", "pkg.store")
+        finally:
+            engine.entities.projection = projection  # type: ignore[assignment]
+    finally:
+        await engine.close()
+    assert reads > 1, reads
+    assert restless.graph_moved is True, restless.record()
+    assert "moved under all" in restless.why, restless.why
+    assert restless.record()["graph_moved"] is True, restless.record()
