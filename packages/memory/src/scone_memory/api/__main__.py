@@ -74,6 +74,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     store = None
     model_management = False
     vision_available = None
+    vision_factory = None
     if settings.model_connections:
         from ..runtime.model_connections import ModelConnectionStore
         from ..runtime.model_runtime import LocalModelWorker, connection_defaults, local_admin_enabled
@@ -82,6 +83,9 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         worker = LocalModelWorker(engine, settings, store)
         model_management = local_admin_enabled(settings)
         vision_available = lambda: store.get('vision') is not None
+        from ..runtime.model_runtime import local_vision_factory
+
+        vision_factory = local_vision_factory(store)
     else:
         worker = build_worker(engine, settings, settings.keys.values())
 
@@ -94,11 +98,6 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
             target = getattr(app.state, 'memory_app', app)
             target.state.model_connections = store
             mount_model_connection_routes(target, store, authorize_local_admin(settings), on_change=worker.refresh)
-            from .image_understanding import mount_image_understanding_routes
-            from ..runtime.model_runtime import authorize_image_write, local_vision_factory
-
-            mount_image_understanding_routes(target, engine, authorize_image_write(settings, engine),
-                                             local_vision_factory(store))
         install_http_diagnostics(app)
         return app
 
@@ -110,7 +109,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                           agent_plan_store=agents.plans if agents else None,
                           agent_run_service=agents.service if agents else None,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
-                          model_connections_available=model_management, vision_available=vision_available))
+                          model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory))
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
@@ -162,7 +161,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    agent_run_service=agents.service if agents else None,
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    runtime_available=runtime_available,
-                                   model_connections_available=model_management, vision_available=vision_available,
+                                   model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
                                    tool_retrieval=conversation_tools))
 

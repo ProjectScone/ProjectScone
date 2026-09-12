@@ -19,6 +19,7 @@ import json
 import re
 
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -40,6 +41,7 @@ from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
+    from ..providers.vision import VisionModel
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
     from ..agents.run_service import AgentRunService
@@ -271,6 +273,7 @@ def create_app(
     directory_sync_service: DirectorySyncService | None = None,
     filesystem=None,
     document_media: DocumentMedia | None = None,
+    vision_factory: Callable[[], VisionModel | None] | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -378,6 +381,12 @@ def create_app(
         if when is not None:
             raise NotFound(f"space {space!r} was deleted at {when}")
         return space
+
+    if vision_factory is not None:
+        from .image_understanding import mount_image_understanding_routes
+
+        mount_image_understanding_routes(app, engine, space_for, vision_factory,
+                                         assert_current_space=assert_current_space)
 
     def actor_for(request: Request) -> str:
         """Who judged: a fingerprint of the bearer key (never the key) plus an

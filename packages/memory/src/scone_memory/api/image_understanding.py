@@ -34,13 +34,14 @@ class _Task(BaseModel):
 
 def mount_image_understanding_routes(app: FastAPI, engine: MemoryEngine,
                                      space_for: Callable[..., object],
-                                     vision_factory: Callable[[], VisionModel | None]) -> None:
+                                     vision_factory: Callable[[], VisionModel | None], *,
+                                     assert_current_space: Callable[[Request, str], None]) -> None:
     """The host dependency authorizes an inference action and returns its space.
 
     A fresh provider is selected on each explicit request, so settings changes
     affect subsequent requests. The generated result is not stored or approved.
     """
-    if not callable(space_for) or not callable(vision_factory):
+    if not callable(space_for) or not callable(vision_factory) or not callable(assert_current_space):
         raise ValueError('space authorization and a vision factory are required')
     slot = asyncio.Semaphore(1)
     logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ def mount_image_understanding_routes(app: FastAPI, engine: MemoryEngine,
             task = _Task.model_validate(json.loads(content))
         except (ValueError, ValidationError):
             return JSONResponse({'error': 'Provide a nonempty image task of at most 16000 characters'}, status_code=400)
+        assert_current_space(request, space)
         try:
             episode = await engine.episode(space, episode_id)
             if attachment_id not in {item.attachment_id for item in episode.attachments}:
@@ -68,6 +70,7 @@ def mount_image_understanding_routes(app: FastAPI, engine: MemoryEngine,
             return JSONResponse({'error': 'This source was forgotten'}, status_code=410)
         except NotFound:
             return JSONResponse({'error': 'Source image unavailable in this space'}, status_code=404)
+        assert_current_space(request, space)
         if slot.locked():
             return JSONResponse({'error': 'Image understanding is busy; retry after the current request'}, status_code=429)
         async with slot:
@@ -102,10 +105,34 @@ def mount_image_understanding_routes(app: FastAPI, engine: MemoryEngine,
                 if result.attachment_id != attachment_id or result.source != source or result.media_type != attachment.media_type:
                     outcome = 'source_mismatch'
                     return JSONResponse({'error': 'Vision result did not match the retained source image'}, status_code=502)
+                try:
+                    await engine.episode(space, episode_id)
+                    current_attachment, current_data = await engine.attachment(space, attachment_id)
+                    await engine.episode(space, episode_id)
+                    current_links = await engine.blobs.for_episode(space, episode_id)
+                    current_episode = await engine.documents.get_episode(space, episode_id)
+                    if current_episode is None:
+                        tombstone = await engine.tombstone(space, episode_id)
+                        if tombstone is not None:
+                            raise Gone('This source was forgotten', tombstone.forgotten_at)
+                        raise NotFound('Source image unavailable in this space')
+                except Gone:
+                    outcome = 'source_gone'
+                    return JSONResponse({'error': 'This source was forgotten'}, status_code=410)
+                except NotFound:
+                    outcome = 'source_unavailable'
+                    return JSONResponse({'error': 'Source image unavailable in this space'}, status_code=404)
+                assert_current_space(request, space)
+                if (attachment_id not in {item.attachment_id for item in current_links}
+                        or current_episode.source != episode.source
+                        or current_episode.content != episode.content
+                        or current_attachment != attachment or current_data != data):
+                    outcome = 'source_changed'
+                    return JSONResponse({'error': 'Source image changed during understanding'}, status_code=404)
                 outcome = 'completed'
+                return JSONResponse({'schema_version': 1, 'episode_id': episode_id,
+                                     'attachment_id': attachment_id, 'understanding': asdict(result), 'persisted': False})
             finally:
                 logger.info('Image understanding finished', extra={'event': 'image_understanding.finished',
                             'episode_id': episode_id, 'model_name': model_name, 'outcome': outcome,
                             'exception_type': exception_type, 'elapsed_ms': round((time.perf_counter()-started)*1000, 3)})
-        return JSONResponse({'schema_version': 1, 'episode_id': episode_id,
-                             'attachment_id': attachment_id, 'understanding': asdict(result), 'persisted': False})
