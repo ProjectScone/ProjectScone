@@ -214,3 +214,17 @@ async def test_a_width_that_turns_out_to_match_is_used():
     await engine.remember("alpha", "a note about boats and the sea")
     result = await engine.recall("alpha", "boats")
     assert result.low_confidence is not None and engine.similarity_floor == 0.4
+
+
+async def test_an_embedder_that_declares_no_width_still_cannot_return_a_ragged_batch():
+    """With no declared width there is nothing to check a vector against,
+    but a batch whose vectors disagree with each other is still wrong --
+    and refusing every vector instead would stop such an embedder storing
+    anything at all."""
+    from scone_memory.ingestion.batch import _validated_vectors
+
+    assert _validated_vectors([[0.0, 1.0], [2.0, 3.0]], 2, 0) == [[0.0, 1.0], [2.0, 3.0]]
+    with pytest.raises(ValueError):
+        _validated_vectors([[0.0, 1.0], [2.0]], 2, 0)
+    with pytest.raises(ValueError):
+        _validated_vectors([[0.0, 1.0]], 1, 3), "a declared width is still enforced"

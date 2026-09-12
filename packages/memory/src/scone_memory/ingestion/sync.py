@@ -101,6 +101,13 @@ class SyncReceipt:
     removed: int = 0
     #: Of those, the ones actually forgotten. Zero unless ``remove``.
     forgotten: int = 0
+    #: Symbolic links under the root, which are counted and not followed:
+    #: what one points at is outside the root the caller named.
+    links: int = 0
+    #: Directories under the root this sync could not read. Each one hides
+    #: an unknown number of files, so a run with any of these cannot say
+    #: what is gone.
+    unreadable: int = 0
     #: Episodes this marker holds whose file this run would not have looked
     #: for -- the suffixes no longer select it. Counted apart from missing,
     #: because a narrowed flag is not a deleted file.
@@ -129,7 +136,8 @@ class SyncReceipt:
                 "files_found": self.files_found, "files_read": self.files_read,
                 "capped": self.capped, "added": self.added, "updated": self.updated,
                 "unchanged": self.unchanged, "removed": self.removed,
-                "out_of_scope": self.out_of_scope,
+                "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
+                "links": self.links,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
                 "listed_all": self.listed_all, "checked_for_missing": self.checked_for_missing,
                 "changes": [{"path": c.path, "what": c.what} for c in self.changes]}
@@ -139,7 +147,10 @@ class SyncReceipt:
         lines = [f"{did} {self.marker}: {self.files_read} of {self.files_found} file(s) read"
                  + (" (capped)" if self.capped else "")
                  + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"]
-        if not self.checked_for_missing:
+        if self.unreadable:
+            lines.append(f"{self.unreadable} directory(ies) under the root could not be read, so "
+                         f"this run cannot say what is gone and forgot nothing")
+        if not self.checked_for_missing and not self.unreadable:
             lines.append("this walk stopped at the file cap, so it did not look for missing files")
         if self.removed and self.removing:
             lines.append(f"{self.forgotten} of {self.removed} missing file(s) forgotten")
@@ -149,6 +160,9 @@ class SyncReceipt:
         if self.out_of_scope:
             lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
                          f"suffixes and were left alone, not treated as gone")
+        if self.links:
+            lines.append(f"{self.links} symbolic link(s) were left alone: what a link points at "
+                         f"is outside the root")
         if self.empty:
             lines.append(f"{self.empty} file(s) had nothing in them")
         if self.cut:
@@ -194,21 +208,66 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
             and not any(part.startswith(".") or part == "__pycache__" for part in here.parts))
 
 
+#: The namespace every key this writes begins with. A space is shared —
+#: with hand-written records and with the document ``DirectorySync``, which
+#: keeps its own managed identities — so the identities this owns are
+#: separated by construction rather than by convention. Nothing outside a
+#: sync writes this prefix, so nothing outside a sync can be replaced by
+#: one.
+KEYS = "scone.sync/1"
+
+
 def _key(marker: str, path: str) -> str:
     """The identity a synced file is stored under: its marker and its path.
 
     Length-prefixed rather than separated, because a marker and a path are
     both text a caller chose and any separator could appear in either.
     """
-    return f"{len(marker)}:{marker}/{path}"
+    return f"{KEYS}:{len(marker)}:{marker}/{path}"
 
 
-def _files(root: pathlib.Path, suffixes: Sequence[str], limit: int) -> tuple[list[pathlib.Path], int]:
-    """(the files to read, how many are there)."""
+def _files(root: pathlib.Path, suffixes: Sequence[str],
+           limit: int) -> tuple[list[pathlib.Path], int, int, int]:
+    """(files to read, how many are there, directories unread, links skipped).
+
+    Walked explicitly rather than with ``rglob``, which swallows a
+    ``PermissionError`` and returns what it could reach — indistinguishable
+    from a smaller directory. A sync that cannot see part of a tree must
+    know it, because the alternative is forgetting memory for files that
+    are still on disk.
+    """
     wanted = _wanted(suffixes)
-    found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and _in_scope(path.relative_to(root), wanted)]
-    return found[:limit], len(found)
+    found: list[pathlib.Path] = []
+    unreadable = links = 0
+    stack = [root]
+    while stack:
+        here = stack.pop()
+        try:
+            entries = sorted(here.iterdir())
+        except OSError:
+            unreadable += 1
+            continue
+        for entry in entries:
+            try:
+                # A link is left alone, and counted. What it points at is
+                # outside the root the caller named -- following one stores
+                # content nobody asked for, under a path inside the root, so
+                # nothing in the space would say where it really came from.
+                if entry.is_symlink():
+                    links += 1
+                    continue
+                directory = entry.is_dir()
+            except OSError:
+                unreadable += 1
+                continue
+            below = entry.relative_to(root)
+            if directory:
+                if not any(part.startswith(".") or part == "__pycache__" for part in below.parts):
+                    stack.append(entry)
+            elif _in_scope(below, wanted):
+                found.append(entry)
+    found.sort()
+    return found[:limit], len(found), unreadable, links
 
 
 async def sync_directory(
@@ -237,7 +296,7 @@ async def sync_directory(
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
 
-    reading, there = _files(where, suffixes, limit)
+    reading, there, unreadable, links = _files(where, suffixes, limit)
     known = {episode.source: episode
              for episode in await engine.episodes(space, {"sync": name})
              if episode.source}
@@ -255,7 +314,11 @@ async def sync_directory(
     for path in reading:
         here = path.relative_to(where).as_posix()
         seen.add(here)
-        raw = path.read_bytes()
+        # One byte past the limit: enough to know the file is longer
+        # without reading the rest of it. Reading a gigabyte to keep a
+        # kilobyte is how a sync of a large tree exhausts a machine.
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
         if len(raw) > max_bytes:
             tally.cut += 1
             tally.saw(here, "cut")
@@ -291,7 +354,11 @@ async def sync_directory(
     # suffixes no longer select was never looked for. Neither is missing,
     # and forgetting on either would delete memory because a flag changed
     # rather than because anything left the disk.
-    whole = len(reading) == there
+    # Three ways a file leaves the walk without leaving the disk: the cap
+    # stopped us, the suffixes no longer select it, or a directory holding
+    # it could not be read. Only a walk clear of all three can say what is
+    # gone.
+    whole = len(reading) == there and not unreadable
     wanted = _wanted(suffixes)
     out_of_scope = [path for path in known if not _in_scope(pathlib.PurePosixPath(path), wanted)]
     missing = ([path for path in known
@@ -307,7 +374,7 @@ async def sync_directory(
         root=str(where), marker=name, space=space, applied=apply, removing=remove,
         files_found=there, files_read=len(reading), added=tally.added, updated=tally.updated,
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
-        out_of_scope=len(out_of_scope),
+        out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
         listed_all=tally.listed_all, checked_for_missing=whole)
     if apply:

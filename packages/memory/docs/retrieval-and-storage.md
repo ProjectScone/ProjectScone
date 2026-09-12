@@ -668,6 +668,19 @@ nothing to do with the disk:
   and left alone, never as missing. Otherwise narrowing a flag between
   two runs would delete every memory the narrower run stopped asking
   about.
+- If a **directory could not be read**, an unknown number of files are
+  hidden behind it. `rglob` swallows a `PermissionError` and returns what
+  it could reach, which is indistinguishable from a smaller directory —
+  so the walk is explicit, counts what it could not open, and a run with
+  any `unreadable` forgets nothing and says why.
+
+Two more things the walk does not do, both because the root is the whole
+scope. **A symbolic link is counted and not followed**: what it points at
+is outside the root the caller named, and storing it would file content
+nobody asked for under a path inside the root, so nothing in the space
+would say where it came from. And a file longer than `--max-bytes` is
+**read only to the limit plus one byte** — enough to know it is longer,
+without reading a gigabyte to keep a kilobyte.
 
 An earlier version got the hidden-directory rule wrong in a way worth
 recording, because the report it produced was confident and false. The

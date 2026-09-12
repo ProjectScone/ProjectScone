@@ -10,6 +10,9 @@ outright when the directory came back empty.
 
 from __future__ import annotations
 
+import os
+import pathlib
+
 import pytest
 
 from scone_memory import (HashEmbedder, InMemoryDocumentStore, InMemoryEventLog,
@@ -296,5 +299,160 @@ async def test_narrowing_the_suffixes_does_not_report_the_rest_as_gone(tmp_path)
         assert narrow.out_of_scope == 1, narrow.record()
         assert "out of scope" in narrow.text(), narrow.text()
         assert await count(engine) == 2, "a narrowed suffix list must never delete memory"
+    finally:
+        await engine.close()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a directory with no permissions")
+async def test_a_directory_it_cannot_read_is_not_evidence_that_files_are_gone(tmp_path):
+    """`rglob` swallows a PermissionError and returns what it could reach,
+    which looks exactly like a smaller directory. Forgetting on that
+    deletes memory for files that are still on disk -- the third way a file
+    can leave the walk without leaving the disk, after the file cap and the
+    suffix list."""
+    tree(tmp_path, **{"open.py": "def a(): pass", "shut/present.py": "def b(): pass"})
+    engine = await memory()
+    try:
+        await sync_directory(engine, "default", tmp_path, apply=True)
+        assert await count(engine) == 2
+        (tmp_path / "shut").chmod(0o000)
+        try:
+            blind = await sync_directory(engine, "default", tmp_path, apply=True, remove=True)
+        finally:
+            (tmp_path / "shut").chmod(0o755)
+        assert blind.unreadable == 1, blind.record()
+        assert not blind.checked_for_missing, blind.record()
+        assert blind.forgotten == 0 and blind.removed == 0, blind.record()
+        assert await count(engine) == 2, "a directory we could not read must never delete memory"
+        assert "could not be read" in blind.text(), blind.text()
+    finally:
+        await engine.close()
+
+
+async def test_a_readable_directory_reports_nothing_unreadable(tmp_path):
+    tree(tmp_path, **{"a.py": "def a(): pass", "deep/b.py": "def b(): pass"})
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True, remove=True)
+        assert done.unreadable == 0 and done.checked_for_missing, done.record()
+        assert done.files_found == 2, done.record()
+    finally:
+        await engine.close()
+
+
+async def test_a_source_this_sync_does_not_own_is_never_replaced(tmp_path):
+    """Another writer's episode for the same path must survive. The space is
+    shared -- a hand-written record, or one managed by the document
+    DirectorySync -- and a sync that replaced whatever sat under a bare
+    path would take those with it."""
+    from scone_memory.ingestion.records import Record
+
+    tree(tmp_path, **{"README.md": "the synced copy"})
+    engine = await memory()
+    try:
+        await engine.replace("default", Record(content="somebody else's record",
+                                               kind="file", source="README.md",
+                                               dedup_key="README.md"))
+        done = await sync_directory(engine, "default", tmp_path, apply=True, marker="mine")
+        assert done.added == 1, done.record()
+        assert await count(engine) == 2, "the other writer's record still stands"
+        held = {e.content for e in await engine.episodes("default", {"sync": "mine"})}
+        assert held == {"the synced copy"}, held
+    finally:
+        await engine.close()
+
+
+async def test_the_key_a_sync_writes_is_namespaced_to_syncs(tmp_path):
+    """Identity by construction rather than by convention: no hand-written
+    key and no other service's key can collide with one of these unless it
+    deliberately writes this namespace."""
+    from scone_memory.ingestion.sync import _key
+
+    assert _key("mine", "README.md").startswith("scone.sync/1:")
+    assert _key("ab", "x") != _key("a", "b/x"), "a marker and a path must not be readable two ways"
+
+
+async def test_a_symlink_does_not_pull_in_a_file_from_outside_the_root(tmp_path):
+    """The root is the whole scope. A link is a file in it, but what it
+    points at is not, and following one silently stores content the caller
+    never pointed at -- and stores it under a path inside the root, so
+    nothing in the space says where it really came from."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("not part of this project", encoding="utf-8")
+    root = tmp_path / "root"
+    tree(root, **{"real.md": "the real note"})
+    (root / "link.md").symlink_to(outside / "secret.md")
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", root, apply=True)
+        assert done.files_found == 1 and done.added == 1, done.record()
+        assert done.links == 1 and "link" in done.text(), done.text()
+        held = {e.content for e in await engine.episodes("default", {"sync": str(root.resolve())})}
+        assert held == {"the real note"}, held
+    finally:
+        await engine.close()
+
+
+async def test_a_linked_directory_is_not_walked(tmp_path):
+    outside = tmp_path / "elsewhere"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "deep" / "a.md").write_text("elsewhere entirely", encoding="utf-8")
+    root = tmp_path / "root"
+    tree(root, **{"real.md": "the real note"})
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", root, apply=True)
+        assert done.files_found == 1 and done.links == 1, done.record()
+    finally:
+        await engine.close()
+
+
+async def test_a_long_file_is_not_read_whole_just_to_throw_most_of_it_away(tmp_path, monkeypatch):
+    """A byte limit is a limit on reading, not only on storing. Reading a
+    gigabyte to keep a kilobyte is how a sync of a large tree exhausts a
+    machine, so this watches how much was actually asked for."""
+
+    class Watched:
+        """A handle that records the size of every read asked of it."""
+
+        def __init__(self, handle, asked):
+            self._handle, self._asked = handle, asked
+
+        def read(self, size=-1):
+            self._asked.append(size)
+            return self._handle.read(size)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *gone):
+            return self._handle.__exit__(*gone)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    (tmp_path / "big.md").write_bytes(b"x" * 262_144)
+    asked: list[int] = []
+    opening = pathlib.Path.open
+    monkeypatch.setattr(pathlib.Path, "open",
+                        lambda self, *a, **k: Watched(opening(self, *a, **k), asked))
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True, max_bytes=64)
+    finally:
+        await engine.close()
+    assert done.cut == 1 and done.added == 1, done.record()
+    assert asked == [65], f"one read of the limit plus a byte, not {asked}"
+
+
+async def test_a_file_exactly_at_the_limit_is_not_reported_as_cut(tmp_path):
+    (tmp_path / "exact.md").write_bytes(b"y" * 64)
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True, max_bytes=64)
+        assert done.cut == 0 and done.added == 1, done.record()
     finally:
         await engine.close()
