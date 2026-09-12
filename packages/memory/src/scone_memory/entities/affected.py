@@ -239,11 +239,12 @@ def _unresolved(target: str, joined: bool) -> str:
     imports, because a notice that appears every time is skipped."""
     if joined or "/" not in target:
         return ""
-    return ("; and no file in this graph imports another, which is what a relative import "
-            "records only when whoever ingested the code could say which file it meant -- "
-            "`engine.remember` and the episodes route cannot, `scone sync --graph` can, so a "
-            "file's dependants may be missing here for that reason rather than for any reason "
-            "about the file itself")
+    return ("; and no file in this graph imports another, so a file's dependants may be missing "
+            "here for a reason that is not about the file: a relative import in the brace "
+            "family names `./store`, which could be store.ts, store.tsx, store.js or "
+            "store/index.ts, and only somebody who read the tree can say which -- "
+            "`scone sync --graph` does, `engine.remember` and the episodes route cannot. "
+            "Python names its own file and does not need that")
 
 
 def _whole(value: object, name: str, top: int) -> int:
@@ -283,17 +284,13 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     seen, allowed = covered.get("facts_read"), covered.get("facts_limit")
     limit_hit = bool(covered.get("reasons")) or (
         isinstance(seen, int) and isinstance(allowed, int) and seen >= allowed)
-    # A relative import records nothing unless whoever ingested the code
-    # supplied a resolver that knows the tree -- `scone sync --graph`
-    # does, from the files it actually read, and `engine.remember` and
-    # the episodes route cannot. So a Python package ingested through
-    # those keeps `import json` and drops `from ..core import errors`,
-    # and every file's dependants are missing. Measured over 57 files of
-    # this package: 0 files with a dependant that way, against 27
-    # cross-file edges and 15 files with dependants through the resolver.
-    #
-    # "Nothing rests on this" is hedged already. It is not enough when
-    # the reason is that no file in this graph imports any other.
+    # Whether this graph holds an import edge between two of its own
+    # files at all. Python names the file a relative import points at by
+    # arithmetic on the importing path, so it does not need a resolver;
+    # the brace family does, because `./store` could carry any of five
+    # extensions and one file cannot choose. "Nothing rests on this" is
+    # hedged already, and it is still not enough when the real reason is
+    # that no file here imports any other.
     joined = any(one.predicate == "imports" and "/" in str(labels_of(projection, one.object_id))
                  for one in projection.relations)
     said = f"read as {mode} at {moment.isoformat()}"
@@ -335,9 +332,23 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # Reverse adjacency over dependency relations only: object -> the
     # subjects that rest on it.
     rests_on: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    # A relative import names `core/errors.py` because a module is the
+    # common case and one file cannot know it was a package. Here the
+    # whole graph can be consulted, so a `core/errors/__init__.py` it
+    # holds collects the edges recorded against the module spelling of
+    # its own name. Matched at read time on purpose: at write time it
+    # would depend on which file arrived first.
+    held = {entity.label: entity.entity_id for entity in projection.entities}
+    package = {entity_id: held[f"{entity_label[:-3]}/__init__.py"]
+               for entity_label, entity_id in held.items()
+               if entity_label.endswith(".py")
+               and f"{entity_label[:-3]}/__init__.py" in held}
     for relation in projection.relations:
         if relation.predicate in DEPENDS_ON and relation.subject_id != relation.object_id:
             rests_on[relation.object_id].append((relation.subject_id, relation.predicate))
+            same = package.get(relation.object_id)
+            if same is not None and same != relation.subject_id:
+                rests_on[same].append((relation.subject_id, relation.predicate))
 
     # The walk bounds how many it may hold and nothing else. A byte
     # bound here as well would be a second bound spending the same budget
@@ -350,17 +361,6 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     notice = _unresolved(shown, joined)
     unresolved = bool(notice)
 
-    # A relative import records nothing unless whoever ingested the code
-    # supplied a resolver that knows the tree -- `scone sync --graph`
-    # does, from the files it actually read, and `engine.remember` and
-    # the episodes route cannot. So a Python package ingested through
-    # those keeps `import json` and drops `from ..core import errors`,
-    # and every file's dependants are missing. Measured over 57 files of
-    # this package: 0 files with a dependant that way, against 27
-    # cross-file edges and 15 files with dependants through the resolver.
-    #
-    # "Nothing rests on this" is hedged already. It is not enough when
-    # the reason is that no file in the graph imports any other.
     seen = {target}
     counted: dict[int, int] = {}
     listed: list[Reached] = []

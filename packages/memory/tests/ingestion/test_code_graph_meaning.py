@@ -75,10 +75,23 @@ def test_a_base_from_a_relative_import_is_resolved_when_somebody_knows_the_tree(
     assert ("pkg/shelf.py:Shelf", "pkg/local.py:Cache") in found, found
 
 
-def test_a_base_from_an_unresolvable_relative_import_is_left_as_written():
-    """The same rule imports follow: say what the file said, and do not
-    invent a location for it."""
-    assert ("pkg/shelf.py:Shelf", "Cache") in said(INHERITS)
+def test_a_base_from_a_relative_import_is_named_where_that_import_points():
+    """The same rule imports follow, and that rule changed.
+
+    A base class taken from a relative import used to be left as the bare
+    word the file wrote, because the import it came from was dropped.
+    Now the import names its file by arithmetic on the importing path, so
+    `from .local import Cache` followed by `class Shelf(Cache)` says
+    `pkg/local.py:Cache` -- a base in a file, which is what an inherits
+    edge is for, rather than a word that matches every other `Cache` in
+    the graph.
+
+    A base from an *absolute* import is still left as written
+    (`pkg.base.Store` below), because nothing about this file says where
+    another package lives.
+    """
+    assert ("pkg/shelf.py:Shelf", "pkg/local.py:Cache") in said(INHERITS)
+    assert ("pkg/shelf.py:Shelf", "pkg.base.Store") in said(INHERITS)
 
 
 def test_the_reason_the_code_is_this_way_is_attached_to_the_code():
