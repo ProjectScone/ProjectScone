@@ -948,8 +948,9 @@ as context without calling a tool:
 - `scone://graph/report`: the knowledge report of the server's space,
   in Markdown;
 - `scone://graph/schema`: its graph schema, as lines;
-- `scone://{space}/graph/report` and `scone://{space}/graph/schema`: the
-  same for any space by name.
+- `scone://graph/health`: what in its graph wants attention, as lines;
+- `scone://{space}/graph/report`, `scone://{space}/graph/schema` and
+  `scone://{space}/graph/health`: the same for any space by name.
 
 A space name that cannot exist is refused, and the refusal says why. Every surface that asks the graph by name, whether HTTP,
 MCP, the ToolBox or the CLI, shares one set of bounds: 24 names of 1 to
