@@ -238,6 +238,19 @@ scone recall "What did I decide about billing, and who was at the meeting?" --pa
 paraphrased: a part is a verbatim span of the question and carries its own
 offsets, so a receipt can quote exactly what was searched.
 
+It takes the same narrowing as an ordinary search — `as_of`, `tags`,
+`where`, `conditions`, `kind`, `source_prefix`, `since`, `until` — and the
+response **echoes the space it authenticated for and the filters it
+actually applied**. A filter a caller passed and the server quietly
+dropped is worse than one it refused: the page shows an answer that looks
+narrowed and is not.
+
+`history` is **refused rather than ignored**. It returns the closed chain
+behind the facts one query matched, and merged across a question's parts
+that has no defined meaning; inventing one silently would be the same
+fault as dropping a filter. Ask `/v1/recall` with `history` for the whole
+question instead.
+
 ### What it measured, which is nothing
 
 ```bash

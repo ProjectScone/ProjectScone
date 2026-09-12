@@ -710,6 +710,9 @@ def create_app(
         source_prefix: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
+        where: Optional[str] = None,
+        conditions: Optional[str] = None,
+        history: bool = False,
         rerank: bool = True,
         graph_boost: bool = False,
         space: str = Depends(space_for),
@@ -726,12 +729,25 @@ def create_app(
         answered."""
         from ..retrieval.parts import recall_parts
 
-        parted = await recall_parts(
-            engine, space, q, limit=limit, as_of=as_of,
-            tags=[t for t in (tags or "").split(",") if t.strip()], kind=kind,
-            source_prefix=source_prefix, since=since, until=until, rerank=rerank,
-            graph_boost=graph_boost)
-        return parted.record()
+        if history:
+            # Refused, not ignored. `history` is the closed chain behind the
+            # facts one query matched; merged across parts it has no defined
+            # meaning, and a caller whose filter was silently dropped reads a
+            # narrowed answer that was never narrowed.
+            raise InvalidInput(
+                "history is not available for a parted search: it is the chain behind one "
+                "query's matched facts, and there is no defined meaning for it merged across "
+                "a question's parts. Ask /v1/recall with history for the whole question.")
+        narrowing = {"as_of": as_of, "tags": [t for t in (tags or "").split(",") if t.strip()],
+                     "where": parse_where(where), "kind": kind, "source_prefix": source_prefix,
+                     "since": since, "until": until, "conditions": read_conditions(conditions)}
+        parted = await recall_parts(engine, space, q, limit=limit, rerank=rerank,
+                                    graph_boost=graph_boost, **narrowing)  # type: ignore[arg-type]
+        # What was actually applied, echoed back. A page cannot otherwise
+        # tell a filter that took effect from one the server never used.
+        applied = {name: value for name, value in narrowing.items() if value}
+        return parted.record() | {"space": space, "applied": applied,
+                                  "rerank": rerank, "graph_boost": graph_boost}
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(
