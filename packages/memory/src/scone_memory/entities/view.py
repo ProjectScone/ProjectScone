@@ -25,7 +25,7 @@ from ..core.timeutil import parse_rfc3339
 from .classify import CLASSIFIER_VERSION
 from .ids import ENTITY_ID_SCHEME
 from .kinds import KIND_HINTS_VERSION
-from .project import Entity, EntityProjection, FactRole, PROJECTION_VERSION
+from .project import Entity, EntityProjection, FactRole, PROJECTION_VERSION, merged_periods
 
 if TYPE_CHECKING:
     from .usage import Usage
@@ -224,6 +224,10 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
         "relations": [{"id": relation.relation_id, "subject_id": relation.subject_id,
                        "predicate": relation.predicate, "object_id": relation.object_id,
                        "fact_ids": [role.fact_id for role in roles], "support": support(roles),
+                       # The stretches it held over, so that first and last
+                       # cannot be read as one unbroken spell.
+                       "periods": [list(period) for period in merged_periods(
+                           [(role.valid_from, role.valid_until) for role in roles])],
                        "first_valid_from": min(role.valid_from for role in roles),
                        "last_valid_until": None if any(role.valid_until is None for role in roles)
                        else max(role.valid_until for role in roles if role.valid_until),

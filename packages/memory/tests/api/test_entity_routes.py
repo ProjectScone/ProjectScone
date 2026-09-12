@@ -940,8 +940,63 @@ def test_an_entity_page_carries_what_follows_over_http(meant):
     assert {fact["fact_id"] for fact in page["facts"]} >= set(followed["fact_ids"])
 
 
+def test_a_relation_carries_the_spells_it_held_over_http(seeded):
+    """Declared in the response model, or a reader over HTTP is told less
+    than the graph knows."""
+    client, works = seeded
+    view = client.get("/v1/graph/knowledge", params={"status": "all"}, headers=auth()).json()
+    [relation] = [r for r in view["relations"] if r["predicate"] == "works_at"]
+    assert relation["periods"] == [["2024-01-01T00:00:00.000Z", None]]
+    assert relation["first_valid_from"] == "2024-01-01T00:00:00.000Z"
+
+
 def test_a_space_with_no_vocabulary_still_answers_the_old_shape(seeded):
     client, _ = seeded
     view = client.get("/v1/graph/knowledge", headers=auth()).json()
     assert view["implied"] == [] and view["coverage"]["meanings"] is None
     assert view["schema_version"] == 1
+
+
+@pytest.fixture
+async def chained():
+    """Five boxes, each part of the next, with part_of carrying through."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    for n in range(4):
+        await engine.assert_fact("alpha", f"Box {n}", "part_of", f"Box {n + 1}",
+                                 valid_from="2024-01-01T00:00:00Z")
+    app = create_app(engine, {"key-a": "alpha"})
+    with TestClient(app) as client:
+        yield client
+
+
+def first_box(client) -> str:
+    found = client.get("/v1/entities/resolve", params={"name": "Box 0"}, headers=auth()).json()
+    [box] = found["candidates"]
+    return str(box["id"])
+
+
+def test_an_entity_page_that_shows_some_of_what_follows_says_how_many_there_are(chained):
+    """A page cut to one implication must not read as a page with one."""
+    page = chained.get(f"/v1/entities/{first_box(chained)}", params={"limit": 1}, headers=auth()).json()
+    assert len(page["follows"]) == 1
+    assert page["coverage"]["follows_total"] == 3
+    assert page["coverage"]["truncated"] is True and "follows_limit" in page["coverage"]["reasons"]
+
+
+def test_an_entity_page_shows_all_of_what_follows_when_it_fits(chained):
+    page = chained.get(f"/v1/entities/{first_box(chained)}", headers=auth()).json()
+    assert page["coverage"]["follows_total"] == 3 and page["coverage"]["follows_shown"] == 3
+    assert "follows_limit" not in page["coverage"]["reasons"]
+
+
+def test_an_entity_page_says_the_vocabulary_and_when_the_walk_stopped(chained, monkeypatch):
+    from scone_memory.entities import project as projecting
+
+    monkeypatch.setattr(projecting, "MAX_WALKED", 1)
+    page = chained.get(f"/v1/entities/{first_box(chained)}", headers=auth()).json()
+    assert page["coverage"]["meanings"]["transitive"] == ["part_of"]
+    assert page["coverage"]["implied_capped"] is True
+    assert page["coverage"]["truncated"] is True and "implied_capped" in page["coverage"]["reasons"]

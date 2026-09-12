@@ -479,3 +479,35 @@ def test_a_dense_graph_costs_claims_rather_than_paths(monkeypatch):
     graph = projected(facts, RelationMeanings(transitive=["part_of"]))
     assert graph.implied_capped is False, "the walk finished well inside the budget"
     assert graph.implied == (), "every pair was already stated"
+
+
+def test_a_stated_relation_says_the_spells_it_held_over_too():
+    """The same honesty the implications get: a claim made of two spells
+    with a gap between them did not hold during the gap, and first and
+    last on their own would let a reader think it did."""
+    from scone_memory.entities.view import knowledge_view
+
+    facts = [spanning(1, "Alice Chen", "works_at", "Acme Robotics", "2019-01-01", "2020-01-01"),
+             spanning(2, "Alice Chen", "works_at", "Acme Robotics", "2022-01-01")]
+    graph = projected(facts)
+    view = knowledge_view(graph, mode="all", as_of="2026-01-01T00:00:00.000Z", limit=10,
+                          attribute_limit=10, offset=0, coverage={"reasons": []})
+    [stated] = view["relations"]
+    assert [(a[:10], b and b[:10]) for a, b in stated["periods"]] == [
+        ("2019-01-01", "2020-01-01"), ("2022-01-01", None)]
+    assert stated["first_valid_from"][:10] == "2019-01-01" and stated["last_valid_until"] is None
+
+
+def test_a_neighbourhood_cut_to_fewer_implications_says_it_was_cut():
+    """The count and the flag belong to the reading itself, not only to the
+    page built from it: anything reading a neighbourhood must be able to
+    tell a page of one from a page cut down to one."""
+    from scone_memory.entities.query import neighbourhood, resolve
+
+    facts = [spanning(n + 1, f"Box {n}", "part_of", f"Box {n + 1}", "2024-01-01") for n in range(4)]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    [box] = resolve(graph, "Box 0").candidates
+    whole = neighbourhood(graph, box.entity_id)
+    assert whole is not None and whole.follows_total == 3 and not whole.truncated
+    cut = neighbourhood(graph, box.entity_id, limit=1)
+    assert cut is not None and cut.follows_total == 3 and len(cut.follows) == 1 and cut.truncated

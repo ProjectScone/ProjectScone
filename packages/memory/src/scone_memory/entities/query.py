@@ -227,6 +227,8 @@ class Neighbourhood:
     #: Counted claims the entity takes part in, as subject or object.
     claims: int = 0
     relations_total: int = 0
+    #: How many follow from claims about it, before any limit.
+    follows_total: int = 0
     truncated: bool = False
 
 
@@ -246,5 +248,6 @@ def neighbourhood(projection: EntityProjection, entity_id: str, *, limit: int = 
     total = len(outgoing) + len(incoming)
     claims = sum(1 for role in projection.roles if entity_id in (role.subject_id, role.object_id))
     return Neighbourhood(entity, tuple(outgoing[:limit]), tuple(incoming[:limit]), tuple(attributes[:limit]),
-                         tuple(follows[:limit]), claims, total,
-                         len(outgoing) > limit or len(incoming) > limit or len(attributes) > limit)
+                         tuple(follows[:limit]), claims, total, len(follows),
+                         len(outgoing) > limit or len(incoming) > limit or len(attributes) > limit
+                         or len(follows) > limit)

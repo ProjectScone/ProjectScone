@@ -92,6 +92,11 @@ class RelationOut(BaseModel):
     object_id: str
     fact_ids: list[int]
     support: Support
+    #: The stretches of valid time it held over, half-open. A claim made
+    #: of two spells with a gap between them did not hold in the gap, so
+    #: the two fields below are its first beginning and last ending, not
+    #: one unbroken spell.
+    periods: list[list[Optional[str]]] = []
     first_valid_from: str
     last_valid_until: Optional[str]
     #: With ``usage``, the recalls that returned one of its facts.
@@ -694,7 +699,13 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
     cited = sorted({fact_id for relation in (*found.outgoing, *found.incoming) for fact_id in relation.fact_ids}
                    | {fact_id for attribute in found.attributes for fact_id in attribute.fact_ids}
                    | {fact_id for item in found.follows for fact_id in item.fact_ids})
-    reasons = [*_read_reasons(coverage), *(["relation_limit"] if found.truncated else [])]
+    reasons = [*_read_reasons(coverage),
+                *(["relation_limit"] if (len(found.outgoing) + len(found.incoming) < found.relations_total
+                                         or len(found.attributes) == limit) else []),
+                *(["follows_limit"] if len(found.follows) < found.follows_total else []),
+                # The walk that worked out what follows stopped early, so
+                # this page is missing implications it cannot name.
+                *(["implied_capped"] if projection.implied_capped else [])]
     return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
             "filters": {"status": status, "as_of": when}, "entity": entity_record(found.entity, found.claims),
             "outgoing": grouped(found.outgoing, "object"), "incoming": grouped(found.incoming, "subject"),
@@ -714,5 +725,7 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
             "facts": await checked_facts(engine.documents, space, cited), "complete": complete,
             "coverage": {**read, "relations_total": found.relations_total,
                          "relations_shown": len(found.outgoing) + len(found.incoming),
-                         "follows_shown": len(found.follows),
+                         "follows_total": found.follows_total, "follows_shown": len(found.follows),
+                         "meanings": projection.meanings.record() if projection.meanings else None,
+                         **({"implied_capped": True} if projection.implied_capped else {}),
                          "truncated": bool(reasons), "reasons": reasons}}
