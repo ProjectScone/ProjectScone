@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Optional
 
+from .view import StatusMode
+
 from ..core.errors import InvalidInput
 from ..memory.engine import check_space
 from .query import resolve
@@ -48,6 +50,10 @@ MAX_HOPS = 8
 MAX_REACHED = 1_000
 #: Bytes one answer may reach.
 MAX_BYTES = 64_000
+#: Characters a name may be. A 20,000-character name echoed into `target`
+#: and `why` produced a 40,000-byte answer under a 512-byte budget: the
+#: same metadata-outside-the-budget fault the context receipts had.
+MAX_NAME = 200
 
 
 @dataclass(frozen=True)
@@ -81,10 +87,18 @@ class Blast:
     #: Entities reached but not listed, because the count or the byte
     #: budget was spent.
     not_listed: int = 0
+    #: The status mode and moment the graph was read at, because an
+    #: answer about dependencies depends entirely on which facts counted.
+    mode: str = "current"
+    at: str = ""
+    #: Whether the read behind this answer was itself truncated. An
+    #: answer of "nothing" from an incomplete read is not an answer.
+    partial_read: bool = False
     why: str = ""
 
     def record(self) -> dict[str, object]:
         return {"target": self.target, "status": self.status, "reached": len(self.reached),
+                "mode": self.mode, "at": self.at, "partial_read": self.partial_read,
                 "by_depth": {str(k): v for k, v in sorted(self.by_depth.items())},
                 "deepest": self.deepest, "stopped_at_depth": self.stopped_at_depth,
                 "not_listed": self.not_listed, "why": self.why,
@@ -99,29 +113,58 @@ def _whole(value: object, name: str, top: int) -> int:
 
 async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: int = 4,
                    limit: int = MAX_REACHED, max_bytes: int = MAX_BYTES,
-                   when: Optional[datetime] = None) -> Blast:
-    """Everything in this graph that rests on ``name``, nearest first."""
+                   when: Optional[datetime] = None,
+                   mode: StatusMode = "current") -> Blast:
+    """Everything in this graph that rests on ``name``, nearest first.
+
+    Read at ``mode`` and ``when``, both reported. The default is
+    **current**: "what breaks if I change this" is a question about the
+    dependencies that hold now, and reading `all` would answer it with
+    edges closed years ago and edges that do not start until 2030. An
+    ``as_of`` that implies a filter it does not apply is worse than no
+    filter at all, so the mode and the moment are on every answer.
+    """
     check_space(space)
     _whole(max_hops, "max_hops", MAX_HOPS)
     _whole(limit, "limit", MAX_REACHED)
     _whole(max_bytes, "max_bytes", MAX_BYTES)
     if not isinstance(name, str) or not name.strip():
         raise InvalidInput("name the symbol, file or module to start from")
+    if len(name) > MAX_NAME:
+        raise InvalidInput(f"a name is at most {MAX_NAME} characters, not {len(name)} -- a name "
+                           f"is echoed in the answer, so an unbounded one is an unbounded answer")
 
-    projection, _ = await engine.entities.projection(
-        space, mode="all", when=when or datetime.now(timezone.utc))
+    moment = when or datetime.now(timezone.utc)
+    projection, covered = await engine.entities.projection(space, mode=mode, when=moment)
+    read = str(covered.get("facts_read", ""))
+    seen, allowed = covered.get("facts_read"), covered.get("facts_limit")
+    limit_hit = bool(covered.get("reasons")) or (
+        isinstance(seen, int) and isinstance(allowed, int) and seen >= allowed)
+    said = f"read as {mode} at {moment.isoformat()}"
+    if limit_hit:
+        said += (f"; the read behind this answer was itself truncated at {read} fact(s), so what "
+                 f"is missing here may be missing from the graph it walked rather than from the "
+                 f"codebase")
+    # The rule merging and windowing follow and this did not: a source
+    # confirmed gone is dropped, never served. A projection is a snapshot
+    # taken before this line, so a space deleted while it was being read
+    # would otherwise be answered from rows that no longer exist.
+    await engine._living(space)
+
     found = resolve(projection, name.strip())
     if found.status == "not_found" or not found.candidates:
         return Blast(target=name, status="unknown",
-                     why=f"{name!r} is not in this graph -- which is not a finding that nothing "
-                         f"depends on it, only that this memory has not been given it")
+                     mode=mode, at=moment.isoformat(), partial_read=limit_hit,
+                     why=f"{name!r} is not in this graph ({said}) -- which is not a finding that "
+                         f"nothing depends on it, only that this memory has not been given it")
     if found.status == "ambiguous":
         # The resolver's own verdict, not a score comparison of my own
         # invention: it knows what "ambiguous" means here and I do not.
         return Blast(target=name, status="ambiguous",
+                     mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} names more than one thing in this graph "
                          f"({', '.join(one.label for one in found.candidates[:4])}); "
-                         f"ask for one of them by its own name")
+                         f"ask for one of them by its own name ({said})")
     target = found.candidates[0].entity_id
     label = {entity.entity_id: entity.label for entity in projection.entities}
 
@@ -166,9 +209,10 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
             queue.append((dependant, step))
     if not listed and not not_listed:
         return Blast(target=label.get(target, name), status="nothing", by_depth=counted,
+                     mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"nothing in this graph rests on {label.get(target, name)!r} through "
-                         f"{', '.join(DEPENDS_ON)} -- a memory holds the code it was given, so "
-                         f"this is not a finding that nothing depends on it")
+                         f"{', '.join(DEPENDS_ON)} ({said}) -- a memory holds the code it was "
+                         f"given, so this is not a finding that nothing depends on it")
 
     why = (f"{len(listed)} thing(s) rest on {label.get(target, name)!r}, nearest first, through "
            f"{', '.join(DEPENDS_ON)}")
@@ -178,8 +222,9 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     if not_listed:
         why += (f"; {not_listed} more were reached and not listed, because the limit of {limit} "
                 f"or the budget of {max_bytes} byte(s) was spent -- they are counted in by_depth")
-    why += ("; this is what this graph holds, which is the code it was given and not the whole "
-            "of any codebase")
+    why += (f"; {said}; this is what this graph holds, which is the code it was given and not "
+            f"the whole of any codebase")
     return Blast(target=label.get(target, name), status="found", reached=tuple(listed),
                  by_depth=counted, deepest=deepest, stopped_at_depth=more_beyond,
-                 not_listed=not_listed, why=why)
+                 not_listed=not_listed, mode=mode, at=moment.isoformat(),
+                 partial_read=limit_hit, why=why)

@@ -165,12 +165,41 @@ async def test_a_source_path_with_a_space_still_yields_its_symbols():
 
 
 def test_a_phrase_is_still_a_literal_however_it_is_punctuated():
-    """The guard against the shortcut Codex warned about: a code
-    predicate must not turn every description into an entity."""
+    """The guard against the shortcut I was warned about twice.
+
+    The first rule here refused a path with a space in it. The second
+    admitted any object containing a colon or a slash -- and both marks
+    appear in ordinary sentences, so `a quorum: three members`, `the
+    ratio 1:2` and `a choice between input/output` all became entities.
+    A quoted phrase did too, because the check ran *before* the quoting
+    test and bypassed it.
+
+    This test was also named "however it is punctuated" while none of its
+    three examples had any punctuation at all -- a name claiming ground
+    its fixture never covered. These do.
+    """
     from scone_memory.entities.classify import ClassificationContext, classify_object
 
     context = ClassificationContext()
-    for phrase in ("a quorum of three members", "the second of May",
-                   "roughly twelve working days"):
+    for phrase in (
+        "a quorum of three members", "the second of May", "roughly twelve working days",
+        # Punctuated, which the old name promised and the old fixture did not test.
+        "a quorum: three members", "the ratio 1:2", "a choice between input/output",
+        "see also: the appendix", "read/write access for the whole team",
+        '"a quorum: three members"',
+    ):
         said = classify_object(phrase, "defines", context)
         assert said.object_class == "literal", (phrase, said)
+
+
+def test_a_qualified_symbol_is_still_recognised():
+    """The other half: the shapes our extractor actually emits must keep
+    working, including a path with a space in it."""
+    from scone_memory.entities.classify import ClassificationContext, classify_object
+
+    context = ClassificationContext()
+    for symbol in ("pkg/store.py", "pkg.store", "json", "my module.py:leaf",
+                   "pkg/store.py:Shelf", "pkg/store.py:Shelf.keep",
+                   "my long folder/my module.py:Shelf.keep"):
+        said = classify_object(symbol, "defines", context)
+        assert said.object_class == "entity", (symbol, said)
