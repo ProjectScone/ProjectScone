@@ -18,7 +18,7 @@ import json
 
 import re
 
-from typing import Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -33,6 +33,10 @@ from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
 from . import file_documents, pdf_documents
+
+if TYPE_CHECKING:
+    from ..agents.catalog import AgentCatalog
+    from ..agents.plan_store import AgentPlanStore
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -210,6 +214,8 @@ def create_app(
     roles: Optional[Mapping[str, str]] = None,
     model_connections_available: bool = False,
     vision_available=None,
+    agent_catalog: AgentCatalog | None = None,
+    agent_plan_store: AgentPlanStore | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -219,6 +225,9 @@ def create_app(
     maps keys to read, write, review or full permissions; unspecified keys have
     full permission. The independently installed Webapp owns browser pages.
     """
+
+    if (agent_catalog is None) != (agent_plan_store is None):
+        raise ValueError("Agent catalog and plan store must be configured together")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -340,6 +349,9 @@ def create_app(
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
         }
+        if agent_catalog is not None and agent_plan_store is not None:
+            features["agents.catalog"] = True
+            features["agents.plans"] = True
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
@@ -352,6 +364,10 @@ def create_app(
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
 
+
+    if agent_catalog is not None and agent_plan_store is not None:
+        from .agent_plans import mount_agent_plan_routes
+        mount_agent_plan_routes(app, agent_catalog, agent_plan_store, space_for)
 
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)

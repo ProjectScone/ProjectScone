@@ -145,6 +145,70 @@ to 4,000 bytes, and each handoff to 32,000 bytes. Oversized handoffs fail before
 receiving model is constructed. Journals retain at most 128 evidence packets
 within the configured encrypted payload budget.
 
+## Save model choices and task plans
+
+`AgentPlanStore` stores encrypted plans separately from execution journals. It
+resolves defaults into explicit model IDs and records the bound configuration for
+every task. A host configuration change makes `checked_plan` refuse execution
+until the caller reviews and saves a new revision. Editing invokes no model.
+
+```python
+from scone_memory.agents.plan_store import AgentPlanStore
+
+store = AgentPlanStore("agent-plans.sqlite", key=key)
+try:
+    saved = store.save("team-space", plan, catalog=agents, expected_revision=0)
+    # A later edit must supply the last revision the caller actually read.
+    stored = store.get("team-space", "research-report")
+    assert stored is not None
+    checked_plan = stored.checked_plan(agents)
+    # Pass checked_plan to AgentWorkflow with the authorized space and scope.
+finally:
+    store.close()
+```
+
+Names are HMAC-indexed; the full record uses authenticated encryption. The host
+owns the 32-byte key, access decisions, backup retention and store lifecycle.
+Use a directory owned by the current OS user that others cannot write to. Files
+must be private, regular and unlinked elsewhere; symlinks and unrelated databases
+are refused. Concurrent path replacement by the same OS user is unsupported.
+The store bounds payloads to 128,000 bytes, contains at most 4,096 plans by default,
+and pages up to 100 at a time with space-bound cursors. Two editors cannot silently
+overwrite each other: stale revisions raise `PlanConflict`.
+
+## Expose authenticated plan configuration
+
+An application can opt into the configuration routes using its host-registered
+catalog and caller-owned plan store:
+
+```python
+from scone_memory.api.app import create_app
+
+app = create_app(memory, keys, roles=roles,
+                 agent_catalog=agents, agent_plan_store=store)
+```
+
+Both arguments are required together. The routes and capability flags are absent
+when they are not configured. Bearer keys determine the space. Read and review
+roles may inspect plans; write and full roles may save. Authorization and space
+identity are checked again after an uploaded body is consumed, before saving.
+The supplied catalog is shared across this application's authorized spaces; the
+host must expose only the models and agent definitions intended for those users.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /v1/agents/catalog` | Public model-choice metadata; no system instructions or provider credentials |
+| `GET /v1/agent-plans?limit=50&after=...` | Page this key's saved plans |
+| `GET /v1/agent-plans/{workflow_id}` | Read a saved plan and whether its configuration is current |
+| `PUT /v1/agent-plans/{workflow_id}` | Save `{expected_revision, plan}`; return 409 for a stale revision |
+
+Responses carry `Cache-Control: no-store`. PUT bodies are bounded before parsing,
+unknown fields and invalid task graphs are refused, and the path must match the
+plan identity. These routes edit plans only; they do not start model execution.
+The application closes its plan store when it shuts down. Deleting a memory space
+blocks HTTP access but does not physically erase its separate plan store or
+backups; the host must include those in its retention policy.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.
@@ -154,6 +218,7 @@ Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
 Declared dependency handoffs and sequential recovery are implemented natively.
-Parallel workflow scheduling, dynamic handoffs, persisted plan editing, HTTP run
-management and a browser model selector remain separate work. Catalog factories
+Parallel workflow scheduling, dynamic handoffs and HTTP run management remain
+separate work. Saved plan editing is available through the native store and
+authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.
