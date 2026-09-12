@@ -73,10 +73,86 @@ async def test_silent_windows_are_receipted_without_inventing_text(ffmpeg):
     parsed = await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
     assert len(parsed.segments) == 1
     assert parsed.segments[0].metadata['start_seconds'] == '1.0'
+    assert parsed.metadata['transcription_window_count'] == '3'
+    assert parsed.metadata['transcription_empty_windows'] == '2'
     assert await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts) == parsed
     assert len(observer.calls) == 3
     with pytest.raises(InvalidInput, match='nonempty'):
         await parser(ffmpeg, Observer(empty=(1, 2, 3))).parse(recording(), 'silent.wav')
+
+
+async def test_window_coverage_counts_survive_partial_resume(ffmpeg):
+    receipts, observer = Receipts(), Observer(interrupt=2, empty=(1,))
+    with pytest.raises(asyncio.CancelledError):
+        await parser(ffmpeg, observer).parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    observer = Observer(empty=(2,))
+    config = parser(ffmpeg, observer)
+    parsed = await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert len(observer.calls) == 2
+    assert parsed.metadata['transcription_window_count'] == '3'
+    assert parsed.metadata['transcription_empty_windows'] == '2'
+    assert await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts) == parsed
+    assert len(observer.calls) == 2
+
+
+async def test_older_completed_receipts_keep_coverage_unknown_without_retranscription(ffmpeg):
+    receipts, observer = Receipts(), Observer(empty=(1,))
+    config = parser(ffmpeg, observer)
+    parsed = await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    raw = json.loads(receipts.values['media-transcript'])
+    raw.pop('coverage', None)
+    receipts.values['media-transcript'] = json.dumps(raw).encode()
+    replay = await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert 'transcription_window_count' not in replay.metadata
+    assert 'transcription_empty_windows' not in replay.metadata
+    assert replay.segments == parsed.segments and len(observer.calls) == 3
+
+
+async def test_whole_file_receipts_do_not_add_window_coverage(ffmpeg):
+    receipts, observer = Receipts(), Observer()
+    config = parser(ffmpeg, observer, seconds=None)
+    parsed = await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert 'coverage' not in json.loads(receipts.values['media-transcript'])
+    assert 'transcription_window_count' not in parsed.metadata
+    assert await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts) == parsed
+    assert len(observer.calls) == 1
+
+
+@pytest.mark.parametrize('coverage', [
+    {'windows': 0, 'empty_windows': 0}, {'windows': True, 'empty_windows': 0},
+    {'windows': 3, 'empty_windows': 3}, {'windows': 3, 'empty_windows': -1},
+    {'windows': 2, 'empty_windows': 1}, {'windows': 3, 'empty_windows': False},
+])
+async def test_invalid_completed_coverage_is_refused_without_model_calls(ffmpeg, coverage):
+    receipts, observer = Receipts(), Observer()
+    config = parser(ffmpeg, observer)
+    await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    raw = json.loads(receipts.values['media-transcript'])
+    raw['coverage'] = coverage
+    receipts.values['media-transcript'] = json.dumps(raw).encode()
+    with pytest.raises(InvalidInput, match='checkpoint'):
+        await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert len(observer.calls) == 3
+
+
+@pytest.mark.parametrize('change', ['empty_count', 'missing_window', 'window_text'])
+async def test_completed_coverage_must_match_the_retained_window_observations(ffmpeg, change):
+    receipts, observer = Receipts(), Observer()
+    config = parser(ffmpeg, observer)
+    await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    if change == 'empty_count':
+        raw = json.loads(receipts.values['media-transcript'])
+        raw['coverage']['empty_windows'] = 2
+        receipts.values['media-transcript'] = json.dumps(raw).encode()
+    elif change == 'missing_window':
+        del receipts.values['media-window-0001']
+    else:
+        raw = json.loads(receipts.values['media-window-0001'])
+        raw['segments'][0]['text'] = 'Changed observations'
+        receipts.values['media-window-0001'] = json.dumps(raw).encode()
+    with pytest.raises(InvalidInput, match='checkpoint'):
+        await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert len(observer.calls) == 3
 
 
 @pytest.mark.parametrize('change', ['policy', 'disable', 'host', 'source', 'receipt', 'hole'])

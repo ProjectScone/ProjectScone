@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...core.errors import InvalidInput
 from ..extraction_checkpoint import ExtractionCheckpoints
 from .media import TranscriptionCallback, TranscriptionSegment, _remaining, _transcription_document
-from .media_checkpoint import _unique
+from .media_checkpoint import TranscriptionCoverage, _unique
 from .types import DocumentLimits
 
 WINDOW_IMPLEMENTATION = 'quiet-audio-windows-v1'
@@ -103,8 +103,11 @@ def _validate(segments: tuple[TranscriptionSegment, ...], duration: float, diges
 
 async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
                              transcribe: TranscriptionCallback, limits: DocumentLimits,
-                             deadline: float, checkpoints: ExtractionCheckpoints | None
-                             ) -> tuple[tuple[TranscriptionSegment, ...], int]:
+                             deadline: float, checkpoints: ExtractionCheckpoints | None,
+                             require_complete: bool = False
+                             ) -> tuple[tuple[TranscriptionSegment, ...], TranscriptionCoverage]:
+    if require_complete and checkpoints is None:
+        raise InvalidInput('completed media window checkpoints are required')
     pcm = audio[44:]  # The decoder emits canonical mono 16 kHz signed 16-bit WAV.
     ranges = window_ranges(pcm, seconds)
     marker = json.dumps({'binding': binding, 'audio_sha256': hashlib.sha256(audio).hexdigest()},
@@ -130,12 +133,14 @@ async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
             else:
                 missing = True
             saved.append(receipt)
+        if require_complete and (missing or previous is None):
+            raise InvalidInput('completed media window checkpoints are missing')
         if previous is None:
             checkpoints.put(WINDOW_BINDING_KEY, marker)
     else:
         saved = [None] * len(ranges)
     result: list[TranscriptionSegment] = []
-    size = 0
+    size = empty_windows = 0
     for index, ((start, end), receipt) in enumerate(zip(ranges, saved, strict=True)):
         remaining = _remaining(deadline)
         wav = _wav(pcm, start, end)
@@ -143,6 +148,8 @@ async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
         observed = (receipt.segments if receipt is not None else
                     await asyncio.wait_for(transcribe(wav), remaining))
         validated = _validate(observed, (end - start) / _SAMPLE_RATE, digest, len(wav), limits)
+        if not validated:
+            empty_windows += 1
         for segment in validated:
             size += len(segment.text.encode()) + (2 if result else 0)
             if len(result) >= limits.max_segments or size > limits.max_text_bytes:
@@ -158,4 +165,6 @@ async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
                 raise InvalidInput('media window checkpoint exceeds its byte limit')
             checkpoints.put(f'media-window-{index:04d}', raw)
     _remaining(deadline)
-    return tuple(result), len(ranges)
+    if not result:
+        raise InvalidInput('transcriber must return a nonempty tuple of timestamped segments')
+    return tuple(result), TranscriptionCoverage(windows=len(ranges), empty_windows=empty_windows)

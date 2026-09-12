@@ -63,20 +63,6 @@ def authorize_host_admin(settings: Settings):
     return authorize
 
 
-def authorize_image_write(settings: Settings, engine):
-    async def authorize(request: Request) -> str:
-        scheme, _, token = request.headers.get('authorization', '').partition(' ')
-        if scheme.lower() != 'bearer' or token not in settings.keys:
-            raise HTTPException(401, 'An authorized space bearer key is required')
-        if settings.roles.get(token, 'full') not in ('write', 'full'):
-            raise HTTPException(403, 'This key cannot request image understanding')
-        space = settings.keys[token]
-        if await engine.space_deleted(space) is not None:
-            raise HTTPException(404, 'The authorized space was deleted')
-        return space
-    return authorize
-
-
 def self_hosted_vision_factory(store: ModelConnectionStore):
     def create():
         from ..providers.vision import SelfHostedOpenAIVision

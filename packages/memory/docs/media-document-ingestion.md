@@ -239,3 +239,11 @@ Checked playback serves that full recording, so citations retain their original
 positions even though inference used smaller WAV inputs. The manifest records the
 window implementation and configured maximum. Completed receipt replay preserves
 the same manifest as uninterrupted extraction with the same model observations.
+
+New extractions also record `transcription_window_count` and
+`transcription_empty_windows` in manifest metadata. These count completed model
+windows and windows returning no text, including completed work reused on resume.
+An empty result does not establish silence or recognition accuracy. Counts are
+retained in the completed receipt, so reopening it performs no transcription.
+Older completed receipts lack these fields; their coverage remains unknown and
+their existing metadata is preserved without another model call.
