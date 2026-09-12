@@ -360,6 +360,14 @@ class DirectorySyncService:
                 os.close(descriptor)
             self._tasks.pop(identity)
 
+    def close_idle(self) -> None:
+        if self._tasks or self._owners or (self._shutdown is not None and not self._shutdown.done()):
+            raise WorkflowError('sync_busy')
+        if not self._closed:
+            self._closing = True
+            self._runs.close()
+            self._closed = True
+
     async def aclose(self) -> None:
         if self._closed:
             return

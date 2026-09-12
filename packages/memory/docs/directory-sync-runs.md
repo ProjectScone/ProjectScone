@@ -139,5 +139,66 @@ intent, so poll status for worker completion and its updated revision before
 resuming. A historical episode identifier still needs current source authorization
 and may now return Gone.
 
-Standard-host environment configuration, Documents controls, scheduling, remote
-connectors and distributed workers remain separate work.
+The standard launcher enables this service only when
+`SCONE_DIRECTORY_SYNC_CONFIG` names a private configuration file. It applies to
+both the memory-only host and the composed conversation host. For example:
+
+```json
+{
+  "schema_version": 1,
+  "state_dir": "directory-state",
+  "key_env": "SCONE_DIRECTORY_KEY",
+  "store_id": "my-local-memory-store-v1",
+  "collections": [
+    {
+      "collection_id": "notes",
+      "label": "Local notes",
+      "space": "default",
+      "root": "notes",
+      "parser_revision": "installed-parser-v1",
+      "allow_delete_missing": false
+    }
+  ]
+}
+```
+
+The file must be owned by the server user, mode 0600, a regular file with one
+hard link, and at most 128 KiB. Duplicate or unsupported keys are refused. Relative
+`root` and `state_dir` paths resolve beside the configuration file. Source roots
+must already exist; the loader creates only the private state directory, which
+must be outside every source root. Duplicate roots in the same space are refused.
+Keep `store_id` stable for the same memory catalog. A replacement catalog needs
+a new identity and a fresh state directory: registry encryption is derived from
+both the master key and the declared catalog identity, so existing history cannot
+be reopened as belonging to a different catalog. The referenced environment variable contains a persistent 32-byte
+key encoded as 64 hexadecimal characters. Changing this key without migrating
+state is refused as an integrity error; it does not create fresh history silently.
+
+Set `SCONE_DIRECTORY_SYNC_CONFIG` before running `scone-memory serve`. Loading
+opens private state without scanning or invoking parsers/models. Existing API
+keys and roles determine which configured spaces and controls a caller can use.
+Startup failure and shutdown close the service before the engine, including when
+server construction fails before the app lifespan begins.
+
+Optional global controls are `max_active` (1–16, default 2), `max_runs`
+(1–100000, default 4096), `max_attempts` (1–4, default 3), and `deadline_s`
+(0–3600 exclusive of zero, default 300). Each collection can configure existing
+`DocumentLimits` through `limits`, `ScanLimits` through `scan_limits`, and an
+explicit `extensions` array of lowercase dotted suffixes. Without `extensions`,
+the collection uses built-in formats plus audio/video formats when the host has
+explicitly configured document media.
+
+A collection can opt into PDF OCR using
+`"pdf_ocr": {"mode": "all_pages", "reading_order": "provider"}` (the same choices
+as document ingestion). This requires configured host OCR; it does not select a
+recognizer or download a model. OCR applies only to PDFs, while native text and
+configured media retain their own parsers. `SCONE_DOCUMENT_MEDIA_CONFIG` supplies
+the host's explicit local transcriber/model selection. Parser identity includes
+the operator revision, installed parser package versions, OCR choices/settings
+and media revision. Change `parser_revision` when OCR binaries, trained data or
+custom parser behavior change. Resuming old work under changed configuration is
+refused; creating a new run reconciles source revisions through the existing
+journal.
+
+Documents controls, standalone client methods, scheduling, remote connectors and
+distributed workers remain separate work.
