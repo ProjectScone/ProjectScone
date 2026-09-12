@@ -28,8 +28,9 @@ _MAX_TOTAL_REGIONS = 20_000
 
 class _Receipt(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     binding: str = Field(pattern=r'^[a-f0-9]{64}$')
+    frame_index: int = Field(ge=0, le=255)
     png_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     result: OcrResult
 
@@ -63,7 +64,7 @@ def _observation(result: OcrResult, frame: VideoFrame, limits: DocumentLimits) -
     return checked
 
 
-def _receipt(raw: bytes, binding: str, frame: VideoFrame, limits: DocumentLimits) -> _Receipt:
+def _receipt(raw: bytes, binding: str, frame: VideoFrame, index: int, limits: DocumentLimits) -> _Receipt:
     try:
         if type(raw) is not bytes or not 0 < len(raw) <= _MAX_RECEIPT:
             raise ValueError('receipt byte limit')
@@ -71,7 +72,7 @@ def _receipt(raw: bytes, binding: str, frame: VideoFrame, limits: DocumentLimits
         if not isinstance(value, dict) or type(value.get('schema_version')) is not int:
             raise ValueError('receipt version')
         saved = _Receipt.model_validate_json(raw)
-        if saved.binding != binding or saved.png_sha256 != frame.sha256:
+        if saved.binding != binding or saved.png_sha256 != frame.sha256 or saved.frame_index != index:
             raise ValueError('receipt frame binding')
         _observation(saved.result, frame, limits)
         return saved
@@ -131,7 +132,7 @@ class VideoDocumentParser:
         limits = _validated_limits(limits)
         deadline = monotonic() + limits.timeout_seconds
         sampled = await self._decoder.sample(data, filename, policy=self._policy, limits=limits)
-        header = _canonical({'implementation': 'video-frame-ocr-v1', 'source': sampled.source_sha256,
+        header = _canonical({'implementation': 'video-frame-ocr-v2', 'source': sampled.source_sha256,
             'filename': filename, 'limits': limits.model_dump(), 'decoder': sampled.decoder_revision,
             'policy_revision': sampled.policy_revision, 'policy': sampled.policy.model_dump(),
             'model_revision': self._revision, 'max_total_regions': _MAX_TOTAL_REGIONS, 'plan': {
@@ -154,7 +155,7 @@ class VideoDocumentParser:
             complete = checkpoints.get(_COMPLETE)
         for index, frame in enumerate(sampled.frames):
             raw = checkpoints.get(_key(index)) if checkpoints is not None else None
-            saved.append(_receipt(raw, binding, frame, limits) if raw is not None else None)
+            saved.append(_receipt(raw, binding, frame, index, limits) if raw is not None else None)
         known = [receipt for receipt in saved if receipt is not None]
         if complete is not None and (len(known) != len(saved) or complete != _completion(known)):
             raise InvalidInput('completed video OCR receipts are incomplete or changed')
@@ -183,7 +184,7 @@ class VideoDocumentParser:
                 raw_text_bytes += sum(len(region.text.encode()) for region in result.regions)
                 if raw_text_bytes > limits.max_text_bytes:
                     raise InvalidInput('video OCR exceeds its text byte limit')
-                receipt = _Receipt(binding=binding, png_sha256=frame.sha256, result=result)
+                receipt = _Receipt(binding=binding, frame_index=index, png_sha256=frame.sha256, result=result)
                 encoded = receipt.model_dump_json().encode()
                 if len(encoded) > _MAX_RECEIPT:
                     raise InvalidInput('video OCR receipt exceeds its byte limit')
@@ -195,6 +196,7 @@ class VideoDocumentParser:
         _remaining(deadline)
         if checkpoints is not None:
             checkpoints.put(_COMPLETE, _completion(results))
+            _remaining(deadline)
         return parsed
 
     def _document(self, sampled: VideoFrames, receipts: list[_Receipt], filename: str) -> ParsedDocument:
