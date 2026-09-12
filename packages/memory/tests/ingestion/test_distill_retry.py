@@ -214,3 +214,44 @@ async def test_the_blocked_count_does_not_claim_to_know_why():
             assert "already cited the episode, and a pass" not in again.text(), again.text()
     finally:
         await engine.close()
+
+
+async def test_a_new_failure_with_budget_left_is_still_queued():
+    """A pass skips an episode only once its attempts reach max_attempts.
+    Treating any recorded failure as parked understates what the next pass
+    will do -- it says blocked, and then the model is called anyway."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        chat = Broken()
+        distiller = Distiller(engine, chat, max_attempts=3, require_grounding=False)
+        await engine.remember("default", "Alice Chen works at Acme Robotics.")
+        with pytest.raises(DistillError):
+            await distiller.distill_pending("default")
+        assert not distiller.parked("default"), "one failure of three is not parked"
+        [only] = [episode_id for space, episode_id in distiller._failures]
+        pending = distiller._pending
+
+        async def slow(space):
+            found = await pending(space)
+            # A concurrent worker fails it once more: two of three used, so
+            # the next pass will still look at it.
+            attempts = distiller._failures.setdefault((space, only), _fresh())
+            attempts.count = 2
+            return found
+
+        distiller._pending = slow
+        try:
+            again = await distiller.retry("default")
+        finally:
+            distiller._pending = pending
+        assert again.cleared == 1, again.record()
+        assert again.queued == 1 and again.blocked == 0, again.record()
+        assert not distiller.parked("default"), "still not parked, so still eligible"
+    finally:
+        await engine.close()
+
+
+def _fresh():
+    from scone_memory.ingestion.distill import _Attempts
+
+    return _Attempts()

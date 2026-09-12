@@ -336,6 +336,16 @@ class Distiller:
             if owner == space and attempts.count >= self.max_attempts
         }
 
+    def _parked_now(self, key: tuple[str, int]) -> bool:
+        """Whether a pass would skip this episode for having run out of
+        attempts. The same test :meth:`distill_pending` applies, because a
+        receipt that used a different one would describe a different
+        system: any recorded failure is not a park, and calling it one
+        reports work as blocked that the next pass will do.
+        """
+        attempts = self._failures.get(key)
+        return attempts is not None and attempts.count >= self.max_attempts
+
     async def retry(self, space: str, *, episodes: Optional[Sequence[int]] = None) -> "Retried":
         """Forget the failures recorded against these episodes, so the next
         pass tries them again. With no ``episodes``, the whole space.
@@ -373,11 +383,12 @@ class Distiller:
             del self._failures[key]
         # Clearing a failure is not the same as queueing the work, and
         # eligibility is read with an await in the middle. A worker can
-        # fail the same episode again while that read is in flight, so what
-        # was eligible before it landed is not what a later pass will see:
-        # the park is re-checked after the await, not before it.
+        # fail the same episode again while that read is in flight, so the
+        # park is re-checked after the await and by the same rule a pass
+        # uses -- attempts against max_attempts, not the mere presence of a
+        # failure. One new failure with budget left is still eligible.
         waiting = {episode.episode_id for episode in await self._pending(space)}
-        queued = sum(1 for key in going if key[1] in waiting and key not in self._failures)
+        queued = sum(1 for key in going if key[1] in waiting and not self._parked_now(key))
         return Retried(space=space, cleared=len(going), unparked=unparked,
                        unknown=0 if wanted is None else len(wanted - held),
                        asked=len(going) if wanted is None else len(wanted),
