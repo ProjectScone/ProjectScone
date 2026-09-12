@@ -12,6 +12,7 @@ from pathlib import Path
 import stat
 
 from .catalog import AgentCatalog
+from .handoff_workflow import AgentHandoffPlan, AgentHandoffWorkflow, HandoffResult
 from .plan_store import AgentPlanStore, PlanConflict
 from .run_store import AgentRunRequest, AgentRunStore, RunConflict
 from .task_workflow import AgentWorkflow
@@ -19,6 +20,14 @@ from .workflow import WorkflowError, WorkflowResult, WorkflowStatus, _integer, _
 from ..core.validation import check_space
 from ..memory.engine import MemoryEngine
 from ..retrieval.recall_scope import RecallScope
+
+AgentExecution = AgentWorkflow | AgentHandoffWorkflow
+
+
+def _execution_progress(workflow: AgentExecution, request: AgentRunRequest) -> WorkflowStatus | None:
+    if isinstance(workflow, AgentHandoffWorkflow):
+        return workflow.progress(request.run_id, request.question)
+    return workflow.status(request.run_id, request.question)
 
 
 @dataclass(frozen=True)
@@ -75,7 +84,7 @@ class AgentRunService:
         self._maximum, self._deadline = max_active, deadline_s
         self._runs = AgentRunStore(target / 'requests.sqlite', key=key, max_runs=max_runs)
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
-        self._workflows: dict[tuple[str, str], AgentWorkflow] = {}
+        self._workflows: dict[tuple[str, str], AgentExecution] = {}
         self._failures: dict[tuple[str, str], str] = {}
         self._owners: dict[tuple[str, str], int] = {}
         self._closed = self._closing = False
@@ -126,11 +135,15 @@ class AgentRunService:
             raise
         return descriptor
 
-    def _open(self, request: AgentRunRequest) -> AgentWorkflow:
+    def _open(self, request: AgentRunRequest) -> AgentExecution:
         plan = request.plan.checked_plan(self._catalog)
         scope = self._scope(request.space)
         if scope.as_dict() != request.scope:
             raise WorkflowError('run_scope_changed')
+        if isinstance(plan, AgentHandoffPlan):
+            return AgentHandoffWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
+                memory=self._memory, space=request.space, scope=scope,
+                exclude_session_id=request.exclude_session_id, deadline_s=self._deadline)
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
             exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel)
@@ -139,12 +152,12 @@ class AgentRunService:
         identity = (request.space, request.run_id)
         active = self._workflows.get(identity)
         if active is not None:
-            return active.status(request.run_id, request.question)
+            return _execution_progress(active, request)
         if not self._path(request).exists():
             return None
         workflow = self._open(request)
         try:
-            return workflow.status(request.run_id, request.question)
+            return _execution_progress(workflow, request)
         finally:
             workflow.close()
 
@@ -248,7 +261,7 @@ class AgentRunService:
         task.add_done_callback(lambda finished: self._finished(identity, workflow))
         return replace(admission, active_local=True)
 
-    async def _execute(self, request: AgentRunRequest, workflow: AgentWorkflow) -> None:
+    async def _execute(self, request: AgentRunRequest, workflow: AgentExecution) -> None:
         identity = (request.space, request.run_id)
         try:
             await workflow.run(request.run_id, request.question)
@@ -259,7 +272,7 @@ class AgentRunService:
         except Exception:
             self._failures[identity] = 'execution_failed'
 
-    def _finished(self, identity: tuple[str, str], workflow: AgentWorkflow) -> None:
+    def _finished(self, identity: tuple[str, str], workflow: AgentExecution) -> None:
         try:
             workflow.close()
         except WorkflowError as error:
@@ -316,7 +329,7 @@ class AgentRunService:
             if descriptor is not None:
                 os.close(descriptor)
 
-    async def result(self, space: str, run_id: str) -> WorkflowResult | None:
+    async def result(self, space: str, run_id: str) -> WorkflowResult | HandoffResult | None:
         await self._space(space)
         request = self._runs.get(space, run_id)
         if request is None:

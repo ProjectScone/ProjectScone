@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ._encrypted_store import EncryptedRecordStore
 from .catalog import Identifier
+from .handoff_workflow import AgentHandoffPlan
 from .plan_store import SavedAgentPlan
 from .workflow import WorkflowError, _integer, _name
 from ..core.errors import InvalidInput
@@ -44,6 +45,7 @@ class AgentRunRequest(BaseModel):
         check_space(self.space)
         if (self.plan.space != self.space or not self.question.strip()
                 or len(self.question.encode()) > 4000 or self.created_at.tzinfo is None
+                or (isinstance(self.plan.plan, AgentHandoffPlan) and self.max_parallel != 1)
                 or (self.cancel_requested_at is not None and self.cancel_requested_at.tzinfo is None)):
             raise ValueError('invalid agent run request')
         try:

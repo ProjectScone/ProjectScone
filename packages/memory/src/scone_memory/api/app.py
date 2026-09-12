@@ -372,6 +372,7 @@ def create_app(
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
             features["agents.plans"] = True
+            features["agents.handoffs"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1

@@ -14,7 +14,8 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ._encrypted_store import EncryptedRecordStore
-from .catalog import AgentCatalog
+from .catalog import AgentCatalog, BoundAgent
+from .handoff_workflow import AgentHandoffPlan
 from .task_workflow import AgentTaskPlan
 from .workflow import WorkflowError, _integer, _name
 from ..core.validation import check_space
@@ -22,6 +23,30 @@ from ..core.validation import check_space
 _APP_ID = 0x5343504C
 _MAX_REVISION = 2**63 - 1
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
+AgentPlan = AgentTaskPlan | AgentHandoffPlan
+
+
+def _selections(plan: AgentPlan) -> dict[str, tuple[str, str | None]]:
+    if isinstance(plan, AgentTaskPlan):
+        return {task.task_id: (task.agent_id, task.model_id) for task in plan.tasks}
+    return {agent.agent_id: (agent.agent_id, agent.model_id) for agent in plan.agents}
+
+
+def _snapshot(plan: AgentPlan) -> AgentPlan:
+    if isinstance(plan, AgentTaskPlan):
+        return AgentTaskPlan.model_validate(plan.model_dump())
+    if isinstance(plan, AgentHandoffPlan):
+        return AgentHandoffPlan.model_validate(plan.model_dump())
+    raise ValueError('validated agent plan required')
+
+
+def _explicit(plan: AgentPlan, agents: dict[str, BoundAgent]) -> AgentPlan:
+    if isinstance(plan, AgentTaskPlan):
+        return AgentTaskPlan(workflow_id=plan.workflow_id, tasks=tuple(
+            task.model_copy(update={'model_id': agents[task.task_id].model_id}) for task in plan.tasks))
+    return AgentHandoffPlan(workflow_id=plan.workflow_id, root_agent=plan.root_agent,
+        max_handoffs=plan.max_handoffs, agents=tuple(
+            agent.model_copy(update={'model_id': agents[agent.agent_id].model_id}) for agent in plan.agents))
 
 
 class PlanConflict(WorkflowError):
@@ -38,27 +63,28 @@ class SavedAgentPlan(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
     space: str
     revision: int = Field(ge=1, le=_MAX_REVISION)
-    plan: AgentTaskPlan
+    plan: AgentPlan
     bindings: dict[str, str]
     updated_at: datetime
 
     @model_validator(mode='after')
     def valid(self) -> Self:
         check_space(self.space)
-        if (set(self.bindings) != {task.task_id for task in self.plan.tasks}
+        selections = _selections(self.plan)
+        if (set(self.bindings) != set(selections)
                 or any(not _HEX.fullmatch(binding) for binding in self.bindings.values())
-                or any(task.model_id is None for task in self.plan.tasks)
+                or any(model is None for _, model in selections.values())
                 or self.updated_at.tzinfo is None):
             raise ValueError('invalid saved agent plan')
         return self
 
-    def checked_plan(self, catalog: AgentCatalog) -> AgentTaskPlan:
+    def checked_plan(self, catalog: AgentCatalog) -> AgentPlan:
         """Refuse changed host configuration; never silently adopt new defaults."""
         saved = SavedAgentPlan.model_validate(self.model_dump())
         try:
-            for task in saved.plan.tasks:
-                bound = catalog.bind(task.agent_id, model_id=task.model_id)
-                if bound.fingerprint != saved.bindings[task.task_id]:
+            for name, (agent_id, model_id) in _selections(saved.plan).items():
+                bound = catalog.bind(agent_id, model_id=model_id)
+                if bound.fingerprint != saved.bindings[name]:
                     raise PlanConfigurationChanged()
         except (KeyError, ValueError):
             raise PlanConfigurationChanged() from None
@@ -119,14 +145,14 @@ class AgentPlanStore:
             row = db.execute('SELECT payload FROM agent_plans WHERE token=?', (token,)).fetchone()
             return None if row is None else self._decode(token, row[0], space)
 
-    def save(self, space: str, plan: AgentTaskPlan, *, catalog: AgentCatalog,
+    def save(self, space: str, plan: AgentPlan, *, catalog: AgentCatalog,
              expected_revision: int) -> SavedAgentPlan:
         _integer(expected_revision, 0, _MAX_REVISION - 1)
-        plan = AgentTaskPlan.model_validate(plan.model_dump())
+        plan = _snapshot(plan)
         token = self._token(space, plan.workflow_id)
-        agents = {task.task_id: catalog.bind(task.agent_id, model_id=task.model_id) for task in plan.tasks}
-        explicit = AgentTaskPlan(workflow_id=plan.workflow_id, tasks=tuple(
-            task.model_copy(update={'model_id': agents[task.task_id].model_id}) for task in plan.tasks))
+        agents = {name: catalog.bind(agent_id, model_id=model_id)
+                  for name, (agent_id, model_id) in _selections(plan).items()}
+        explicit = _explicit(plan, agents)
         saved = SavedAgentPlan(space=space, revision=expected_revision + 1, plan=explicit,
             bindings={name: agent.fingerprint for name, agent in agents.items()}, updated_at=datetime.now(timezone.utc))
         payload = self._seal(token, saved.model_dump_json().encode())

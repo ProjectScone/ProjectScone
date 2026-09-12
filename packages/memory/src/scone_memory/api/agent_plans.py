@@ -6,15 +6,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agents.catalog import AgentCatalog
-from ..agents.plan_store import AgentPlanStore, PlanConfigurationChanged, SavedAgentPlan
-from ..agents.task_workflow import AgentTaskPlan
+from ..agents.plan_store import AgentPlan, AgentPlanStore, PlanConfigurationChanged, SavedAgentPlan
 from ..agents.workflow import WorkflowError
 
 
 class _SavePlan(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     expected_revision: int = Field(ge=0, le=2**63 - 2)
-    plan: AgentTaskPlan
+    plan: AgentPlan
 
 
 async def _body(request: Request) -> bytes:

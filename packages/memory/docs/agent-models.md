@@ -429,8 +429,23 @@ and callers must inspect the verified result for `completed` versus
 attempts refuse automatic replay. Temporary verification outages preserve
 receipts, while confirmed invalid evidence prevents their reuse.
 
-Handoffs currently use this native caller-owned API. The saved-plan HTTP API and
-browser editor continue to manage fixed task DAGs, not dynamic handoff plans.
+Handoff plans can also be saved through `AgentPlanStore` and the same authenticated
+`/v1/agent-plans` routes. The plan body uses `agents`, `root_agent` and
+`max_handoffs` instead of `tasks`; mixed shapes and unknown fields are rejected.
+Saved models are explicit, with bindings keyed by agent ID. Revisions and immutable
+run snapshots behave the same as task plans. Existing task records retain their
+format; new handoff records require an updated reader.
+
+The host advertises `agents.handoffs` when agent configuration is mounted.
+When `agents.runs` is also enabled, start, status, original request, result and
+cancellation use the existing run routes and share the same bounded admission
+pool. Handoffs require `max_parallel=1`; other widths are rejected before request
+registration. A handoff result contains `status`, `final`, `hops` and
+`reused_hops`, rather than the task workflow's `results` and `reused_steps`.
+As with native progress, run status describes execution; inspect the verified
+result to distinguish a final answer from exhausted partial work. Result reads
+recheck the current host scope and model bindings before publication. The browser
+handoff editor is being implemented separately.
 
 ## Current boundary
 

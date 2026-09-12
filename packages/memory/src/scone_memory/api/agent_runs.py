@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..agents.catalog import Identifier
+from ..agents.handoff_workflow import HandoffResult
 from ..agents.run_service import AgentRunService
 from ..agents.workflow import WorkflowError
 
@@ -129,7 +130,10 @@ def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
         try:
             answer = await service.result(space, run_id)
             assert_current_space(request, space)
-            return _response({'space': space, **asdict(answer)}) if answer else _response({'error': 'agent_result_not_found'}, 404)
+            if answer is None:
+                return _response({'error': 'agent_result_not_found'}, 404)
+            payload = answer.model_dump(mode='json') if isinstance(answer, HandoffResult) else asdict(answer)
+            return _response({'space': space, **payload})
         except (WorkflowError, ValueError) as error:
             return _failure(error)
 
