@@ -471,16 +471,30 @@ What follows is kept apart from what was said, everywhere it travels:
   claim.
 - It names the facts under it (`fact_ids`) and the relations it was
   worked out from (`follows_from`), so a reader can check the sources.
-- It holds only while every claim under it does: it begins at the latest
-  beginning of them, ends at the earliest ending, and is no better
-  grounded than its least grounded link — one unsourced leg makes an
-  unsourced chain. Exclude a leg and the chain goes; its neighbour stands.
+- It holds only over the stretches of valid time its claims actually
+  shared, worked out from the claims themselves. A relation made of two
+  spells with a gap between them does not hold during the gap, so a chain
+  through it does not either: `periods` lists every stretch it held over,
+  and `first_valid_from` and `last_valid_until` are the first beginning
+  and the last ending of those. A chain whose legs never shared a moment
+  is not recorded at all.
+- It is no better grounded than its least grounded link — one unsourced
+  leg makes an unsourced chain. Exclude a leg and the chain goes; its
+  neighbour stands.
 
 Nothing already said is implied, nothing is implied twice, nothing is
-implied about a thing and itself, and a ring goes round once. A chain is
-followed four claims at most, and a projection holds at most 50,000
-implications; `coverage.meanings` names the vocabulary and both bounds,
-and `coverage.implied_capped` says when the closure stopped early.
+implied about a thing and itself, and a ring goes round once.
+
+Three bounds, all reported rather than assumed. A chain is followed four
+claims at most (`max_steps`); a projection holds at most 50,000
+implications (`max_implied`); and a whole walk examines at most 200,000
+claims (`max_walked`), because a dense graph has more paths than anyone
+can walk. Each thing is also reached by the shortest route from a claim
+and never expanded again, which is what keeps the walk to the claims
+rather than the paths; the cost of that is stated plainly: a longer
+route that would hold over a stretch the shortest does not is not
+searched for. `coverage.meanings` names the vocabulary and all three
+bounds, and `coverage.implied_capped` says when a walk stopped early.
 
 Where to see it: `implied` in the knowledge view, `follows` on an
 entity's page, and `follows:` lines in the packet `graph context` writes

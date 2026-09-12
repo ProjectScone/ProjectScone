@@ -369,3 +369,113 @@ def test_a_view_of_a_space_with_no_vocabulary_says_so():
     view = knowledge_view(graph, mode="current", as_of="2025-01-01T00:00:00.000Z", limit=10,
                           attribute_limit=10, offset=0, coverage={"reasons": []})
     assert view["coverage"]["meanings"] is None
+
+
+def spanning(fact_id: int, subject: str, predicate: str, object: str, since: str, until: str | None = None) -> Fact:
+    """One claim over one stretch of valid time, open-ended when until is None."""
+    return Fact(fact_id=fact_id, space=SPACE, subject=subject, predicate=predicate, object=object,
+                valid_from=f"{since}T00:00:00.000Z",
+                valid_until=None if until is None else f"{until}T00:00:00.000Z",
+                status="active" if until is None else "closed")
+
+
+def test_nothing_follows_from_claims_that_never_held_at_the_same_time():
+    """The shelf left the aisle three years before the aisle joined the
+    warehouse. It was never in the warehouse."""
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01", "2021-01-01"),
+             spanning(2, "Aisle 3", "part_of", "Warehouse 7", "2024-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied == ()
+
+
+def test_a_gap_between_two_spells_is_not_a_time_the_chain_held():
+    """The shelf was in the aisle twice, and the aisle was in the warehouse
+    only between those two spells. Nothing followed at any moment."""
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01", "2021-01-01"),
+             spanning(2, "Shelf A", "part_of", "Aisle 3", "2024-01-01"),
+             spanning(3, "Aisle 3", "part_of", "Warehouse 7", "2022-01-01", "2023-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied == (), "the envelope spans a gap that no claim does"
+
+
+def test_what_follows_holds_over_the_stretch_its_claims_share():
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01", "2023-01-01"),
+             spanning(2, "Aisle 3", "part_of", "Warehouse 7", "2022-01-01", "2025-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    [followed] = graph.implied
+    assert followed.first_valid_from.startswith("2022-01-01")
+    assert followed.last_valid_until is not None and followed.last_valid_until.startswith("2023-01-01")
+    assert [(a[:10], (b or "")[:10]) for a, b in followed.periods] == [("2022-01-01", "2023-01-01")]
+
+
+def test_what_follows_can_hold_over_more_than_one_stretch():
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01", "2021-01-01"),
+             spanning(2, "Shelf A", "part_of", "Aisle 3", "2024-01-01"),
+             spanning(3, "Aisle 3", "part_of", "Warehouse 7", "2020-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    [followed] = graph.implied
+    assert [(a[:10], b and b[:10]) for a, b in followed.periods] == [
+        ("2020-01-01", "2021-01-01"), ("2024-01-01", None)]
+    assert followed.first_valid_from.startswith("2020-01-01") and followed.last_valid_until is None
+
+
+def test_the_other_side_of_a_claim_holds_when_the_claim_does():
+    facts = [spanning(1, "Alice Chen", "works_at", "Acme Robotics", "2021-01-01", "2022-01-01")]
+    graph = projected(facts, RelationMeanings(inverse={"works_at": "employs"}))
+    [followed] = graph.implied
+    assert [(a[:10], b and b[:10]) for a, b in followed.periods] == [("2021-01-01", "2022-01-01")]
+
+
+def test_a_walk_that_would_never_end_stops_and_says_so(monkeypatch):
+    """A dense graph has more paths than anyone can walk. The walk is
+    bounded by the work it does, not only by what it finds, and an answer
+    that stopped early says it stopped."""
+    from scone_memory.entities import project as projecting
+
+    monkeypatch.setattr(projecting, "MAX_WALKED", 4)
+    names = [f"Box {n}" for n in range(6)]
+    facts = [spanning(index + 1, one, "part_of", other, "2020-01-01")
+             for index, (one, other) in enumerate((a, b) for a in names for b in names if a != b)]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied_capped is True
+    assert all(item.relation_id.startswith("imp:") for item in graph.implied)
+
+
+def test_a_walk_that_finishes_says_it_finished():
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01"),
+             spanning(2, "Aisle 3", "part_of", "Warehouse 7", "2020-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied_capped is False and len(graph.implied) == 1
+
+
+def test_a_view_says_when_a_chain_held_rather_than_between_when_and_when():
+    """The view must not recompute an envelope of its own: it shows the
+    stretches the claims shared, which is what the projection worked out."""
+    from scone_memory.entities.view import knowledge_view
+
+    facts = [spanning(1, "Shelf A", "part_of", "Aisle 3", "2020-01-01", "2021-01-01"),
+             spanning(2, "Shelf A", "part_of", "Aisle 3", "2024-01-01"),
+             spanning(3, "Aisle 3", "part_of", "Warehouse 7", "2020-01-01")]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    view = knowledge_view(graph, mode="all", as_of="2026-01-01T00:00:00.000Z", limit=10,
+                          attribute_limit=10, offset=0, coverage={"reasons": []})
+    [followed] = view["implied"]
+    assert [(a[:10], b and b[:10]) for a, b in followed["periods"]] == [
+        ("2020-01-01", "2021-01-01"), ("2024-01-01", None)]
+    assert followed["first_valid_from"].startswith("2020-01-01") and followed["last_valid_until"] is None
+
+
+def test_a_dense_graph_costs_claims_rather_than_paths(monkeypatch):
+    """Every route through a complete graph is a different path, and there
+    are far more paths than claims. Reaching each thing once keeps the walk
+    to the claims, so a budget that a path-by-path walk would blow through
+    is not even approached."""
+    from scone_memory.entities import project as projecting
+
+    monkeypatch.setattr(projecting, "MAX_WALKED", 2_000)
+    names = [f"Box {n}" for n in range(6)]
+    facts = [spanning(index + 1, one, "part_of", other, "2020-01-01")
+             for index, (one, other) in enumerate((a, b) for a in names for b in names if a != b)]
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied_capped is False, "the walk finished well inside the budget"
+    assert graph.implied == (), "every pair was already stated"

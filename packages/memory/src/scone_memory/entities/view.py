@@ -235,9 +235,12 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
                      "object_id": item.object_id, "fact_ids": [role.fact_id for role in roles],
                      "support": support(roles), "follows": item.follows,
                      "follows_from": list(item.follows_from),
-                     "first_valid_from": max(role.valid_from for role in roles),
-                     "last_valid_until": None if all(role.valid_until is None for role in roles)
-                     else min(role.valid_until for role in roles if role.valid_until)}
+                     # The stretches the claims under it actually shared,
+                     # as the projection worked them out. A first and last
+                     # moment taken from the facts here would span a gap
+                     # that no claim does.
+                     "periods": [list(period) for period in item.periods],
+                     "first_valid_from": item.first_valid_from, "last_valid_until": item.last_valid_until}
                     for item, roles in implied],
         "attributes": [{"id": attribute.attribute_id, "entity_id": attribute.entity_id,
                         "predicate": attribute.predicate, "value": attribute.value,

@@ -18,14 +18,14 @@ from functools import lru_cache
 import hashlib
 import json
 import re
-from typing import Iterable, Literal, cast
+from typing import Iterable, Literal, Sequence, cast
 
 from ..core.models import Fact
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..core.validation import entity_key
 from .classify import CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, reference_flag
 from .ids import attribute_id, implied_id, key_id, relation_id
-from .meanings import MAX_IMPLIED, MAX_STEPS, RelationMeanings
+from .meanings import MAX_IMPLIED, MAX_STEPS, MAX_WALKED, RelationMeanings
 from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, hint, infer_kind
 
 PROJECTION_VERSION = "scone.entities/1"
@@ -121,6 +121,11 @@ class Implied:
     follows: str
     #: The stated relations it was worked out from, in order.
     follows_from: tuple[str, ...]
+    #: Every stretch of valid time the claims under it actually shared,
+    #: half-open and in order. This is the truth of when it held; the two
+    #: fields above are the first beginning and the last ending of these,
+    #: and a chain that held twice with a gap between says so here.
+    periods: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,9 +287,13 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
             roles_count[key]["subject"], roles_count[key]["object"]))
 
     relations = []
+    spans: dict[str, tuple[tuple[str, str | None], ...]] = {}
     for (subject_id, predicate, object_id), members in relation_facts.items():
         in_ledger = [fact for fact in members if fact.in_ledger]
         ends = [fact.valid_until for fact in in_ledger]
+        spans[relation_id(space, subject_id, predicate, object_id)] = _merged(
+            [(_moment(fact.valid_from), _moment(fact.valid_until) if fact.valid_until else None)
+             for fact in in_ledger])
         relations.append(Relation(
             relation_id(space, subject_id, predicate, object_id), subject_id, predicate, object_id,
             tuple(fact.fact_id for fact in members), _support(members),
@@ -298,7 +307,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
     entities.sort(key=lambda entity: entity.entity_id)
     relations.sort(key=lambda relation: relation.relation_id)
     attributes.sort(key=lambda attribute: attribute.attribute_id)
-    implied, capped = _implied(space, relations, meanings)
+    implied, capped = _implied(space, relations, spans, meanings)
     digest = hashlib.sha256(_canonical({
         "version": [PROJECTION_VERSION, CLASSIFIER_VERSION, KIND_HINTS_VERSION], "space": space,
         "entities": [_plain(item) for item in entities], "relations": [_plain(item) for item in relations],
@@ -310,44 +319,52 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
                             digest, implied=tuple(implied), implied_capped=capped, meanings=meanings)
 
 
-def _implied(space: str, relations: list[Relation],
+def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple[str, str | None], ...]],
              meanings: RelationMeanings | None) -> tuple[list[Implied], bool]:
     """What follows from the stated relations under the space's vocabulary.
 
     Nothing already said is implied, nothing is implied twice, and nothing
-    is implied about a thing and itself. A relation that carries through is
-    followed the short way first, so a claim that is reachable by two paths
-    keeps the shorter one, and the walk stops after MAX_STEPS claims."""
+    is implied about a thing and itself. A chain holds only over the
+    stretches of time its claims actually shared, worked out from the
+    claims themselves rather than from the first and last moment of each
+    relation, because a relation made of two spells with a gap between
+    them does not hold during the gap. A chain that shares no moment with
+    itself is not a chain at all and is never recorded.
+
+    The walk is bounded twice over: a thing is reached by the shortest
+    route to it and never expanded again, and the whole walk stops after
+    MAX_WALKED claims are examined. Either bound, and the cap on how many
+    implications a projection holds, is reported rather than assumed."""
     if not meanings or not relations:
         return [], False
     said = {(item.subject_id, item.predicate, item.object_id) for item in relations}
     found: dict[tuple[str, str, str], Implied] = {}
     capped = False
+    walked = 0
 
     def keep(subject: str, predicate: str, other: str, follows: str,
              path: tuple[Relation, ...]) -> bool:
-        """Record one implied relation; False when there is no room left."""
+        """Record one implied relation, when its claims ever held together.
+        False when there is no room left for another."""
         nonlocal capped
         key = (subject, predicate, other)
         if subject == other or key in said or key in found:
+            return True
+        shared = _shared(spans, path)
+        if not shared:
             return True
         if len(found) >= MAX_IMPLIED:
             capped = True
             return False
         # It is no better grounded than its least grounded claim: a chain
         # with one unsourced link is an unsourced chain, whatever the rest
-        # of it was quoted from. And it holds only while every claim it
-        # rests on does, so it begins at the latest beginning and ends at
-        # the earliest ending.
+        # of it was quoted from.
         weakest = min(path, key=lambda item: (item.support.quoted, item.support.unquoted,
                                               item.support.facts, item.relation_id))
-        ends = [item.last_valid_until for item in path]
         found[key] = Implied(
             implied_id(space, subject, predicate, other), subject, predicate, other,
             tuple(sorted({fact for item in path for fact in item.fact_ids})), weakest.support,
-            max(item.first_valid_from for item in path),
-            None if all(end is None for end in ends) else min(end for end in ends if end),
-            follows, tuple(item.relation_id for item in path))
+            shared[0][0], shared[-1][1], follows, tuple(item.relation_id for item in path), shared)
         return True
 
     for item in relations:
@@ -363,14 +380,23 @@ def _implied(space: str, relations: list[Relation],
     for item in relations:
         if not meanings.carries_through(item.predicate) or capped:
             continue
+        # Each thing is reached by the shortest route from this claim and
+        # never expanded twice: a dense graph has more paths than anyone
+        # can walk, and walking them all finds nothing a shorter route did
+        # not already find.
+        reached = {item.subject_id, item.object_id}
         frontier: list[tuple[str, tuple[Relation, ...]]] = [(item.object_id, (item,))]
         for _ in range(MAX_STEPS - 1):
             beyond: list[tuple[str, tuple[Relation, ...]]] = []
-            for reached, path in frontier:
-                walked = {step.relation_id for step in path}
-                for edge in onward.get((item.predicate, reached), ()):
-                    if edge.relation_id in walked:
+            for at, path in frontier:
+                for edge in onward.get((item.predicate, at), ()):
+                    walked += 1
+                    if walked > MAX_WALKED:
+                        capped = True
+                        return sorted(found.values(), key=lambda r: r.relation_id), capped
+                    if edge.object_id in reached:
                         continue
+                    reached.add(edge.object_id)
                     step = (*path, edge)
                     if not keep(item.subject_id, item.predicate, edge.object_id, "transitive", step):
                         return sorted(found.values(), key=lambda r: r.relation_id), capped
@@ -379,6 +405,56 @@ def _implied(space: str, relations: list[Relation],
             if not frontier:
                 break
     return sorted(found.values(), key=lambda r: r.relation_id), capped
+
+
+def _merged(periods: Iterable[tuple[str, str | None]]) -> tuple[tuple[str, str | None], ...]:
+    """One stretch of time per spell, overlapping and touching spells
+    joined, in order. An open end swallows everything after it."""
+    ordered = sorted(periods, key=lambda period: (period[0], period[1] is None, period[1] or ""))
+    joined: list[tuple[str, str | None]] = []
+    for start, end in ordered:
+        if end is not None and end <= start:
+            continue
+        if joined and (joined[-1][1] is None or joined[-1][1] >= start):
+            was = joined[-1]
+            joined[-1] = (was[0], None if was[1] is None or end is None else max(was[1], end))
+        else:
+            joined.append((start, end))
+    return tuple(joined)
+
+
+def _shared(spans: dict[str, tuple[tuple[str, str | None], ...]],
+            path: Sequence[Relation]) -> tuple[tuple[str, str | None], ...]:
+    """The stretches of time every claim along a path held at once."""
+    common = spans.get(path[0].relation_id, ())
+    for step in path[1:]:
+        if not common:
+            return ()
+        common = _overlap(common, spans.get(step.relation_id, ()))
+    return common
+
+
+def _overlap(left: Sequence[tuple[str, str | None]],
+             right: Sequence[tuple[str, str | None]]) -> tuple[tuple[str, str | None], ...]:
+    """Where two ordered sets of stretches meet."""
+    shared: list[tuple[str, str | None]] = []
+    one = other = 0
+    while one < len(left) and other < len(right):
+        stops, ends = left[one][1], right[other][1]
+        start = max(left[one][0], right[other][0])
+        finish = None if stops is None or ends is None else min(stops, ends)
+        if finish is None:
+            finish = stops if ends is None else ends
+        if finish is None or start < finish:
+            shared.append((start, finish))
+        # Whichever stretch ends first cannot meet anything later.
+        if stops is None:
+            other += 1
+        elif ends is None or stops <= ends:
+            one += 1
+        else:
+            other += 1
+    return tuple(shared)
 
 
 _SCALARS = frozenset({str, int, float, bool, type(None)})

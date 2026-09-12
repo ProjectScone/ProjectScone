@@ -42,6 +42,11 @@ MAX_MEANINGS = 500
 #: Relations that may be implied for one projection. Past this the graph
 #: says what it left out rather than growing without bound.
 MAX_IMPLIED = 50_000
+#: Claims a whole walk may examine. A dense graph has more paths than
+#: anyone can walk, and finding nothing new is not the same as being
+#: cheap, so the work itself is bounded and what it stopped short of is
+#: said rather than assumed.
+MAX_WALKED = 200_000
 
 
 def _named(predicates: object, what: str) -> list[str]:
@@ -109,4 +114,5 @@ class RelationMeanings:
         """The vocabulary as it will be applied, which is what a projection
         is digested with and what a reader is shown."""
         return {"inverse": dict(self.inverse), "symmetric": list(self.symmetric),
-                "transitive": list(self.transitive), "max_steps": MAX_STEPS, "max_implied": MAX_IMPLIED}
+                "transitive": list(self.transitive), "max_steps": MAX_STEPS, "max_implied": MAX_IMPLIED,
+                "max_walked": MAX_WALKED}

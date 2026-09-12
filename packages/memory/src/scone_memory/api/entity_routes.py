@@ -134,6 +134,27 @@ class ListFilters(Filters):
     q: Optional[str]
 
 
+class ImpliedOut(BaseModel):
+    """An edge nobody claimed, which follows from ones they did. Its own
+    model, as it is its own kind of thing: the id carries an ``imp:``
+    prefix, and it names the claims and relations it rests on."""
+
+    id: str
+    subject_id: str
+    predicate: str
+    object_id: str
+    fact_ids: list[int]
+    support: Support
+    #: "inverse", "symmetric" or "transitive".
+    follows: str
+    #: The stated relations it was worked out from, in order.
+    follows_from: list[str]
+    #: Every stretch of valid time the claims under it shared, half-open.
+    periods: list[list[Optional[str]]] = []
+    first_valid_from: str
+    last_valid_until: Optional[str] = None
+
+
 class Coverage(BaseModel):
     facts_read: int
     #: Facts that count in this view's status mode and moment; the view is
@@ -148,6 +169,15 @@ class Coverage(BaseModel):
     relations_shown: Optional[int] = None
     attributes_total: Optional[int] = None
     attributes_shown: Optional[int] = None
+    #: The vocabulary the implications were worked out under, with the
+    #: bounds it applied (max_steps, max_implied, max_walked). None when
+    #: the space configures no meanings and the graph holds only claims.
+    meanings: Optional[dict[str, object]] = None
+    implied_total: Optional[int] = None
+    implied_shown: Optional[int] = None
+    #: Present only when the walk stopped before it had followed
+    #: everything that follows.
+    implied_capped: Optional[bool] = None
     truncated: bool
     reasons: list[str]
     #: Pass as ``cursor`` for the next page of the ranking; absent on the last.
@@ -211,6 +241,9 @@ class KnowledgeView(BaseModel):
     filters: Filters
     entities: list[EntityOut]
     relations: list[RelationOut]
+    #: What follows from the relations under the space's vocabulary, kept
+    #: apart from them. Empty when no meanings are configured.
+    implied: list[ImpliedOut] = []
     attributes: list[AttributeOut]
     coverage: Coverage
     groupings: Optional[Groupings] = None
@@ -673,6 +706,8 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
             "follows": [{"relation_id": item.relation_id, "predicate": item.predicate,
                          "subject": names[item.subject_id], "object": names[item.object_id],
                          "follows": item.follows, "follows_from": list(item.follows_from),
+                         "periods": [list(period) for period in item.periods],
+                         "first_valid_from": item.first_valid_from, "last_valid_until": item.last_valid_until,
                          "fact_ids": list(item.fact_ids),
                          "support": support([roles[fact_id] for fact_id in item.fact_ids if fact_id in roles])}
                         for item in found.follows],

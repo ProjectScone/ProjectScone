@@ -897,3 +897,51 @@ def test_health_counts_what_wants_attention(seeded):
     assert all(len(concern["examples"]) <= 2 for concern in found["concerns"])
     assert client.get("/v1/graph/health", params={"limit": 0}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2
+
+
+@pytest.fixture
+async def meant():
+    """A space whose vocabulary says works_at is the other side of employs."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(inverse={"works_at": "employs"})).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics",
+                             valid_from="2024-01-01T00:00:00Z")
+    app = create_app(engine, {"key-a": "alpha"})
+    with TestClient(app) as client:
+        yield client
+
+
+def test_the_knowledge_map_carries_what_follows_over_http(meant):
+    """The response model must declare what the view holds, or a reader
+    over HTTP is told less than the graph knows."""
+    view = meant.get("/v1/graph/knowledge", headers=auth()).json()
+    [followed] = view["implied"]
+    assert followed["predicate"] == "employs" and followed["follows"] == "inverse"
+    assert followed["id"].startswith("imp:")
+    assert followed["follows_from"] == [view["relations"][0]["id"]]
+    assert followed["fact_ids"] == view["relations"][0]["fact_ids"]
+    assert followed["periods"] and followed["first_valid_from"].startswith("2024-01-01")
+    coverage = view["coverage"]
+    assert coverage["implied_total"] == 1 and coverage["implied_shown"] == 1
+    assert coverage["meanings"]["inverse"] == {"employs": "works_at", "works_at": "employs"}
+    assert coverage["meanings"]["max_steps"] and coverage["meanings"]["max_walked"]
+
+
+def test_an_entity_page_carries_what_follows_over_http(meant):
+    found = meant.get("/v1/entities/resolve", params={"name": "Acme Robotics"}, headers=auth()).json()
+    [acme] = found["candidates"]
+    page = meant.get(f"/v1/entities/{acme['id']}", headers=auth()).json()
+    [followed] = page["follows"]
+    assert followed["predicate"] == "employs" and followed["object"]["label"] == "alice chen"
+    assert followed["relation_id"].startswith("imp:") and followed["follows"] == "inverse"
+    assert page["coverage"]["follows_shown"] == 1
+    assert {fact["fact_id"] for fact in page["facts"]} >= set(followed["fact_ids"])
+
+
+def test_a_space_with_no_vocabulary_still_answers_the_old_shape(seeded):
+    client, _ = seeded
+    view = client.get("/v1/graph/knowledge", headers=auth()).json()
+    assert view["implied"] == [] and view["coverage"]["meanings"] is None
+    assert view["schema_version"] == 1
