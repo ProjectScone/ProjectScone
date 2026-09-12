@@ -711,36 +711,62 @@ def _brace_calls(code: list[str], path: str, held: dict[str, str],
                  spans: list[tuple[str, str, int, int]], say) -> None:
     """Calls between things this file can see, and no others.
 
-    The same rule the Python reader follows, which is the only one a
-    brace language can keep honestly: a bare name is a call to this
-    file's own declaration when it has one. A function from another
-    module, or a method on a value whose type nobody wrote down, is left
-    out rather than pointed at a name that might mean anything.
+    A bare name binds only to a **top-level declaration of this file
+    whose name it does not share with another**. Three things follow from
+    that, and each was a false edge before it:
+
+    - A method never binds. `save()` is reached through a receiver, and
+      this reader never knows a receiver's type. Two classes each
+      declaring `save()` made one the target of the other's declaration
+      header, and the blast radius of `B.save` listed `A.save`.
+    - A name declared twice at the top level binds to neither, rather
+      than to whichever the declaration table happened to keep.
+    - A parameter of the enclosing declaration wins over anything it
+      shadows. `function run(leaf)` calling `leaf(1)` calls its argument,
+      not the `leaf` declared beside it. This reader has no scopes, but a
+      parameter is written on a header line it already reads.
 
     ``code`` is the masked source the declaration reader already uses, so
     a call inside a string or a comment is not a call.
 
-    Each call belongs to the **innermost** declaration holding it, so a
-    call in a method is the method's and not also its class's. That is
-    also what keeps a declaration's own header from being a call to
-    itself: `gamma() {` matches the call pattern exactly, and while every
-    enclosing span was being credited it made `Beta` call `Beta.gamma`
-    at the line where the method is written rather than used. Innermost,
-    the caller and the target are the same thing and it is dropped. A
+    Each call belongs to the innermost declaration holding it, so a call
+    in a method is the method's and not also its class's. That is also
+    what keeps a declaration's own header from being a call to itself. A
     method whose whole body is on one line is not a declaration to this
     reader, and then its class is the innermost there is.
 
-    Two limits, neither claimed away. A call to a name that came from an
-    import is left out, which the Python reader does resolve. And there
-    was no call graph outside Python at all before this: 263 `calls`
-    relations over 60 files of this package against 0 over 58 files of
-    this project's web application.
+    Two limits stated rather than claimed away: a call to a name that
+    came from an import is left out, which the Python reader resolves;
+    and a call reached through any receiver at all is left out, which is
+    most calls in an object-oriented file. What is left is small and
+    checkable, and there was none of it at all before -- 263 `calls` over
+    60 files of this package against 0 over 58 files of this project's
+    web application.
     """
-    # The innermost declaration covering each line, and the line each
-    # declaration is written on.
+    # Counted from the spans and not from ``held``, which is a dict: the
+    # second `save` overwrote the first there, so a duplicate could never
+    # be seen at all and the guard against it could never fire.
+    # Counted from the spans and not from ``held``, which is a dict: the
+    # second `save` overwrote the first there, so a duplicate could never
+    # be seen and the guard against it could never fire. Counted by the
+    # line each is written on, because two declarations of one name make
+    # the same label -- that is the whole difficulty.
+    once: dict[str, str] = {}
+    written: dict[str, int] = {}
+    twice: set[str] = set()
+    for whole, _inside, first, _last in spans:
+        symbol = whole.rpartition(":")[2]
+        if "." in symbol:
+            continue  # a method: reached through a receiver, never bare
+        if written.get(symbol, first) != first:
+            twice.add(symbol)
+        written.setdefault(symbol, first)
+        once[symbol] = whole
     holder: dict[int, str] = {}
     width: dict[int, int] = {}
+    header: dict[str, str] = {}
     for whole, _inside, first, last in spans:
+        header.setdefault(whole, code[first - 1] if first - 1 < len(code) else "")
         for number in range(first, last + 1):
             if number not in width or last - first < width[number]:
                 holder[number], width[number] = whole, last - first
@@ -750,12 +776,31 @@ def _brace_calls(code: list[str], path: str, held: dict[str, str],
             continue
         for match in _CALL.finditer(line):
             name = match.group(1)
-            if name in _NOT_CALLS or line[:match.start(1)].rstrip().endswith("."):
+            if name in _NOT_CALLS or name in twice or line[:match.start(1)].rstrip().endswith("."):
                 continue
-            target = held.get(name)
-            if target is None or target == caller:
+            target = once.get(name)
+            if target is None or target == caller or _shadowed(name, header.get(caller, "")):
                 continue
             say(caller, CALLS, target, number)
+
+
+def _shadowed(name: str, header: str) -> bool:
+    """Whether the declaration written on ``header`` takes ``name`` as an
+    argument, in which case a call to it is a call to that argument."""
+    opened = header.find("(")
+    if opened < 0:
+        return False
+    depth, taken = 0, []
+    for character in header[opened:]:
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+            if depth == 0:
+                break
+        else:
+            taken.append(character)
+    return bool(re.search(rf"\b{re.escape(name)}\b", "".join(taken)))
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:

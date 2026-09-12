@@ -370,3 +370,74 @@ def test_a_declaration_header_is_not_a_call_to_itself():
     found = code_claims(source, "web/app.ts", language="braces")
     calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
     assert not calls, calls
+
+
+def test_two_classes_with_a_method_of_the_same_name_do_not_call_each_other():
+    """`held` mapped a bare name to one declaration, and method names are
+    not unique in a file. Two classes each declaring `save()` made the
+    later one the target of the earlier one's own declaration header, so
+    `A.save` was recorded as calling `B.save` and the blast radius of
+    `B.save` listed `A.save`. A method is reached through a receiver
+    whose type this reader cannot know, so a bare name never binds to
+    one."""
+    source = ("export class A {\n"
+              "  save() {\n"
+              "    return 1;\n"
+              "  }\n"
+              "}\n"
+              "export class B {\n"
+              "  save() {\n"
+              "    return 2;\n"
+              "  }\n"
+              "}\n")
+    found = code_claims(source, "web/app.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls
+
+
+def test_a_bare_call_does_not_bind_to_a_method_of_some_class():
+    """`save()` at the top of a file is not `A.save`. Reaching a method
+    means having a receiver, and this reader never knows its type."""
+    source = ("export class A {\n"
+              "  save() {\n"
+              "    return 1;\n"
+              "  }\n"
+              "}\n"
+              "export function run() {\n"
+              "  return save();\n"
+              "}\n")
+    found = code_claims(source, "web/app.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls
+
+
+def test_a_parameter_of_the_same_name_is_not_the_function_it_shadows():
+    """`function run(leaf) { return leaf(); }` calls its parameter, not
+    the `leaf` declared beside it. This reader has no scopes, but a
+    parameter is written on the header line it can already read."""
+    source = ("export function leaf(p) { return p; }\n"
+              "export function run(leaf) {\n"
+              "  return leaf(1);\n"
+              "}\n")
+    found = code_claims(source, "web/app.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls
+
+
+def test_a_name_declared_twice_at_the_top_level_binds_to_neither():
+    """A file can declare one name twice -- a function and then a class
+    of the same name is legal JavaScript, and the declaration reader
+    reports both. Binding a call to whichever the table happened to keep
+    is a coin toss recorded as a fact, so it binds to neither."""
+    source = ("function save(p) {\n"
+              "  return 1;\n"
+              "}\n"
+              "class save {\n"
+              "  constructor() {}\n"
+              "}\n"
+              "function run() {\n"
+              "  return save(1);\n"
+              "}\n")
+    found = code_claims(source, "web/app.js", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls
