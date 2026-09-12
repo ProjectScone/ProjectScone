@@ -14,6 +14,9 @@ from .agents import AgentClient, PlanPage, RunPage
 from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
 from .client import DEFAULT_BASE_URL, DEFAULT_TIMEOUT, Scone
+from .document_jobs import DocumentJobs, DocumentPage
+from .document_models import (DocumentAttachment, DocumentFormat, DocumentFormats, DocumentRequest, DocumentResult, DocumentSpec,
+                              DocumentStatus, DocumentStored, ParserLimits, PdfOcr)
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
@@ -24,6 +27,8 @@ __all__ = [
     "Capabilities",
     "AgentClient",
     "InputRecord",
+    "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
+    "DocumentSpec", "DocumentStatus", "DocumentStored", "ParserLimits", "PdfOcr",
     "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
     "ModelChoice", "ModelTask", "RunPolicy", "RunRequest", "RunStatus", "SavedPlan", "TaskPlan",
     "SconeError",
