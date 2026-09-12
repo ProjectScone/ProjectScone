@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import io
+import posixpath
 import tokenize
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -424,23 +425,56 @@ def _joined(module: str, name: str) -> str:
     return f"{module}.{name}" if module != name else module
 
 
+def _stem(path: str, level: int, module: str) -> Optional[str]:
+    """The file a relative import names, by arithmetic on the importing
+    file's own path.
+
+    A relative import does not need the tree to be **named**, only to be
+    **confirmed**. `from ..core.errors import Bad` inside
+    `pkg/api/routes.py` names `pkg/core/errors.py` and nothing about any
+    other file changes that. Returning it here is what lets a caller who
+    has seen one file -- `engine.remember`, the episodes route -- record
+    the edge at all; whether such a file exists is a question the whole
+    graph answers later, which is also what makes the answer independent
+    of the order files arrived in.
+
+    `.py` because this is the Python reader. A package imported by its
+    directory (`pkg/core/errors/__init__.py`) is named as `errors.py` and
+    will not be confirmed; that is a miss, not a wrong edge, and it is
+    recorded in bench-runs/code-graph-imports-2026-09-12.
+    """
+    here = posixpath.dirname(path)
+    for _ in range(level - 1):
+        if not here:
+            # Further up than the corpus goes: nothing can be named.
+            return None
+        here = posixpath.dirname(here)
+    parts = [one for one in module.split(".") if one]
+    if not parts:
+        return None
+    return posixpath.join(here, *parts) + ".py"
+
+
 def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[str]:
     """What an import names: an absolute module as written, and a relative
-    one only when somebody who knows the tree can say what it is."""
+    one named by the tree when somebody knows it and by arithmetic on the
+    importing file's path when nobody does."""
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if not isinstance(node, ast.ImportFrom):
         return []
     if not node.level:
         return [node.module] if node.module else []
-    if resolve is None:
-        return []
     # "from .code import x" names the module in module; "from . import
     # code" names it in the aliases. Either way what is imported is a
-    # module, and that is what the resolver is asked for.
+    # module.
     wanted = [node.module] if node.module else [alias.name for alias in node.names]
-    found = [resolve(path, node.level, one) for one in wanted]
-    return [one for one in found if one]
+    if resolve is not None:
+        # Somebody who read the tree can confirm the file exists, which
+        # is strictly better than naming a candidate. Left exactly as it
+        # was, so `scone sync --graph` is unchanged.
+        return [one for one in (resolve(path, node.level, one) for one in wanted) if one]
+    return [one for one in (_stem(path, node.level, one) for one in wanted) if one]
 
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str], say) -> None:

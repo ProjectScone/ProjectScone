@@ -627,17 +627,45 @@ async def test_a_graph_with_no_resolved_cross_file_imports_says_so():
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 code_graph=True).open()
     try:
-        await engine.remember("default", "import json\n\n\ndef keep(p: str) -> str:\n"
-                              "    return json.dumps(p)\n", source="pkg/store.py")
-        await engine.remember("default", "from .store import keep\n\n\ndef put(p: str) -> str:\n"
-                              "    return keep(p)\n", source="pkg/api.py")
-        blast = await affected(engine, "default", "pkg/store.py")
+        # TypeScript, because `./store` could be store.ts, store.tsx,
+        # store.js or store/index.ts and arithmetic cannot choose. Python
+        # names its file and no longer needs the resolver for this.
+        await engine.remember("default", "export function keep(p: string) { return p; }\n",
+                              source="pkg/store.ts")
+        await engine.remember("default", "import {keep} from './store';\n"
+                              "export function put(p: string) { return keep(p); }\n",
+                              source="pkg/api.ts")
+        blast = await affected(engine, "default", "pkg/store.ts")
     finally:
         await engine.close()
     assert not blast.reached, blast.record()
     assert blast.unresolved_imports is True, blast.record()
     assert "relative import" in blast.why, blast.why
     assert "sync --graph" in blast.why, blast.why
+
+
+async def test_a_package_imported_by_its_directory_is_matched_to_its_init():
+    """The half of the old objection that was right.
+
+    `from .core import errors` names `core/errors`, and arithmetic cannot
+    say whether that is `core/errors.py` or `core/errors/__init__.py`.
+    `.py` is written, because a module is the common case and a name is
+    cheap; the two are matched where the whole graph can be consulted
+    instead of one file. So a package's `__init__.py` collects the edges
+    recorded against the module spelling of its own name.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "from ..core.errors import Bad\n\n\n"
+                              "def put(p):\n    return Bad(p)\n", source="pkg/api/routes.py")
+        await engine.remember("default", "class Bad(Exception):\n    pass\n",
+                              source="pkg/core/errors/__init__.py")
+        blast = await affected(engine, "default", "pkg/core/errors/__init__.py")
+    finally:
+        await engine.close()
+    assert blast.status == "found", blast.record()
+    assert any(one.label == "pkg/api/routes.py" for one in blast.reached), blast.record()
 
 
 async def test_a_graph_that_did_resolve_its_imports_says_nothing_of_the_kind():
@@ -651,3 +679,32 @@ async def test_a_graph_that_did_resolve_its_imports_says_nothing_of_the_kind():
     assert blast.reached, blast.record()
     assert blast.unresolved_imports is False, blast.record()
     assert "sync --graph" not in blast.why, blast.why
+
+
+async def test_a_relative_import_reaches_the_file_it_names_without_a_resolver():
+    """The blast radius answered "nothing" for every file in this
+    repository, because a relative import recorded nothing at all unless
+    the caller could say which file it meant -- and `engine.remember` and
+    the episodes route see one file each, so neither can.
+
+    A relative import does not need the tree to be *named*, only to be
+    *confirmed*. `from ..core import errors` inside `pkg/a/b.py` names
+    `pkg/core/errors` by arithmetic on the path. Whether such a file
+    exists is a question the whole graph can answer later, and answering
+    it later is what makes the result independent of the order files
+    arrived in.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        # The importer arrives first, naming a file the graph has not seen.
+        await engine.remember("default", "from ..core.errors import Bad\n\n\n"
+                              "def put(p):\n    return Bad(p)\n", source="pkg/api/routes.py")
+        await engine.remember("default", "class Bad(Exception):\n    pass\n",
+                              source="pkg/core/errors.py")
+        blast = await affected(engine, "default", "pkg/core/errors.py")
+    finally:
+        await engine.close()
+    assert blast.status == "found", blast.record()
+    assert any(one.label == "pkg/api/routes.py" for one in blast.reached), blast.record()
+    assert blast.unresolved_imports is False, blast.record()
