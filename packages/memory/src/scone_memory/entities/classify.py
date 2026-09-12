@@ -183,10 +183,19 @@ def _prose(text: str) -> bool:
     return False
 
 
-#: The tail of a qualified symbol: a declaration name, possibly dotted.
-_SYMBOL_TAIL = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*$")
 #: A file extension at the end of a path segment.
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _declaration(text: str) -> bool:
+    """A dotted chain of identifiers, as a declaration is named.
+
+    ``str.isidentifier`` rather than an ASCII pattern: `def naïve()` is
+    valid Python and an ASCII-only tail refused it, which regressed real
+    symbols in the course of tightening the rule against prose.
+    """
+    parts = text.split(".")
+    return bool(parts) and all(part.isidentifier() for part in parts)
 
 
 def _code_shaped(text: str) -> bool:
@@ -214,15 +223,21 @@ def _code_shaped(text: str) -> bool:
         return False
     if len(text.split()) == 1:
         return True
-    cut = max(text.rfind(":"), text.rfind("/"))
-    if cut <= 0 or cut == len(text) - 1:
-        return False
-    head, separator, tail = text[:cut], text[cut], text[cut + 1:]
-    if head[-1].isspace() or tail[0].isspace():
-        return False
-    if not _SYMBOL_TAIL.fullmatch(tail):
-        return False
-    return "/" in head or bool(_EXTENSION.search(head.split()[-1]))
+    # A multi-word object is a symbol only if it is a **path**, and a
+    # path's last segment carries a file extension. "head contains a
+    # slash" was the previous test and prose satisfies it:
+    # `a choice between input/output/value` is not a path.
+    cut = text.rfind(":")
+    if cut > 0:
+        head, tail = text[:cut], text[cut + 1:]
+        if not head or not tail or head[-1].isspace() or tail[0].isspace():
+            return False
+        if not _declaration(tail):
+            return False
+    else:
+        head = text
+    segment = head.rsplit("/", 1)[-1]
+    return bool(_EXTENSION.search(segment)) and not segment.rstrip().endswith(" ")
 
 
 def _uncased_name(text: str) -> bool:
@@ -277,17 +292,19 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification("entity", None, "identity_decision")
     if _quoted(stripped):
         return ObjectClassification("literal", "text", "quoted_text")
+    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
+        # **After** quoting, so `"a quorum: three members"` stays the
+        # quoted text it is -- an earlier version ran before it and
+        # bypassed the check entirely. **Before** prose, because `_prose`
+        # calls anything past 120 characters prose, and a long directory
+        # path is not prose: `pkg/<110 characters>.py` lost its
+        # declarations to that rule. And before `literal_shape`, so a
+        # module called `2024` is not read as a date.
+        return ObjectClassification("entity", None, "code_symbol")
     if _prose(stripped):
         return ObjectClassification("literal", "text", "prose")
     if key in _PRONOUNS:
         return ObjectClassification("literal", "pronoun", "pronoun")
-    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
-        # After quoting and prose, so `"a quorum: three members"` stays
-        # the quoted text it is -- the first version ran before them and
-        # bypassed both. Still before `literal_shape`, so a module called
-        # `2024` is not read as a date or a path holding a version as a
-        # measurement.
-        return ObjectClassification("entity", None, "code_symbol")
     shape = literal_shape(stripped)
     if shape is not None:
         if key in context.anchors and is_case_safe(stripped):
