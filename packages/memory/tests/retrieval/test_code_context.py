@@ -20,7 +20,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
-from scone_memory.retrieval.code_context import MAX_IMPORTS, code_context
+from scone_memory.retrieval.code_context import MAX_IMPORT_LINES, MAX_IMPORTS, code_context
 
 pytestmark = pytest.mark.asyncio
 
@@ -651,3 +651,37 @@ async def test_code_context_describes_only_passages_that_survived_every_stage():
         assert described <= answered, (sorted(described), sorted(answered))
     finally:
         await engine.close()
+
+
+async def test_one_enormous_import_is_quoted_to_a_bound_and_says_so():
+    """`MAX_IMPORTS` bounds how many import lines are listed and said
+    nothing about how long one may be, so a parenthesised import spanning
+    hundreds of lines was quoted whole -- and two hundred of those is an
+    unbounded answer. The signature beside it has been bounded all along,
+    which is the same half-measure this work keeps producing.
+
+    Found by auditing my own module after a review found ten of these,
+    rather than by waiting for the eleventh.
+    """
+    names = ",\n".join(f"    name_{n}" for n in range(400))
+    source = ("from pathlib import (\n" + names + ",\n)\n"
+              "import json\n\n\ndef contact() -> str:\n"
+              "    return json.dumps({\"n\": name_1}) + \" a body long enough to be a chunk\"\n")
+    engine = await memory(source, source="wide_import.py", target=80)
+    try:
+        found = await engine.recall("default", "contact json dumps body chunk", limit=6)
+        context = await code_context(engine, "default", found.items)
+    finally:
+        await engine.close()
+    one = next(iter(context.by_chunk.values()), None)
+    assert one is not None, context.record()
+    big = [i for i in one.imports if i.text.startswith("from pathlib")]
+    assert big, [i.text[:30] for i in one.imports]
+    assert big[0].text.count("\n") + 1 <= MAX_IMPORT_LINES, big[0].text.count("\n") + 1
+    assert big[0].clipped is True, big[0]
+    # Every chunk of this file carries the same oversized import, and the
+    # count is per chunk -- so it equals the number of chunks, not one.
+    assert context.long_imports == len(context.by_chunk), context.record()
+    assert "quoted to" in context.why, context.why
+    said = context.record()
+    assert any(i["clipped"] for one in said["by_chunk"].values() for i in one["imports"]), said

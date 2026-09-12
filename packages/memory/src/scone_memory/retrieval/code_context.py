@@ -56,6 +56,12 @@ MAX_EPISODES = 100
 #: Lines a signature may run to. A header longer than this is quoted to
 #: here and says it was clipped.
 MAX_SIGNATURE_LINES = 12
+#: Lines one import may run to. ``MAX_IMPORTS`` bounds how many are
+#: listed and says nothing about how long one may be, so a parenthesised
+#: import spanning hundreds of lines was quoted whole -- and two hundred
+#: of those is an unbounded answer. The signature beside it had been
+#: bounded all along, which is the half-measure this module kept making.
+MAX_IMPORT_LINES = 12
 
 #: How the brace languages open a line that brings a name in. This reads
 #: **lines**, where ``ingestion/code_graph.py`` resolves **targets** --
@@ -92,6 +98,8 @@ class Imported:
 
     line: int
     text: str
+    #: Whether the import ran past the line bound and was quoted to it.
+    clipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,18 +140,24 @@ class CodeContext:
     #: Contexts with a signature longer than the line bound, quoted to
     #: there. A header cut short must not read as the whole header.
     shortened: int = 0
+    #: Contexts with an import longer than the line bound, quoted to
+    #: there. Counted apart from ``shortened`` because a truncated header
+    #: and a truncated import are different things to a reader.
+    long_imports: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
         return {"chunks": len(self.by_chunk), "not_code": self.not_code, "gone": self.gone,
                 "unread": self.unread, "not_read": self.not_read, "capped": self.capped,
-                "shortened": self.shortened, "why": self.why,
+                "shortened": self.shortened, "long_imports": self.long_imports,
+                "why": self.why,
                 "items": [item.model_dump() for item in self.items],
                 "by_chunk": {str(key): {
                     "language": value.language, "more_imports": value.more_imports,
                     "holders": [{"name": s.name, "line": s.line, "text": s.text,
                                  "clipped": s.clipped} for s in value.holders],
-                    "imports": [[i.line, i.text] for i in value.imports],
+                    "imports": [{"line": i.line, "text": i.text, "clipped": i.clipped}
+                                for i in value.imports],
                 } for key, value in self.by_chunk.items()}}
 
 
@@ -382,8 +396,9 @@ def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, .
         for first, last in sorted(at):
             if len(found) >= limit:
                 return tuple(found), True
-            text = "\n".join(lines[first - 1:last])
-            found.append(Imported(line=first, text=text))
+            held = lines[first - 1:last]
+            found.append(Imported(line=first, text="\n".join(held[:MAX_IMPORT_LINES]),
+                                  clipped=len(held) > MAX_IMPORT_LINES))
         return tuple(found), False
     for number, line in enumerate(lines, 1):
         if _BROUGHT_IN.match(line):
@@ -408,7 +423,7 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     kept: list[RecallItem] = []
     read: dict[int, Optional[str]] = {}
     unavailable: set[int] = set()
-    not_code = vanished = unread = unbudgeted = capped = shortened = 0
+    not_code = vanished = unread = unbudgeted = capped = shortened = lengthy = 0
     for item in items:
         language = code_language(item.source)
         if language is None:
@@ -455,6 +470,8 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
                            for holder in holders)
         if any(signature.clipped for signature in signatures):
             shortened += 1
+        if any(brought_in.clipped for brought_in in brought):
+            lengthy += 1
         found[item.chunk_id] = ChunkContext(
             chunk_id=item.chunk_id, language=language, holders=signatures,
             imports=brought, more_imports=more)
@@ -480,6 +497,9 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     if shortened:
         why += (f"; {shortened} signature(s) run past {MAX_SIGNATURE_LINES} lines and were "
                 f"quoted to there, so those headers are incomplete")
+    if lengthy:
+        why += (f"; {lengthy} chunk(s) have an import running past {MAX_IMPORT_LINES} lines, "
+                f"quoted to there, so those import lines are incomplete")
     return CodeContext(items=tuple(kept), by_chunk=found, not_code=not_code, gone=vanished,
                        unread=unread, not_read=unbudgeted, capped=capped, shortened=shortened,
-                       why=why)
+                       long_imports=lengthy, why=why)
