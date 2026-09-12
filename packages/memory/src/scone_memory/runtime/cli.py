@@ -831,8 +831,12 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
@@ -897,8 +901,12 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     reports = []
     for item in items:
