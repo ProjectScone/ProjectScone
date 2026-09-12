@@ -15,7 +15,7 @@ from .agent_evidence import EvidencePacket
 from .agents import AgentClient, PlanPage, RunPage
 from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
-from .client import DEFAULT_BASE_URL, DEFAULT_TIMEOUT, Scone
+from .client import DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, Scone
 from .document_jobs import DocumentJobs, DocumentPage
 from .document_models import (DocumentAttachment, DocumentFormat, DocumentFormats, DocumentRequest, DocumentResult, DocumentSpec,
                               DocumentStatus, DocumentStored, ParserLimits, PdfOcr)
@@ -44,5 +44,6 @@ __all__ = [
     "Tag",
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT",
+    "DEFAULT_MAX_RESPONSE_BYTES",
     "__version__",
 ]

@@ -14,13 +14,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Un
 
 import requests
 
+from ._response import DEFAULT_MAX_RESPONSE_BYTES, read_response
 from ._wire import Capabilities
 from .agents import AgentClient
 from .document_jobs import DocumentJobs
 from .errors import SconeError
 from .models import Added, Fact, Profile, Recall, Status, Tag
 
-__all__ = ["Scone", "DEFAULT_BASE_URL", "DEFAULT_TIMEOUT"]
+__all__ = ["Scone", "DEFAULT_BASE_URL", "DEFAULT_TIMEOUT", "DEFAULT_MAX_RESPONSE_BYTES"]
 
 DEFAULT_BASE_URL = "http://127.0.0.1:7437"
 DEFAULT_TIMEOUT = 30.0
@@ -45,6 +46,7 @@ class Scone:
         *,
         timeout: Union[float, Tuple[float, float]] = DEFAULT_TIMEOUT,
         session: Optional[requests.Session] = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         """Configure a client, reading SCONE_URL and SCONE_API_KEY when unset.
 
@@ -58,6 +60,9 @@ class Scone:
                 "no API key: pass api_key= or set SCONE_API_KEY "
                 "(every Scone route requires a Bearer key)"
             )
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise SconeError("max_response_bytes must be a positive integer")
+        self.max_response_bytes = max_response_bytes
         self.base_url = url.rstrip("/")
         self.timeout = timeout
         self._owns_session = session is None
@@ -223,7 +228,8 @@ class Scone:
         url = f"{self.base_url}{path}"
         if data is not None and (json is not None or not isinstance(data, bytes)):
             raise SconeError("request requires either JSON or raw bytes")
-        request_headers = dict(headers or {})
+        request_headers = requests.structures.CaseInsensitiveDict(headers or {})
+        request_headers["Accept-Encoding"] = "gzip, deflate"
         if json is not None:
             request_headers["Content-Type"] = "application/json"
         try:
@@ -234,48 +240,42 @@ class Scone:
             response = self.session.request(
                 method, url, params=params, data=encoded,
                 headers=request_headers or None,
-                timeout=self.timeout, allow_redirects=False
+                timeout=self.timeout, allow_redirects=False, stream=True
             )
         except requests.RequestException as exc:
             raise SconeError(f"{method} {url} failed: {exc}") from exc
 
-        if 300 <= response.status_code < 400:
-            raise SconeError("HTTP redirects are not followed", response.status_code)
-
-        if not response.ok:
-            raise SconeError(_error_message(response), response.status_code, body=response.text)
-
-        if not response.content:
-            return {}
         try:
-            payload = response.json()
-        except ValueError as exc:
+            if 300 <= response.status_code < 400:
+                raise SconeError("HTTP redirects are not followed", response.status_code)
+            body = read_response(response, self.max_response_bytes)
+        finally:
+            response.close()
+
+        def error_text() -> str:
+            try:
+                return body.decode(response.encoding or "utf-8", errors="replace")
+            except LookupError:
+                return body.decode("utf-8", errors="replace")
+        try:
+            payload = _json.loads(body) if body else {}
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            text = error_text()
+            if not response.ok:
+                raise SconeError(text.strip() or f"HTTP {response.status_code}",
+                                 response.status_code, body=text) from exc
             raise SconeError(
                 f"{method} {path} returned a non-JSON body", response.status_code,
-                body=response.text,
+                body=text,
             ) from exc
+        if not response.ok:
+            text = error_text()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            message = error if isinstance(error, str) else text.strip() or f"HTTP {response.status_code}"
+            raise SconeError(message, response.status_code, body=text)
         if not isinstance(payload, dict):
             raise SconeError(
                 f"{method} {path} returned {type(payload).__name__}, expected an object",
-                response.status_code,
-                body=response.text,
+                response.status_code, body=error_text(),
             )
         return payload
-
-
-def _error_message(response: requests.Response) -> str:
-    """Pull the server's message out of a failure body.
-
-    Handler failures answer ``{"error": "..."}``; axum's own extractor
-    rejections (bad JSON, missing ``q``, wrong content type) answer plain
-    text, so fall back to the body and then to the status line.
-    """
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, str):
-        return error
-    text = (response.text or "").strip()
-    return text or f"HTTP {response.status_code}"
