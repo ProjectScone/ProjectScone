@@ -568,6 +568,72 @@ lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
 
+## Keeping a space in step with a directory
+
+`map` remembers the files under a directory and notices when it has seen
+one before. What it cannot notice is that a file has **changed** or that
+a file is **gone** — and those two are the difference between an import
+you run once and a sync you run on a schedule.
+
+```bash
+scone sync ~/work/notes                          # a plan: nothing is written
+# would sync /Users/me/work/notes: 34 of 34 file(s) read; 2 added, 1 updated,
+# 31 unchanged; 1 file(s) are gone from disk but not removed from memory; pass
+# remove to forget them
+# last sync: 2026-09-11T22:04:11Z (34 added, 0 updated)
+
+scone sync ~/work/notes --apply                  # writes the added and changed
+scone sync ~/work/notes --apply --remove         # also forgets what is gone
+```
+
+An unchanged file is **not a write**: the space's revision does not move,
+so a sync on a timer does not churn the store. A changed file is an
+update through the engine's keyed `replace`, so a source that changed
+leaves **one** memory and not two.
+
+### Deletion is opt-in, previewed, and refused when the path looks wrong
+
+Forgetting memory because a file is missing is destructive, and a
+directory can be missing for reasons that have nothing to do with
+intent: an unmounted volume, a half-finished checkout, a typo. So there
+are three separate guards, each with its own test:
+
+- **Nothing is written without `--apply`.** The default is a plan.
+- **Nothing is forgotten without `--remove`** *as well*. An ordinary
+  sync reports what is gone and leaves it alone, because a caller who
+  has not thought about deletion should not get it.
+- **An empty directory is refused outright.** If the walk found no files
+  and the marker holds memories, the sync stops before forgetting
+  anything and says so. A repository whose every file was deleted is far
+  rarer than a wrong path.
+
+A fourth guard is about honesty rather than intent. If the walk stops at
+the file cap it has not seen the whole directory, so it **cannot** tell a
+file that is gone from one it never reached. Such a sync reports
+`checked_for_missing: false` and forgets nothing — without that, lowering
+`--limit` would silently delete memory, and a `removed: 0` would read as
+"nothing is gone" when it means "we did not look".
+
+### The marker is a name, not a path
+
+Every episode a sync writes carries its marker in metadata, so "what did
+the last sync of this directory leave here" has an exact answer rather
+than a guess from path prefixes. Two directories synced into one space
+cannot delete each other's memories, and `--marker` lets a directory be
+moved or renamed without losing what it stored.
+
+`last sync` comes from the event log, and only an **applied** sync is
+recorded — a plan succeeded at nothing. A store with no event log raises
+rather than answering "never", because "nothing keeps the record" and
+"it has never run" are different facts.
+
+### Not on the HTTP surface
+
+`scone sync` reads whatever local directory it is pointed at. Exposing
+that over HTTP would let an API caller choose which of the server's
+directories to read, so it is a command-line operation only. The
+sandboxed memory filesystem below is the HTTP-facing story for paths.
+
 ## Memory as a tree of paths
 
 An agent that can list and read paths can explore a space without being

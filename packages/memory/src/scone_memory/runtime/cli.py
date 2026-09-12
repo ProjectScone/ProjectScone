@@ -321,6 +321,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
 
+    p = sub.add_parser("sync", help="bring a space into step with a directory: added, changed and gone")
+    p.add_argument("directory")
+    p.add_argument("--marker", help="the name these memories are held under; defaults to the "
+                                    "directory's absolute path, so rename it with this")
+    p.add_argument("--suffix", action="append", default=[],
+                   help="only files with this suffix, repeatable; defaults to code and prose")
+    p.add_argument("--apply", action="store_true", help="actually write; without it this is a plan")
+    p.add_argument("--remove", action="store_true",
+                   help="also forget memories whose file is gone from disk (destructive; needs --apply)")
+    p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
+    p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
+
     p = sub.add_parser("map", help="remember every source file under a directory, and optionally what each says")
     p.add_argument("directory")
     p.add_argument("--graph", action="store_true",
@@ -570,6 +582,36 @@ def _parses(text: str) -> bool:
     except (SyntaxError, ValueError, RecursionError):
         return False
     return True
+
+
+async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+    """Bring a space into step with a directory. A plan by default, because
+    the interesting half is destructive: a file gone from disk means a
+    memory to forget, and that needs asking for twice (--apply --remove).
+
+    Deliberately not on the HTTP surface: it reads whatever local directory
+    it is pointed at, and an API caller should not choose that."""
+    from ..ingestion.sync import NoEventLog, last_sync, sync_directory
+
+    if args.remove and not args.apply:
+        print("note: --remove needs --apply to forget anything; this is a plan", file=sys.stderr)
+    chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
+    done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
+                                apply=args.apply, remove=args.remove, limit=args.limit,
+                                max_bytes=args.max_bytes, **chosen)
+    if args.json:
+        print(json.dumps(done.record()), file=out)
+        return 0
+    print(done.text(), file=out)
+    if not args.apply:
+        try:
+            before = await last_sync(engine, args.space, done.marker)
+        except NoEventLog as unknown:
+            print(f"last sync: unknown ({unknown})", file=out)
+        else:
+            print(f"last sync: {before['at']} ({before['added']} added, {before['updated']} updated)"
+                  if before else "last sync: never", file=out)
+    return 0
 
 
 async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
@@ -1319,6 +1361,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         print(f"route: {routed.route} — {routed.why}", file=out)
         print(routed.text, file=out)
         return 0
+
+    if args.command == "sync":
+        return await sync_command(args, engine, out)
 
     if args.command == "map":
         return await map_command(args, engine, out)

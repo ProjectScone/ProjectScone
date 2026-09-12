@@ -5,12 +5,14 @@ the HTTP routes and MCP tools read."""
 from __future__ import annotations
 
 import io
+import sys
 import json
 import xml.etree.ElementTree as ElementTree
 
 import pytest
 
-from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory import (HashEmbedder, InMemoryDocumentStore, InMemoryEventLog,
+                          InMemoryVectorIndex, MemoryEngine)
 from scone_memory.core.errors import InvalidInput
 from scone_memory.runtime import cli
 from scone_memory.runtime.cli import build_parser, run
@@ -528,3 +530,33 @@ def test_bench_parts_refuses_a_k_it_cannot_search(tmp_path):
     path.write_text("[]", encoding="utf-8")
     out = io.StringIO()
     assert cli.main(["bench-parts", str(path), "--k", "0"], env={}, stdin=io.StringIO(""), out=out) == 2
+
+
+async def test_sync_plans_before_it_writes(tmp_path):
+    (tmp_path / "a.py").write_text("def a(): pass", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["sync", str(tmp_path)]), memory, io.StringIO(""), out)
+    assert code == 0 and "would sync" in out.getvalue() and "last sync: never" in out.getvalue()
+    assert (await memory.status("default")).episodes == 0, "a plan writes nothing"
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["sync", str(tmp_path), "--apply", "--marker", "repo"]),
+                     memory, io.StringIO(""), out)
+    assert code == 0 and "synced repo" in out.getvalue() and "1 added" in out.getvalue()
+    assert (await memory.status("default")).episodes == 1
+
+
+async def test_sync_says_a_removal_needs_apply(tmp_path):
+    (tmp_path / "a.py").write_text("def a(): pass", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    out, err = io.StringIO(), io.StringIO()
+    saved, sys.stderr = sys.stderr, err
+    try:
+        code = await run(build_parser().parse_args(["sync", str(tmp_path), "--remove"]),
+                         memory, io.StringIO(""), out)
+    finally:
+        sys.stderr = saved
+    assert code == 0 and "needs --apply" in err.getvalue(), err.getvalue()
+    assert (await memory.status("default")).episodes == 0
