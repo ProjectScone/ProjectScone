@@ -254,7 +254,13 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(counted.entities), "entities_shown": len(shown),
                      "relations_total": len(counted.relations), "relations_shown": len(relations),
-                     "meanings": projection.meanings.record() if projection.meanings else None,
+                     # `is None`, never truthiness: RelationMeanings() is falsy, so
+                     # an explicitly empty vocabulary serialised as null and a
+                     # reader could not tell "there are none" from "nothing said".
+                     "meanings": (None if projection.meanings is None
+                                  else projection.meanings.record()),
+                     "vocabulary_source": projection.vocabulary_source,
+                     "vocabulary_why": projection.vocabulary_why,
                      "implied_total": len(counted.implied), "implied_shown": len(implied),
                      **({"implied_capped": True} if projection.implied_capped else {}),
                      "attributes_total": len(counted.attributes),
@@ -282,6 +288,12 @@ def entity_listing(projection: EntityProjection, *, mode: StatusMode, as_of: str
         "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in matching[:limit]],
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(matching), "entities_shown": min(len(matching), limit),
+                     # Said on every view built from a projection, not only
+                     # the detailed one: a caller cannot tell why two answers
+                     # about one space differ unless each says which
+                     # vocabulary it was built under.
+                     "vocabulary_source": projection.vocabulary_source,
+                     "vocabulary_why": projection.vocabulary_why,
                      "truncated": bool(reasons), "reasons": reasons},
     }
 

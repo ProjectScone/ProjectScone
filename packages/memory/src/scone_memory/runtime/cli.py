@@ -105,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
+    p.add_argument("--window", type=int, metavar="BYTES",
+                   help="return each passage with this many bytes of its episode either side; "
+                        "serves the single precise hit that --merge cannot")
+    p.add_argument("--withhold", metavar="KINDS",
+                   help="withhold matches of these kinds from the answer, comma separated "
+                        "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
+    p.add_argument("--code-context", action="store_true",
+                   help="for a passage of code, also quote the signature it sits inside and the "
+                        "imports of its file; the passage itself is not changed")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -242,6 +251,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
+    p.add_argument("--window", type=int, default=0, metavar="BYTES",
+                   help="widen every returned passage by this many bytes either side before "
+                        "scoring, to measure what that changes")
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
@@ -831,12 +843,16 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries, merge=args.merge)
+                             cross_queries=args.cross_queries, merge=args.merge, window=args.window)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -897,8 +913,12 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     reports = []
     for item in items:
@@ -925,6 +945,30 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
     return 0
+
+
+def _staged(record: dict) -> dict:
+    """A stage's receipt without its own copy of the passages.
+
+    Every stage replaces the answer's items with its output -- widening,
+    withholding, code context and merging all do -- so a receipt's copy
+    of the text is always redundant with `items`, and always older than
+    it. Emitting one hands back what a later stage removed: text a
+    withholding policy took out, or a passage whose source a later stage
+    found deleted.
+
+    So the copy is dropped from every stage, unconditionally. Dropping it
+    only when some flag is set treats one symptom of the class -- it was
+    written that way first, conditioned on a withholding policy, and the
+    deletion case walked straight through the gap. The counts are the
+    useful part of a receipt and they stay.
+    """
+    kept = {key: value for key, value in record.items() if key != "items"}
+    if "items" in record:
+        kept["items_not_repeated"] = (
+            "the passages this answer returns are in `items`; this receipt described them at "
+            "an earlier stage and its copy is not returned")
+    return kept
 
 
 def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
@@ -1241,6 +1285,30 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
+        policy: tuple[str, ...] = ()
+        if args.withhold:
+            from ..retrieval.withhold import chosen_kinds
+
+            # Checked before the search, as the HTTP route does: a policy
+            # naming a kind that does not exist is a mistake in the
+            # request, and searching first spends the work for an answer
+            # nobody receives.
+            policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            # Everything refused here re-reads the episode from the store
+            # *after* withholding and prints source verbatim, which hands
+            # back what was just withheld: --merge and --code-context both
+            # quote the raw episode, and --parts answers without passing
+            # through withholding at all. The HTTP route refuses the same
+            # class of combination; the CLI refusing a different set would
+            # be the same hole wearing different clothes.
+            clashes = [name for name, asked_for in (
+                ("--merge", args.merge), ("--code-context", args.code_context),
+                ("--parts", args.parts)) if asked_for]
+            if clashes:
+                raise InvalidInput(
+                    f"--withhold cannot be combined with {', '.join(clashes)}: each of those "
+                    f"quotes the episode again after withholding, which would hand back what "
+                    f"was withheld; ask for one or the other")
         if args.parts:
             from ..retrieval.parts import recall_parts
 
@@ -1262,16 +1330,68 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost,
         )
+        kept = None
+        opened = None
+        if args.window:
+            from ..retrieval.window import widen
+
+            opened = await widen(engine, space, result.items,
+                                 before=args.window, after=args.window)
+            result = result.model_copy(update={"items": list(opened.items)})
+        if policy:
+            from ..retrieval.withhold import withhold
+
+            # Facts and history too. Fixing this on the HTTP route and
+            # not here left the same address reachable through the CLI.
+            kept = withhold(result.items, facts=list(result.facts) + list(result.history),
+                            kinds=policy)
+            result = result.model_copy(update={
+                "items": list(kept.items),
+                "facts": list(kept.facts[:len(result.facts)]),
+                "history": list(kept.facts[len(result.facts):])})
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
 
             joined = await merge_neighbours(engine, space, result.items)
             result = result.model_copy(update={"items": list(joined.items)})
+        inside = None
+        if args.code_context:
+            from ..retrieval.code_context import code_context
+
+            # **Last**, after every stage that re-reads a source. Code
+            # context quotes the file -- a signature, an import line --
+            # and a stage running after it can find that source deleted,
+            # leaving the answer correctly empty while the context still
+            # prints the text. Dropping the receipt's copy of the items
+            # cannot fix that, because the quoted signature is a separate
+            # copy of the same source. Running last is what makes the
+            # context describe passages that survived.
+            inside = await code_context(engine, space, result.items)
+            # A source this stage finds gone is dropped from the answer
+            # too, not only from the context.
+            result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
-            emit(said | ({"merged": joined.record()} if joined else {}))
+            emit(said | ({"merged": _staged(joined.record())} if joined else {})
+                      | ({"widened": _staged(opened.record())} if opened else {})
+                      | ({"withheld": _staged(kept.record())} if kept else {})
+                      | ({"code_context": _staged(inside.record())} if inside else {}))
             return 0
+        if kept is not None:
+            print(kept.why, file=out)
+        if opened is not None:
+            print(opened.why, file=out)
+        if inside is not None:
+            print(inside.why, file=out)
+            for chunk, context in inside.by_chunk.items():
+                for holder in context.holders:
+                    cut = " (quoted to the line bound, so incomplete)" if holder.clipped else ""
+                    print(f"  #{chunk} inside {holder.name} (line {holder.line}){cut}", file=out)
+                    for line in holder.text.splitlines():
+                        print(f"      {line}", file=out)
+                for brought in context.imports:
+                    print(f"  #{chunk} line {brought.line}: {brought.text}", file=out)
         if joined is not None:
             print(joined.why, file=out)
             for chunk, absorbed in joined.from_chunks.items():

@@ -13,6 +13,7 @@ says so rather than implying the rule was vindicated.
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -182,3 +183,19 @@ async def test_the_bench_counts_the_bytes_it_actually_returned(tmp_path):
         "the fixture has to actually merge or this proves nothing"
     assert after.returned_bytes > before.returned_bytes, \
         (after.returned_bytes, before.returned_bytes)
+
+
+def test_the_bench_reports_progress_even_when_asked_for_json(tmp_path, capsys):
+    """A run that takes hours with no sign of life cannot be told from a
+    wedged one. The JSON goes to stdout, so progress on stderr spoils
+    nothing that reads it."""
+    from scone_memory.runtime import cli
+
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(DATASET), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench", str(path), "--k", "1", "--json"], env={}, stdin=io.StringIO(""),
+                    out=out)
+    assert code == 0, out.getvalue()
+    assert "2/2" in capsys.readouterr().err, "progress has to reach stderr with --json"
+    assert json.loads(out.getvalue().strip().splitlines()[-1])["items"] == 2

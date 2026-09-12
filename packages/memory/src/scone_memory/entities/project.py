@@ -158,6 +158,15 @@ class EntityProjection:
     #: The vocabulary the implications were worked out under, so a view can
     #: say what it applied and where it stopped. None when none was given.
     meanings: RelationMeanings | None = None
+    #: Where those meanings came from: ``space`` when the space holds its
+    #: own vocabulary, ``process`` when they are the reading process's
+    #: configuration, ``none`` when there are none. Carried on the
+    #: projection so every view that serialises one can say it, rather
+    #: than each route having to ask separately -- and so the claim that
+    #: an answer says where its vocabulary came from is true of every
+    #: answer built from a projection.
+    vocabulary_source: str = "none"
+    vocabulary_why: str = ""
 
     def components(self) -> list[frozenset[str]]:
         """Groups of entities connected by relations in either direction."""
@@ -235,7 +244,9 @@ def _canonical(value: object) -> bytes:
 
 
 def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
-                     meanings: RelationMeanings | None = None) -> EntityProjection:
+                     meanings: RelationMeanings | None = None,
+                     vocabulary_source: str = "none",
+                     vocabulary_why: str = "") -> EntityProjection:
     rows = sorted(facts, key=lambda fact: fact.fact_id)
     for fact in rows:
         if fact.space != space:
@@ -316,7 +327,8 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
            if meanings else {}),
     })).hexdigest()
     return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles),
-                            digest, implied=tuple(implied), implied_capped=capped, meanings=meanings)
+                            digest, implied=tuple(implied), implied_capped=capped, meanings=meanings,
+                            vocabulary_source=vocabulary_source, vocabulary_why=vocabulary_why)
 
 
 def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple[str, str | None], ...]],

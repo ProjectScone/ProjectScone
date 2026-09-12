@@ -17,6 +17,7 @@ from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
+from .structure_chunks import structured_spans
 from .code import code_language, code_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 
@@ -114,6 +115,12 @@ class IngestionRuntime:
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
+    #: Whether prose is cut at the structure it carries -- headings and
+    #: numbered clauses -- rather than at the target alone. Off by
+    #: default: cut positions decide what chunks exist, and stored
+    #: offsets are part of the shared specification, so this is a
+    #: caller's choice and not ours to make for an existing space.
+    structure_aware: bool = False
 
 
 def validated_record(space: str, record: Record, when: str) -> NewEpisode:
@@ -187,11 +194,16 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
     """Where to cut: at declarations when the source is code and the name
-    it was stored under says which language, and by length otherwise."""
+    it was stored under says which language, at the document's own
+    headings and clauses when asked, and by length otherwise."""
     language = code_language(source) if runtime.code_aware else None
-    if language is None:
-        return chunk_spans(content, runtime.chunk_target)
-    return list(code_spans(content, runtime.chunk_target, language=language))
+    if language is not None:
+        return list(code_spans(content, runtime.chunk_target, language=language))
+    if runtime.structure_aware:
+        # Prose only. Code has a better boundary than a heading, and the
+        # branch above already took it.
+        return list(structured_spans(content, runtime.chunk_target).spans)
+    return chunk_spans(content, runtime.chunk_target)
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,

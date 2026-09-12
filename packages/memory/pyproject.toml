@@ -85,6 +85,21 @@ include = ["scone_memory*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Dump every thread's stack for a test that has run ten minutes, and let
+# it carry on: `faulthandler_exit_on_timeout` defaults to false, so this
+# fails nothing, skips nothing and changes no result. It is a diagnostic,
+# not a deadline -- a deadline near our real maximum would turn a slow
+# process fixture under load into a flake, which is worse than what it
+# would catch. The slowest things we have are far below this: 203s for
+# the 22 AWS catalog tests together, and a 180s migration budget.
+#
+# It exists because a stalled run reported nothing at all: on 2026-09-12
+# the full gate sat at 0% CPU twice, at different points on identical
+# code, with no failing test, no name and no traceback -- and CI is
+# exposed to the same stall on a runner where nobody is watching %CPU.
+# With this set the job still hangs, but its log says which test and what
+# it is waiting on.
+faulthandler_timeout = 600
 markers = [
     "mongo: needs a live MongoDB at SCONE_TEST_MONGO_URL",
     "qdrant: needs a live Qdrant at SCONE_TEST_QDRANT_URL",

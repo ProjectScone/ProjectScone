@@ -43,6 +43,14 @@ CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
 INHERITS = "inherits"
+#: What a type satisfies without extending it: an interface, a protocol,
+#: a Rust trait, a Scala mixin. "What implements this interface?" is a
+#: different question from "what extends this class?", and flattening
+#: both into one predicate means the graph answers neither precisely.
+#: Rust has no class inheritance at all, so every Rust edge is one of
+#: these -- calling them inheritance described a relation the language
+#: does not have.
+MIXES_IN = "mixes_in"
 #: Why the code is the way it is, in the words of whoever wrote it.
 NOTES = "notes"
 #: What is known to be wrong with it. A different question from why it
@@ -64,9 +72,26 @@ _CITED = re.compile(r"\b(ADR|RFC)[\s\-_#]*([0-9]{1,6})\b", re.IGNORECASE)
 #: built on. Read separately: `extends Base implements Face` is two
 #: relationships, and one capture for both invented a single target named
 #: after neither.
-_DECLARES = re.compile(r"\b(?:class|interface|struct)\s+([A-Za-z_]\w*)")
-_BUILT_ON = re.compile(r"\b(?:extends|implements)\s+([A-Za-z_][\w.:<>,\s]*?)"
-                       r"(?=\b(?:extends|implements)\b|[{;]|$)")
+_DECLARES = re.compile(r"\b(?:class|interface|struct|enum|record|protocol)\s+([A-Za-z_]\w*)")
+#: Go writes a type with `type Name struct` / `type Name interface`, which
+#: the class-first pattern misses entirely -- so Go types were invisible
+#: while Go was on the supported list.
+_GO_TYPE = re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b")
+#: Rust says what a type implements with `impl Trait for Type`, which is
+#: the language's most important relation and produced no edge at all.
+#: `impl Type` alone is an inherent block: the same type, not a second
+#: definition of it and not an inheritance.
+_RUST_IMPL = re.compile(r"^\s*impl(?:\s*<[^>]*>)?\s+([A-Za-z_][\w:]*)"
+                        r"(?:\s*<[^>]*>)?(?:\s+for\s+([A-Za-z_][\w:]*))?")
+#: Scala joins its mixins with `with`, and Kotlin and Scala write a base
+#: as a constructor call -- `extends Base(3) with Store`. A capture class
+#: without parentheses matched nothing at all there, so Scala produced no
+#: edges while it was on the supported list.
+_BUILT_ON = re.compile(r"\b(extends|implements|with)\s+([A-Za-z_][\w.:<>,()\s]*?)"
+                       r"(?=\b(?:extends|implements|with)\b|[{;]|$)")
+#: Which relation a clause keyword names. `extends` is the only one that
+#: extends; `implements` and Scala's `with` satisfy without extending.
+_CLAUSE_MEANS = {"extends": INHERITS, "implements": MIXES_IN, "with": MIXES_IN}
 #: C++ and C# write the bases after a colon, immediately following the
 #: declared name. Anchored there on purpose: a colon anywhere else is a
 #: type annotation or a label, and reading those would invent bases.
@@ -97,7 +122,7 @@ def _cited(text: str) -> list[str]:
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
 
 
-def _masked(content: str, *, prose: bool = True) -> str:
+def masked(content: str, *, prose: bool = True) -> str:
     """The source with text that is not code blanked, in place.
 
     A regex over raw source cannot tell code from data, and there are two
@@ -239,7 +264,7 @@ def _meaning(content: str, path: str, language: str,
         for at, prose in _python_prose(content):
             _tagged(prose, path, at, declared, say)
         return
-    for number, line in enumerate(_masked(content).split("\n"), start=1):
+    for number, line in enumerate(masked(content).split("\n"), start=1):
         _tagged(line, path, number, declared, say)
 
 
@@ -503,31 +528,92 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     held: dict[str, str] = {}
     for item in declarations(content, language="braces"):
         owner = path if "." not in item.name else f"{path}:{item.name.rsplit('.', 1)[0]}"
+        # A Rust `impl Shelf` block is a good place to cut a chunk and not
+        # a definition of Shelf: the type is defined by its struct, enum or
+        # trait, here or in another file. Emitting a define for the impl
+        # too made one type look like two. `declarations()` is right to
+        # report it -- chunking wants the boundary -- so the distinction
+        # belongs here, where the claim is made.
+        if path.endswith(".rs") and _at_impl(lines, item.first_line):
+            held.setdefault(item.name.rsplit(".", 1)[-1], f"{path}:{item.name}")
+            continue
         say(owner, DEFINES, f"{path}:{item.name}", item.first_line)
         held[item.name.rsplit(".", 1)[-1]] = f"{path}:{item.name}"
 
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    for number, line in enumerate(_masked(content, prose=False).split("\n"), start=1):
+    code = masked(content, prose=False).split("\n")
+    if path.endswith(".go"):
+        # Go's types, which the brace declaration pattern cannot see.
+        for number, line in enumerate(code, start=1):
+            named = _GO_TYPE.match(line)
+            if named and named.group(1) not in held:
+                whole = f"{path}:{named.group(1)}"
+                held[named.group(1)] = whole
+                say(path, DEFINES, whole, number)
+    if path.endswith(".rs"):
+        for number, line in enumerate(code, start=1):
+            impl = _RUST_IMPL.match(line)
+            if not impl:
+                continue
+            first, second = impl.group(1), impl.group(2)
+            # `impl Trait for Type` says the type implements the trait.
+            # `impl Type` is an inherent block on a type already defined,
+            # so it is neither an edge nor a second definition.
+            if second is None:
+                continue
+            subject = held.get(second, f"{path}:{second}")
+            say(subject, MIXES_IN, held.get(first, first), number)
+    for number, line in enumerate(code, start=1):
         declares = _DECLARES.search(line)
         if not declares:
             continue
         child = declares.group(1)
         subject = held.get(child, f"{path}:{child}")
-        clauses = [clause.group(1) for clause in _BUILT_ON.finditer(line, declares.end())]
+        # `None` means the source did not say which relation it is, which
+        # only the colon form leaves open.
+        clauses: list[tuple[str | None, str]] = [
+            (_CLAUSE_MEANS[clause.group(1).lower()], clause.group(2))
+            for clause in _BUILT_ON.finditer(line, declares.end())]
         colon = _AFTER_COLON.match(line, declares.end())
         if colon:
-            clauses.append(colon.group(1))
-        for clause in clauses:
+            # After a colon the line does not say which is which, except in
+            # one real way: Kotlin constructs its superclass and does not
+            # construct an interface, so `Base(), Store` distinguishes
+            # them. C++ has no interfaces, so a colon base there extends.
+            clauses.append((None, colon.group(1)))
+        for means, clause in clauses:
             for base in clause.split(","):
-                written = base.strip().split("<")[0].strip().rstrip("{").strip()
+                # Kotlin and Scala write `: Base(), Store` and
+                # `extends Base(3)`. Keeping the call would make `Base()`
+                # and `Base` two entities, and a graph with both cannot
+                # answer a question about either.
+                constructed = "(" in base
+                written = base.strip().split("<")[0].split("(")[0].strip().rstrip("{").strip()
                 # A base list may lead with specifiers that name no type.
                 words = [word for word in written.split() if word.lower() not in _SPECIFIERS]
                 written = words[-1] if words else ""
                 if not written or not (written[0].isalpha() or written[0] == "_"):
                     continue
-                say(subject, INHERITS, held.get(written, written), number)
+                # A colon clause says less than a keyword does, and how
+                # much less depends on the language.
+                #
+                # Kotlin constructs its superclass and does not construct
+                # an interface, so `Base(), Store` really does distinguish
+                # them. C++ has no interfaces at all, so `: public Base` is
+                # inheritance and reading it as a mixin would be a new
+                # error. Everywhere else a colon list is genuinely
+                # ambiguous, and inheritance is what it most often is --
+                # recorded with that limitation stated rather than guessed
+                # at silently.
+                if means is not None:
+                    relation = means
+                elif path.endswith((".kt", ".kts")):
+                    relation = INHERITS if constructed else MIXES_IN
+                else:
+                    relation = INHERITS
+                say(subject, relation, held.get(written, written), number)
 
     inside = False
     for number, line in enumerate(lines, start=1):
@@ -564,3 +650,10 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     if not module.startswith("."):
         return module
     return resolve(path, 1, module) if resolve is not None else None
+
+
+def _at_impl(lines: list[str], line: int) -> bool:
+    """Whether this declaration is a Rust ``impl`` block rather than a type."""
+    if not 1 <= line <= len(lines):
+        return False
+    return _RUST_IMPL.match(lines[line - 1]) is not None

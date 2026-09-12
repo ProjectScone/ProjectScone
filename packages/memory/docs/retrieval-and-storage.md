@@ -297,7 +297,26 @@ ends a part, while a `;` or an "and" splits only on evidence:
 | `How many days passed between the day I cancelled ... and the day I did ...` | whole | "between … and …" *is* the question |
 | `... the 'To Adapt or Not to Adapt? Real-Time Adaptation' submission?` | whole | the `?` is inside a quoted title |
 
-The last three rows were not foreseen. An earlier version required only
+### The languages we claim, and what they actually gave
+
+Being on a supported list is a claim, and four of ours were not true. Each
+was found by running the extractor over five lines of the language rather
+than by reading the list:
+
+| language | what it gave | what it gives now |
+| --- | --- | --- |
+| Rust | **no inheritance at all**, and `impl Shelf` counted as a second definition of Shelf | `impl Store for Shelf` → `Shelf mixes_in Store`; an inherent `impl` is neither an edge nor a definition |
+| Go | **no definition for `type Shelf struct`** — Go types were invisible | `type … struct` and `type … interface` define |
+| Kotlin | `inherits Base()` — the call kept, so `Base()` and `Base` were two entities | `inherits Base`, and the constructor call is what tells a superclass from an interface |
+| Scala | **nothing**: `extends Base(3) with Store` defeated the clause pattern on both the parens and the `with` | both bases, with `with` read as a clause |
+
+A graph holding both `Base()` and `Base` cannot answer a question about
+either, and a Rust graph without `impl … for …` is missing the language's
+most important relation. Fixing what the list already promised was worth
+more than adding a twentieth language: tree-sitter would bring ~40, and
+that is a dependency and a grammar per language rather than a patch.
+
+The last three rows of the earlier table were not foreseen. An earlier version required only
 an asking word on each side, and on real LongMemEval questions it split
 "how many hours of jogging and yoga did I do last week" at the "and",
 because "did" satisfied the test; it also split a paper's title at the
@@ -495,6 +514,213 @@ gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
 `periods` (every stretch, half-open); the working names each stretch. A
 claim that still holds is counted up to the moment asked and says so.
 
+## Withholding what a caller must not receive
+
+Secrets are scrubbed on the way **in**, but only for the agent feed.
+Memory arrives by many other doors — `remember`, `sync`, document import
+— and none of them scrub, so a space accumulates whatever was put into
+it. A framework whose business is remembering what people said should be
+able to withhold on the way out.
+
+```bash
+scone recall "write to ana about the deploy" --withhold email,secret
+# 2 match(es) of email, secret withheld from this answer; this is a net of
+# patterns, not a guarantee -- nothing withheld is **not a finding** that there
+# is nothing of these kinds in the text, and the memory still holds whatever it
+# held
+# 0.81  2026-09-12  #4  Write to [withheld: email] about [withheld: secret].
+```
+
+`GET /v1/recall?withhold=email,secret` (capability `recall.withhold`).
+Kinds: `email`, `phone`, `ip`, `card`, `secret`.
+
+Four things it does deliberately:
+
+- **The caller names the kinds.** Withholding something nobody asked to
+  withhold damages an answer to protect nothing, and an unknown kind is
+  refused rather than ignored.
+- **A number is checked, not just matched.** A run of sixteen digits is
+  an order reference far more often than a card, so the card kind runs a
+  Luhn check. A false positive here costs the reader the answer.
+- **The report is not a safety claim.** "Nothing withheld" means the
+  patterns matched nothing, *not* that there is nothing to find, and
+  every report says so in those words. A caller who reads it the second
+  way is worse off than one who was told nothing.
+- **Nothing is deleted.** This is what one answer hands back; the memory
+  still holds what it held, which is why the field is `withheld` and not
+  `removed`. A passage longer than the scan bound has its tail reported
+  as unexamined rather than silently passed.
+
+### What it covers, and what it refuses to be asked
+
+The first version of this scanned `text` and nothing else. The same
+address came back as the item's `source`, in its `tags`, in a `metadata`
+value and as the `object` of a fact — while the report said one match and
+nothing unscanned, which reads as "this answer was covered". Scrubbing
+the prose and handing the address back in the next field is not
+withholding, it is moving it.
+
+Every text-bearing field of an item is scanned (`text`, `source`, `tags`,
+`metadata` values) and every one of a fact (`subject`, `predicate`,
+`object`, `quote` — the quote is an exact substring of the episode, so it
+carries whatever the episode carried). Metadata *keys* are not scanned,
+and do not need to be: a key is validated to `[a-z][a-z0-9_]{0,31}` at
+every door into a space, so no key can hold any of these patterns.
+
+The report names them, because `unscanned: 0` on its own is a claim about
+coverage that cannot be checked:
+
+```json
+"withheld": {"count": 5, "by_kind": {"email": 5}, "kinds_applied": ["email"],
+             "unscanned": 0, "surfaces": ["text", "source", "tags", "metadata", "facts"]}
+```
+
+**The expansions are refused rather than half-covered.** `evidence_graph`,
+`graph_analysis`, `structural_context`, `multi_hop` and `graph_boost` each
+build their own structure, and withholding does not reach inside them.
+Asking for one of them together with `withhold` is a `422` naming which,
+because the alternative is a report that covers the items and reads as
+covering the answer. Covering them is open work; until it is done the
+limit is a refusal and not a silence.
+
+**The policy is checked before the search runs.** An unknown kind was
+previously refused *after* the whole recall had happened and been logged
+— work spent, and an event recorded, for an answer nobody receives.
+
+## Cutting a document where it already divides itself
+
+The chunker prefers a paragraph break, then a sentence end, then any
+whitespace, then a hard cut inside a word. It knows nothing about
+headings, numbered clauses or tables. So `Article 7.2` can end one chunk
+while the clause it names begins the next, and a table's rows can arrive
+without the header row that says what their columns mean — and the clause
+number and the column names are usually the query terms.
+
+The leading document pipeline answers this with a chunker per document
+type: one for books, one for laws, one for papers, one for resumes. That
+needs someone to declare what kind of document this is before it is read.
+This reads the structure the document already carries.
+
+```python
+MemoryEngine(store, index, embedder, structure_aware=True)
+```
+
+Built on `ingestion/structure.py`, which already finds headings, fenced
+code and pipe tables and is already used by retrieval and source
+inspection. Only what that parser deliberately leaves out is new:
+setext headings, numbered and lettered clauses, `Q:`/`A:` pairs.
+
+Measured over this repository's own 23 documents, 437,141 bytes, at
+commit 90ea0ce:
+
+| | default | structure-aware |
+| --- | --- | --- |
+| chunks | 829 | 867 (+4.6%) |
+| tables split across chunks | **10 of 34** | **0** |
+| headings left as the last line of a chunk | **105** | **0** |
+
+That measures the defect, not recall. Recall on our benchmark corpus
+would have been zero and meaningless: it is chat sessions, which have no
+headings, clauses or tables at all. Whether a reader answers better from
+these chunks is unmeasured, and the cost of 4.6% more chunks — more
+embeddings at ingestion, more candidates per query — is real. The sha
+matters because the corpus is this directory: editing these docs changes
+the numbers slightly, and the script that produces them lives beside the
+write-up in `bench-runs/structure-chunking-2026-09-12/`.
+
+Four rules, each with a test:
+
+- **A document with no structure chunks byte-identically to today.** A
+  test compares the two span lists directly, because cut positions decide
+  what chunks exist and stored offsets are part of the shared
+  specification.
+- **A unit longer than the target is still split**, and the receipt
+  separates chunks beginning at a boundary from chunks beginning where
+  the target fell. "Structure-aware" must not read as "every chunk is a
+  section".
+- **A table is never cut, and travels with the heading above it.** A
+  table over the target is counted in `over_target` rather than quietly
+  returned: a caller sizing a context window needs that more than an
+  assurance that nothing exceeds the target.
+- **Structure that is not there is not invented.** `1984 was a year` is
+  prose, not clause 1984. A `#` or a numbered step inside a fence is an
+  example, not a heading. The `---` closing YAML front matter is not a
+  heading underline. Each was a false positive found by reading the rule,
+  and each has its own test.
+
+**It is off by default**, because chunk boundaries decide what chunks
+exist for every future ingest into a space, which is the caller's
+decision and not ours to make for them.
+
+One thing it got wrong and one thing the measurement caught are recorded
+in `bench-runs/structure-chunking-2026-09-12/results.md`: prose between a
+table and the next heading was dropped from every chunk — silently
+unretrievable — and a heading above a table was separated from it. The
+invariant test that should have caught the first asserted exactly the
+right property and passed, because its fixture never contained the
+junction.
+
+## A recalled body, with the signature and imports that make it readable
+
+A chunk of code already says which declaration it came from —
+`Engine.forget` — and that was where the answer stopped. It did not say
+the declaration's **signature**, so a caller saw a body without its
+parameters, and it did not say what the file **imported**, so a name in
+the body could not be traced to where it came from. For "how is this
+done here", a body without its signature and its imports is a fragment.
+
+```bash
+scone recall "write the paper to the shelf" --code-context
+#   #4 inside Shelf.keep (line 17)
+#       def keep(
+#           self,
+#           paper: str,
+#           *,
+#           tag: str = "unsorted",
+#       ) -> Path:
+#   #4 line 3: from __future__ import annotations
+#   #4 line 5: import json
+#   #4 line 6: from pathlib import Path
+```
+
+The reference that has this prepends the context **into** the chunk text.
+Ours does not: invariant I1 says `content[span.start:span.end]` is the
+source unchanged, and a chunk that has grown a header is no longer a
+quotation of the file. So the context sits beside the chunk, quoted from
+the source with the line numbers it came from, and every line of it can
+be checked against the file.
+
+Three rules, each with a test:
+
+- **Nothing is guessed from content.** A file called `notes.md` holding a
+  code block is prose that quotes code, and gets no code context — the
+  language comes from the stored name, as everywhere else.
+- **A source confirmed gone is dropped, not answered.** The rule merging
+  and windowing already follow.
+- **A list that stopped says so.** A file bringing in more names than the
+  bound reports `more_imports`, because a count of what was listed must
+  never read as a count of what the file imports. The episode budget
+  counts reads that failed, for the same reason.
+
+The signature runs from the declaring keyword to the end of its parameter
+list. Python takes it from `ast` — the header ends where the body
+begins — and the brace family scans a copy of the source with string
+literals and comments blanked in place, so every line and column still
+indexes the real file and the quote comes from the unblanked text.
+
+**An earlier version of this counted brackets on the raw line and this
+page argued that was sufficient**, on the grounds that a colon inside a
+default argument is inside brackets. True, and beside the point: a
+bracket inside a *string* is inside nothing, so
+`def f(value="("):` never reached depth zero at its own colon and
+`def f(value=")"):` drove the count negative. Bracket depth cannot
+establish a lexical boundary without knowing what is code.
+
+A header longer than twelve lines is quoted to there, and says so —
+`clipped` on the holder, `shortened` on the receipt, and a note beside
+the name in the terminal. A bound that bit in silence is the fault this
+framework keeps making.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments
@@ -558,8 +784,33 @@ edges now come out of the same pass:
 ```
 pkg/shelf.py:Paper  inherits  pkg/shelf.py:Shelf      # a base this file defines
 pkg/shelf.py:Shelf  inherits  pkg.base.Store          # a base from an import
-web/shelf.ts:Shelf  inherits  Store                   # extends / implements / :
+web/shelf.ts:Shelf  inherits  Store                   # extends
+web/shelf.ts:Shelf  mixes_in  Face                    # implements
 ```
+
+**Extending a class and satisfying an interface are different relations,
+and collapsing them loses the question people ask.** "What is a Shelf?"
+has one answer; "what can be used as a Face?" has many, and a graph with a
+single `inherits` edge cannot tell them apart. So `implements`, Scala's
+`with` and Rust's `impl Trait for Type` are `mixes_in`, while `extends`
+and Python's base list are `inherits`. Rust has no class inheritance at
+all, so **no Rust edge is ever `inherits`** — a claim the extractor used to
+make on every `impl … for …` line.
+
+A colon clause says less than a keyword does, and how much less depends on
+the language, so the rule is language-aware rather than uniform:
+
+| form | read as | why |
+| --- | --- | --- |
+| `extends Base` | `inherits` | the keyword says so |
+| `implements Face`, `with Store`, `impl Store for Shelf` | `mixes_in` | the keyword says so |
+| Kotlin `: Base(), Store` | `inherits Base`, `mixes_in Store` | Kotlin constructs its superclass and never constructs an interface, so the parens are the language's own answer |
+| C++, C#, Python `: Base` / `(Base)` | `inherits` | C++ has no interfaces; reading a base list there as a mixin would be a new wrong claim |
+
+The last row is a limitation stated rather than hidden: a C# `: IFace` is
+an interface and is recorded as inheritance, because nothing on the line
+distinguishes it from a base class and inheritance is the more common
+case. Kotlin is the only language where a colon list carries the answer.
 
 A base the file can see is named by its path, like any other declaration.
 One that arrived through an import whose module resolves to a file is

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from scone_memory.ingestion.code_graph import CITES, FLAGS, INHERITS, NOTES, code_claims
+from scone_memory.ingestion.code_graph import (CITES, DEFINES, FLAGS, INHERITS, MIXES_IN,
+                                               NOTES, code_claims)
 
 MODULE = '''"""Storage shelves."""
 
@@ -178,10 +179,13 @@ class Reader(Shelf):
 
 
 def test_typescript_extends_and_implements_are_separate_targets():
+    """Three targets, and now two relations: this test originally asserted
+    all three were inheritance, which flattened a distinction the source
+    makes plainly."""
     source = "class Shelf extends Base implements Face, Other {\n}\n"
     found = code_claims(source, "web/shelf.ts", language="braces")
-    bases = sorted(c.object for c in found if c.predicate == INHERITS)
-    assert bases == ["Base", "Face", "Other"], bases
+    assert [c.object for c in found if c.predicate == INHERITS] == ["Base"]
+    assert sorted(c.object for c in found if c.predicate == MIXES_IN) == ["Face", "Other"]
 
 
 def test_a_brace_comment_inside_a_string_is_not_a_comment():
@@ -270,3 +274,107 @@ def test_a_note_in_a_comment_beside_commented_out_code_is_still_read():
     assert any(c.predicate == NOTES and "kept for reference" in c.object for c in found), found
     assert any(c.predicate == CITES and c.object == "ADR-9" for c in found), found
     assert [c.object for c in found if c.predicate == INHERITS] == []
+
+
+# Languages this framework already advertises, tested because a claimed
+# capability that does not work is worse than an absent one. Each of these
+# was broken when the list said the language was supported.
+
+def test_rust_impl_for_is_a_trait_edge():
+    """`impl Store for Shelf` is the most important relation in Rust code
+    and produced nothing at all. It is trait implementation, not
+    inheritance -- Rust has no class inheritance -- so this test was
+    written asserting the wrong predicate and then corrected."""
+    source = ("pub struct Shelf { size: u32 }\n"
+              "impl Store for Shelf {\n    fn open(&self) {}\n}\n"
+              "trait Store { fn open(&self); }\n")
+    found = code_claims(source, "a.rs", language="braces")
+    edges = [(c.subject, c.object) for c in found if c.predicate == MIXES_IN]
+    # The trait is declared in this file, so it resolves to its path --
+    # which is the better answer than the bare name this test first
+    # expected, and the reason to assert the resolved form.
+    assert ("a.rs:Shelf", "a.rs:Store") in edges, edges
+
+
+def test_a_rust_inherent_impl_is_not_a_second_definition():
+    """`struct Shelf` then `impl Shelf` is one type, not two."""
+    source = "pub struct Shelf { size: u32 }\nimpl Shelf {\n    fn open(&self) {}\n}\n"
+    found = code_claims(source, "a.rs", language="braces")
+    defined = [c.object for c in found if c.predicate == DEFINES and c.object.endswith(":Shelf")]
+    assert len(defined) == 1, defined
+    assert not [c for c in found if c.predicate == INHERITS], "an inherent impl inherits nothing"
+
+
+def test_a_go_type_is_defined():
+    """`type Shelf struct` produced nothing, so Go types were invisible
+    while Go was on the supported list."""
+    source = ("type Shelf struct {\n    size int\n}\n"
+              "func (s *Shelf) Open() {}\n"
+              "type Store interface {\n    Open()\n}\n")
+    found = code_claims(source, "a.go", language="braces")
+    defined = {c.object.split(":")[-1] for c in found if c.predicate == DEFINES}
+    assert {"Shelf", "Store"} <= defined, defined
+
+
+def test_a_base_class_is_not_named_after_its_constructor_call():
+    """Kotlin and Scala write `class Shelf : Base(), Store`. Keeping the
+    parentheses makes `Base()` and `Base` two different entities, which is
+    a graph that cannot answer a question about Base."""
+    for source, path in (("class Shelf : Base(), Store {\n    fun open() {}\n}\n", "a.kt"),
+                         ("class Shelf extends Base(3) with Store {\n}\n", "a.scala")):
+        found = code_claims(source, path, language="braces")
+        bases = [c.object for c in found if c.predicate == INHERITS]
+        assert all("(" not in one and ")" not in one for one in bases), (path, bases)
+        assert "Base" in bases, (path, bases)
+
+
+# Extending a class and satisfying an interface are different relations,
+# and "what implements this interface?" is a different question from "what
+# extends this class?". Flattening both into one predicate means the graph
+# can answer neither precisely.
+
+def test_extending_a_class_and_implementing_an_interface_are_different_edges():
+    source = "public class Shelf extends Base implements Store, Closeable {\n}\n"
+    found = code_claims(source, "a.java", language="braces")
+    said = {(c.predicate, c.object) for c in found if c.predicate in (INHERITS, MIXES_IN)}
+    assert (INHERITS, "Base") in said, said
+    assert (MIXES_IN, "Store") in said and (MIXES_IN, "Closeable") in said, said
+    assert (INHERITS, "Store") not in said, "an interface is not a superclass"
+
+
+def test_a_scala_mixin_is_a_mixin():
+    source = "class Shelf extends Base(3) with Store with Closeable {\n}\n"
+    found = code_claims(source, "a.scala", language="braces")
+    said = {(c.predicate, c.object) for c in found if c.predicate in (INHERITS, MIXES_IN)}
+    assert (INHERITS, "Base") in said, said
+    assert (MIXES_IN, "Store") in said and (MIXES_IN, "Closeable") in said, said
+
+
+def test_kotlin_tells_a_superclass_from_an_interface_by_its_constructor_call():
+    """`class Shelf : Base(), Store` -- the superclass is constructed and
+    the interface is not, which is the only signal on the line and a real
+    one."""
+    source = "class Shelf : Base(), Store {\n    fun open() {}\n}\n"
+    found = code_claims(source, "a.kt", language="braces")
+    said = {(c.predicate, c.object) for c in found if c.predicate in (INHERITS, MIXES_IN)}
+    assert (INHERITS, "Base") in said, said
+    assert (MIXES_IN, "Store") in said, said
+
+
+def test_rust_has_no_class_inheritance_so_every_rust_edge_is_a_mixin():
+    """`impl Store for Shelf` is trait implementation. Rust has no class
+    inheritance at all, so calling this "inherits" described a relation the
+    language does not have."""
+    source = "pub struct Shelf {}\nimpl Store for Shelf {\n    fn open(&self) {}\n}\n"
+    found = code_claims(source, "a.rs", language="braces")
+    assert not [c for c in found if c.predicate == INHERITS], \
+        [c.object for c in found if c.predicate == INHERITS]
+    assert [c.object for c in found if c.predicate == MIXES_IN] == ["Store"], found
+
+
+def test_python_bases_stay_inheritance():
+    """Python has no interfaces, so every base is a superclass."""
+    source = "class Shelf(Base, Store):\n    pass\n"
+    found = claims(content=source)
+    assert {c.object for c in found if c.predicate == INHERITS} == {"Base", "Store"}
+    assert not [c for c in found if c.predicate == MIXES_IN]
