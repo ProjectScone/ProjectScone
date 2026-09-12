@@ -91,6 +91,7 @@ class DocumentImportService:
         self._workflows: dict[tuple[str, str], DocumentIngestionWorkflow] = {}
         self._owners: dict[tuple[str, str], int] = {}
         self._failures: dict[tuple[str, str], str] = {}
+        self._admitting = 0
         self._closing = self._closed = False
 
     def require_host(self, memory: MemoryEngine) -> None:
@@ -195,24 +196,28 @@ class DocumentImportService:
             if prior.spec != spec:
                 raise ImportConflict()
             return self._status(prior)
-        original, _ = await self._memory.attachment(space, attachment_id)
-        extraction_filename(original, filename)
-        self._available()
-        if len(self._tasks) >= self._maximum:
+        if len(self._tasks) + self._admitting >= self._maximum:
             raise WorkflowError('import_busy')
-        if admission_guard is not None:
-            admission_guard()
-        request = self._imports.register(space, import_id, spec)
-        # Registration may have lost a race to another process. Never reinterpret
-        # that process's admitted request as a fresh execution.
-        if request.attempt or request.cancel_requested_at is not None:
-            return self._status(request)
+        self._admitting += 1
+        try:
+            original, _ = await self._memory.attachment(space, attachment_id)
+            extraction_filename(original, filename)
+            self._available()
+            if admission_guard is not None:
+                admission_guard()
+            request = self._imports.register(space, import_id, spec)
+            # Registration may have lost a race to another process. Never reinterpret
+            # that process's admitted request as a fresh execution.
+            if request.attempt or request.cancel_requested_at is not None:
+                return self._status(request)
+        finally:
+            self._admitting -= 1
         return self._admit(request, resume=False)
 
     def _admit(self, request: DocumentImportRequest, *, resume: bool) -> DocumentImportStatus:
         self._available()
         identity = (request.space, request.import_id)
-        if identity in self._tasks or len(self._tasks) >= self._maximum:
+        if identity in self._tasks or len(self._tasks) + self._admitting >= self._maximum:
             raise WorkflowError('import_busy')
         if request.attempt >= request.spec.max_attempts:
             raise WorkflowError('retries_exhausted')

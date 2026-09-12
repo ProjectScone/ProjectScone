@@ -661,7 +661,8 @@ assuming no work occurred. Cancellation stops owned work even if writing its
 intent fails, while reporting that storage failure.
 
 A per-job local file lock prevents simultaneous execution by another process.
-Capacity is bounded per service; excess admission returns 429 with Retry-After.
+Capacity is bounded per service, including pending original reads before execution;
+excess admission returns 429 with Retry-After.
 This is local task ownership, not a distributed queue. Request/result reads do
 not start jobs. A confirmed forgotten source invalidates completed evidence;
 a temporary verification outage refuses the result without replaying work.

@@ -200,3 +200,26 @@ async def test_cancel_stops_owned_work_even_when_intent_storage_fails(tmp_path, 
         assert not await engine.episodes('alpha', {'document_original': original})
     finally:
         await owner.aclose(); await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_original_read_reserves_capacity_before_another_admission(tmp_path, monkeypatch):
+    engine, original = await memory(); parser = HeldParser(); owner = service(tmp_path, engine, parser, max_active=1)
+    read = engine.attachment; entered = asyncio.Event(); release = asyncio.Event(); reads = 0
+    async def held(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            entered.set(); await release.wait()
+        return await read(*args, **kwargs)
+    monkeypatch.setattr(engine, 'attachment', held)
+    first = asyncio.create_task(owner.start('alpha', 'one', attachment_id=original, filename='note.md'))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        with pytest.raises(WorkflowError, match='import_busy'):
+            await owner.start('alpha', 'two', attachment_id=original, filename='note.md')
+        assert reads == 1 and await owner.request('alpha', 'two') is None
+        release.set(); await first
+    finally:
+        release.set(); await asyncio.gather(first, return_exceptions=True)
+        await owner.aclose(); await engine.close()
