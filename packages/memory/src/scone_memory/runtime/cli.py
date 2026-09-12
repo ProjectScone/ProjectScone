@@ -816,7 +816,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             emit(answered.record(space))
         else:
             print(answered.text, file=out)
-        return 0 if answered.status == "computed" else 1
+        # Computed and recalled are both answers; the rest say why there is none.
+        return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
         result = await engine.recall(

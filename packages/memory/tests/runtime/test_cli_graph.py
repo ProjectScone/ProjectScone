@@ -343,6 +343,14 @@ async def test_when_computes_the_answer_and_shows_its_working():
     assert code == 0 and json.loads(shown)["value"]["days"] == 9
 
 
+async def test_when_answers_a_question_about_a_day_from_that_day():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.remember("default", "I met Emma for coffee near the river.", created_at="2023-04-11T12:00:00Z")
+    code, text = await temporal(memory, "What did I do 9 days ago?", "--now", "2023-04-20T10:12:00Z")
+    assert code == 0, "a day's passages are an answer, not a failure"
+    assert "on: 2023-04-11" in text and "passage: 2023-04-11" in text
+
+
 async def test_when_leaves_a_question_it_cannot_read_to_the_caller():
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     code, text = await temporal(memory, "What did I drink?")
