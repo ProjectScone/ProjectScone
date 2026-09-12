@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
+from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
+                    Sequence, TypedDict, cast)
 
 from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
 from .identity import join_match
@@ -29,7 +30,12 @@ from ..ingestion.records import (
 )
 from ..retrieval import fact_recall
 from ..entities.meanings import RelationMeanings
-from ..entities.vocabulary_store import VocabularyStore
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Type-only: the vocabulary store needs cryptography, and a base
+    # install promises pydantic alone. Importing it here would make
+    # `import scone_memory` fail wherever that extra is absent.
+    from ..entities.vocabulary_store import VocabularyStore
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -786,7 +792,11 @@ class MemoryEngine:
         (bytes only when no other space holds them), the records of the
         space with their vectors, then the event trail; mark the space
         deleted so no write re-creates it. Returns the receipt
-        ``space_impact`` would have shown, with the counts of the deed."""
+        ``space_impact`` would have shown, with the counts of the deed.
+
+        Does **not** clear the space's relation vocabulary: that lives in a
+        host-owned store this engine has no handle on, so a space recreated
+        under this name would inherit it. The host clears that record."""
         try:
             return await retention.delete_space(self._retention_runtime(), space)
         finally:

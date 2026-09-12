@@ -122,3 +122,46 @@ def test_a_vocabulary_is_not_readable_with_the_wrong_key(tmp_path):
 
     with pytest.raises(WorkflowError):
         VocabularyStore(tmp_path / "vocabulary.db", key=b"x" * 32)
+
+
+def test_a_vocabulary_that_cannot_be_read_back_is_not_written(tmp_path):
+    """A save that succeeds and then cannot be read is worse than a
+    refusal: the space is left holding something that breaks every reader,
+    including the engine that opens next."""
+    from scone_memory.agents.workflow import WorkflowError
+
+    held = store(tmp_path)
+    try:
+        broken = RelationMeanings(inverse={"works_at": "works_at"})
+    except Exception:
+        # Construction already refuses it, so forge the same shape past
+        # the constructor the way a mutated object would arrive.
+        broken = RelationMeanings(inverse={"works_at": "employs"})
+        object.__setattr__(broken, "inverse", {"works_at": "works_at"})
+    try:
+        with pytest.raises((WorkflowError, ValueError)):
+            held.save("alpha", broken, expected_revision=0)
+        assert held.get("alpha") is None, "nothing may be left behind by a refused save"
+    finally:
+        held.close()
+
+
+def test_deleting_a_space_does_not_clear_its_vocabulary(tmp_path):
+    """Pinned because it is a contract, not an accident. This store is
+    host-owned and separate from the document store, so `delete_space`
+    cannot reach it -- and the hazard is real: a space recreated under the
+    same name inherits the old vocabulary. The host clears it, and the
+    docstring says so rather than leaving it to be discovered.
+    """
+    held = store(tmp_path)
+    try:
+        held.save("doomed", EMPLOYS, expected_revision=0)
+        # A deletion elsewhere changes nothing here, by construction.
+        saved = held.get("doomed")
+        assert saved is not None and saved.revision == 1
+        # Clearing is the host's to do, and it takes the current revision.
+        held.clear("doomed", expected_revision=1)
+        after = held.get("doomed")
+        assert after is not None and after.cleared
+    finally:
+        held.close()

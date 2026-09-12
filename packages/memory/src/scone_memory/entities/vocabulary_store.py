@@ -106,6 +106,15 @@ class VocabularyStore:
     connections. The host owns key storage and backup retention. The
     containing directory must be owned by this user and not writable by
     others. No model is invoked.
+
+    **Lifecycle, stated because it is a contract and not an accident:**
+    this store is the host's, separate from the document store, so
+    ``MemoryEngine.delete_space`` does **not** clear a space's vocabulary
+    and cannot -- it has no handle on this file. The hazard that follows is
+    real: a space recreated under a deleted name **inherits the old
+    vocabulary**. A host that deletes spaces should :meth:`clear` or
+    delete the corresponding record here, and a host that does not should
+    know that it has not.
     """
 
     def __init__(self, path: str | Path, *, key: bytes) -> None:
@@ -150,6 +159,17 @@ class VocabularyStore:
         """
         if not isinstance(meanings, RelationMeanings):
             raise WorkflowError("invalid_vocabulary")
+        # Checked against the constructor before anything is committed. A
+        # `RelationMeanings` can arrive here mutated past its own
+        # validation -- a predicate made its own inverse, say -- and a save
+        # that succeeds and then cannot be read back is worse than a
+        # refusal: it leaves the space holding something that breaks every
+        # later reader, including the next engine to open.
+        try:
+            RelationMeanings(inverse=dict(meanings.inverse), symmetric=list(meanings.symmetric),
+                             transitive=list(meanings.transitive))
+        except Exception as broken:
+            raise WorkflowError("invalid_vocabulary") from broken
         return self._write(space, meanings, expected_revision=expected_revision, cleared=False)
 
     def clear(self, space: str, *, expected_revision: int) -> SavedVocabulary:

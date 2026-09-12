@@ -240,3 +240,74 @@ def test_the_wire_carries_the_vocabulary_provenance(tmp_path):
     finally:
         asyncio.run(engine.close())
         kept.close()
+
+
+def test_the_engine_imports_without_the_store_s_dependencies():
+    """A base install promises pydantic alone. Importing the vocabulary
+    store at module scope made `import scone_memory` require cryptography,
+    which is a dependency regression rather than a feature."""
+    import builtins
+    import subprocess
+    import sys
+
+    script = (
+        "import builtins\n"
+        "real = builtins.__import__\n"
+        "def blocked(name, *a, **k):\n"
+        "    if name.startswith('cryptography'):\n"
+        "        raise ImportError('absent in a base install')\n"
+        "    return real(name, *a, **k)\n"
+        "builtins.__import__ = blocked\n"
+        "from scone_memory import MemoryEngine\n"
+        "print('ok')\n")
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert done.returncode == 0 and "ok" in done.stdout, done.stderr[-400:]
+
+
+async def test_a_space_not_resolved_at_open_says_so_and_touches_no_store(tmp_path):
+    """These stores are thread-bound, so a request must not reach one. A
+    space nobody named at open therefore falls back -- and says it fell
+    back, rather than quietly serving process configuration as though the
+    space had nothing saved."""
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("alpha", RelationMeanings(symmetric=["married_to"]), expected_revision=0)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                               relation_meanings=EMPLOYS, vocabulary=kept,
+                               vocabulary_spaces=["default"]).open()
+    reads = []
+    original = kept.get
+    kept.get = lambda space: (reads.append(space), original(space))[1]
+    try:
+        held = await read_vocabulary(engine, "alpha")
+        assert reads == [], "an unresolved space must not reach the thread-bound store"
+        assert held.source == "process", held.why
+        assert "was not read when this engine opened" in held.why, held.why
+    finally:
+        kept.get = original
+        await engine.close()
+        kept.close()
+
+
+async def test_the_vocabulary_handed_out_cannot_be_mutated_into_the_cache(tmp_path):
+    """It was handed out by reference, so a caller could empty it and
+    leave the cached projection implying edges the reported vocabulary no
+    longer mentioned -- under the same identity."""
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("default", EMPLOYS, expected_revision=0)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                vocabulary=kept).open()
+    try:
+        held = await read_vocabulary(engine, "default")
+        assert held.meanings is not None
+        with pytest.raises(Exception):
+            held.meanings.inverse.clear()
+        again = await read_vocabulary(engine, "default")
+        assert again.meanings is not None
+        assert again.meanings.opposite("works_at") == "employs", "the held vocabulary stands"
+    finally:
+        await engine.close()
+        kept.close()

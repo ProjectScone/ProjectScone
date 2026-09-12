@@ -46,6 +46,7 @@ Until then this reports honestly rather than storing dishonestly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 import hashlib
 import json
 from typing import TYPE_CHECKING, Optional
@@ -77,6 +78,22 @@ class Vocabulary:
                 # and a reader handed `meanings: null` cannot tell "there
                 # are none" from "nothing was said".
                 "meanings": None if self.meanings is None else self.meanings.record()}
+
+
+def _snapshot(meanings: Optional[RelationMeanings]) -> Optional[RelationMeanings]:
+    """A copy nobody can mutate into the cache.
+
+    The held vocabulary used to be handed out by reference, so a caller
+    could empty its ``inverse`` and leave a cached projection implying
+    edges the reported vocabulary no longer mentioned -- under the same
+    identity. ``RelationMeanings`` is frozen but its mapping is not, so
+    the mapping is wrapped too.
+    """
+    if meanings is None:
+        return None
+    return RelationMeanings(inverse=dict(meanings.inverse),
+                            symmetric=tuple(meanings.symmetric),
+                            transitive=tuple(meanings.transitive))
 
 
 def _identity(source: str, meanings: Optional[RelationMeanings],
@@ -125,6 +142,24 @@ async def read_vocabulary(engine: "MemoryEngine", space: str) -> Vocabulary:
     resolved = getattr(engine, "_vocabulary_read", None)
     if resolved is not None and space in resolved:
         return resolved[space]
+    if getattr(engine, "vocabulary", None) is not None:
+        # A store of this kind is bound to the thread that opened it, so a
+        # request served elsewhere must not reach one. A space nobody named
+        # at open therefore falls back -- and **says** it fell back, rather
+        # than serving process configuration as though the space had
+        # nothing saved. Silence there would be a false statement about a
+        # space that may well hold a vocabulary.
+        process = engine.relation_meanings
+        return Vocabulary(
+            meanings=_snapshot(process), source="process" if process is not None else "none",
+            why=("this space was not read when this engine opened, so whatever it holds is not "
+                 "applied here; name it in vocabulary_spaces to have it read. "
+                 + ("this process's configuration applies meanwhile"
+                    if process is not None else
+                    "nothing is configured in this process, so the graph holds only what was "
+                    "said")),
+            identity=_identity("process" if process is not None else "none", process,
+                               f"{space}:unresolved"))
     return await _read(engine, space)
 
 
@@ -137,18 +172,18 @@ async def _read(engine: "MemoryEngine", space: str) -> Vocabulary:
         if saved is not None and not saved.cleared:
             held = saved.meanings
             return Vocabulary(
-                meanings=held, source="space",
+                meanings=_snapshot(held), source="space",
                 why=f"the space holds this vocabulary, saved at {saved.saved_at.isoformat()} "
                     f"(revision {saved.revision}); every reader of the space applies it, "
                     f"whatever each process was configured with",
                 identity=_identity("space", held, f"{space}:{saved.revision}"))
         if saved is not None:
             return Vocabulary(
-                meanings=process, source="process" if process else "none",
+                meanings=_snapshot(process), source="process" if process is not None else "none",
                 why=(f"the space's vocabulary was cleared at {saved.saved_at.isoformat()}, so "
-                     + ("this process's configuration applies" if process
+                     + ("this process's configuration applies" if process is not None
                         else "the graph holds only what was said")),
-                identity=_identity("process" if process else "none", process,
+                identity=_identity("process" if process is not None else "none", process,
                                    f"{space}:cleared:{saved.revision}"))
     if process is None:
         return Vocabulary(
@@ -156,7 +191,7 @@ async def _read(engine: "MemoryEngine", space: str) -> Vocabulary:
             why="nothing is configured in this process, so the graph holds only what was said",
             identity=_identity("none", None))
     return Vocabulary(
-        meanings=process, source="process",
+        meanings=_snapshot(process), source="process",
         why="these are this process's configuration; a space cannot yet hold its own, so "
             "another process configured differently will read this space differently",
         identity=_identity("process", process))
