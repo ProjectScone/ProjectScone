@@ -135,3 +135,26 @@ async def test_notes_are_listed_as_their_own_directory():
     assert all(entry.of == "note" for entry in listing.entries)
     root = await fs.list("/")
     assert "/notes" in [entry.path for entry in root.entries]
+
+
+async def test_forgetting_a_note_takes_it_out_of_the_tree():
+    """A note is an episode, so forgetting the episode forgets the note —
+    the tree cannot outlive what it is a view of."""
+    fs = await tree()
+    written = await fs.write("/notes/plan.md", "Ship on Friday.")
+    assert [entry.path for entry in (await fs.list("/notes")).entries] == ["/notes/plan.md"]
+    await fs.engine.forget(SPACE, written.episode_id)
+    assert (await fs.list("/notes")).entries == ()
+    with pytest.raises(PathRefused, match="no note"):
+        await fs.read("/notes/plan.md")
+
+
+async def test_a_path_whose_note_was_forgotten_can_be_written_again():
+    """Nothing haunts the path: with the note gone, the next write is a
+    first write, not a conflict with something that is not there."""
+    fs = await tree()
+    written = await fs.write("/notes/plan.md", "Ship on Friday.")
+    await fs.engine.forget(SPACE, written.episode_id)
+    again = await fs.write("/notes/plan.md", "Ship on Monday.", if_version=written.version)
+    assert (await fs.read("/notes/plan.md")).text == "Ship on Monday."
+    assert again.episode_id != written.episode_id
