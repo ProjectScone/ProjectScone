@@ -163,6 +163,7 @@ class MemoryEngine:
         record_queries: bool = False,
         contextual_embeddings: bool = False,
         code_aware: bool = True,
+        structure_aware: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
@@ -199,6 +200,7 @@ class MemoryEngine:
         #: at its declarations. Names say it, never the content: a note that
         #: quotes code is prose.
         self.code_aware = code_aware
+        self.structure_aware = structure_aware
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -431,7 +433,7 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph)
+                         self.code_aware, self.code_graph, self.structure_aware)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -448,7 +450,7 @@ class MemoryEngine:
             if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                        self.code_aware, self.code_graph) != configuration):
+                        self.code_aware, self.code_graph, self.structure_aware) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -564,6 +566,7 @@ class MemoryEngine:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            structure_aware=self.structure_aware,
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record], *,
