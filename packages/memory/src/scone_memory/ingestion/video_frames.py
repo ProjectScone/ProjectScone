@@ -18,7 +18,7 @@ import zlib
 
 from pydantic import ValidationError
 
-from .video_evidence import VideoFramePolicy as VideoFramePolicy
+from .video_evidence import DocumentVideoEvidence, VideoFramePolicy as VideoFramePolicy
 
 from ..core.errors import InvalidInput
 from ..ocr.process import python_worker, run_bounded
@@ -236,6 +236,47 @@ class VideoFrameDecoder:
     def __init__(self, *, ffmpeg_path: str, ffprobe_path: str) -> None:
         self.ffmpeg, self._ffmpeg_digest = _executable(ffmpeg_path)
         self.ffprobe, self._ffprobe_digest = _executable(ffprobe_path)
+
+    async def read_frame(self, data: bytes, filename: str, evidence: DocumentVideoEvidence,
+                         ordinal: int, *, limits: DocumentLimits | None = None) -> VideoFrame:
+        """Reproduce retained pixels and timing without recognition or inference."""
+        limits = _validated_limits(DocumentLimits() if limits is None else limits)
+        deadline = monotonic() + limits.timeout_seconds
+        try:
+            retained = DocumentVideoEvidence.model_validate(evidence.model_dump())
+        except (ValueError, AttributeError) as error:
+            raise InvalidInput('retained video evidence is invalid') from error
+        if type(ordinal) is not int or ordinal not in {frame.ordinal for frame in retained.frames}:
+            raise InvalidInput('requested frame is not in the retained video evidence')
+        _input(data, filename, limits, VIDEO_EXTENSIONS - {'.ts'})
+        if not isinstance(data, bytes) or hashlib.sha256(data).hexdigest() != retained.source_sha256:
+            raise InvalidInput('video source does not match retained evidence')
+        sampled = await self.sample(data, filename, policy=retained.policy,
+            limits=limits.model_copy(update={'timeout_seconds': _remaining(deadline)}))
+        plan = sampled.plan
+        if (sampled.source_sha256 != retained.source_sha256 or sampled.decoder_revision != retained.decoder_revision
+                or sampled.policy_revision != retained.policy_revision or sampled.policy != retained.policy
+                or plan.stream_index != retained.stream_index or str(plan.time_base) != str(Fraction(retained.time_base))
+                or plan.start_timestamp != retained.start_timestamp
+                or plan.duration != retained.duration_ticks * Fraction(retained.time_base)
+                or plan.decoded_frames != retained.decoded_frames or plan.unavailable_requests != retained.unavailable_requests
+                or len(sampled.frames) != len(retained.frames)):
+            raise InvalidInput('video decoder or frame plan does not match retained evidence')
+        selected = None
+        for actual, expected in zip(sampled.frames, retained.frames, strict=True):
+            if (actual.selection.ordinal != expected.ordinal
+                    or actual.selection.presentation_timestamp != expected.presentation_timestamp
+                    or actual.selection.requested_seconds != expected.requested_seconds
+                    or (actual.width, actual.height) != (expected.width, expected.height)
+                    or len(actual.png) != expected.png_bytes or actual.sha256 != expected.png_sha256
+                    or hashlib.sha256(actual.png).hexdigest() != expected.png_sha256):
+                raise InvalidInput('decoded video frame does not match retained evidence')
+            if actual.selection.ordinal == ordinal:
+                selected = actual
+        _remaining(deadline)
+        if selected is None:
+            raise InvalidInput('requested frame is unavailable')
+        return selected
 
     async def sample(self, data: bytes, filename: str, *, policy: VideoFramePolicy | None = None,
                      limits: DocumentLimits | None = None) -> VideoFrames:
