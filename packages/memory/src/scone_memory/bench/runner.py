@@ -201,6 +201,9 @@ class RunReport:
     #: metadata cannot say which configuration produced it is not evidence
     #: of anything.
     merge: bool
+    #: Bytes of window either side, 0 when off. Recorded for the same
+    #: reason.
+    window: int
     ks: list[int]
     recall_any: dict[int, float]
     recall_all: dict[int, float]
@@ -260,6 +263,7 @@ async def run(
     history: bool = False,
     cross_queries: bool = False,
     merge: bool = False,
+    window: int = 0,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -311,6 +315,13 @@ async def run(
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
             pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            if window:
+                from ..retrieval.window import widen
+
+                opened = await widen(engine, space, pack.items, before=window, after=window)
+                pack = pack.model_copy(update={
+                    "items": list(opened.items),
+                    "returned_bytes": sum(len(i.text.encode()) for i in opened.items)})
             if merge:
                 from ..retrieval.merging import merge_neighbours
 
@@ -374,7 +385,7 @@ async def run(
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
-        merge=merge, ks=list(ks),
+        merge=merge, window=window, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, by_type=by_type,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
