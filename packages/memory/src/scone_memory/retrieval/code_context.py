@@ -156,9 +156,10 @@ class CodeContext:
     #: and a truncated import are different things to a reader.
     long_imports: int = 0
     #: Chunks whose context was not returned because the byte budget was
-    #: spent. Their items are still in the answer; only the context they
-    #: would have carried is missing, and a caller can ask again with a
-    #: larger budget or a smaller limit.
+    #: spent -- the first one included, with no exemption. Their items are
+    #: still in the answer; only the context they would have carried is
+    #: missing, and a caller can ask again with a larger budget or a
+    #: smaller limit.
     beyond_budget: int = 0
     why: str = ""
 
@@ -545,26 +546,44 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
             capped += 1
         signatures = tuple(_signature(content, lines, blank, starts, holder, language, headers)
                            for holder in holders)
-        if any(signature.clipped for signature in signatures):
-            shortened += 1
-        if any(brought_in.clipped for brought_in in brought):
-            lengthy += 1
         size = (sum(len(s.text.encode()) for s in signatures)
                 + sum(len(i.text.encode()) for i in brought))
-        if spent + size > max_bytes and found:
-            # The item stays in the answer; only the context it would have
-            # carried is left out, and the count says how many.
+        if spent + size > max_bytes:
+            # No exemption for the first chunk. I gave it one on purpose,
+            # so a tiny budget returned one context rather than none, and
+            # that made `max_bytes=16` answer with four thousand bytes,
+            # `beyond_budget: 0` and nothing in `why` -- a bound with an
+            # unreported exemption, which is the fault this framework
+            # keeps making, committed knowingly in the name of being
+            # helpful. A budget too small for any context now returns
+            # none and says so.
+            #
+            # The item stays in the answer either way: only the context
+            # it would have carried is left out.
             beyond += 1
             kept.append(item)
             continue
         spent += size
+        # Counted after the budget, so the receipt describes the context
+        # that was returned rather than context that was refused.
+        if any(signature.clipped for signature in signatures):
+            shortened += 1
+        if any(brought_in.clipped for brought_in in brought):
+            lengthy += 1
         found[item.chunk_id] = ChunkContext(
             chunk_id=item.chunk_id, language=language, holders=signatures,
             imports=brought, more_imports=more)
         kept.append(item)
 
-    why = (f"{len(found)} chunk(s) given the signature they sit inside and the imports of "
-           f"their file" if found else "no chunk had code context to give")
+    if found:
+        why = (f"{len(found)} chunk(s) given the signature they sit inside and the imports of "
+               f"their file")
+    elif beyond:
+        # "Nothing to give" and "the budget refused it" are different
+        # answers and a caller acts on them differently.
+        why = f"no context returned: the budget of {max_bytes} byte(s) did not reach any chunk"
+    else:
+        why = "no chunk had code context to give"
     if not_code:
         why += (f"; {not_code} item(s) are stored under a name that does not say a language, so "
                 f"nothing was read from them -- a file of prose quoting code is prose")

@@ -772,3 +772,42 @@ async def test_one_very_long_import_line_is_bounded_in_bytes_too():
     assert len(big[0].text.encode()) <= MAX_QUOTED_BYTES, len(big[0].text.encode())
     assert big[0].clipped is True, big[0].clipped
     assert context.long_imports >= 1, context.record()
+
+
+async def test_the_byte_budget_has_no_exemption_for_the_first_chunk():
+    """I exempted the first context from the budget on purpose, so that a
+    tiny budget returned one context rather than none. That made
+    `max_bytes=16` return four thousand bytes with `beyond_budget: 0` and
+    nothing in `why` -- a bound with an unreported exemption, which is the
+    fault this framework keeps making, committed knowingly this time in
+    the name of being helpful.
+
+    Every chunk is measured now, including the first. A budget too small
+    for any context returns none and says so, and a caller who reads that
+    can raise it.
+    """
+    source = ("from module import " + "n" * 20_000 + "\nimport json\n\n\n"
+              "def work() -> str:\n"
+              "    return json.dumps({}) + \" a body long enough to be its own chunk\"\n")
+    engine = await memory(source, source="exempt.py", target=70)
+    try:
+        found = await engine.recall("default", "work json dumps body chunk", limit=6)
+        whole = await code_context(engine, "default", found.items)
+        tiny = await code_context(engine, "default", found.items, max_bytes=16)
+    finally:
+        await engine.close()
+    assert whole.by_chunk, whole.record()
+    assert tiny.by_chunk == {}, tiny.record()
+    assert tiny.beyond_budget == len(whole.by_chunk), tiny.record()
+    assert "budget" in tiny.why, tiny.why
+    # "Nothing to give" and "the budget refused it" are different answers.
+    assert "did not reach any chunk" in tiny.why, tiny.why
+    assert "no chunk had code context to give" not in tiny.why, tiny.why
+    # And a count about context that was never returned is not reported.
+    assert tiny.long_imports == 0 and tiny.shortened == 0, tiny.record()
+    # And nothing quoted at all, rather than one quotation of any size.
+    quoted = sum(len(h.text.encode()) for one in tiny.by_chunk.values() for h in one.holders)
+    quoted += sum(len(i.text.encode()) for one in tiny.by_chunk.values() for i in one.imports)
+    assert quoted == 0, quoted
+    # The passages themselves are untouched: only their context is absent.
+    assert len(tiny.items) == len(found.items), (len(tiny.items), len(found.items))
