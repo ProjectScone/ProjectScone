@@ -947,6 +947,30 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
     return 0
 
 
+def _staged(record: dict) -> dict:
+    """A stage's receipt without its own copy of the passages.
+
+    Every stage replaces the answer's items with its output -- widening,
+    withholding, code context and merging all do -- so a receipt's copy
+    of the text is always redundant with `items`, and always older than
+    it. Emitting one hands back what a later stage removed: text a
+    withholding policy took out, or a passage whose source a later stage
+    found deleted.
+
+    So the copy is dropped from every stage, unconditionally. Dropping it
+    only when some flag is set treats one symptom of the class -- it was
+    written that way first, conditioned on a withholding policy, and the
+    deletion case walked straight through the gap. The counts are the
+    useful part of a receipt and they stay.
+    """
+    kept = {key: value for key, value in record.items() if key != "items"}
+    if "items" in record:
+        kept["items_not_repeated"] = (
+            "the passages this answer returns are in `items`; this receipt described them at "
+            "an earlier stage and its copy is not returned")
+    return kept
+
+
 def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
     """Read only the selected regular file, bounded even if its size changes.
 
@@ -1325,41 +1349,34 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
                 "history": list(kept.facts[len(result.facts):])})
-        inside = None
-        if args.code_context:
-            from ..retrieval.code_context import code_context
-
-            # After widening and withholding, so the context describes the
-            # passages actually being handed back.
-            inside = await code_context(engine, space, result.items)
-            # A source confirmed gone is dropped from the answer, not just
-            # from the context: a receipt saying "dropped" beside a printed
-            # passage is the disagreement that makes it dangerous.
-            result = result.model_copy(update={"items": list(inside.items)})
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
 
             joined = await merge_neighbours(engine, space, result.items)
             result = result.model_copy(update={"items": list(joined.items)})
+        inside = None
+        if args.code_context:
+            from ..retrieval.code_context import code_context
+
+            # **Last**, after every stage that re-reads a source. Code
+            # context quotes the file -- a signature, an import line --
+            # and a stage running after it can find that source deleted,
+            # leaving the answer correctly empty while the context still
+            # prints the text. Dropping the receipt's copy of the items
+            # cannot fix that, because the quoted signature is a separate
+            # copy of the same source. Running last is what makes the
+            # context describe passages that survived.
+            inside = await code_context(engine, space, result.items)
+            # A source this stage finds gone is dropped from the answer
+            # too, not only from the context.
+            result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
-            widened = None
-            if opened is not None:
-                widened = opened.record()
-                if policy:
-                    # The widened record carries the passages as they were
-                    # *before* withholding, so emitting it whole hands back
-                    # what was just withheld. The receipt stays; its copy of
-                    # the text goes, and says where the text is instead.
-                    widened = {key: value for key, value in widened.items() if key != "items"}
-                    widened["items_withheld"] = (
-                        "the widened passages are in `items`, after withholding; this receipt's "
-                        "own copy predates it and is not returned")
-            emit(said | ({"merged": joined.record()} if joined else {})
-                      | ({"widened": widened} if widened is not None else {})
-                      | ({"withheld": kept.record()} if kept else {})
-                      | ({"code_context": inside.record()} if inside else {}))
+            emit(said | ({"merged": _staged(joined.record())} if joined else {})
+                      | ({"widened": _staged(opened.record())} if opened else {})
+                      | ({"withheld": _staged(kept.record())} if kept else {})
+                      | ({"code_context": _staged(inside.record())} if inside else {}))
             return 0
         if kept is not None:
             print(kept.why, file=out)

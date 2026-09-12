@@ -405,8 +405,10 @@ async def test_the_json_widened_receipt_does_not_return_what_withholding_removed
         assert address not in shown, shown
         said = jsonlib.loads(shown)
         assert "widened" in said and "items" not in said["widened"], said["widened"]
-        assert "items_withheld" in said["widened"], said["widened"]
+        assert "items_not_repeated" in said["widened"], said["widened"]
         assert said["withheld"]["by_kind"].get("email"), said["withheld"]
+        # The counts are the useful part of a receipt and they stay.
+        assert said["widened"]["widened"] == 1, said["widened"]
     finally:
         await engine.close()
 
@@ -509,3 +511,143 @@ async def test_a_colon_inside_a_dict_default_does_not_end_the_signature():
     assert holders, context.record()
     text = holders[0].text
     assert text == 'def keep(tags: dict = {"a": 1, "b": 2}, label: str = "x:y") -> str:', text
+
+
+async def test_a_one_line_brace_body_is_not_part_of_the_signature():
+    """The tenth instance of the same half-fix: I made the Python path
+    character-precise so `def f(): return secret` stopped returning its
+    body, and left the brace path counting whole lines -- so
+    `function contact() { return secret; }` still did."""
+    # The body is on the header's line *and* long enough that the line is
+    # its own chunk, so `contact` is unavoidably the holder. My first
+    # version of this fixture put a short body on that line; the chunk
+    # was never recalled, `contact` was never a holder, and the
+    # assertion sat behind `if "contact" in got:` and never ran. A
+    # mutation proof is what exposed that -- the test passed with the fix
+    # removed, which is the only reason I looked.
+    source = (
+        'import {thing} from "./thing";\n'
+        '\n'
+        'function contact() { return "alice@example.test" + " padded out with a good deal '
+        'more text so that this single line is comfortably a chunk of its own"; }\n'
+        '\n'
+        'function other(tag) {\n'
+        '  return thing(tag) + " a body long enough that the chunk is not the header";\n'
+        '}\n')
+    engine = await memory(source, source="contact.ts", target=60)
+    try:
+        found = await engine.recall("default", "contact padded text single line chunk", limit=8)
+        context = await code_context(engine, "default", found.items)
+    finally:
+        await engine.close()
+    got = {h.name: h for one in context.by_chunk.values() for h in one.holders}
+    assert "contact" in got, ["the fixture must make contact a holder", sorted(got)]
+    assert got["contact"].text == "function contact() {", got["contact"].text
+    assert "alice@example.test" not in got["contact"].text, "the body is not the signature"
+    assert not got["contact"].clipped, got["contact"].text
+    for name, holder in got.items():
+        assert holder.text in source, (name, "quoted, never assembled")
+
+
+async def test_no_stage_receipt_repeats_the_passages_even_with_no_policy():
+    """The rule, not one instance of it.
+
+    I first dropped the receipt's copy of the text only when a
+    withholding policy was active, which treats a symptom: a review then
+    deleted an episode between widening's read and code context's read,
+    and the widened receipt printed the deleted passage while the answer
+    itself correctly returned nothing. Every stage replaces the answer's
+    items with its own output, so a receipt's copy is always redundant
+    with `items` and always older than it -- and is dropped from every
+    stage, with no flag involved.
+    """
+    import io
+    import json as jsonlib
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await memory()
+    try:
+        out = io.StringIO()
+        code = await run(build_parser().parse_args(
+            ["recall", "write a paper to the shelf payload", "--window", "80",
+             "--code-context", "--json"]), engine, io.StringIO(""), out)
+        shown = out.getvalue()
+        assert code == 0, shown
+        said = jsonlib.loads(shown)
+        for stage in ("widened", "code_context"):
+            assert stage in said, (stage, sorted(said))
+            assert "items" not in said[stage], (stage, said[stage])
+            assert "items_not_repeated" in said[stage], (stage, said[stage])
+        # and the answer still carries them exactly once
+        assert said["items"], said.keys()
+    finally:
+        await engine.close()
+
+
+async def test_a_line_separator_in_a_string_does_not_move_the_imports_either():
+    """The same fault in a third place. `str.splitlines()` breaks on
+    U+2028, U+2029, U+0085, vertical tab and form feed; the parser's line
+    numbers do not. A banner constant holding one shifted every line
+    after it, so a signature -- and, in a third copy of the same table,
+    an import -- was quoted from the wrong place.
+
+    Each of the three copies had to be fixed separately, which is the
+    argument for one table rather than three.
+    """
+    for separator in ("\u2028", "\u0085", "\v"):
+        for newline in ("\n", "\r\n"):
+            source = newline.join([
+                'banner = "one' + separator + 'two"',
+                'import json',
+                'from pathlib import Path',
+                '',
+                '',
+                'def contact(tag: str = "x") -> str:',
+                '    return json.dumps({"tag": tag, "where": str(Path("."))}) + banner',
+                ''])
+            engine = await memory(source, source="banners.py", target=60)
+            try:
+                found = await engine.recall("default", "tag json dumps where path banner",
+                                            limit=6)
+                context = await code_context(engine, "default", found.items)
+            finally:
+                await engine.close()
+            one = next(iter(context.by_chunk.values()), None)
+            assert one is not None, (repr(separator), repr(newline), context.record())
+            assert [i.text for i in one.imports] == ["import json", "from pathlib import Path"], \
+                (repr(separator), repr(newline), [i.text for i in one.imports])
+            for holder in one.holders:
+                assert holder.text == 'def contact(tag: str = "x") -> str:', \
+                    (repr(separator), repr(newline), holder.text)
+
+
+async def test_code_context_describes_only_passages_that_survived_every_stage():
+    """Code context quotes the file -- a signature, an import line -- so a
+    stage running *after* it can find that source deleted and leave the
+    answer empty while the context still prints the text. Dropping the
+    receipt's copy of the items cannot fix that: the signature is a
+    separate copy of the same source.
+
+    So it runs last, and the invariant is structural: every chunk the
+    context describes is a chunk the answer returns.
+    """
+    import io
+    import json as jsonlib
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await memory(target=90)
+    try:
+        out = io.StringIO()
+        code = await run(build_parser().parse_args(
+            ["recall", "write a paper to the shelf payload target", "--merge",
+             "--code-context", "--json", "--limit", "6"]), engine, io.StringIO(""), out)
+        shown = out.getvalue()
+        assert code == 0, shown
+        said = jsonlib.loads(shown)
+        answered = {item["chunk_id"] for item in said["items"]}
+        described = {int(key) for key in said["code_context"]["by_chunk"]}
+        assert described <= answered, (sorted(described), sorted(answered))
+    finally:
+        await engine.close()

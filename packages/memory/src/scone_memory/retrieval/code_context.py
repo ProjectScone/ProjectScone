@@ -185,9 +185,12 @@ def _python_headers(content: str) -> dict[int, tuple[int, int]]:
     either direction. A caller wanting the decorators has the
     declaration's own line range.
     """
-    starts = [0]
-    for line in content.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
+    # `_line_starts`, not a second table built here. The first version of
+    # this function had its own `splitlines(keepends=True)` copy, and
+    # when the newline semantics were corrected only the shared helper
+    # was fixed -- so the bug stayed exactly where the finding was about,
+    # in a duplicate four lines away. One table, one convention.
+    starts = _line_starts(content)
 
     def offset(row: int, column: int) -> int:
         return starts[row - 1] + column
@@ -240,35 +243,87 @@ def _header(headers: dict[int, tuple[int, int]],
     return headers[min(inside)] if inside else None
 
 
-def _brace_header(lines: list[str], blank: list[str], start: int) -> tuple[int, bool]:
-    """A brace declaration's header, to the ``{`` that opens its body.
+def _brace_header(blank: list[str], starts: list[int], start: int) -> tuple[int, bool]:
+    """A brace declaration's header, through the ``{`` that opens its body.
 
     Scanned over the **blanked** copy, where string literals and comments
-    have been replaced in place, so a brace inside a string cannot move
-    the depth. Every line and column is preserved, so the position found
-    here indexes the real source.
+    are replaced in place, so a brace inside a string cannot move the
+    depth and every line and column still indexes the real source.
+
+    Answers a character offset rather than a line, for the same reason
+    the Python path does: ``function contact() { return secret; }`` puts
+    a body on the header's line, and quoting the line whole made that
+    body part of the signature. The Python path was made
+    character-precise and this one was left counting lines -- the same
+    half-fix, one language later.
     """
     depth = 0
     for offset in range(MAX_SIGNATURE_LINES):
         index = start - 1 + offset
         if index >= len(blank):
-            return min(start + offset, len(lines)), False
-        for char in blank[index]:
+            return starts[min(index, len(starts) - 1)], False
+        line = blank[index]
+        for column, char in enumerate(line):
             if char == "{" and depth == 0:
-                return start + offset, False
+                return starts[index] + column + 1, False
             if char in "([":
                 depth += 1
             elif char in ")]":
                 depth = max(0, depth - 1)
-        if blank[index].rstrip().endswith(";") and depth == 0:
-            # A declaration with no body of its own, which is a header
-            # in its entirety.
-            return start + offset, False
-    return start + MAX_SIGNATURE_LINES - 1, True
+            elif char == ";" and depth == 0:
+                # A declaration with no body of its own: the header is
+                # the whole of it, up to and including the semicolon.
+                return starts[index] + column + 1, False
+    last = start - 1 + MAX_SIGNATURE_LINES - 1
+    return starts[min(last, len(starts) - 1)] + len(blank[min(last, len(blank) - 1)]), True
 
 
-def _signature(content: str, lines: list[str], blank: list[str], declaration: Declaration,
-               language: str, headers: dict[int, tuple[int, int]]) -> Signature:
+def _line_starts(content: str) -> list[int]:
+    """The offset each **physical** line begins at, as the tokenizer
+    counts them.
+
+    Not ``str.splitlines()``, which was the first version of this and
+    was wrong: it also breaks on U+2028, U+2029, U+0085, vertical tab
+    and form feed, none of which the tokenizer treats as a physical
+    newline. A string literal holding one -- ``banner = "one\u2028two"``
+    is ordinary code -- shifted every row after it, and a signature came
+    back as ``'two"\ndef conta'``. Two coordinate systems that disagree,
+    which is the third time that shape has bitten this work.
+
+    ``io.StringIO`` is what ``tokenize`` reads through here, and with its
+    default ``newline='\n'`` it performs no translation and ends a line
+    only at ``\n``. So this does too, and a ``\r`` stays part of its
+    line, keeping offsets into the source exactly as it arrived.
+    """
+    at = [0]
+    index = content.find("\n")
+    while index != -1:
+        at.append(index + 1)
+        index = content.find("\n", index + 1)
+    return at
+
+
+def _looks_like_a_header(text: str, language: str) -> bool:
+    """Whether a quoted span is plausibly the header it claims to be.
+
+    A post-condition rather than trust in the arithmetic. Every
+    coordinate mistake in this work has produced text that is obviously
+    not a header -- a fragment of a string literal, half of two lines --
+    and one cheap check turns the next one into a visibly incomplete
+    answer instead of a confident quotation of the wrong bytes.
+    """
+    said = text.strip()
+    if not said:
+        return False
+    if language == "python":
+        return said.endswith(":") and said.split("(")[0].split()[0] in (
+            "def", "class", "async") or said.startswith(("def ", "class ", "async "))
+    return said.endswith(("{", ";"))
+
+
+def _signature(content: str, lines: list[str], blank: list[str], starts: list[int],
+               declaration: Declaration, language: str,
+               headers: dict[int, tuple[int, int]]) -> Signature:
     """A declaration's header, quoted from the source."""
     if language == "python":
         span = _header(headers, declaration)
@@ -278,24 +333,42 @@ def _signature(content: str, lines: list[str], blank: list[str], declaration: De
             # is the field that says a header is incomplete.
             return Signature(name=declaration.name, kind=declaration.kind,
                              line=declaration.first_line,
-                             text=lines[declaration.first_line - 1], clipped=True)
+                             text=lines[declaration.first_line - 1].rstrip("\r"),
+                             clipped=True)
         text = content[span[0]:span[1]]
         held = text.split("\n")
         clipped = len(held) > MAX_SIGNATURE_LINES
+        text = "\n".join(line.rstrip("\r") for line in held[:MAX_SIGNATURE_LINES])
+        if not _looks_like_a_header(text, language):
+            return Signature(name=declaration.name, kind=declaration.kind,
+                             line=declaration.first_line,
+                             text=lines[declaration.first_line - 1].rstrip("\r"),
+                             clipped=True)
         return Signature(name=declaration.name, kind=declaration.kind,
                          line=content[:span[0]].count("\n") + 1,
-                         text="\n".join(held[:MAX_SIGNATURE_LINES]), clipped=clipped)
+                         text=text, clipped=clipped)
     start = declaration.first_line
-    end, clipped = _brace_header(lines, blank, start)
-    end = min(end, len(lines))
+    at, clipped = _brace_header(blank, starts, start)
+    text = content[starts[start - 1]:at].strip("\n")
+    if not _looks_like_a_header(text, language):
+        return Signature(name=declaration.name, kind=declaration.kind, line=start,
+                         text=(lines[start - 1].rstrip("\r") if start - 1 < len(lines)
+                               else ""), clipped=True)
     return Signature(name=declaration.name, kind=declaration.kind, line=start,
-                     text="\n".join(lines[start - 1:end]), clipped=clipped)
+                     text=text, clipped=clipped)
 
 
 def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, ...], bool]:
     """The lines this file brings names in on, quoted, and whether there
-    are more than were listed."""
-    lines = content.splitlines()
+    are more than were listed.
+
+    Physical lines, indexed by the parser's own line numbers, so the same
+    convention as everything else here. This was the third copy of a
+    ``splitlines()`` table in this file and had the same fault as the
+    other two: a line separator inside a string literal above an import
+    shifted every line after it, and the import came back misquoted.
+    """
+    lines = [line.rstrip("\r") for line in content.split("\n")]
     found: list[Imported] = []
     if language == "python":
         try:
@@ -367,15 +440,18 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
             # clean reason, so the item goes with the count.
             vanished += 1
             continue
-        lines = content.splitlines()
-        blank = masked(content, prose=False).splitlines()
+        # Split the same way `_line_starts` counts, so a row indexes the
+        # same text in all three.
+        lines = content.split("\n")
+        blank = masked(content, prose=False).split("\n")
+        starts = _line_starts(content)
         headers = _python_headers(content) if language == "python" else {}
         holders = declarations_in(content, item.start, item.end, language=language,
                                   offsets="bytes")
         brought, more = _imports(content, language, imports)
         if more:
             capped += 1
-        signatures = tuple(_signature(content, lines, blank, holder, language, headers)
+        signatures = tuple(_signature(content, lines, blank, starts, holder, language, headers)
                            for holder in holders)
         if any(signature.clipped for signature in signatures):
             shortened += 1
