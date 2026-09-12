@@ -104,6 +104,10 @@ class SyncReceipt:
     #: Symbolic links under the root, which are counted and not followed:
     #: what one points at is outside the root the caller named.
     links: int = 0
+    #: Things matching the suffixes that are not ordinary files -- named
+    #: pipes, sockets, devices. Counted and never opened: reading one can
+    #: block forever.
+    special: int = 0
     #: Directories under the root this sync could not read. Each one hides
     #: an unknown number of files, so a run with any of these cannot say
     #: what is gone.
@@ -137,7 +141,7 @@ class SyncReceipt:
                 "capped": self.capped, "added": self.added, "updated": self.updated,
                 "unchanged": self.unchanged, "removed": self.removed,
                 "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
-                "links": self.links,
+                "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
                 "listed_all": self.listed_all, "checked_for_missing": self.checked_for_missing,
                 "changes": [{"path": c.path, "what": c.what} for c in self.changes]}
@@ -160,6 +164,9 @@ class SyncReceipt:
         if self.out_of_scope:
             lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
                          f"suffixes and were left alone, not treated as gone")
+        if self.special:
+            lines.append(f"{self.special} path(s) matching the suffixes are not ordinary files "
+                         f"and were not opened")
         if self.links:
             lines.append(f"{self.links} symbolic link(s) were left alone: what a link points at "
                          f"is outside the root")
@@ -227,8 +234,8 @@ def _key(marker: str, path: str) -> str:
 
 
 def _files(root: pathlib.Path, suffixes: Sequence[str],
-           limit: int) -> tuple[list[pathlib.Path], int, int, int]:
-    """(files to read, how many are there, directories unread, links skipped).
+           limit: int) -> tuple[list[pathlib.Path], int, int, int, int]:
+    """(files to read, how many there are, directories unread, links, special files).
 
     Walked explicitly rather than with ``rglob``, which swallows a
     ``PermissionError`` and returns what it could reach — indistinguishable
@@ -238,7 +245,7 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
     """
     wanted = _wanted(suffixes)
     found: list[pathlib.Path] = []
-    unreadable = links = 0
+    unreadable = links = special = 0
     stack = [root]
     while stack:
         here = stack.pop()
@@ -257,6 +264,11 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
                     links += 1
                     continue
                 directory = entry.is_dir()
+                # "Not a directory" is not "a file". A named pipe matching
+                # the suffixes would be opened and block until somebody
+                # wrote to it, and a sync that hangs is worse than one that
+                # counts wrongly: nothing reports it and nothing recovers.
+                ordinary = directory or entry.is_file()
             except OSError:
                 unreadable += 1
                 continue
@@ -264,10 +276,13 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
             if directory:
                 if not any(part.startswith(".") or part == "__pycache__" for part in below.parts):
                     stack.append(entry)
+            elif not ordinary:
+                if _in_scope(below, wanted):
+                    special += 1
             elif _in_scope(below, wanted):
                 found.append(entry)
     found.sort()
-    return found[:limit], len(found), unreadable, links
+    return found[:limit], len(found), unreadable, links, special
 
 
 async def sync_directory(
@@ -296,7 +311,7 @@ async def sync_directory(
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
 
-    reading, there, unreadable, links = _files(where, suffixes, limit)
+    reading, there, unreadable, links, special = _files(where, suffixes, limit)
     known = {episode.source: episode
              for episode in await engine.episodes(space, {"sync": name})
              if episode.source}
@@ -375,6 +390,7 @@ async def sync_directory(
         files_found=there, files_read=len(reading), added=tally.added, updated=tally.updated,
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
         out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
+        special=special,
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
         listed_all=tally.listed_all, checked_for_missing=whole)
     if apply:

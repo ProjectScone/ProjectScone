@@ -687,6 +687,12 @@ nothing to do with the disk:
   so the walk is explicit, counts what it could not open, and a run with
   any `unreadable` forgets nothing and says why.
 
+**Only ordinary files are opened.** A named pipe matching the suffixes
+would block on open until somebody wrote to it, and a sync that hangs is
+worse than one that counts wrongly: nothing reports it and nothing
+recovers. Pipes, sockets and devices are counted as `special` and left
+shut.
+
 Two more things the walk does not do, both because the root is the whole
 scope. **A symbolic link is counted and not followed**: what it points at
 is outside the root the caller named, and storing it would file content

@@ -228,3 +228,39 @@ async def test_an_embedder_that_declares_no_width_still_cannot_return_a_ragged_b
         _validated_vectors([[0.0, 1.0], [2.0]], 2, 0)
     with pytest.raises(ValueError):
         _validated_vectors([[0.0, 1.0]], 1, 3), "a declared width is still enforced"
+
+
+async def test_an_undeclared_width_is_settled_once_for_the_whole_operation():
+    """Inferring the width per batch lets one operation store vectors of
+    two different widths -- 64 at eight wide, the next at sixteen -- and
+    an index built from those is silently incoherent. The first vector
+    settles it for everything that follows."""
+    from scone_memory.ingestion.batch import EMBED_BATCH, _embed_chunks
+
+    class Widening:
+        """Eight wide for the first batch, sixteen for the next."""
+
+        id = "test:widening"
+        dim = 0
+
+        def __init__(self):
+            self.calls = 0
+
+        async def embed(self, texts):
+            self.calls += 1
+            width = 8 if self.calls == 1 else 16
+            return [[0.5] * width for _ in texts]
+
+    with pytest.raises(ValueError):
+        await _embed_chunks(Widening(), ["t"] * (EMBED_BATCH + 1))
+    settled = await _embed_chunks(Widening(), ["t"] * 3)
+    assert [len(vector) for vector in settled] == [8, 8, 8]
+
+
+async def test_a_vector_with_no_dimensions_is_never_accepted():
+    """An empty vector cannot be a width, and accepting one would make the
+    first batch define the operation as zero wide."""
+    from scone_memory.ingestion.batch import _validated_vectors
+
+    with pytest.raises(ValueError):
+        _validated_vectors([[]], 1, 0)

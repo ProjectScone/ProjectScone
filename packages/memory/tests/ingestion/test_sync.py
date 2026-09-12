@@ -10,6 +10,7 @@ outright when the directory came back empty.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 
@@ -456,3 +457,30 @@ async def test_a_file_exactly_at_the_limit_is_not_reported_as_cut(tmp_path):
         assert done.cut == 0 and done.added == 1, done.record()
     finally:
         await engine.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
+async def test_a_named_pipe_is_never_opened(tmp_path):
+    """Opening a FIFO blocks until somebody writes to it, so a sync that
+    reads anything that is "not a directory" hangs forever on one, and a
+    hang is worse than a wrong number: nothing reports it and nothing
+    recovers.
+
+    The classification is asserted before anything is opened, so a
+    regression here fails immediately instead of hanging the suite.
+    """
+    from scone_memory.ingestion.sync import _files
+
+    tree(tmp_path, **{"real.md": "the real note"})
+    os.mkfifo(tmp_path / "stream.md")
+    reading, there, unreadable, links, special = _files(tmp_path, (".md",), 100)
+    assert [path.name for path in reading] == ["real.md"], reading
+    assert (there, special) == (1, 1), (there, special)
+
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True)
+    finally:
+        await engine.close()
+    assert done.files_found == 1 and done.added == 1, done.record()
+    assert done.special == 1 and "not ordinary files" in done.text(), done.text()
