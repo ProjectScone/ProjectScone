@@ -17,7 +17,7 @@ def body(run_id='one'):return {'run_id':run_id,'workflow_id':'report','plan_revi
 
 
 @pytest.fixture
-async def setup(tmp_path):
+async def setup(tmp_path, request):
     memory=await MemoryEngine(InMemoryDocumentStore(),InMemoryVectorIndex(),HashEmbedder()).open()
     release=asyncio.Event();entered=asyncio.Event();calls=[]
     class Model:
@@ -28,7 +28,7 @@ async def setup(tmp_path):
     plans=AgentPlanStore(tmp_path/'plans.db',key=b'k'*32)
     plans.save('alpha',AgentTaskPlan(workflow_id='report',tasks=(AgentTask(task_id='find',agent_id='research',prompt='Find evidence.'),)),catalog=catalog,expected_revision=0)
     service=AgentRunService(tmp_path/'runs',key=b'k'*32,catalog=catalog,plans=plans,memory=memory,
-        scope_for=lambda space:RecallScope.validated(),max_active=1)
+        scope_for=lambda space:RecallScope.validated(),max_active=1,max_parallel_tasks=getattr(request,'param',1))
     app=create_app(memory,{'writer':'alpha','reader':'alpha','other':'bravo'},roles={'writer':'write','reader':'read'},
         agent_catalog=catalog,agent_plan_store=plans,agent_run_service=service)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://scone.test') as client:
@@ -171,3 +171,32 @@ async def test_result_withholds_evidence_when_host_scope_narrows(tmp_path, monke
         await service.aclose()
         plans.close()
         await memory.close()
+
+
+@pytest.mark.parametrize('setup',[2],indirect=True)
+async def test_parallel_selection_is_bounded_and_bound_to_run(setup):
+    client,_,service,_,release,_,calls=setup
+    rejected=await client.post('/v1/agent-runs',json={**body(),'max_parallel':3},headers=auth())
+    assert rejected.status_code==422
+    assert await service.request('alpha','one') is None and not calls
+    policy=await client.get('/v1/agents/run-policy',headers=auth('reader'))
+    assert policy.status_code==200 and policy.json()=={'space':'alpha','max_parallel_tasks':2,'max_active_runs':1}
+    caps=(await client.get('/v1/capabilities',headers=auth())).json()['features'];assert caps['agents.parallel']
+    response=await client.post('/v1/agent-runs',json={**body(),'max_parallel':2},headers=auth())
+    assert response.status_code==202 and response.json()['max_parallel']==2
+    release.set();await service.wait('alpha','one')
+    snapshot=(await client.get('/v1/agent-runs/one/request',headers=auth())).json()
+    assert snapshot['max_parallel']==2 and (await service.request('alpha','one')).max_parallel==2
+    changed=await client.post('/v1/agent-runs',json=body(),headers=auth())
+    assert changed.status_code==409 and len(calls)==1
+    assert (await client.get('/v1/agent-runs/one/result',headers=auth())).status_code==200
+
+
+async def test_default_run_policy_is_sequential(setup):
+    client,_,service,_,_,_,calls=setup
+    policy=(await client.get('/v1/agents/run-policy',headers=auth())).json()
+    assert policy['max_parallel_tasks']==1
+    assert not (await client.get('/v1/capabilities',headers=auth())).json()['features']['agents.parallel']
+    rejected=await client.post('/v1/agent-runs',json={**body(),'max_parallel':2},headers=auth())
+    assert rejected.status_code==422 and not calls
+    assert await service.request('alpha','one') is None

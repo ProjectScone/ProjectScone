@@ -34,6 +34,8 @@ class AgentRunStatus:
     inflight: str | None
     outcome_unknown: bool
     error_class: str | None
+    max_parallel: int = 1
+    inflight_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,8 +55,10 @@ class AgentRunService:
     """
     def __init__(self, directory: str | Path, *, key: bytes, catalog: AgentCatalog,
                  plans: AgentPlanStore, memory: MemoryEngine, scope_for: Callable[[str], RecallScope],
-                 max_active: int = 4, max_runs: int = 4096, deadline_s: float = 120.0) -> None:
+                 max_active: int = 4, max_runs: int = 4096, deadline_s: float = 120.0, max_parallel_tasks: int = 1) -> None:
         _integer(max_active, 1, 32)
+        _integer(max_parallel_tasks, 1, 8)
+        self._parallel = max_parallel_tasks
         if not callable(scope_for):
             raise ValueError('host scope resolver required')
         if type(key) is not bytes or len(key) != 32:
@@ -75,6 +79,14 @@ class AgentRunService:
         self._failures: dict[tuple[str, str], str] = {}
         self._owners: dict[tuple[str, str], int] = {}
         self._closed = self._closing = False
+
+    @property
+    def max_parallel_tasks(self) -> int:
+        return self._parallel
+
+    async def policy(self, space: str) -> dict[str, str | int]:
+        await self._space(space)
+        return {'space': space, 'max_parallel_tasks': self._parallel, 'max_active_runs': self._maximum}
 
     def require_host(self, memory: MemoryEngine, plans: AgentPlanStore, catalog: AgentCatalog) -> None:
         if memory is not self._memory or plans is not self._plans or catalog is not self._catalog:
@@ -121,7 +133,7 @@ class AgentRunService:
             raise WorkflowError('run_scope_changed')
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
-            exclude_session_id=request.exclude_session_id, deadline_s=self._deadline)
+            exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel)
 
     def _progress(self, request: AgentRunRequest) -> WorkflowStatus | None:
         identity = (request.space, request.run_id)
@@ -149,7 +161,8 @@ class AgentRunService:
                     progress.status if progress else 'registered'), active_local=active,
             completed_steps=progress.completed_steps if progress else (),
             inflight=progress.inflight if progress else None, outcome_unknown=unknown and not active,
-            error_class=progress.error_class if progress else self._failures.get(identity))
+            error_class=progress.error_class if progress else self._failures.get(identity),
+            max_parallel=request.max_parallel, inflight_steps=progress.inflight_steps if progress else ())
 
     async def status(self, space: str, run_id: str) -> AgentRunStatus | None:
         await self._space(space)
@@ -167,7 +180,7 @@ class AgentRunService:
                 items.append(AgentRunStatus(run_id=request.run_id, space=request.space,
                     created_at=request.created_at.isoformat(), workflow_id=request.plan.plan.workflow_id,
                     plan_revision=request.plan.revision, status='unavailable', active_local=False,
-                    completed_steps=(), inflight=None, outcome_unknown=True, error_class=error.code))
+                    completed_steps=(), inflight=None, outcome_unknown=True, error_class=error.code, max_parallel=request.max_parallel))
         return AgentRunStatusPage(tuple(items), page.next_after)
 
     async def request(self, space: str, run_id: str) -> AgentRunRequest | None:
@@ -175,7 +188,7 @@ class AgentRunService:
         return self._runs.get(space, run_id)
 
     async def start(self, space: str, run_id: str, *, workflow_id: str,
-                    plan_revision: int, question: str,
+                    plan_revision: int, question: str, max_parallel: int = 1,
                     admission_guard: Callable[[], None] | None = None) -> AgentRunStatus:
         await self._space(space)
         if admission_guard is not None:
@@ -184,11 +197,12 @@ class AgentRunService:
         _name(run_id)
         _name(workflow_id)
         _integer(plan_revision, 1, 2**63 - 1)
+        _integer(max_parallel, 1, self._parallel)
         identity = (space, run_id)
         prior = self._runs.get(space, run_id)
         if prior is not None:
             if (prior.plan.plan.workflow_id != workflow_id or prior.plan.revision != plan_revision
-                    or prior.question != question or prior.scope != self._scope(space).as_dict()):
+                    or prior.question != question or prior.max_parallel != max_parallel or prior.scope != self._scope(space).as_dict()):
                 raise RunConflict()
             prior.plan.checked_plan(self._catalog)
             current = self._status(prior)
@@ -209,7 +223,7 @@ class AgentRunService:
             if saved.revision != plan_revision:
                 raise PlanConflict()
             saved.checked_plan(self._catalog)
-            prior = self._runs.register(space, run_id, plan=saved, question=question, scope=self._scope(space))
+            prior = self._runs.register(space, run_id, plan=saved, question=question, scope=self._scope(space), max_parallel=max_parallel)
         descriptor = self._claim(prior)
         workflow = None
         try:

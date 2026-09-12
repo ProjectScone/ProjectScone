@@ -33,6 +33,7 @@ class AgentRunRequest(BaseModel):
     run_id: Identifier
     plan: SavedAgentPlan
     question: str = Field(min_length=1, max_length=4000)
+    max_parallel: int = Field(default=1, ge=1, le=8)
     scope: dict[str, object]
     exclude_session_id: Identifier | None = None
     created_at: datetime
@@ -61,6 +62,11 @@ class AgentRunRequest(BaseModel):
 class AgentRunPage:
     items: tuple[AgentRunRequest, ...]
     next_after: str | None
+
+
+def _request_bytes(request: AgentRunRequest) -> bytes:
+    # Preserve the sequential record shape for existing local readers.
+    return request.model_dump_json(exclude={'max_parallel'} if request.max_parallel == 1 else set()).encode()
 
 
 class AgentRunStore:
@@ -102,15 +108,15 @@ class AgentRunStore:
             return None if row is None else self._decode(token, row[0], space)
 
     def register(self, space: str, run_id: str, *, plan: SavedAgentPlan, question: str,
-                 scope: RecallScope, exclude_session_id: str | None = None) -> AgentRunRequest:
+                 scope: RecallScope, exclude_session_id: str | None = None, max_parallel: int = 1) -> AgentRunRequest:
         token = self._token(space, run_id)
         if not isinstance(scope, RecallScope):
             raise ValueError('validated recall scope required')
         saved = AgentRunRequest(space=space, run_id=run_id,
-            plan=SavedAgentPlan.model_validate(plan.model_dump()), question=question,
+            plan=SavedAgentPlan.model_validate(plan.model_dump()), question=question, max_parallel=max_parallel,
             scope=RecallScope.validated(**scope.kwargs()).as_dict(), exclude_session_id=exclude_session_id,
             created_at=datetime.now(timezone.utc))
-        payload = self._storage._seal(token, saved.model_dump_json().encode())
+        payload = self._storage._seal(token, _request_bytes(saved))
         with self._storage._access(write=True) as db:
             row = db.execute('SELECT payload FROM agent_runs WHERE token=?', (token,)).fetchone()
             if row is not None:
@@ -136,7 +142,7 @@ class AgentRunStore:
             request = AgentRunRequest.model_validate({**request.model_dump(),
                 'cancel_requested_at': datetime.now(timezone.utc)})
             db.execute('UPDATE agent_runs SET payload=? WHERE token=?',
-                       (self._storage._seal(token, request.model_dump_json().encode()), token))
+                       (self._storage._seal(token, _request_bytes(request)), token))
             return request
 
     def list(self, space: str, *, limit: int = 50, after: str | None = None) -> AgentRunPage:

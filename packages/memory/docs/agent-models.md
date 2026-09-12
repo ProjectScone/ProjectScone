@@ -253,11 +253,11 @@ from scone_memory.agents.run_service import AgentRunService
 
 service = AgentRunService("agent-run-data", key=key, catalog=agents,
     plans=store, memory=memory, scope_for=lambda space: RecallScope.validated(
-        where={"project": "approved-project"}), max_active=4)
+        where={"project": "approved-project"}), max_active=4, max_parallel_tasks=2)
 try:
     admitted = await service.start("team-space", "request-1",
         workflow_id="research-report", plan_revision=stored.revision,
-        question="What should our team do next?")
+        question="What should our team do next?", max_parallel=2)
     progress = await service.wait("team-space", "request-1")
     answer = await service.result("team-space", "request-1")
 finally:
@@ -294,7 +294,7 @@ closes its owned tasks during lifespan shutdown; the caller still owns the engin
 and plan store.
 
 - `POST /v1/agent-runs` accepts `run_id`, `workflow_id`, `plan_revision` and
-  `question`, returning 202 after bounded admission. It requires a write key.
+  `question` and optional `max_parallel` (default 1), returning 202 after bounded admission. It requires a write key.
 - `GET /v1/agent-runs?limit=20&after=...` lists space-scoped progress; individual
   status is at `/v1/agent-runs/{run_id}`.
 - `GET /v1/agent-runs/{run_id}/request` returns the original invocation snapshot.
@@ -343,8 +343,17 @@ Native `WorkflowStatus.inflight_steps` reports every recorded in-flight step;
 `inflight` remains the first for existing consumers. Progress lists retain
 plan order regardless of completion order. Generic `WorkflowRunner` also accepts
 an explicit complete `dependencies` map and `max_parallel`; retryable steps are
-rejected in this scheduling mode. Served runs currently retain their sequential
-host policy; dynamic handoffs and served scheduling configuration remain open.
+rejected in this scheduling mode. For served runs, configure `AgentRunService(max_parallel_tasks=2)` as the host
+ceiling and select `max_parallel` when starting a run. The default ceiling and
+request width are 1. Values above the ceiling are rejected before registration;
+excess whole-run admission is still bounded by `max_active`. Thus the configured
+upper bound on simultaneous task callbacks is their product, at most 32 × 8.
+`GET /v1/agents/run-policy` reports these limits within the authenticated space.
+`agents.parallel` is advertised only when the ceiling exceeds 1. The original
+run request retains its chosen width; changing it under an existing run ID
+conflicts. Sequential records retain their previous encrypted payload shape so
+older local readers can still inspect them. New parallel records require a reader
+that supports scheduling. Dynamic handoffs remain separate work.
 
 ## Current boundary
 
@@ -355,7 +364,7 @@ Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
 Declared dependency handoffs and sequential recovery are implemented natively.
-Dynamic handoffs and served parallel scheduling configuration remain separate work.
+Dynamic model-selected handoffs remain separate work.
 Saved plan editing is available through the native store and
 authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.

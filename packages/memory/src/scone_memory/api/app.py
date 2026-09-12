@@ -374,6 +374,7 @@ def create_app(
             features["agents.plans"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.

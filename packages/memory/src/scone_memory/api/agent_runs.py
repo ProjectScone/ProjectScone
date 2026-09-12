@@ -22,6 +22,7 @@ class _StartRun(BaseModel):
     workflow_id: Identifier
     plan_revision: int = Field(ge=1, le=2**63 - 1)
     question: str = Field(min_length=1, max_length=4000)
+    max_parallel: int = Field(default=1, ge=1, le=8)
 
     @model_validator(mode='after')
     def valid(self) -> Self:
@@ -71,6 +72,15 @@ def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
                            space_for: Callable[..., Awaitable[str]],
                            assert_current_space: Callable[[Request, str], None]) -> None:
     """Host dependencies enforce authentication, roles and unchanged key scope."""
+    @app.get('/v1/agents/run-policy')
+    async def policy(request: Request, space: str = Depends(space_for)) -> JSONResponse:
+        try:
+            result = await service.policy(space)
+            assert_current_space(request, space)
+            return _response(result)
+        except (WorkflowError, ValueError) as error:
+            return _failure(error)
+
     @app.post('/v1/agent-runs')
     async def start(request: Request, space: str = Depends(space_for)) -> JSONResponse:
         try:
@@ -79,7 +89,7 @@ def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
             if current != space:
                 assert_current_space(request, space)
             result = await service.start(space, body.run_id, workflow_id=body.workflow_id,
-                plan_revision=body.plan_revision, question=body.question,
+                plan_revision=body.plan_revision, question=body.question, max_parallel=body.max_parallel,
                 admission_guard=lambda: assert_current_space(request, space))
             assert_current_space(request, space)
             return _response(asdict(result), 202)
