@@ -72,6 +72,7 @@
       "entities.duplicates": true,
       "answers.temporal": true,
       "answers.routed": true,
+      "recall.parts": true,
       "graph.health": true,
       "recall.graph_boost": true,
       "graph.knowledge_paging": true,

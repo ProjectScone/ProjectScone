@@ -486,3 +486,45 @@ def test_bench_route_reports_as_json_when_asked(tmp_path):
                     env={}, stdin=io.StringIO(""), out=out)
     assert code == 0, out.getvalue()
     assert json.loads(out.getvalue())["questions"] == 1
+
+
+async def test_recall_parts_gives_every_part_of_a_question_a_turn():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.remember("default", "We reverted the billing change after the invoices came out wrong.")
+    await memory.remember("default", "At the Thursday meeting were Priya, Tomas and the auditor.")
+    out = io.StringIO()
+    asked = ["recall", "What did I decide about billing, and who was at the meeting?", "--parts", "--limit", "2"]
+    code = await run(build_parser().parse_args(asked), memory, io.StringIO(""), out)
+    shown = out.getvalue()
+    assert code == 0, shown
+    assert "[What did I decide about billing]" in shown and "[who was at the meeting?]" in shown, shown
+    assert "not evidence" in shown, "a search with no floor must not read as an answered question"
+
+
+async def test_recall_without_parts_is_unchanged():
+    """The flag is opt-in: it was measured to change nothing on LongMemEval,
+    so it does not become the default search."""
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await memory.remember("default", "We reverted the billing change.")
+    out = io.StringIO()
+    asked = ["recall", "What did I decide about billing, and who was at the meeting?", "--limit", "2"]
+    code = await run(build_parser().parse_args(asked), memory, io.StringIO(""), out)
+    assert code == 0 and "[" not in out.getvalue(), out.getvalue()
+
+
+def test_bench_parts_compares_both_ways_on_the_questions_that_split(tmp_path):
+    from tests.benchmarks.test_bench_parts import SPLIT, WHOLE
+
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps([SPLIT, WHOLE]), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench-parts", str(path), "--k", "2"], env={}, stdin=io.StringIO(""), out=out)
+    assert code == 0, out.getvalue()
+    assert "1 of 2 question(s)" in out.getvalue(), out.getvalue()
+
+
+def test_bench_parts_refuses_a_k_it_cannot_search(tmp_path):
+    path = tmp_path / "items.json"
+    path.write_text("[]", encoding="utf-8")
+    out = io.StringIO()
+    assert cli.main(["bench-parts", str(path), "--k", "0"], env={}, stdin=io.StringIO(""), out=out) == 2

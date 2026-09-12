@@ -369,7 +369,7 @@ def create_app(
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if conversations:
@@ -616,6 +616,39 @@ def create_app(
         from ..retrieval.router import answer_question
 
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route)).record(space)
+
+    @app.get("/v1/recall/parts")
+    async def get_recall_parts(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        limit: int = Query(default=5, ge=1, le=50),
+        as_of: Optional[str] = None,
+        tags: Optional[str] = None,
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        rerank: bool = True,
+        graph_boost: bool = False,
+        space: str = Depends(space_for),
+    ) -> dict:
+        """A multi-part question searched a part at a time, so the part whose
+        words are commoner in the corpus cannot take every slot.
+
+        This was measured against the single query on LongMemEval and changed
+        nothing there (13 of 500 questions split; identical evidence on those
+        13 at k=5 and k=10), so it is a separate route rather than the default
+        search. What it adds over one query is the receipt: which part placed
+        each passage, which parts found nothing, and — when no similarity
+        floor is configured — that finding passages is not evidence a part was
+        answered."""
+        from ..retrieval.parts import recall_parts
+
+        parted = await recall_parts(
+            engine, space, q, limit=limit, as_of=as_of,
+            tags=[t for t in (tags or "").split(",") if t.strip()], kind=kind,
+            source_prefix=source_prefix, since=since, until=until, rerank=rerank,
+            graph_boost=graph_boost)
+        return parted.record()
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(

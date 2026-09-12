@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
+    p.add_argument("--parts", action="store_true",
+                   help="search each part of a multi-part question and give every part a turn "
+                        "(measured to change nothing on LongMemEval; off by default)")
 
     p = sub.add_parser("attachments", help="list an episode's original attachment metadata (no download)")
     p.add_argument("episode_id", type=int)
@@ -299,6 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="score computed temporal answers on a file of dated questions (no model called)")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
+
+    p = sub.add_parser("bench-parts",
+                       help="measure what splitting multi-part questions changes, paired (no model called)")
+    p.add_argument("dataset", help="a LongMemEval-shaped JSON file")
+    p.add_argument("--limit", type=int, help="only the first N questions")
+    p.add_argument("--k", type=int, default=10, help="passages compared per question")
 
     p = sub.add_parser("bench-route",
                        help="score the rule that chooses a route, on a file of questions (no model called)")
@@ -498,6 +507,18 @@ async def temporal_command(args: argparse.Namespace, settings: Settings, out) ->
     from ..bench.temporal import run_temporal
 
     scored = await run_temporal(args.dataset, limit=args.limit)
+    print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def parts_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Ask every multi-part question both ways on its own memory. Nothing is
+    written anywhere, and the report says when the rule split nothing."""
+    from ..bench.parts import run_parts_bench
+
+    if not 1 <= args.k <= 100:
+        raise InvalidInput(f"--k must be from 1 to 100, not {args.k}")
+    scored = await run_parts_bench(args.dataset, limit=args.limit, k=args.k)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
     return 0
 
@@ -1149,6 +1170,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
+        if args.parts:
+            from ..retrieval.parts import recall_parts
+
+            parted = await recall_parts(
+                engine, space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag,
+                where=parse_pairs(args.where, "--where"), kind=args.kind,
+                source_prefix=args.source_prefix, since=args.since, until=args.until,
+                rerank=not args.no_rerank, graph_boost=args.graph_boost)
+            if args.json:
+                emit(parted.record())
+                return 0
+            print(parted.text(), file=out)
+            for lane in {lane for part in parted.per_part for lane in part.degraded}:
+                print(f"degraded: {lane}", file=sys.stderr)
+            return 0
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
@@ -1523,11 +1559,11 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "calibrate", "tune"):
+                        "bench-parts", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
-                   "bench-route": route_command, "calibrate": calibrate_command,
-                   "tune": tune_command}[args.command]
+                   "bench-route": route_command, "bench-parts": parts_command,
+                   "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:

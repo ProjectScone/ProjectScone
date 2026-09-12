@@ -207,6 +207,82 @@ That needs a known answer for every question under every route, which
 these files do not have. The report says so in its own output rather than
 reading as though the rule had been vindicated.
 
+## A question that asks two things, searched as two
+
+One query over "What did I decide about billing, and who was at the
+meeting?" returns one blend of passages, and the half whose words are
+commoner in the corpus tends to take every slot. The leading frameworks
+split such a question with a model writing sub-questions — a paid call
+per question, and nothing a person can read when it comes out wrong.
+Here the rule is written down and every decomposition says what it did:
+
+```bash
+scone recall "What did I decide about billing, and who was at the meeting?" --parts --limit 2
+# it asks 2 parts, searched on their own and merged so each has its turn; no
+# similarity floor is configured, so a part returning passages is not evidence
+# that part was answered
+# [What did I decide about billing] We reverted the billing change after ...
+# [who was at the meeting?] At the Thursday meeting were Priya, Tomas ...
+```
+
+`GET /v1/recall/parts` (capability `recall.parts`). Nothing is
+paraphrased: a part is a verbatim span of the question and carries its own
+offsets, so a receipt can quote exactly what was searched.
+
+### What it measured, which is nothing
+
+```bash
+scone bench-parts bench-data/longmemeval_s.json --k 10
+# parts: 13 of 500 question(s) ... split at k=10. On those: any-evidence 12
+# whole vs 12 parted; all-evidence 12 whole vs 12 parted (+0 question(s)).
+```
+
+**Splitting changed no retrieval on the one dataset available**, at k=5
+and k=10 alike. So it is an opt-in flag and a separate route, not the
+default search: it costs a search per part and buys no measured gain.
+This is the third retrieval idea measured and left off by default this
+week, and all three point the same way — with the hash embedder the
+lexical lane carries retrieval.
+
+What the number does **not** say is that the idea is worthless. The rule
+split 13 of 500 questions, and LongMemEval's questions are single-focus
+by construction: the benchmark cannot test a two-part question because it
+barely contains any. A corpus of genuinely multi-part questions would be
+needed to answer it, and arranging one by hand would measure the
+arrangement.
+
+What it does buy, measurement aside, is the receipt: which part placed
+each passage, which parts found nothing, and — when no floor is
+configured — the plain statement that finding passages is **not** evidence
+a part was answered. There is deliberately no single confidence number
+for a multi-part answer, because the floor was measured per query and one
+number over the lot would be a number a reader could mistake for a
+judgment about the whole question.
+
+### The rule, and why it is shy
+
+The risk is one-sided. A question wrongly left whole retrieves what it
+would have anyway; a question wrongly split is searched as two queries
+that mean nothing, and the answer is worse than before. So a `?` always
+ends a part, while a `;` or an "and" splits only on evidence:
+
+| The question | What happens | Why |
+| --- | --- | --- |
+| `How many engineers do I lead now? How many did I lead before?` | splits | two sentences, each its own question |
+| `What did I decide about billing, and who was at the meeting?` | splits | comma before "and", and the right side opens with "who" |
+| `Where do I work and where does my sister work?` | splits | the right side opens with its own interrogative |
+| `How many hours of jogging and yoga did I do last week?` | whole | no comma, no interrogative — "and" is joining a list |
+| `How many days passed between the day I cancelled ... and the day I did ...` | whole | "between … and …" *is* the question |
+| `... the 'To Adapt or Not to Adapt? Real-Time Adaptation' submission?` | whole | the `?` is inside a quoted title |
+
+The last three rows were not foreseen. An earlier version required only
+an asking word on each side, and on real LongMemEval questions it split
+"how many hours of jogging and yoga did I do last week" at the "and",
+because "did" satisfied the test; it also split a paper's title at the
+question mark inside it. Running the rule over 500 real questions found
+all three, which is the argument for a rule you can run over a corpus and
+read the output of.
+
 ## Questions about dates, answered by computation
 
 Much of what people ask memory is arithmetic over dates: how long between
