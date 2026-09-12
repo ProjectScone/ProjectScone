@@ -37,6 +37,7 @@ from .query import resolve
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..memory.engine import MemoryEngine
+    from .project import EntityProjection
 
 #: Relations where the subject rests on the object, so a change to the
 #: object reaches the subject. ``defines`` is deliberately absent: a file
@@ -50,10 +51,16 @@ MAX_HOPS = 8
 MAX_REACHED = 1_000
 #: Bytes one answer may reach.
 MAX_BYTES = 64_000
-#: Characters a name may be. A 20,000-character name echoed into `target`
-#: and `why` produced a 40,000-byte answer under a 512-byte budget: the
-#: same metadata-outside-the-budget fault the context receipts had.
+#: **Bytes** a name may cost, not characters. A 20,000-character name
+#: echoed into `target` and `why` produced a 40,000-byte answer under a
+#: 512-byte budget: the same metadata-outside-the-budget fault the
+#: context receipts had. Counting characters did not close it -- 200
+#: emoji are 200 characters, 800 UTF-8 bytes and 2,400 once JSON escapes
+#: them, so the bound has to be in the unit the answer is paid in.
 MAX_NAME = 200
+#: Reads allowed while the ledger moves under the walk. The same fence,
+#: and the same count, that `memory/catalog.py` uses for a profile.
+ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,16 @@ class Blast:
     #: Whether the read behind this answer was itself truncated. An
     #: answer of "nothing" from an incomplete read is not an answer.
     partial_read: bool = False
+    #: Whether the ledger moved under every read, so the graph walked
+    #: here was never the graph at any single moment.
+    graph_moved: bool = False
+    #: Whether the byte budget was spent on the answer's own framing
+    #: before a single dependant could be listed.
+    framing_spent_budget: bool = False
+    #: What that framing cost. A budget charged invisibly is a budget the
+    #: caller cannot reason about: this is the number subtracted from
+    #: ``max_bytes`` before the first dependant was measured.
+    framing_bytes: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
@@ -101,8 +118,49 @@ class Blast:
                 "mode": self.mode, "at": self.at, "partial_read": self.partial_read,
                 "by_depth": {str(k): v for k, v in sorted(self.by_depth.items())},
                 "deepest": self.deepest, "stopped_at_depth": self.stopped_at_depth,
-                "not_listed": self.not_listed, "why": self.why,
+                "not_listed": self.not_listed, "graph_moved": self.graph_moved,
+                "framing_spent_budget": self.framing_spent_budget,
+                "framing_bytes": self.framing_bytes, "why": self.why,
                 "entities": [[r.label, r.depth, r.through, r.depends_on] for r in self.reached]}
+
+
+def _why(label: str, said: str, listed: int, not_listed: int, more_beyond: bool,
+         max_hops: int, limit: int, max_bytes: int) -> str:
+    """The answer's own prose, built in one place because it is charged
+    against the caller's budget before it is written into the answer. An
+    estimate here would drift from the sentence it estimates; the charge
+    is this function called with its widest arguments."""
+    why = (f"{listed} thing(s) rest on {label!r}, nearest first, through "
+           f"{', '.join(DEPENDS_ON)}")
+    if more_beyond:
+        why += (f"; the walk stopped at {max_hops} hop(s) with more to follow, so what lies "
+                f"beyond is unexplored rather than absent")
+    if not_listed:
+        why += (f"; {not_listed} more were reached and not listed, because the limit of {limit} "
+                f"or the budget of {max_bytes} byte(s) was spent -- they are counted in by_depth")
+    return why + (f"; {said}; this is what this graph holds, which is the code it was given "
+                  f"and not the whole of any codebase")
+
+
+async def _read_graph(engine: "MemoryEngine", space: str, mode: StatusMode,
+                      moment: datetime) -> tuple["EntityProjection", dict[str, object], bool]:
+    """The projection, what its read covered, and whether the ledger held
+    still while it was taken.
+
+    ``_living`` fences the space and nothing fenced the facts, so a
+    dependency excluded the instant after the snapshot was still reported
+    as current -- an answer stamped with a moment it was no longer true
+    at. The projection carries the revision it was built from, so the
+    fence is exact rather than a window around the call.
+    """
+    for _ in range(ATTEMPTS - 1):
+        projection, covered = await engine.entities.projection(space, mode=mode, when=moment)
+        if await engine.documents.revision(space) == projection.revision:
+            return projection, covered, False
+    # The last read is taken whatever happens, so there is always an
+    # answer; only whether it settled is still in question.
+    projection, covered = await engine.entities.projection(space, mode=mode, when=moment)
+    return projection, covered, (await engine.documents.revision(space)) != projection.revision
 
 
 def _whole(value: object, name: str, top: int) -> int:
@@ -130,12 +188,14 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     _whole(max_bytes, "max_bytes", MAX_BYTES)
     if not isinstance(name, str) or not name.strip():
         raise InvalidInput("name the symbol, file or module to start from")
-    if len(name) > MAX_NAME:
-        raise InvalidInput(f"a name is at most {MAX_NAME} characters, not {len(name)} -- a name "
-                           f"is echoed in the answer, so an unbounded one is an unbounded answer")
+    cost = len(name.encode())
+    if cost > MAX_NAME:
+        raise InvalidInput(f"a name is at most {MAX_NAME} bytes, not {cost} -- a name is echoed "
+                           f"in the answer, so an unbounded one is an unbounded answer, and "
+                           f"characters are not the unit an answer is paid in")
 
     moment = when or datetime.now(timezone.utc)
-    projection, covered = await engine.entities.projection(space, mode=mode, when=moment)
+    projection, covered, moved = await _read_graph(engine, space, mode, moment)
     read = str(covered.get("facts_read", ""))
     seen, allowed = covered.get("facts_read"), covered.get("facts_limit")
     limit_hit = bool(covered.get("reasons")) or (
@@ -145,6 +205,9 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
         said += (f"; the read behind this answer was itself truncated at {read} fact(s), so what "
                  f"is missing here may be missing from the graph it walked rather than from the "
                  f"codebase")
+    if moved:
+        said += (f"; the ledger moved under all {ATTEMPTS} reads, so this walk crossed facts from "
+                 f"either side of a write and was never the graph at any one moment")
     # The rule merging and windowing follow and this did not: a source
     # confirmed gone is dropped, never served. A projection is a snapshot
     # taken before this line, so a space deleted while it was being read
@@ -153,14 +216,14 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
 
     found = resolve(projection, name.strip())
     if found.status == "not_found" or not found.candidates:
-        return Blast(target=name, status="unknown",
+        return Blast(target=name, status="unknown", graph_moved=moved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} is not in this graph ({said}) -- which is not a finding that "
                          f"nothing depends on it, only that this memory has not been given it")
     if found.status == "ambiguous":
         # The resolver's own verdict, not a score comparison of my own
         # invention: it knows what "ambiguous" means here and I do not.
-        return Blast(target=name, status="ambiguous",
+        return Blast(target=name, status="ambiguous", graph_moved=moved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} names more than one thing in this graph "
                          f"({', '.join(one.label for one in found.candidates[:4])}); "
@@ -174,6 +237,18 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     for relation in projection.relations:
         if relation.predicate in DEPENDS_ON and relation.subject_id != relation.object_id:
             rests_on[relation.object_id].append((relation.subject_id, relation.predicate))
+
+    # `target` and `why` are in the answer too, and `max_bytes` bounded
+    # neither -- so a 512-byte budget returned five kilobytes and the
+    # bound read as a fact. Charge the framing first, at its widest, so
+    # what the walk may list is what the budget has left rather than the
+    # whole of it. Widest, because the prose grows with the clauses the
+    # walk turns out to need and the charge is made before the walk.
+    shown = label.get(target, name)
+    framing = len(shown.encode()) + len(
+        _why(shown, said, limit, limit, True, max_hops, limit, max_bytes).encode())
+    room = max_bytes - framing
+    framing_spent = room <= 0
 
     seen = {target}
     counted: dict[int, int] = {}
@@ -201,30 +276,27 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
             one = Reached(entity_id=dependant, label=label.get(dependant, dependant),
                           depth=step, through=predicate, depends_on=label.get(node, node))
             size = len(one.label.encode()) + len(one.depends_on.encode()) + len(predicate)
-            if len(listed) >= limit or spent + size > max_bytes:
+            if len(listed) >= limit or spent + size > room:
                 not_listed += 1
             else:
                 listed.append(one)
                 spent += size
             queue.append((dependant, step))
     if not listed and not not_listed:
-        return Blast(target=label.get(target, name), status="nothing", by_depth=counted,
+        return Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved,
+                     framing_bytes=framing,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
-                     why=f"nothing in this graph rests on {label.get(target, name)!r} through "
+                     why=f"nothing in this graph rests on {shown!r} through "
                          f"{', '.join(DEPENDS_ON)} ({said}) -- a memory holds the code it was "
                          f"given, so this is not a finding that nothing depends on it")
 
-    why = (f"{len(listed)} thing(s) rest on {label.get(target, name)!r}, nearest first, through "
-           f"{', '.join(DEPENDS_ON)}")
-    if more_beyond:
-        why += (f"; the walk stopped at {max_hops} hop(s) with more to follow, so what lies "
-                f"beyond is unexplored rather than absent")
-    if not_listed:
-        why += (f"; {not_listed} more were reached and not listed, because the limit of {limit} "
-                f"or the budget of {max_bytes} byte(s) was spent -- they are counted in by_depth")
-    why += (f"; {said}; this is what this graph holds, which is the code it was given and not "
-            f"the whole of any codebase")
-    return Blast(target=label.get(target, name), status="found", reached=tuple(listed),
+    why = _why(shown, said, len(listed), not_listed, more_beyond, max_hops, limit, max_bytes)
+    if framing_spent:
+        why += (f"; nothing could be listed at all: the answer's own framing costs {framing} "
+                f"byte(s) and the budget was {max_bytes}, so the budget was spent before the "
+                f"first dependant -- by_depth is the whole shape of what was reached")
+    return Blast(target=shown, status="found", reached=tuple(listed),
                  by_depth=counted, deepest=deepest, stopped_at_depth=more_beyond,
                  not_listed=not_listed, mode=mode, at=moment.isoformat(),
-                 partial_read=limit_hit, why=why)
+                 partial_read=limit_hit, graph_moved=moved,
+                 framing_spent_budget=framing_spent, framing_bytes=framing, why=why)
