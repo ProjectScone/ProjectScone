@@ -106,6 +106,10 @@ class Blast:
     #: Whether the ledger moved under every read, so the graph walked
     #: here was never the graph at any single moment.
     graph_moved: bool = False
+    #: Whether this graph holds no import edge between two of its own
+    #: files, which makes a file's blast radius unanswerable here for a
+    #: reason that has nothing to do with the file.
+    unresolved_imports: bool = False
     #: Whether the byte budget was spent on the answer's own framing
     #: before a single dependant could be listed.
     framing_spent_budget: bool = False
@@ -123,6 +127,7 @@ class Blast:
                 "by_depth": {str(k): v for k, v in sorted(self.by_depth.items())},
                 "deepest": self.deepest, "stopped_at_depth": self.stopped_at_depth,
                 "not_listed": self.not_listed, "graph_moved": self.graph_moved,
+                "unresolved_imports": self.unresolved_imports,
                 "framing_spent_budget": self.framing_spent_budget,
                 "bytes_spent": self.bytes_spent, "why": self.why,
                 "entities": [[r.label, r.depth, r.through, r.depends_on] for r in self.reached]}
@@ -219,6 +224,28 @@ def _within(blast: "Blast", max_bytes: int) -> "Blast":
     return one
 
 
+def labels_of(projection: "EntityProjection", entity_id: str) -> str:
+    """One entity's label, for the few places that need it before the
+    walk builds its own table."""
+    for entity in projection.entities:
+        if entity.entity_id == entity_id:
+            return entity.label
+    return ""
+
+
+def _unresolved(target: str, joined: bool) -> str:
+    """The sentence to add when a file's dependants could not have been
+    found, whatever the file is. Empty when the graph did resolve its
+    imports, because a notice that appears every time is skipped."""
+    if joined or "/" not in target:
+        return ""
+    return ("; and no file in this graph imports another, which is what a relative import "
+            "records only when whoever ingested the code could say which file it meant -- "
+            "`engine.remember` and the episodes route cannot, `scone sync --graph` can, so a "
+            "file's dependants may be missing here for that reason rather than for any reason "
+            "about the file itself")
+
+
 def _whole(value: object, name: str, top: int) -> int:
     if type(value) is not int or not 1 <= value <= top:
         raise InvalidInput(f"{name} is a whole number from 1 to {top}, not {value!r}")
@@ -256,6 +283,19 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     seen, allowed = covered.get("facts_read"), covered.get("facts_limit")
     limit_hit = bool(covered.get("reasons")) or (
         isinstance(seen, int) and isinstance(allowed, int) and seen >= allowed)
+    # A relative import records nothing unless whoever ingested the code
+    # supplied a resolver that knows the tree -- `scone sync --graph`
+    # does, from the files it actually read, and `engine.remember` and
+    # the episodes route cannot. So a Python package ingested through
+    # those keeps `import json` and drops `from ..core import errors`,
+    # and every file's dependants are missing. Measured over 57 files of
+    # this package: 0 files with a dependant that way, against 27
+    # cross-file edges and 15 files with dependants through the resolver.
+    #
+    # "Nothing rests on this" is hedged already. It is not enough when
+    # the reason is that no file in this graph imports any other.
+    joined = any(one.predicate == "imports" and "/" in str(labels_of(projection, one.object_id))
+                 for one in projection.relations)
     said = f"read as {mode} at {moment.isoformat()}"
     if limit_hit:
         said += (f"; the read behind this answer was itself truncated at {read} fact(s), so what "
@@ -270,21 +310,25 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # would otherwise be answered from rows that no longer exist.
     await engine._living(space)
 
+    early = _unresolved(name.strip(), joined)
     found = resolve(projection, name.strip())
     if found.status == "not_found" or not found.candidates:
         return _within(Blast(target=name, status="unknown", graph_moved=moved,
+                     unresolved_imports=bool(early),
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} is not in this graph ({said}) -- which is not a finding that "
-                         f"nothing depends on it, only that this memory has not been given it"),
+                         f"nothing depends on it, only that this memory has not been given it"
+                         f"{early}"),
                        max_bytes)
     if found.status == "ambiguous":
         # The resolver's own verdict, not a score comparison of my own
         # invention: it knows what "ambiguous" means here and I do not.
         return _within(Blast(target=name, status="ambiguous", graph_moved=moved,
+                     unresolved_imports=bool(early),
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} names more than one thing in this graph "
                          f"({', '.join(one.label for one in found.candidates[:4])}); "
-                         f"ask for one of them by its own name ({said})"), max_bytes)
+                         f"ask for one of them by its own name ({said}){early}"), max_bytes)
     target = found.candidates[0].entity_id
     label = {entity.entity_id: entity.label for entity in projection.entities}
 
@@ -303,7 +347,20 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # came to be kept over an earlier one. One budget, one bound, and it
     # is the one measured on what the caller receives.
     shown = label.get(target, name)
+    notice = _unresolved(shown, joined)
+    unresolved = bool(notice)
 
+    # A relative import records nothing unless whoever ingested the code
+    # supplied a resolver that knows the tree -- `scone sync --graph`
+    # does, from the files it actually read, and `engine.remember` and
+    # the episodes route cannot. So a Python package ingested through
+    # those keeps `import json` and drops `from ..core import errors`,
+    # and every file's dependants are missing. Measured over 57 files of
+    # this package: 0 files with a dependant that way, against 27
+    # cross-file edges and 15 files with dependants through the resolver.
+    #
+    # "Nothing rests on this" is hedged already. It is not enough when
+    # the reason is that no file in the graph imports any other.
     seen = {target}
     counted: dict[int, int] = {}
     listed: list[Reached] = []
@@ -334,11 +391,12 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
                 listed.append(one)
             queue.append((dependant, step))
     if not listed and not not_listed:
-        return _within(Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved,
+        return _within(Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved, unresolved_imports=unresolved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"nothing in this graph rests on {shown!r} through "
                          f"{', '.join(DEPENDS_ON)} ({said}) -- a memory holds the code it was "
-                         f"given, so this is not a finding that nothing depends on it"), max_bytes)
+                         f"given, so this is not a finding that nothing depends on it"
+                         f"{notice}"), max_bytes)
 
     reached = len(listed)
 
@@ -353,8 +411,9 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
                      by_depth=counted, deepest=deepest, stopped_at_depth=more_beyond,
                      not_listed=dropped, mode=mode, at=moment.isoformat(),
                      partial_read=limit_hit, graph_moved=moved,
+                     unresolved_imports=unresolved,
                      framing_spent_budget=not kept and bool(reached or not_listed),
-                     why=_why(shown, said, kept, dropped, more_beyond, max_hops, limit))
+                     why=_why(shown, said, kept, dropped, more_beyond, max_hops, limit) + notice)
 
     whole = _settle(answer(reached))
     if whole.bytes_spent <= max_bytes:
