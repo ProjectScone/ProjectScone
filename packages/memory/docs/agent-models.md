@@ -309,6 +309,43 @@ stale plans, changed scope/configuration and uncertain outcomes return 409.
 After a lost start response, inspect the original run ID before deciding to
 submit again. Never automatically replay an interrupted model call.
 
+## Run independent branches concurrently
+
+Pass `max_parallel=2` (up to 8) to `AgentWorkflow` to execute ready independent
+branches together. The default remains 1 and retains existing sequential journal
+bindings. A task starts only after every declared dependency has a saved result;
+its model receives only those declared outputs. The concurrency/dependency
+schedule is part of the journal binding, so changing it refuses old run reuse.
+
+```python
+workflow = AgentWorkflow("parallel-report.sqlite", key=key, catalog=agents,
+    plan=plan, memory=memory, space="team-space", scope=RecallScope.validated(),
+    max_parallel=2)
+try:
+    result = await workflow.run("report-1", "Compare the evidence.")
+finally:
+    workflow.close()
+```
+
+One scheduler writes run state while worker callbacks execute concurrently.
+Successful branches are committed independently, including results already
+finished when a sibling fails or verification becomes temporarily unavailable.
+Before any recovery admission, unresolved prior attempts refuse replay. An
+interrupted model call is not evidence that nothing happened externally.
+
+Cancellation, deadline, storage failure and invalid outputs stop admissions and
+wait for every owned worker before releasing journal ownership. Cancellation is
+cooperative. Confirmed source invalidation discards receipts and revokes active
+checkpoint leases; worker cleanup cannot recreate invalid-source checkpoints.
+Each step has its own lease and shared aggregate checkpoint budget.
+
+Native `WorkflowStatus.inflight_steps` reports every recorded in-flight step;
+`inflight` remains the first for existing consumers. Progress lists retain
+plan order regardless of completion order. Generic `WorkflowRunner` also accepts
+an explicit complete `dependencies` map and `max_parallel`; retryable steps are
+rejected in this scheduling mode. Served runs currently retain their sequential
+host policy; dynamic handoffs and served scheduling configuration remain open.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.
@@ -318,7 +355,7 @@ Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
 Declared dependency handoffs and sequential recovery are implemented natively.
-Parallel workflow scheduling and dynamic handoffs remain separate work.
+Dynamic handoffs and served parallel scheduling configuration remain separate work.
 Saved plan editing is available through the native store and
 authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.

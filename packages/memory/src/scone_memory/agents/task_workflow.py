@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .catalog import AgentCatalog, BoundAgent, Identifier
 from .tool_evidence import prepare_tool_evidence
-from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep
+from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, _integer
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine
 from ..retrieval.recall_scope import RecallScope
@@ -91,7 +91,8 @@ def _json(value: object) -> str:
 class AgentWorkflow:
     """A caller-owned encrypted workflow with fixed models and declared inputs.
 
-    Execution is sequential in stable dependency order. Completed model results
+    Execution defaults to stable sequential order; max_parallel enables bounded
+    ready branches and dependency joins. Completed model results
     can be reused only with the same plan, model configuration, input and scope,
     and after their actual retained evidence is revalidated. Uncertain model
     calls are never automatically retried. This is not distributed execution.
@@ -99,8 +100,9 @@ class AgentWorkflow:
     def __init__(self, path: str | Path, *, key: bytes, catalog: AgentCatalog, plan: AgentTaskPlan,
                  memory: MemoryEngine, space: str, scope: RecallScope,
                  exclude_session_id: str | None = None, deadline_s: float = 120.0,
-                 max_payload_bytes: int = 1000000) -> None:
+                 max_payload_bytes: int = 1000000, max_parallel: int = 1) -> None:
         check_space(space)
+        _integer(max_parallel, 1, 8)
         if not isinstance(plan, AgentTaskPlan) or not isinstance(scope, RecallScope):
             raise ValueError('validated agent plan and recall scope required')
         plan = AgentTaskPlan.model_validate(plan.model_dump())
@@ -117,6 +119,7 @@ class AgentWorkflow:
             'plan': signature, 'recall': self._scope.as_dict(), 'exclude_session_id': exclude_session_id})))
         self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
             deadline=deadline_s, max_payload_bytes=max_payload_bytes, verify_before_step=True,
+            max_parallel=max_parallel, dependencies={task.task_id: task.depends_on for task in self._tasks.values()} if max_parallel > 1 else None,
             steps=[WorkflowStep(task.task_id, signature, self._step(task, self._agents[task.task_id]))
                    for task in self._tasks.values()])
 
