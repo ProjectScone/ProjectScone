@@ -31,6 +31,7 @@ from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, SconeError
 from ..retrieval.filters import read_conditions
+from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -279,6 +280,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("bench-code",
+                       help="measure what recall does with code, on a corpus of source files (no model called)")
+    p.add_argument("root", help="a directory of source files, e.g. src/scone_memory")
+    p.add_argument("--k", type=int, default=5, help="recall limit and the k of the numbers (default 5)")
+    p.add_argument("--limit", type=int, help="only the first N questions")
+    p.add_argument("--asked", choices=("docstring", "name"), default="docstring",
+                   help="ask with the docstring as written, or with 'what <name> does' (default docstring)")
+    p.add_argument("--chunk-target", type=int, default=DEFAULT_CHUNK_TARGET,
+                   help=f"the chunk size the corpus is stored at (default {DEFAULT_CHUNK_TARGET})")
+    p.add_argument("--by-length", action="store_true",
+                   help="store the corpus with the ordinary chunker instead of cutting at declarations")
+
     p = sub.add_parser("bench-graph", help="score entity graph quality on a versioned synthetic fixture")
     p.add_argument("--fixtures", required=True, help="a JSON lines fixture, e.g. benchmarks/entity_graph/fixtures-v1.jsonl")
     p = sub.add_parser("bench-conflicts",
@@ -417,6 +430,25 @@ async def temporal_command(args: argparse.Namespace, settings: Settings, out) ->
     from ..bench.temporal import run_temporal
 
     scored = await run_temporal(args.dataset, limit=args.limit)
+    print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def bench_code_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Measure code retrieval on a corpus of files. Its own in-process
+    store, so the configured one is neither read nor written."""
+    from ..bench.code import run_code_bench
+
+    if args.k < 1:
+        raise InvalidInput("--k must be at least 1")
+    if args.limit is not None and args.limit < 1:
+        raise InvalidInput("--limit must be at least 1 question")
+    if args.chunk_target < 1:
+        raise InvalidInput("--chunk-target must be a positive number of characters")
+    if not pathlib.Path(args.root).is_dir():
+        raise InvalidInput(f"{args.root} is not a directory of source files")
+    scored = await run_code_bench(args.root, k=args.k, limit=args.limit, asked=args.asked,
+                                  code_aware=not args.by_length, chunk_target=args.chunk_target)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
     return 0
 
@@ -1171,9 +1203,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-temporal", "calibrate"):
+    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "calibrate"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
-                   "bench-temporal": temporal_command, "calibrate": calibrate_command}[args.command]
+                   "bench-temporal": temporal_command, "bench-code": bench_code_command,
+                   "calibrate": calibrate_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:

@@ -380,3 +380,20 @@ async def test_a_listed_fact_says_which_episode_it_came_from():
     lines = sorted(line for line in out.getvalue().splitlines() if line.startswith("#"))
     assert code == 0 and f"from episode {said.episode_id}" in lines[0]
     assert "from episode" not in lines[1], "nothing cites a source for this one"
+
+
+def test_bench_code_measures_a_corpus_of_source_files(tmp_path):
+    from tests.benchmarks.test_bench_code import PLANNER
+
+    (tmp_path / "planner.py").write_text(PLANNER, encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench-code", str(tmp_path), "--asked", "name"], env={}, stdin=io.StringIO(""), out=out)
+    assert code == 0, out.getvalue()
+    assert "2 question(s) over 1 file(s), asked by name" in out.getvalue(), out.getvalue()
+
+
+def test_bench_code_refuses_a_root_that_is_not_a_directory(tmp_path):
+    missing = tmp_path / "nowhere"
+    out = io.StringIO()
+    code = cli.main(["bench-code", str(missing)], env={}, stdin=io.StringIO(""), out=out)
+    assert code == 2, out.getvalue()

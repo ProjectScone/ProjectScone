@@ -87,6 +87,14 @@ the claims that hold, then the space's recent activity. `GET /v1/profile`
   says how many facts were read, what the read left out, the policy in
   force, how many candidates were considered, and how often each shown
   claim was restated.
+- **One revision's profile.** A profile is three reads — the claims, how
+  often each was said again, what happened lately — so a ledger that moves
+  between them could answer with a claim from before a write beside a
+  count from after it. The revision is taken before and after, a profile
+  made across a write is read again, and a ledger that will not hold still
+  for two attempts is answered with `ledger_moved_during_read` among the
+  coverage reasons rather than passed off as settled. `coverage.revision`
+  says which revision the answer is of.
 - Closed, excluded and proposed claims are never profiled, as before.
 
 ## Abstaining, by a floor that was measured
@@ -256,6 +264,71 @@ right and 6 wrong), and so is widening what counts as undecided past a
 tenth (14 right, 4 wrong). What the planner refuses to read is counted
 apart, because leaving a question to ordinary recall is not the same as
 answering it wrongly.
+
+## Code: cut where the declarations are
+
+A source file stored under a name that says which language it is in
+(`.py`, and the brace family: `.ts`, `.js`, `.go`, `.rs`, `.java`, `.c`,
+`.swift` and their neighbours) is cut at its declarations rather than
+every `chunk_target` characters. A function is a chunk when it fits; a
+longer one is cut at its own lines, preferring a nested declaration and
+then a blank line, and whatever is left at the end goes back to the piece
+it was cut from; small neighbours share a chunk. Nothing is rewritten:
+`content.encode()[start:end].decode()` is still the source, exactly.
+
+The name decides, never the content: a note that quotes code is prose.
+`code_aware=False` puts the ordinary chunker back.
+
+Python is parsed with `ast`, so its spans are exact — the `def` line with
+its decorators and the comment lines written directly above it, through
+the last line of the body. Brace languages are read by a header line and
+a brace count, which is the guess a parser would not have to make: a
+brace inside a template literal that spans lines can be counted wrongly,
+and the result is a chunk boundary in the wrong place, never a changed
+byte. Line endings are counted as Python counts them, a lone carriage
+return included. Nesting is read 32 deep; what Python's own parser
+refuses is cut the ordinary way.
+
+Every recalled item now carries where it came from, worked out from the
+episode rather than stored, so a chunk written before any of this answers
+the same way:
+
+- `start` and `end` — the chunk's own UTF-8 byte span of its episode.
+- `first_line` and `last_line` — the lines that span covers.
+- `declaration` — the declaration that holds all of it, qualified by
+  everything that holds it (`Engine.forget`), or `null` when the chunk is
+  module-level code or crosses more than one declaration.
+
+### What that is worth, measured
+
+```bash
+scone bench-code src/scone_memory --k 5 --asked name
+scone bench-code src/scone_memory --k 5 --asked name --by-length   # to compare
+```
+
+It stores every source file under a directory and asks one question per
+documented function: either the
+docstring's first paragraph as written, or "what <the function's name, in
+words> does". A hit is a returned chunk holding that function's own `def`
+line. On this package's own source — 273 files, 737 functions, hash
+embedder, k=5:
+
+| asked | cut | own definition in top 5 | own file | a whole declaration |
+| --- | --- | --- | --- | --- |
+| docstring | declarations | 691 (94%) | 717 (97%) | 292 (40%) |
+| docstring | by length | 697 (95%) | 718 (97%) | 259 (35%) |
+| name | declarations | 321 (44%) | 406 (55%) | 126 (17%) |
+| name | by length | 325 (44%) | 410 (56%) | 124 (17%) |
+
+Read it honestly. **Cutting at declarations does not find more.** What it
+changes is what comes back: a whole function rather than the end of one
+and the start of the next, which is what makes a citation quotable. The
+first pair of rows is close to an exact-match measurement — the docstring
+is in the chunk, verbatim — so what it really says is that chunking a
+file does not bury a function either way. The second pair is the
+interesting one: asked in a person's words, two in five questions do not
+return the function's own definition. That is an embedder question, not a
+chunker one, and it is where the next gain is.
 
 ## Measured and not shipped
 
