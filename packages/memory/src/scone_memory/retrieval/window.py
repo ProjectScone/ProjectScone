@@ -16,7 +16,9 @@ decided before anyone has asked a question.
 Three rules, each with a test:
 
 - **A window is quoted, never assembled.** The text is the episode's own
-  bytes between two offsets, so it can be checked against the source.
+  bytes between two offsets, so ``raw[start:end] == text.encode()`` holds
+  and a caller can check the quote against the source. Both edges sit on
+  character boundaries for that to be true of text, not just of lengths.
 - **A window cut short says so.** Asking for 500 bytes before a chunk
   that begins 40 bytes into the episode gets 40, and ``clipped`` counts
   it — otherwise a caller cannot tell a full window from the edge of a
@@ -48,6 +50,11 @@ MAX_WINDOW = 100_000
 MAX_EPISODES = 100
 
 
+def _tail(byte: int) -> bool:
+    """Is this byte the continuation of a character that starts earlier?"""
+    return 0x80 <= byte < 0xC0
+
+
 @dataclass(frozen=True)
 class Widened:
     """What was widened, and what was left as it was."""
@@ -58,6 +65,11 @@ class Widened:
     #: Items whose window met the start or end of the episode, so it is
     #: shorter than asked for.
     clipped: int = 0
+    #: Items whose window moved a byte or two to sit on character
+    #: boundaries. Counted apart from ``clipped`` because the two mean
+    #: different things to a caller: this one is a partial character
+    #: dropped, not a document that ran out.
+    aligned: int = 0
     #: Items whose episode is confirmed absent; dropped rather than served
     #: from text this space no longer holds.
     gone: int = 0
@@ -70,8 +82,8 @@ class Widened:
     why: str = ""
 
     def record(self) -> dict[str, object]:
-        return {"widened": self.widened, "clipped": self.clipped, "gone": self.gone,
-                "unread": self.unread, "why": self.why,
+        return {"widened": self.widened, "clipped": self.clipped, "aligned": self.aligned,
+                "gone": self.gone, "unread": self.unread, "why": self.why,
                 "by_chunk": {str(k): list(v) for k, v in self.by_chunk.items()},
                 "items": [item.model_dump() for item in self.items]}
 
@@ -91,7 +103,7 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
 
     kept: list[RecallItem] = []
     by_chunk: dict[int, tuple[int, int]] = {}
-    widened = clipped = vanished = unread = 0
+    widened = clipped = moved = vanished = unread = 0
     read: dict[int, Optional[str]] = {}
     for item in items:
         if item.episode_id not in read:
@@ -111,7 +123,8 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             vanished += 1
             continue
         raw = content.encode()
-        first, last = max(0, item.start - before), min(len(raw), item.end + after)
+        start, stop = max(0, item.start - before), min(len(raw), item.end + after)
+        first, last = start, stop
         if first >= last or item.end > len(raw):
             # The span does not sit in the text we just read, so this is
             # not the episode the chunk came from any more.
@@ -120,9 +133,22 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             continue
         if first > item.start - before or last < item.end + after:
             clipped += 1
-        text = raw[first:last].decode("utf-8", errors="ignore")
+        # A window is counted in bytes and read as text, so an edge can
+        # land inside a character. Both edges move inward to the nearest
+        # character start; the chunk's own span is one, so neither edge
+        # can cross the hit. Dropping the partial character while leaving
+        # the offsets on it -- which is what decoding leniently did --
+        # left the item's span naming bytes the item's text did not
+        # contain, and a window is quoted, never assembled.
+        while first < last and _tail(raw[first]):
+            first += 1
+        while first < last < len(raw) and _tail(raw[last]):
+            last -= 1
+        if (first, last) != (start, stop):
+            moved += 1
+        text = raw[first:last].decode()
         kept.append(item.model_copy(update={
-            "text": text, "start": first, "end": first + len(text.encode()),
+            "text": text, "start": first, "end": last,
             "first_line": None, "last_line": None, "declaration": None}))
         by_chunk[item.chunk_id] = (first, last)
         widened += 1
@@ -131,11 +157,15 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
     if clipped:
         why += (f"; {clipped} met the start or end of their episode, so those windows are "
                 f"shorter than asked for")
+    if moved:
+        why += (f"; {moved} moved to a character boundary, so those windows are a byte or two "
+                f"shorter than asked for -- a partial character dropped, not a document that "
+                f"ran out")
     if vanished:
         why += (f"; {vanished} item(s) are no longer there and were dropped rather than served "
                 f"from text this space has deleted")
     if unread:
         why += (f"; {unread} item(s) could not be read and stand as they were -- that is a "
                 f"failure to widen, not a finding that there was nothing to widen")
-    return Widened(items=tuple(kept), widened=widened, clipped=clipped, gone=vanished,
-                   unread=unread, by_chunk=by_chunk, why=why)
+    return Widened(items=tuple(kept), widened=widened, clipped=clipped, aligned=moved,
+                   gone=vanished, unread=unread, by_chunk=by_chunk, why=why)

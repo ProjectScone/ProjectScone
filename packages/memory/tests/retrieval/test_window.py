@@ -22,6 +22,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
+from scone_memory.core.models import RecallItem
 from scone_memory.retrieval.window import MAX_WINDOW, widen
 
 pytestmark = pytest.mark.asyncio
@@ -66,7 +67,10 @@ async def test_the_window_is_the_text_the_episode_actually_holds():
         await engine.close()
     [one] = widened.items
     assert one.text in PARAGRAPH, "a window is quoted, never assembled"
-    assert len(one.text.encode()) == one.end - one.start, "the text is its own span"
+    # Equal lengths are not enough: the old assertion here compared only
+    # sizes and passed while the span pointed at different bytes than the
+    # text came from. The span has to name the text.
+    assert PARAGRAPH.encode()[one.start:one.end] == one.text.encode(), (one.start, one.end)
 
 
 async def test_a_window_cut_by_the_start_of_the_episode_says_so():
@@ -119,3 +123,52 @@ async def test_widening_keeps_the_caller_s_ranking():
     finally:
         await engine.close()
     assert [i.chunk_id for i in widened.items] == [i.chunk_id for i in found.items]
+
+
+async def test_a_window_lands_on_characters_not_bytes():
+    """A window is measured in bytes and read as text, so an edge can fall
+    inside a character.
+
+    Built by hand rather than found in a corpus: the hit is the single
+    byte "B", and one byte either side reaches into the two-byte "e-acute"
+    before it. Decoding that range threw the half character away while the
+    offsets kept pointing at it, so the item's own span named bytes the
+    item's own text did not contain -- and `by_chunk` named a third range
+    again. Any of the three could have been used to quote the source.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    content = "Aé" + "BCDEF"
+    raw = content.encode()
+    assert raw[2:4] == b"\xa9B", "the fixture is only interesting if byte 2 is a tail byte"
+    try:
+        added = await engine.remember("default", content, source="accent.txt")
+        hit = RecallItem(chunk_id=7, episode_id=added.episode_id, text="B", score=1.0,
+                         created_at="2026-09-12", start=3, end=4)
+        widened = await widen(engine, "default", [hit], before=1, after=1)
+    finally:
+        await engine.close()
+    [one] = widened.items
+    assert raw[one.start:one.end] == one.text.encode(), (one.start, one.end, one.text)
+    assert widened.by_chunk[7] == (one.start, one.end), widened.by_chunk
+    assert one.text in content, "a window is quoted, never assembled"
+
+
+async def test_moving_to_a_character_boundary_is_not_hitting_the_edge():
+    """Both shorten a window, and a caller acts on them differently: one
+    means the document ran out, the other means one byte of a character
+    was dropped. Counting the second as the first would read as the
+    document being smaller than it is."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    content = "Aé" + "BCDEF"
+    try:
+        added = await engine.remember("default", content, source="accent.txt")
+        hit = RecallItem(chunk_id=7, episode_id=added.episode_id, text="B", score=1.0,
+                         created_at="2026-09-12", start=3, end=4)
+        widened = await widen(engine, "default", [hit], before=1, after=1)
+    finally:
+        await engine.close()
+    assert widened.clipped == 0, "neither end of this window met either end of the episode"
+    assert widened.aligned == 1, widened.record()
+    assert "character" in widened.why, widened.why
