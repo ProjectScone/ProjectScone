@@ -225,3 +225,13 @@ async def test_a_capped_grounding_check_is_said(monkeypatch):
     found = await graph_health(engine, "alpha")
     assert "grounding_checked 1 of 2" in found.coverage["reasons"]
     assert found.coverage["grounding_checked"] == 1 and "coverage: limited: " in found.text
+
+
+async def test_each_concern_says_where_to_see_the_whole_of_it():
+    """A count is useful beside the place that shows all of it."""
+    engine = await engine_with(("alice chen", "works_at", "Acme Robotics"), ("project atlas", "status", "ready"))
+    found = await graph_health(engine, "alpha")
+    where = {concern["kind"]: concern["where"] for concern in found.concerns}
+    assert where["ungrounded"] == "scone audit-grounding --flagged-only"
+    assert where["unconnected"].startswith("/v1/graph/knowledge")
+    assert "see scone audit-grounding --flagged-only" in found.text

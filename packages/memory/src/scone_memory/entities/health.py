@@ -49,6 +49,16 @@ MEANINGS = {
     "likely_duplicate": "pairs of names that may be one thing",
 }
 ORDER = tuple(MEANINGS)
+#: Where to go with each concern. A count is only useful beside the
+#: place that shows the whole of it, or acts on it.
+WHERE = {
+    "ungrounded": "scone audit-grounding --flagged-only",
+    "contested_kind": "/v1/graph/entity, which shows what each hint was",
+    "kind_unknown": "/v1/graph/entity, which shows the claims a kind would come from",
+    "unconnected": "/v1/graph/knowledge, which shows what each entity does have",
+    "thin_predicate": "/v1/graph/schema, which counts every predicate",
+    "likely_duplicate": "/v1/entities/duplicates, which shows every pair and why",
+}
 
 
 class HealthError(ValueError):
@@ -73,7 +83,7 @@ class Health:
 
 
 def _concern(kind: str, examples: list[dict[str, object]], count: int) -> dict[str, object]:
-    return {"kind": kind, "meaning": MEANINGS[kind], "count": count, "examples": examples}
+    return {"kind": kind, "meaning": MEANINGS[kind], "where": WHERE[kind], "count": count, "examples": examples}
 
 
 def _claims(projection: EntityProjection) -> dict[int, str]:
@@ -199,7 +209,7 @@ async def _look(engine: "MemoryEngine", space: str, limit: int, status: "StatusM
         shown = ", ".join(_example(example) for example in cast(list[dict[str, object]], concern["examples"]))
         lines.append(f"{concern['kind']}: {concern['count']} "
                      f"{'claims' if concern['kind'] == 'ungrounded' else 'found'} "
-                     f"({concern['meaning']}): {shown}")
+                     f"({concern['meaning']}): {shown}; see {concern['where']}")
     tail = [] if concerns else [f"result: nothing to fix{'' if complete else ' among the facts read'}"]
     text = _fit([*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,
                  *counted, *lines, *tail], max_bytes)

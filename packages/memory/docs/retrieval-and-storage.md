@@ -735,6 +735,11 @@ answer. It reads and changes nothing.
   default score, carried in so one read shows everything; the detail
   stays on that route, and anything it cut is said here with a
   `duplicates:` prefix.
+- Each concern says **where to see the whole of it**: the grounding audit
+  for ungrounded claims, the entity page for kinds, `/v1/graph/knowledge`
+  for unconnected entities, `/v1/graph/schema` for thin predicates and
+  `/v1/entities/duplicates` for the pairs. A count is only useful beside
+  the place that shows all of it.
 - A graph with none of these says `nothing to fix`, and a capped read
   says `among the facts read` instead of claiming the whole space.
 - **One answer, one revision.** The totals, the grounding checks and the
