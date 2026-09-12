@@ -122,7 +122,7 @@ def _cited(text: str) -> list[str]:
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
 
 
-def _masked(content: str, *, prose: bool = True) -> str:
+def masked(content: str, *, prose: bool = True) -> str:
     """The source with text that is not code blanked, in place.
 
     A regex over raw source cannot tell code from data, and there are two
@@ -264,7 +264,7 @@ def _meaning(content: str, path: str, language: str,
         for at, prose in _python_prose(content):
             _tagged(prose, path, at, declared, say)
         return
-    for number, line in enumerate(_masked(content).split("\n"), start=1):
+    for number, line in enumerate(masked(content).split("\n"), start=1):
         _tagged(line, path, number, declared, say)
 
 
@@ -543,7 +543,7 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    code = _masked(content, prose=False).split("\n")
+    code = masked(content, prose=False).split("\n")
     if path.endswith(".go"):
         # Go's types, which the brace declaration pattern cannot see.
         for number, line in enumerate(code, start=1):

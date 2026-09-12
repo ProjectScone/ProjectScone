@@ -703,11 +703,23 @@ Three rules, each with a test:
   counts reads that failed, for the same reason.
 
 The signature runs from the declaring keyword to the end of its parameter
-list, found by bracket depth rather than by masking strings: the `:`
-ending a Python header and the `{` opening a brace body are always at
-depth zero, because a colon inside a default argument is inside brackets
-by definition. A header longer than twelve lines is quoted to there and
-says it was clipped.
+list. Python takes it from `ast` — the header ends where the body
+begins — and the brace family scans a copy of the source with string
+literals and comments blanked in place, so every line and column still
+indexes the real file and the quote comes from the unblanked text.
+
+**An earlier version of this counted brackets on the raw line and this
+page argued that was sufficient**, on the grounds that a colon inside a
+default argument is inside brackets. True, and beside the point: a
+bracket inside a *string* is inside nothing, so
+`def f(value="("):` never reached depth zero at its own colon and
+`def f(value=")"):` drove the count negative. Bracket depth cannot
+establish a lexical boundary without knowing what is code.
+
+A header longer than twelve lines is quoted to there, and says so —
+`clipped` on the holder, `shortened` on the receipt, and a note beside
+the name in the terminal. A bound that bit in silence is the fault this
+framework keeps making.
 
 ## One passage instead of three fragments of it
 

@@ -34,12 +34,15 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+import io
 import re
+import tokenize
 from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import Gone, InvalidInput, NotFound, SconeError
 from ..core.models import RecallItem
 from ..ingestion.code import Declaration, code_language, declarations_in
+from ..ingestion.code_graph import masked
 from ..memory.engine import check_space
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -108,6 +111,10 @@ class ChunkContext:
 class CodeContext:
     """The context found, and every reason a chunk has none."""
 
+    #: The items a caller should hand on, with any whose source is
+    #: confirmed gone removed -- so a receipt saying "dropped" and the
+    #: passages a caller prints cannot disagree.
+    items: tuple[RecallItem, ...] = ()
     by_chunk: dict[int, ChunkContext] = field(default_factory=dict)
     #: Items whose stored name does not say a language. Not a failure.
     not_code: int = 0
@@ -122,57 +129,167 @@ class CodeContext:
     not_read: int = 0
     #: Contexts whose import list reached the bound.
     capped: int = 0
+    #: Contexts with a signature longer than the line bound, quoted to
+    #: there. A header cut short must not read as the whole header.
+    shortened: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
         return {"chunks": len(self.by_chunk), "not_code": self.not_code, "gone": self.gone,
                 "unread": self.unread, "not_read": self.not_read, "capped": self.capped,
-                "why": self.why,
+                "shortened": self.shortened, "why": self.why,
+                "items": [item.model_dump() for item in self.items],
                 "by_chunk": {str(key): {
                     "language": value.language, "more_imports": value.more_imports,
-                    "holders": [[s.name, s.line, s.text] for s in value.holders],
+                    "holders": [{"name": s.name, "line": s.line, "text": s.text,
+                                 "clipped": s.clipped} for s in value.holders],
                     "imports": [[i.line, i.text] for i in value.imports],
                 } for key, value in self.by_chunk.items()}}
 
 
-def _signature(lines: list[str], declaration: Declaration, language: str) -> Signature:
-    """A declaration's header, from its keyword to the end of its
-    parameters.
+def _python_headers(content: str) -> dict[int, tuple[int, int]]:
+    """Each Python declaration's ``def``/``class`` line to the exact
+    character span of its header, ending at its own colon.
 
-    The terminator is found by bracket depth rather than by masking
-    strings, because the ``:`` ending a Python header and the ``{``
-    opening a brace body are always at depth zero -- a colon inside a
-    default argument is inside brackets by definition.
+    Two wrong answers came before this one, and each was wrong in a way
+    the code confidently explained:
+
+    - **Bracket depth over raw text.** Justified on the grounds that a
+      colon in a default argument is inside brackets. So it is -- but a
+      bracket inside a *string* is inside nothing, so
+      ``def f(value="("):`` never reached depth zero at its own colon
+      and ``def f(value=")"):`` went negative.
+    - **``ast`` body-start minus one line.** ``ast`` reports where a
+      declaration *begins*, not where its header ends, and the gap
+      between them is not empty: leading comments and blank lines in the
+      body are not statements, so they became part of the "signature"; a
+      class whose first method carries a decorator took that decorator
+      into the class header, because ``FunctionDef.lineno`` points at the
+      ``def``; long leading body comments set ``clipped`` on a one-line
+      header; and ``def f(): return secret`` returned its body as its
+      signature -- which in a withholding answer is the leak shape
+      again.
+
+    ``tokenize`` is the tool that actually knows: strings and comments
+    are single tokens, so no bracket inside either can move the depth,
+    and the colon that ends the header is the first ``:`` operator at
+    depth zero after the declaring keyword. Character offsets, not
+    lines, so a one-line suite yields ``def f():`` and not its body.
+
+    The header begins at ``def``, ``class`` or the ``async`` before
+    them, so **a decorator is not part of the signature**. That is a
+    choice rather than an oversight: a decorator is a separate
+    statement, the reason a class header must not swallow its first
+    method's decorator is that they belong to different declarations,
+    and a rule that starts at the keyword cannot make that mistake in
+    either direction. A caller wanting the decorators has the
+    declaration's own line range.
     """
-    start = declaration.first_line
-    close = ":" if language == "python" else "{"
+    starts = [0]
+    for line in content.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+
+    def offset(row: int, column: int) -> int:
+        return starts[row - 1] + column
+
+    at: dict[int, tuple[int, int]] = {}
+    begin: Optional[tuple[int, int]] = None
     depth = 0
-    taken: list[str] = []
-    clipped = True
+    previous_async: Optional[tuple[int, int]] = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if begin is None:
+                if token.type == tokenize.NAME and token.string == "async":
+                    previous_async = token.start
+                    continue
+                if token.type == tokenize.NAME and token.string in ("def", "class"):
+                    head = previous_async or token.start
+                    begin, depth = (head[0], offset(*head)), 0
+                elif token.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT,
+                                        tokenize.INDENT, tokenize.DEDENT):
+                    previous_async = None
+                continue
+            if token.type == tokenize.OP:
+                if token.string in "([{":
+                    depth += 1
+                elif token.string in ")]}":
+                    depth -= 1
+                elif token.string == ":" and depth == 0:
+                    at[begin[0]] = (begin[1], offset(token.end[0], token.end[1]))
+                    begin, previous_async = None, None
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        # A file `ast` accepted should tokenize, so this is unreachable in
+        # practice; returning what was read keeps a partial answer honest
+        # rather than claiming none.
+        pass
+    return at
+
+
+def _header(headers: dict[int, tuple[int, int]],
+            declaration: Declaration) -> Optional[tuple[int, int]]:
+    """The character span of a declaration's own header, or None.
+
+    Found by range rather than by exact key: a declaration's span starts
+    at its decorators and at the comment lines written directly above
+    it, so ``first_line`` is often earlier than the ``def`` the parser
+    reports. Looking up ``first_line`` alone returned the comment line
+    and nothing else.
+    """
+    inside = [line for line in headers
+              if declaration.first_line <= line <= declaration.last_line]
+    return headers[min(inside)] if inside else None
+
+
+def _brace_header(lines: list[str], blank: list[str], start: int) -> tuple[int, bool]:
+    """A brace declaration's header, to the ``{`` that opens its body.
+
+    Scanned over the **blanked** copy, where string literals and comments
+    have been replaced in place, so a brace inside a string cannot move
+    the depth. Every line and column is preserved, so the position found
+    here indexes the real source.
+    """
+    depth = 0
     for offset in range(MAX_SIGNATURE_LINES):
         index = start - 1 + offset
-        if index >= len(lines):
-            clipped = False
-            break
-        line = lines[index]
-        taken.append(line)
-        done = False
-        for char in line:
-            if char in "([{" and not (char == "{" and depth == 0 and close == "{"):
+        if index >= len(blank):
+            return min(start + offset, len(lines)), False
+        for char in blank[index]:
+            if char == "{" and depth == 0:
+                return start + offset, False
+            if char in "([":
                 depth += 1
-            elif char in ")]}":
-                depth -= 1
-            elif depth == 0 and char == close:
-                done = True
-                break
-            if depth == 0 and char == close and close == "{":
-                done = True
-                break
-        if done:
-            clipped = False
-            break
+            elif char in ")]":
+                depth = max(0, depth - 1)
+        if blank[index].rstrip().endswith(";") and depth == 0:
+            # A declaration with no body of its own, which is a header
+            # in its entirety.
+            return start + offset, False
+    return start + MAX_SIGNATURE_LINES - 1, True
+
+
+def _signature(content: str, lines: list[str], blank: list[str], declaration: Declaration,
+               language: str, headers: dict[int, tuple[int, int]]) -> Signature:
+    """A declaration's header, quoted from the source."""
+    if language == "python":
+        span = _header(headers, declaration)
+        if span is None:
+            # The header's end could not be established, so the declaring
+            # line is all that can honestly be quoted -- and `clipped`
+            # is the field that says a header is incomplete.
+            return Signature(name=declaration.name, kind=declaration.kind,
+                             line=declaration.first_line,
+                             text=lines[declaration.first_line - 1], clipped=True)
+        text = content[span[0]:span[1]]
+        held = text.split("\n")
+        clipped = len(held) > MAX_SIGNATURE_LINES
+        return Signature(name=declaration.name, kind=declaration.kind,
+                         line=content[:span[0]].count("\n") + 1,
+                         text="\n".join(held[:MAX_SIGNATURE_LINES]), clipped=clipped)
+    start = declaration.first_line
+    end, clipped = _brace_header(lines, blank, start)
+    end = min(end, len(lines))
     return Signature(name=declaration.name, kind=declaration.kind, line=start,
-                     text="\n".join(taken), clipped=clipped)
+                     text="\n".join(lines[start - 1:end]), clipped=clipped)
 
 
 def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, ...], bool]:
@@ -215,20 +332,24 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
                            f"{episodes!r}")
 
     found: dict[int, ChunkContext] = {}
+    kept: list[RecallItem] = []
     read: dict[int, Optional[str]] = {}
     unavailable: set[int] = set()
-    not_code = vanished = unread = unbudgeted = capped = 0
+    not_code = vanished = unread = unbudgeted = capped = shortened = 0
     for item in items:
         language = code_language(item.source)
         if language is None:
             not_code += 1
+            kept.append(item)
             continue
         if item.episode_id in unavailable:
             unread += 1
+            kept.append(item)
             continue
         if item.episode_id not in read:
             if len(read) + len(unavailable) >= episodes:
                 unbudgeted += 1
+                kept.append(item)
                 continue
             try:
                 read[item.episode_id] = (await engine.episode(space, item.episode_id)).content
@@ -237,21 +358,31 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
             except SconeError:
                 unavailable.add(item.episode_id)
                 unread += 1
+                kept.append(item)
                 continue
         content = read[item.episode_id]
         if content is None:
+            # Confirmed absent. Counting it as dropped while a caller
+            # still holds the item is how stale text gets served under a
+            # clean reason, so the item goes with the count.
             vanished += 1
             continue
         lines = content.splitlines()
+        blank = masked(content, prose=False).splitlines()
+        headers = _python_headers(content) if language == "python" else {}
         holders = declarations_in(content, item.start, item.end, language=language,
                                   offsets="bytes")
         brought, more = _imports(content, language, imports)
         if more:
             capped += 1
+        signatures = tuple(_signature(content, lines, blank, holder, language, headers)
+                           for holder in holders)
+        if any(signature.clipped for signature in signatures):
+            shortened += 1
         found[item.chunk_id] = ChunkContext(
-            chunk_id=item.chunk_id, language=language,
-            holders=tuple(_signature(lines, holder, language) for holder in holders),
+            chunk_id=item.chunk_id, language=language, holders=signatures,
             imports=brought, more_imports=more)
+        kept.append(item)
 
     why = (f"{len(found)} chunk(s) given the signature they sit inside and the imports of "
            f"their file" if found else "no chunk had code context to give")
@@ -270,5 +401,9 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     if capped:
         why += (f"; {capped} file(s) bring in more than {imports} names and this listed "
                 f"{imports} of them, not all of them")
-    return CodeContext(by_chunk=found, not_code=not_code, gone=vanished, unread=unread,
-                       not_read=unbudgeted, capped=capped, why=why)
+    if shortened:
+        why += (f"; {shortened} signature(s) run past {MAX_SIGNATURE_LINES} lines and were "
+                f"quoted to there, so those headers are incomplete")
+    return CodeContext(items=tuple(kept), by_chunk=found, not_code=not_code, gone=vanished,
+                       unread=unread, not_read=unbudgeted, capped=capped, shortened=shortened,
+                       why=why)

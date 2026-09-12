@@ -27,6 +27,20 @@ report says so in as many words.
 Nothing is deleted from the store: this is what one answer hands back.
 The memory still holds what it held, which is why the report says
 "withheld" and not "removed".
+
+**The rule for anyone adding a surface to an answer.** Every fault found
+in this feature so far has been the same shape: a second place carrying
+the same text, reached by a path the previous fix did not cover. The
+passage, then the item's source and tags and metadata. The items, then
+the facts. The HTTP route, then the CLI. The answer, then a receipt
+holding its own copy of the answer from before withholding ran. An
+expansion that re-reads the episode hands back what was withheld, which
+is why those combinations are refused rather than sanitised -- a quoted
+passage cannot be scrubbed and stay a quotation.
+
+So before calling a change here done, ask where else the text appears:
+in another field, in another receipt, behind another entry point. Not
+after someone finds the next door.
 """
 
 from __future__ import annotations

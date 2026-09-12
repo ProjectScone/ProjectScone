@@ -1261,6 +1261,30 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
+        policy: tuple[str, ...] = ()
+        if args.withhold:
+            from ..retrieval.withhold import chosen_kinds
+
+            # Checked before the search, as the HTTP route does: a policy
+            # naming a kind that does not exist is a mistake in the
+            # request, and searching first spends the work for an answer
+            # nobody receives.
+            policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            # Everything refused here re-reads the episode from the store
+            # *after* withholding and prints source verbatim, which hands
+            # back what was just withheld: --merge and --code-context both
+            # quote the raw episode, and --parts answers without passing
+            # through withholding at all. The HTTP route refuses the same
+            # class of combination; the CLI refusing a different set would
+            # be the same hole wearing different clothes.
+            clashes = [name for name, asked_for in (
+                ("--merge", args.merge), ("--code-context", args.code_context),
+                ("--parts", args.parts)) if asked_for]
+            if clashes:
+                raise InvalidInput(
+                    f"--withhold cannot be combined with {', '.join(clashes)}: each of those "
+                    f"quotes the episode again after withholding, which would hand back what "
+                    f"was withheld; ask for one or the other")
         if args.parts:
             from ..retrieval.parts import recall_parts
 
@@ -1290,12 +1314,17 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             opened = await widen(engine, space, result.items,
                                  before=args.window, after=args.window)
             result = result.model_copy(update={"items": list(opened.items)})
-        if args.withhold:
+        if policy:
             from ..retrieval.withhold import withhold
 
-            kept = withhold(result.items,
-                            kinds=tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
-            result = result.model_copy(update={"items": list(kept.items)})
+            # Facts and history too. Fixing this on the HTTP route and
+            # not here left the same address reachable through the CLI.
+            kept = withhold(result.items, facts=list(result.facts) + list(result.history),
+                            kinds=policy)
+            result = result.model_copy(update={
+                "items": list(kept.items),
+                "facts": list(kept.facts[:len(result.facts)]),
+                "history": list(kept.facts[len(result.facts):])})
         inside = None
         if args.code_context:
             from ..retrieval.code_context import code_context
@@ -1303,6 +1332,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # After widening and withholding, so the context describes the
             # passages actually being handed back.
             inside = await code_context(engine, space, result.items)
+            # A source confirmed gone is dropped from the answer, not just
+            # from the context: a receipt saying "dropped" beside a printed
+            # passage is the disagreement that makes it dangerous.
+            result = result.model_copy(update={"items": list(inside.items)})
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
@@ -1311,8 +1344,20 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             result = result.model_copy(update={"items": list(joined.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
+            widened = None
+            if opened is not None:
+                widened = opened.record()
+                if policy:
+                    # The widened record carries the passages as they were
+                    # *before* withholding, so emitting it whole hands back
+                    # what was just withheld. The receipt stays; its copy of
+                    # the text goes, and says where the text is instead.
+                    widened = {key: value for key, value in widened.items() if key != "items"}
+                    widened["items_withheld"] = (
+                        "the widened passages are in `items`, after withholding; this receipt's "
+                        "own copy predates it and is not returned")
             emit(said | ({"merged": joined.record()} if joined else {})
-                      | ({"widened": opened.record()} if opened else {})
+                      | ({"widened": widened} if widened is not None else {})
                       | ({"withheld": kept.record()} if kept else {})
                       | ({"code_context": inside.record()} if inside else {}))
             return 0
@@ -1324,7 +1369,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(inside.why, file=out)
             for chunk, context in inside.by_chunk.items():
                 for holder in context.holders:
-                    print(f"  #{chunk} inside {holder.name} (line {holder.line})", file=out)
+                    cut = " (quoted to the line bound, so incomplete)" if holder.clipped else ""
+                    print(f"  #{chunk} inside {holder.name} (line {holder.line}){cut}", file=out)
                     for line in holder.text.splitlines():
                         print(f"      {line}", file=out)
                 for brought in context.imports:
