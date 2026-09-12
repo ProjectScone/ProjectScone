@@ -111,7 +111,8 @@ class Capabilities:
 
 class WorkflowTransport(Protocol):
     def _request(self, method: str, path: str, *, params: Optional[Mapping[str, str]] = None,
-                 json: Optional[Dict[str, object]] = None) -> object: ...
+                 json: Optional[Dict[str, object]] = None, data: Optional[bytes] = None,
+                 headers: Optional[Mapping[str, str]] = None) -> object: ...
     def capabilities(self) -> Capabilities: ...
 
 

@@ -16,6 +16,7 @@ import requests
 
 from ._wire import Capabilities
 from .agents import AgentClient
+from .document_jobs import DocumentJobs
 from .errors import SconeError
 from .models import Added, Fact, Profile, Recall, Status, Tag
 
@@ -103,6 +104,10 @@ class Scone:
     def agents(self, *, expected_space: str) -> AgentClient:
         """Create a typed agent client, checking space without changing authority."""
         return AgentClient(self, expected_space=expected_space)
+
+    def document_jobs(self, *, expected_space: str) -> DocumentJobs:
+        """Create a typed client for explicit durable document operations."""
+        return DocumentJobs(self, expected_space=expected_space)
 
     def add(
         self,
@@ -211,17 +216,24 @@ class Scone:
         *,
         params: Optional[Mapping[str, str]] = None,
         json: Optional[Json] = None,
+        data: Optional[bytes] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> Json:
         """Send one request and return its decoded JSON body, or raise SconeError."""
         url = f"{self.base_url}{path}"
+        if data is not None and (json is not None or not isinstance(data, bytes)):
+            raise SconeError("request requires either JSON or raw bytes")
+        request_headers = dict(headers or {})
+        if json is not None:
+            request_headers["Content-Type"] = "application/json"
         try:
-            encoded = _json.dumps(json, ensure_ascii=False, allow_nan=False).encode("utf-8") if json is not None else None
+            encoded = _json.dumps(json, ensure_ascii=False, allow_nan=False).encode("utf-8") if json is not None else data
         except (TypeError, ValueError):
             raise SconeError("request is not valid JSON") from None
         try:
             response = self.session.request(
                 method, url, params=params, data=encoded,
-                headers={"Content-Type": "application/json"} if encoded is not None else None,
+                headers=request_headers or None,
                 timeout=self.timeout, allow_redirects=False
             )
         except requests.RequestException as exc:

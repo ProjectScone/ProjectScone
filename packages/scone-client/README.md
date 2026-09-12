@@ -145,3 +145,36 @@ SCONE_TEST_NATIVE_PYTHON=/path/to/native/python python -m pytest -q tests/test_n
 The test launches an isolated loopback server, restarts it after saving a reply,
 and verifies that only the explicitly selected model executes after continuation.
 It does not contact a model provider or the live memory service.
+
+Durable document jobs retain their original upload and extraction request:
+
+```python
+jobs = client.document_jobs(expected_space="alpha")
+formats = jobs.formats()
+original = jobs.upload(b"# Notes\n\nAda studies stars.", media_type="text/markdown")
+status = jobs.start("import-1", attachment_id=original.attachment_id, filename="notes.md")
+request = jobs.request("import-1")
+status = jobs.status("import-1")
+# Once completed, read currently verified original/manifest/episode identities.
+result = jobs.result("import-1")
+```
+
+Callers choose when to poll. Starting an existing import only returns its status;
+it never implicitly resumes a stopped attempt. For an explicit recovery, read the
+current request and pass that exact snapshot to `jobs.resume(request)`. Cancellation
+uses `jobs.cancel(request)`. Both operations compare the saved request before writing,
+send its control revision, and verify the acknowledgement afterward. A stale snapshot
+raises `SconeError`; no automatic retry occurs. Document recovery can explicitly retry
+an interrupted extraction/index operation whose outcome is unknown.
+
+`jobs.list(limit=20, after=page.next_after)` reads retained history. `jobs.result()`
+does not run extraction, even when source verification previously failed or the
+attempt limit has been reached. Missing or currently unverifiable results raise an
+error. The result's extraction filename is checked against the immutable job request;
+the original blob may retain a different first-upload filename after deduplication.
+
+For PDF OCR, pass `pdf_ocr=PdfOcr("missing_text", "columns_ltr")` to `start()` after
+checking the host's `formats.pdf_ocr_available` and advertised choices. Users select
+OCR behavior; the host owns the parser implementation, revision, and processing limits.
+Upload and job admission are separate explicit writes. Uploaded bytes must fit the
+host's advertised input limit and the client's 25 MiB ceiling.
