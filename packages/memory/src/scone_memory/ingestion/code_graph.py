@@ -43,6 +43,14 @@ CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
 INHERITS = "inherits"
+#: What a type satisfies without extending it: an interface, a protocol,
+#: a Rust trait, a Scala mixin. "What implements this interface?" is a
+#: different question from "what extends this class?", and flattening
+#: both into one predicate means the graph answers neither precisely.
+#: Rust has no class inheritance at all, so every Rust edge is one of
+#: these -- calling them inheritance described a relation the language
+#: does not have.
+MIXES_IN = "mixes_in"
 #: Why the code is the way it is, in the words of whoever wrote it.
 NOTES = "notes"
 #: What is known to be wrong with it. A different question from why it
@@ -79,8 +87,11 @@ _RUST_IMPL = re.compile(r"^\s*impl(?:\s*<[^>]*>)?\s+([A-Za-z_][\w:]*)"
 #: as a constructor call -- `extends Base(3) with Store`. A capture class
 #: without parentheses matched nothing at all there, so Scala produced no
 #: edges while it was on the supported list.
-_BUILT_ON = re.compile(r"\b(?:extends|implements|with)\s+([A-Za-z_][\w.:<>,()\s]*?)"
+_BUILT_ON = re.compile(r"\b(extends|implements|with)\s+([A-Za-z_][\w.:<>,()\s]*?)"
                        r"(?=\b(?:extends|implements|with)\b|[{;]|$)")
+#: Which relation a clause keyword names. `extends` is the only one that
+#: extends; `implements` and Scala's `with` satisfy without extending.
+_CLAUSE_MEANS = {"extends": INHERITS, "implements": MIXES_IN, "with": MIXES_IN}
 #: C++ and C# write the bases after a colon, immediately following the
 #: declared name. Anchored there on purpose: a colon anywhere else is a
 #: type annotation or a label, and reading those would invent bases.
@@ -553,30 +564,56 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             if second is None:
                 continue
             subject = held.get(second, f"{path}:{second}")
-            say(subject, INHERITS, held.get(first, first), number)
+            say(subject, MIXES_IN, held.get(first, first), number)
     for number, line in enumerate(code, start=1):
         declares = _DECLARES.search(line)
         if not declares:
             continue
         child = declares.group(1)
         subject = held.get(child, f"{path}:{child}")
-        clauses = [clause.group(1) for clause in _BUILT_ON.finditer(line, declares.end())]
+        # `None` means the source did not say which relation it is, which
+        # only the colon form leaves open.
+        clauses: list[tuple[str | None, str]] = [
+            (_CLAUSE_MEANS[clause.group(1).lower()], clause.group(2))
+            for clause in _BUILT_ON.finditer(line, declares.end())]
         colon = _AFTER_COLON.match(line, declares.end())
         if colon:
-            clauses.append(colon.group(1))
-        for clause in clauses:
+            # After a colon the line does not say which is which, except in
+            # one real way: Kotlin constructs its superclass and does not
+            # construct an interface, so `Base(), Store` distinguishes
+            # them. C++ has no interfaces, so a colon base there extends.
+            clauses.append((None, colon.group(1)))
+        for means, clause in clauses:
             for base in clause.split(","):
                 # Kotlin and Scala write `: Base(), Store` and
                 # `extends Base(3)`. Keeping the call would make `Base()`
                 # and `Base` two entities, and a graph with both cannot
                 # answer a question about either.
+                constructed = "(" in base
                 written = base.strip().split("<")[0].split("(")[0].strip().rstrip("{").strip()
                 # A base list may lead with specifiers that name no type.
                 words = [word for word in written.split() if word.lower() not in _SPECIFIERS]
                 written = words[-1] if words else ""
                 if not written or not (written[0].isalpha() or written[0] == "_"):
                     continue
-                say(subject, INHERITS, held.get(written, written), number)
+                # A colon clause says less than a keyword does, and how
+                # much less depends on the language.
+                #
+                # Kotlin constructs its superclass and does not construct
+                # an interface, so `Base(), Store` really does distinguish
+                # them. C++ has no interfaces at all, so `: public Base` is
+                # inheritance and reading it as a mixin would be a new
+                # error. Everywhere else a colon list is genuinely
+                # ambiguous, and inheritance is what it most often is --
+                # recorded with that limitation stated rather than guessed
+                # at silently.
+                if means is not None:
+                    relation = means
+                elif path.endswith((".kt", ".kts")):
+                    relation = INHERITS if constructed else MIXES_IN
+                else:
+                    relation = INHERITS
+                say(subject, relation, held.get(written, written), number)
 
     inside = False
     for number, line in enumerate(lines, start=1):

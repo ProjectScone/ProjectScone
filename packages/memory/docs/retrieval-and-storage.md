@@ -305,9 +305,9 @@ than by reading the list:
 
 | language | what it gave | what it gives now |
 | --- | --- | --- |
-| Rust | **no inheritance at all**, and `impl Shelf` counted as a second definition of Shelf | `impl Store for Shelf` → `Shelf inherits Store`; an inherent `impl` is neither an edge nor a definition |
+| Rust | **no inheritance at all**, and `impl Shelf` counted as a second definition of Shelf | `impl Store for Shelf` → `Shelf mixes_in Store`; an inherent `impl` is neither an edge nor a definition |
 | Go | **no definition for `type Shelf struct`** — Go types were invisible | `type … struct` and `type … interface` define |
-| Kotlin | `inherits Base()` — the call kept, so `Base()` and `Base` were two entities | `inherits Base` |
+| Kotlin | `inherits Base()` — the call kept, so `Base()` and `Base` were two entities | `inherits Base`, and the constructor call is what tells a superclass from an interface |
 | Scala | **nothing**: `extends Base(3) with Store` defeated the clause pattern on both the parens and the `with` | both bases, with `with` read as a clause |
 
 A graph holding both `Base()` and `Base` cannot answer a question about
@@ -614,8 +614,33 @@ edges now come out of the same pass:
 ```
 pkg/shelf.py:Paper  inherits  pkg/shelf.py:Shelf      # a base this file defines
 pkg/shelf.py:Shelf  inherits  pkg.base.Store          # a base from an import
-web/shelf.ts:Shelf  inherits  Store                   # extends / implements / :
+web/shelf.ts:Shelf  inherits  Store                   # extends
+web/shelf.ts:Shelf  mixes_in  Face                    # implements
 ```
+
+**Extending a class and satisfying an interface are different relations,
+and collapsing them loses the question people ask.** "What is a Shelf?"
+has one answer; "what can be used as a Face?" has many, and a graph with a
+single `inherits` edge cannot tell them apart. So `implements`, Scala's
+`with` and Rust's `impl Trait for Type` are `mixes_in`, while `extends`
+and Python's base list are `inherits`. Rust has no class inheritance at
+all, so **no Rust edge is ever `inherits`** — a claim the extractor used to
+make on every `impl … for …` line.
+
+A colon clause says less than a keyword does, and how much less depends on
+the language, so the rule is language-aware rather than uniform:
+
+| form | read as | why |
+| --- | --- | --- |
+| `extends Base` | `inherits` | the keyword says so |
+| `implements Face`, `with Store`, `impl Store for Shelf` | `mixes_in` | the keyword says so |
+| Kotlin `: Base(), Store` | `inherits Base`, `mixes_in Store` | Kotlin constructs its superclass and never constructs an interface, so the parens are the language's own answer |
+| C++, C#, Python `: Base` / `(Base)` | `inherits` | C++ has no interfaces; reading a base list there as a mixin would be a new wrong claim |
+
+The last row is a limitation stated rather than hidden: a C# `: IFace` is
+an interface and is recorded as inheritance, because nothing on the line
+distinguishes it from a base class and inheritance is the more common
+case. Kotlin is the only language where a colon list carries the answer.
 
 A base the file can see is named by its path, like any other declaration.
 One that arrived through an import whose module resolves to a file is
