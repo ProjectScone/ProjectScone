@@ -133,7 +133,8 @@ def chosen_setting(rows: Sequence[Measured]) -> tuple[Optional[Setting], str]:
         lowest = min(row.recall_any for row in rows)
         return DEFAULT_SETTINGS, (f"nothing measured better than the defaults ({best:.3f} against "
                                   f"{lowest:.3f} at worst)")
-    quickest = min(tied, key=lambda row: (row.recall_ms_p50 if row.recall_ms_p50 is not None else 0.0,
+    # A row nobody timed is not a quick row: it goes last among equals.
+    quickest = min(tied, key=lambda row: (row.recall_ms_p50 if row.recall_ms_p50 is not None else float("inf"),
                                           row.setting.text()))
     was = next((row.recall_any for row in rows if row.setting == DEFAULT_SETTINGS), None)
     why = f"{quickest.recall_any:.3f} against {was:.3f} by the defaults" if was is not None \

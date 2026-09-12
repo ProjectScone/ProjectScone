@@ -51,6 +51,17 @@ def test_a_tie_between_two_changes_goes_to_the_quicker_one():
     assert taken == quick and "quicker" in why
 
 
+def test_a_setting_that_was_not_timed_does_not_win_a_tie_on_that():
+    """A missing timing is not a fast one. The row that was timed wins."""
+    timed = Setting(candidate_limit=100)
+    rows = [measured(DEFAULT_SETTINGS, 0.4),
+            Measured(setting=Setting(candidate_limit=200), questions=10, recall_any=0.9,
+                     recall_all=0.9, recall_ms_p50=None, errors=0),
+            measured(timed, 0.9, p50=30.0)]
+    taken, _ = chosen_setting(rows)
+    assert taken == timed
+
+
 def test_a_sweep_with_nothing_measured_chooses_nothing():
     taken, why = chosen_setting([])
     assert taken is None and "nothing was measured" in why
