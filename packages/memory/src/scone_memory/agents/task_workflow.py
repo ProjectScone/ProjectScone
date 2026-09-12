@@ -5,7 +5,7 @@ catalog, memory space and recall scope; a saved result never grants authority.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 import hashlib
 import json
 from pathlib import Path
@@ -88,6 +88,37 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
 
 
+async def _verify_agent_evidence(memory: MemoryEngine, space: str, scope: RecallScope,
+                                 excluded: str | None, receipts: Sequence[AgentTaskReceipt]) -> bool:
+    if sum(len(receipt.evidence_packets) for receipt in receipts) > MAX_EVIDENCE_PACKETS:
+        return False
+    if await memory.space_deleted(space) is not None:
+        return False
+    revision = await memory.documents.revision(space)
+    validators: list[Callable[[], Awaitable[bool]]] = []
+    for receipt in receipts:
+        ids: list[str] = []
+        for raw in receipt.evidence_packets:
+            if len(raw.encode()) > 64000:
+                return False
+            packet = json.loads(raw)
+            if not isinstance(packet, dict):
+                return False
+            evidence = await prepare_tool_evidence(memory, space, scope,
+                                                   excluded, packet, 2.0, raise_unavailable=True)
+            if not evidence.evidence_ids:
+                return False
+            ids.extend(evidence.evidence_ids)
+            validators.append(evidence.validate)
+        expected = tuple(dict.fromkeys(ids))
+        if receipt.evidence_ids != expected or receipt.source_status != ('retained' if expected else 'none'):
+            return False
+    for validate in validators:
+        if not await validate():
+            return False
+    return await memory.documents.revision(space) == revision
+
+
 class AgentWorkflow:
     """A caller-owned encrypted workflow with fixed models and declared inputs.
 
@@ -146,32 +177,9 @@ class AgentWorkflow:
     async def _verify(self, context: StepContext) -> bool:
         if context.space != self._space or context.scope != self._binding_scope:
             return False
-        if await self._memory.space_deleted(self._space) is not None:
-            return False
         receipts = self._receipts(context)
-        revision = await self._memory.documents.revision(self._space)
-        validators: list[Callable[[], Awaitable[bool]]] = []
-        for receipt in receipts.values():
-            ids: list[str] = []
-            for raw in receipt.evidence_packets:
-                if len(raw.encode()) > 64000:
-                    return False
-                packet = json.loads(raw)
-                if not isinstance(packet, dict):
-                    return False
-                evidence = await prepare_tool_evidence(self._memory, self._space, self._scope,
-                                                       self._excluded, packet, 2.0, raise_unavailable=True)
-                if not evidence.evidence_ids:
-                    return False
-                ids.extend(evidence.evidence_ids)
-                validators.append(evidence.validate)
-            expected = tuple(dict.fromkeys(ids))
-            if receipt.evidence_ids != expected or receipt.source_status != ('retained' if expected else 'none'):
-                return False
-        for validate in validators:
-            if not await validate():
-                return False
-        return await self._memory.documents.revision(self._space) == revision
+        return await _verify_agent_evidence(self._memory, self._space, self._scope,
+                                            self._excluded, tuple(receipts.values()))
 
     def _step(self, task: AgentTask, agent: BoundAgent) -> Callable[[StepContext], Awaitable[JSONValue]]:
         async def execute(context: StepContext) -> JSONValue:

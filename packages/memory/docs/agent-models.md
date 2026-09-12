@@ -353,7 +353,7 @@ upper bound on simultaneous task callbacks is their product, at most 32 × 8.
 run request retains its chosen width; changing it under an existing run ID
 conflicts. Sequential records retain their previous encrypted payload shape so
 older local readers can still inspect them. New parallel records require a reader
-that supports scheduling. Dynamic handoffs remain separate work.
+that supports scheduling.
 
 ## Finish a sequential workflow early
 
@@ -368,6 +368,70 @@ executing omitted steps. Unknown prior attempts still prevent completion/replay.
 Default workflows retain their existing journal signatures. Completion conditions
 cannot currently be combined with parallel dependency scheduling.
 
+## Let an agent hand off within a fixed policy
+
+Native `AgentHandoffWorkflow` lets a model choose the next agent from a
+host-reviewed set of edges. Each agent still uses its configured model and the
+same fixed memory space, recall scope and tool set. A model cannot select a
+different provider or grant permissions through its answer.
+
+```python
+from scone_memory.agents.handoff_workflow import (
+    AgentHandoffPlan, AgentHandoffWorkflow, HandoffAgent,
+)
+
+handoffs = AgentHandoffPlan(
+    workflow_id="research-report", root_agent="research", max_handoffs=3,
+    agents=(
+        HandoffAgent(agent_id="research", model_id="careful",
+                     can_handoff_to=("writer",)),
+        HandoffAgent(agent_id="writer", model_id="fast"),
+    ),
+)
+workflow = AgentHandoffWorkflow("handoffs.sqlite", key=key, catalog=agents,
+    plan=handoffs, memory=memory, space="team-space", scope=RecallScope.validated())
+try:
+    result = await workflow.run("report-1", "Explain the decision.")
+    if result.status == "completed":
+        assert result.final is not None
+        print(result.final.text)
+    else:
+        # Partial hops remain inspectable, but there is no final answer.
+        assert result.status == "handoff_limit" and result.final is None
+finally:
+    workflow.close()
+```
+
+The host catalog must contain these agents and their allowed model IDs. Omitting
+`model_id` binds the catalog's current explicit default. The selected bindings,
+root, edges and budget are recorded in the encrypted journal's signature;
+changing them prevents reuse of a prior run.
+
+Each model receives an output contract requiring exactly `answer` and
+`handoff_to`. A null target finishes the chain; otherwise the target must be on
+that agent's allowed list. Invalid JSON, duplicate keys, extra fields and
+disallowed targets fail before another agent is called. They are not silently
+repaired or retried. Explicit cycles, including self-edges, are allowed, but
+`max_handoffs` (0–31) permits only 1–32 total hops. Exhausting the budget while
+requesting another handoff returns `handoff_limit`, with `final=None`.
+
+Only the immediately preceding answer reaches the next model, as untrusted
+context bounded to 32,000 UTF-8 bytes. Each hop retains its own evidence; earlier
+evidence does not automatically become evidence for a later answer. Actual
+retained sources are revalidated before downstream work and result publication.
+A final result can have `source_status="none"`; workflow completion is not a
+claim of factual correctness.
+
+`read_result` freshly validates saved hops without invoking models. `progress`
+returns journal metadata only: its `completed` status means execution stopped,
+and callers must inspect the verified result for `completed` versus
+`handoff_limit`. Completed hops are reusable after reopening; interrupted model
+attempts refuse automatic replay. Temporary verification outages preserve
+receipts, while confirmed invalid evidence prevents their reuse.
+
+Handoffs currently use this native caller-owned API. The saved-plan HTTP API and
+browser editor continue to manage fixed task DAGs, not dynamic handoff plans.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.
@@ -376,8 +440,8 @@ the tool-loop budgets bound model rounds, tool calls and retained transcript dat
 Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
-Declared dependency handoffs and sequential recovery are implemented natively.
-Dynamic model-selected handoffs remain separate work.
+Declared dependencies, bounded parallel execution, controlled dynamic handoffs
+and sequential recovery are implemented natively.
 Saved plan editing is available through the native store and
 authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.
