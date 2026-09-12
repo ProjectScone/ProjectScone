@@ -587,6 +587,75 @@ limit is a refusal and not a silence.
 previously refused *after* the whole recall had happened and been logged
 — work spent, and an event recorded, for an answer nobody receives.
 
+## Cutting a document where it already divides itself
+
+The chunker prefers a paragraph break, then a sentence end, then any
+whitespace, then a hard cut inside a word. It knows nothing about
+headings, numbered clauses or tables. So `Article 7.2` can end one chunk
+while the clause it names begins the next, and a table's rows can arrive
+without the header row that says what their columns mean — and the clause
+number and the column names are usually the query terms.
+
+The leading document pipeline answers this with a chunker per document
+type: one for books, one for laws, one for papers, one for resumes. That
+needs someone to declare what kind of document this is before it is read.
+This reads the structure the document already carries.
+
+```python
+MemoryEngine(store, index, embedder, structure_aware=True)
+```
+
+Built on `ingestion/structure.py`, which already finds headings, fenced
+code and pipe tables and is already used by retrieval and source
+inspection. Only what that parser deliberately leaves out is new:
+setext headings, numbered and lettered clauses, `Q:`/`A:` pairs.
+
+Measured over this repository's own 23 documents (433,769 bytes):
+
+| | default | structure-aware |
+| --- | --- | --- |
+| chunks | 824 | 860 (+4.4%) |
+| tables split across chunks | **10 of 33** | **0** |
+| headings left as the last line of a chunk | **105** | **0** |
+
+That measures the defect, not recall. Recall on our benchmark corpus
+would have been zero and meaningless: it is chat sessions, which have no
+headings, clauses or tables at all. Whether a reader answers better from
+these chunks is unmeasured, and the cost of 4.4% more chunks — more
+embeddings at ingestion, more candidates per query — is real.
+
+Four rules, each with a test:
+
+- **A document with no structure chunks byte-identically to today.** A
+  test compares the two span lists directly, because cut positions decide
+  what chunks exist and stored offsets are part of the shared
+  specification.
+- **A unit longer than the target is still split**, and the receipt
+  separates chunks beginning at a boundary from chunks beginning where
+  the target fell. "Structure-aware" must not read as "every chunk is a
+  section".
+- **A table is never cut, and travels with the heading above it.** A
+  table over the target is counted in `over_target` rather than quietly
+  returned: a caller sizing a context window needs that more than an
+  assurance that nothing exceeds the target.
+- **Structure that is not there is not invented.** `1984 was a year` is
+  prose, not clause 1984. A `#` or a numbered step inside a fence is an
+  example, not a heading. The `---` closing YAML front matter is not a
+  heading underline. Each was a false positive found by reading the rule,
+  and each has its own test.
+
+**It is off by default**, because chunk boundaries decide what chunks
+exist for every future ingest into a space, which is the caller's
+decision and not ours to make for them.
+
+One thing it got wrong and one thing the measurement caught are recorded
+in `bench-runs/structure-chunking-2026-09-12/results.md`: prose between a
+table and the next heading was dropped from every chunk — silently
+unretrievable — and a heading above a table was separated from it. The
+invariant test that should have caught the first asserted exactly the
+right property and passed, because its fixture never contained the
+junction.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments
