@@ -576,3 +576,52 @@ async def test_an_unknown_withhold_kind_is_refused_before_any_recall_runs():
             assert searches == 1, "a valid policy must not stop the search"
     finally:
         await engine.close()
+
+
+def test_a_window_and_code_context_are_reachable_over_http(client):
+    """Both shipped to the CLI and stopped there, and HTTP is the surface
+    everything else uses. A retrieval feature only the terminal can ask
+    for is a feature the product does not have."""
+    source = ("import json\n\n\n"
+              "def keep(paper: str) -> str:\n"
+              "    \"\"\"Keep one paper.\"\"\"\n"
+              "    return json.dumps({\"paper\": paper})\n")
+    assert client.post("/v1/episodes", json={
+        "content": source, "source": "pkg/store.py"}, headers=auth()).status_code == 200
+    asked = {"q": "keep one paper", "limit": 3}
+
+    widened = client.get("/v1/recall", params={**asked, "window": 200}, headers=auth())
+    assert widened.status_code == 200, widened.text
+    assert "widened" in widened.json(), widened.json()
+
+    inside = client.get("/v1/recall", params={**asked, "code_context": True}, headers=auth())
+    assert inside.status_code == 200, inside.text
+    assert "code_context" in inside.json(), inside.json()
+
+
+def test_a_stage_receipt_over_http_does_not_repeat_the_passages(client):
+    """The fault the CLI had: a stage's receipt kept its own copy of the
+    text, so `--json --window --withhold` handed the withheld address back
+    inside the widened receipt. The same shape would arrive here with the
+    same parameters, so the copy is dropped from every stage here too."""
+    address = "ana.alves@meridian-health.example"
+    assert client.post("/v1/episodes", json={
+        "content": f"Write to {address} about the rota, at length, so the window has "
+                   f"something either side of the match to widen into."},
+        headers=auth()).status_code == 200
+    asked = {"q": "write rota", "limit": 3, "window": 300, "withhold": "email"}
+    held = client.get("/v1/recall", params=asked, headers=auth())
+    assert held.status_code == 200, held.text
+    body = held.json()
+    assert address not in json.dumps(body), "the widened receipt handed back what was withheld"
+    assert "items_not_repeated" in body["widened"], body["widened"]
+
+
+def test_code_context_is_refused_beside_withholding(client):
+    """Code context quotes the file again after withholding, so asking
+    for both hands back what was just withheld. The CLI refuses this; a
+    route that did not would be the same hole wearing different clothes."""
+    refused = client.get("/v1/recall", params={
+        "q": "anything", "limit": 3, "withhold": "email", "code_context": True}, headers=auth())
+    assert refused.status_code == 422, (refused.status_code, refused.text)
+    assert "code_context" in refused.text, refused.text
