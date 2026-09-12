@@ -15,6 +15,7 @@ from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpo
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .document_source import DocumentSource, source_revision_key
+from .video_evidence import DocumentVideoEvidence
 
 if TYPE_CHECKING:
     from ..core.ports import EmbeddingCheckpoint
@@ -38,7 +39,7 @@ FILE_MEDIA_TYPES = {
 
 class DocumentManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2, 3, 4, 5] = 1
+    schema_version: Literal[1, 2, 3, 4, 5, 6] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
@@ -51,6 +52,11 @@ class DocumentManifest(BaseModel):
 
 
 def _validate_manifest_version(manifest: DocumentManifest) -> None:
+    if manifest.parsed.video is not None:
+        if manifest.schema_version < 6:
+            raise ValueError('document video frames require manifest version six')
+        if manifest.parsed.video.source_sha256 != manifest.original_sha256:
+            raise ValueError('document video evidence does not match its original')
     if manifest.schema_version < 5 and any(c.context or c.merged_locators
             for s in manifest.parsed.segments for c in s.table_cells):
         raise ValueError('document merged table sources require manifest version five')
@@ -95,6 +101,7 @@ class DocumentProvenance:
     parser: str
     segments: tuple[DocumentSegment, ...]
     metadata: dict[str, str] = field(default_factory=dict)
+    video: DocumentVideoEvidence | None = None
 
 
 def digest(data: bytes) -> str:
@@ -127,7 +134,7 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
     has_order = any('ocr_reading_order' in s.metadata for s in parsed.segments)
     has_tables = any(s.table_cells for s in parsed.segments)
     has_merges = any(c.context or c.merged_locators for s in parsed.segments for c in s.table_cells)
-    return DocumentManifest(schema_version=5 if has_merges else 4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
+    return DocumentManifest(schema_version=6 if parsed.video is not None else 5 if has_merges else 4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
                             original_sha256=digest(data), filename=filename, parsed=parsed)
 
 
@@ -221,4 +228,4 @@ async def document_provenance(memory: MemoryEngine, space: str, episode_id: int,
             selected.append(segment.model_copy(update={'regions': regions, 'table_cells': cells}))
         offset = stop + 2
     return DocumentProvenance(original, retained, manifest.filename, manifest.parsed.format,
-                              manifest.parsed.parser, tuple(selected), dict(manifest.parsed.metadata))
+                              manifest.parsed.parser, tuple(selected), dict(manifest.parsed.metadata), manifest.parsed.video)

@@ -9,6 +9,7 @@ from ...core.errors import InvalidInput
 from ...ocr.types import OrderedOcrRegion
 from ...ocr.layout import ReadingOrderReceipt, validate_reading_order
 from .table_types import DocumentTableCell, validate_tables
+from ..video_evidence import DocumentVideoEvidence
 
 
 class DocumentTextRegion(OrderedOcrRegion):
@@ -51,6 +52,14 @@ class ParsedDocument(BaseModel):
     parser: str = Field(min_length=1, max_length=128)
     segments: tuple[DocumentSegment, ...] = Field(min_length=1, max_length=20_000)
     metadata: dict[str, str] = Field(default_factory=dict)
+    video: DocumentVideoEvidence | None = None
+
+    @model_serializer(mode='wrap')
+    def serialize_video(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result: dict[str, object] = handler(self)
+        if self.video is None:
+            result.pop('video', None)
+        return result
 
 
 def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
@@ -67,6 +76,7 @@ def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
         _regions(segment)
     _metadata(parsed.metadata)
     validate_tables(parsed.segments)
+    _video(parsed)
 
 
 def _regions(segment: DocumentSegment) -> None:
@@ -100,3 +110,31 @@ def _regions(segment: DocumentSegment) -> None:
 def _metadata(values: dict[str, str]) -> None:
     if len(values) > 32 or any(len(k) > 128 or len(v.encode('utf-8')) > 4096 for k, v in values.items()):
         raise InvalidInput('document metadata exceeds its limit')
+
+
+def _video(parsed: ParsedDocument) -> None:
+    if parsed.video is None:
+        if any('video_frame_ordinal' in segment.metadata for segment in parsed.segments):
+            raise InvalidInput('video segments require frame evidence')
+        return
+    try:
+        evidence = DocumentVideoEvidence.model_validate(parsed.video.model_dump())
+    except (ValueError, AttributeError) as error:
+        raise InvalidInput('document video evidence is invalid') from error
+    if sum(len(segment.regions) for segment in parsed.segments) > 20_000:
+        raise InvalidInput('video OCR exceeds its total region limit')
+    observed = {str(frame.ordinal): frame for frame in evidence.frames if not frame.empty}
+    seen: set[str] = set()
+    for segment in parsed.segments:
+        ordinal = segment.metadata.get('video_frame_ordinal', '')
+        frame = observed.get(ordinal)
+        if (frame is None or ordinal in seen or not segment.regions
+                or segment.metadata.get('extraction') != 'ocr'
+                or segment.metadata.get('engine') != frame.ocr_engine
+                or segment.locator != f'video:stream:{evidence.stream_index}/frame:{ordinal}'
+                or any(region.coordinate_space != 'normalized_displayed_frame_top_left'
+                       for region in segment.regions)):
+            raise InvalidInput('video OCR segments do not match their sampled frames')
+        seen.add(ordinal)
+    if seen != set(observed):
+        raise InvalidInput('video evidence is missing recognized frame text')
