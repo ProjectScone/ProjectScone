@@ -267,56 +267,6 @@ def test_from_dot_import_names_its_module_without_a_resolver_too():
     assert ("pkg/ingestion/graph.py:Shelf", "pkg/ingestion/core.py:Base") in inherits, inherits
 
 
-def test_a_brace_language_records_the_calls_it_can_see():
-    """There was no call graph outside Python at all.
-
-    Measured over 58 files of this project's web application: 263 `calls`
-    relations for the equivalent Python corpus and **0** for TypeScript,
-    in something the reference survey marks done. `calls` is the backbone
-    of a code graph and it existed for one language.
-
-    The rule is the one the Python reader already follows: a bare name is
-    a call to this file's own declaration when it has one. Anything else
-    -- a function from another module, a method on a value whose type
-    nobody wrote down -- is left out rather than pointed at a name that
-    might mean anything.
-
-    Coarser than Python in one way that the assertions below state
-    rather than hide: the brace declaration reader reports a class and
-    not its methods, so a call written in a method is attributed to the
-    class holding it.
-    """
-    source = ("function helper(p) { return p; }\n"
-              "export class Shelf {\n"
-              "  keep(p) { return helper(p); }\n"
-              "  put(p) { return this.keep(p); }\n"
-              "}\n"
-              "export function drive(p) {\n"
-              "  return elsewhere(p) + helper(p);\n"
-              "}\n")
-    found = code_claims(source, "web/shelf.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert ("web/shelf.ts:Shelf", "web/shelf.ts:helper") in calls, calls
-    assert ("web/shelf.ts:drive", "web/shelf.ts:helper") in calls, calls
-    # `elsewhere` is not declared here and is not guessed at.
-    assert not any("elsewhere" in one for pair in calls for one in pair), calls
-
-
-def test_a_brace_call_is_not_read_out_of_a_string_or_a_comment():
-    """The masked copy of the source is what the declaration reader
-    already uses; the call reader has to use it too, or `// helper(p)`
-    and `"helper(p)"` become edges."""
-    source = ("function helper(p) { return p; }\n"
-              "export function drive(p) {\n"
-              "  // helper(p) used to be called here\n"
-              "  const said = 'helper(p)';\n"
-              "  return said;\n"
-              "}\n")
-    found = code_claims(source, "web/shelf.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
-
-
 def test_an_unknown_suffix_is_part_of_the_name_not_an_extension():
     """`./foo.bar` means `foo.bar.ts`, confirmed against
     `tsc --traceResolution` (TypeScript 7.0.2). Treating `.bar` as an
@@ -324,21 +274,6 @@ def test_an_unknown_suffix_is_part_of_the_name_not_an_extension():
     found = code_claims("import {x} from './foo.bar';\n", "web/page.ts", language="braces")
     imports = {claim.object for claim in found if claim.predicate == "imports"}
     assert imports == {"web/foo.bar.ts"}, imports
-
-
-def test_a_call_in_a_method_belongs_to_the_method_and_not_also_its_class():
-    """Spans nest, so a line inside a method sits inside its class too.
-    The innermost declaration holding a call is the one that made it, or
-    every call in a class would be claimed twice at two granularities."""
-    source = ("function helper(p) { return p; }\n"
-              "export class Shelf {\n"
-              "  keep(p) {\n"
-              "    return helper(p);\n"
-              "  }\n"
-              "}\n")
-    found = code_claims(source, "web/shelf.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert calls == {("web/shelf.ts:Shelf.keep", "web/shelf.ts:helper")}, calls
 
 
 def test_an_import_that_writes_its_own_extension_is_not_given_a_second():
@@ -358,86 +293,43 @@ def test_an_import_that_writes_its_own_extension_is_not_given_a_second():
     assert imports == {"web/personas.ts", "web/wire.js", "web/foo.bar.ts"}, imports
 
 
-def test_a_declaration_header_is_not_a_call_to_itself():
-    """`gamma() {` matches the call pattern exactly, so a class was
-    claimed to call each of its own methods at the line where they are
-    written. That is where a thing is declared, not where it is used."""
-    source = ("class Beta {\n"
-              "  gamma() {\n"
-              "    return 1;\n"
+def test_a_brace_language_gets_no_call_graph_without_a_parser():
+    """Withdrawn after three rounds of false edges, and the record of why
+    belongs here rather than in a commit nobody reads.
+
+    Python has 263 `calls` relations over 60 files of this package and a
+    brace language had none, so I gave braces one: a bare name binds to a
+    declaration this file makes. Every round of review found a new shape
+    of false edge -- two classes with a method of one name calling each
+    other, a bare call binding to a method, a parameter shadowing the
+    function it is named after, a declaration header read as a call, the
+    same header again once a top-level name shared it, a local variable
+    shadowing a global. Each fix was another rule about names, and each
+    one left a case the next rule had to cover.
+
+    The cause is not names. It is that binding a call needs **lexical
+    scope**, and this reader has none: it sees masked lines, not a syntax
+    tree. Cross-file binding through an import does not escape it either,
+    since a parameter can shadow an imported name exactly as it shadows a
+    local one.
+
+    So the rule this file started with stands, and it was right: without
+    a parser, saying what `helper(n)` refers to is guessing, and an edge
+    nobody can check is worse than none. On this project's web
+    application the attempt produced 73 call edges of which 51 crossed a
+    file, and 40 of those 51 named a symbol the graph holds no
+    declaration for -- a larger count, not better evidence.
+
+    Closing it properly means a syntax-aware reader for the brace family,
+    which is the same work as the tree-sitter question the reference
+    survey already records as open. Written down in
+    bench-runs/code-graph-imports-2026-09-12/results.md.
+    """
+    source = ("function helper(p) { return p; }\n"
+              "export class Shelf {\n"
+              "  keep(p) {\n"
+              "    return helper(p);\n"
               "  }\n"
               "}\n")
-    found = code_claims(source, "web/app.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
-
-
-def test_two_classes_with_a_method_of_the_same_name_do_not_call_each_other():
-    """`held` mapped a bare name to one declaration, and method names are
-    not unique in a file. Two classes each declaring `save()` made the
-    later one the target of the earlier one's own declaration header, so
-    `A.save` was recorded as calling `B.save` and the blast radius of
-    `B.save` listed `A.save`. A method is reached through a receiver
-    whose type this reader cannot know, so a bare name never binds to
-    one."""
-    source = ("export class A {\n"
-              "  save() {\n"
-              "    return 1;\n"
-              "  }\n"
-              "}\n"
-              "export class B {\n"
-              "  save() {\n"
-              "    return 2;\n"
-              "  }\n"
-              "}\n")
-    found = code_claims(source, "web/app.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
-
-
-def test_a_bare_call_does_not_bind_to_a_method_of_some_class():
-    """`save()` at the top of a file is not `A.save`. Reaching a method
-    means having a receiver, and this reader never knows its type."""
-    source = ("export class A {\n"
-              "  save() {\n"
-              "    return 1;\n"
-              "  }\n"
-              "}\n"
-              "export function run() {\n"
-              "  return save();\n"
-              "}\n")
-    found = code_claims(source, "web/app.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
-
-
-def test_a_parameter_of_the_same_name_is_not_the_function_it_shadows():
-    """`function run(leaf) { return leaf(); }` calls its parameter, not
-    the `leaf` declared beside it. This reader has no scopes, but a
-    parameter is written on the header line it can already read."""
-    source = ("export function leaf(p) { return p; }\n"
-              "export function run(leaf) {\n"
-              "  return leaf(1);\n"
-              "}\n")
-    found = code_claims(source, "web/app.ts", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
-
-
-def test_a_name_declared_twice_at_the_top_level_binds_to_neither():
-    """A file can declare one name twice -- a function and then a class
-    of the same name is legal JavaScript, and the declaration reader
-    reports both. Binding a call to whichever the table happened to keep
-    is a coin toss recorded as a fact, so it binds to neither."""
-    source = ("function save(p) {\n"
-              "  return 1;\n"
-              "}\n"
-              "class save {\n"
-              "  constructor() {}\n"
-              "}\n"
-              "function run() {\n"
-              "  return save(1);\n"
-              "}\n")
-    found = code_claims(source, "web/app.js", language="braces")
-    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
-    assert not calls, calls
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    assert not [claim for claim in found if claim.predicate == "calls"], found

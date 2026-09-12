@@ -576,7 +576,6 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                                begins + len(text.encode())))
 
     held: dict[str, str] = {}
-    spans: list[tuple[str, str, int, int]] = []
     for item in declarations(content, language="braces"):
         owner = path if "." not in item.name else f"{path}:{item.name.rsplit('.', 1)[0]}"
         # A Rust `impl Shelf` block is a good place to cut a chunk and not
@@ -590,9 +589,6 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             continue
         say(owner, DEFINES, f"{path}:{item.name}", item.first_line)
         held[item.name.rsplit(".", 1)[-1]] = f"{path}:{item.name}"
-        spans.append((f"{path}:{item.name}",
-                      item.name.rsplit(".", 1)[0] if "." in item.name else "",
-                      item.first_line, item.last_line))
 
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
@@ -693,114 +689,8 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             used = _USE.match(line)
             if used:
                 say(path, IMPORTS, used.group(1).split("::")[0], number)
-    _brace_calls(code, path, held, spans, say)
     _meaning(content, path, "braces", say)
     return tuple(found)
-
-
-#: A call site: a name, then an opening bracket. Read from the masked
-#: copy of the source, so a call written inside a string or a comment is
-#: not one. `new Shelf(` is a construction and names the same thing.
-_CALL = re.compile(r"(?:\bnew\s+)?\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
-#: Words that take a bracket and are not calls.
-_NOT_CALLS = frozenset("if while for switch catch return typeof await yield function class new "
-                       "else do try throw case delete void in of instanceof".split())
-
-
-def _brace_calls(code: list[str], path: str, held: dict[str, str],
-                 spans: list[tuple[str, str, int, int]], say) -> None:
-    """Calls between things this file can see, and no others.
-
-    A bare name binds only to a **top-level declaration of this file
-    whose name it does not share with another**. Three things follow from
-    that, and each was a false edge before it:
-
-    - A method never binds. `save()` is reached through a receiver, and
-      this reader never knows a receiver's type. Two classes each
-      declaring `save()` made one the target of the other's declaration
-      header, and the blast radius of `B.save` listed `A.save`.
-    - A name declared twice at the top level binds to neither, rather
-      than to whichever the declaration table happened to keep.
-    - A parameter of the enclosing declaration wins over anything it
-      shadows. `function run(leaf)` calling `leaf(1)` calls its argument,
-      not the `leaf` declared beside it. This reader has no scopes, but a
-      parameter is written on a header line it already reads.
-
-    ``code`` is the masked source the declaration reader already uses, so
-    a call inside a string or a comment is not a call.
-
-    Each call belongs to the innermost declaration holding it, so a call
-    in a method is the method's and not also its class's. That is also
-    what keeps a declaration's own header from being a call to itself. A
-    method whose whole body is on one line is not a declaration to this
-    reader, and then its class is the innermost there is.
-
-    Two limits stated rather than claimed away: a call to a name that
-    came from an import is left out, which the Python reader resolves;
-    and a call reached through any receiver at all is left out, which is
-    most calls in an object-oriented file. What is left is small and
-    checkable, and there was none of it at all before -- 263 `calls` over
-    60 files of this package against 0 over 58 files of this project's
-    web application.
-    """
-    # Counted from the spans and not from ``held``, which is a dict: the
-    # second `save` overwrote the first there, so a duplicate could never
-    # be seen at all and the guard against it could never fire.
-    # Counted from the spans and not from ``held``, which is a dict: the
-    # second `save` overwrote the first there, so a duplicate could never
-    # be seen and the guard against it could never fire. Counted by the
-    # line each is written on, because two declarations of one name make
-    # the same label -- that is the whole difficulty.
-    once: dict[str, str] = {}
-    written: dict[str, int] = {}
-    twice: set[str] = set()
-    for whole, _inside, first, _last in spans:
-        symbol = whole.rpartition(":")[2]
-        if "." in symbol:
-            continue  # a method: reached through a receiver, never bare
-        if written.get(symbol, first) != first:
-            twice.add(symbol)
-        written.setdefault(symbol, first)
-        once[symbol] = whole
-    holder: dict[int, str] = {}
-    width: dict[int, int] = {}
-    header: dict[str, str] = {}
-    for whole, _inside, first, last in spans:
-        header.setdefault(whole, code[first - 1] if first - 1 < len(code) else "")
-        for number in range(first, last + 1):
-            if number not in width or last - first < width[number]:
-                holder[number], width[number] = whole, last - first
-    for number, line in enumerate(code, start=1):
-        caller = holder.get(number)
-        if caller is None:
-            continue
-        for match in _CALL.finditer(line):
-            name = match.group(1)
-            if name in _NOT_CALLS or name in twice or line[:match.start(1)].rstrip().endswith("."):
-                continue
-            target = once.get(name)
-            if target is None or target == caller or _shadowed(name, header.get(caller, "")):
-                continue
-            say(caller, CALLS, target, number)
-
-
-def _shadowed(name: str, header: str) -> bool:
-    """Whether the declaration written on ``header`` takes ``name`` as an
-    argument, in which case a call to it is a call to that argument."""
-    opened = header.find("(")
-    if opened < 0:
-        return False
-    depth, taken = 0, []
-    for character in header[opened:]:
-        if character in "([{":
-            depth += 1
-        elif character in ")]}":
-            depth -= 1
-            if depth == 0:
-                break
-        else:
-            taken.append(character)
-    return bool(re.search(rf"\b{re.escape(name)}\b", "".join(taken)))
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
