@@ -685,3 +685,31 @@ async def test_one_enormous_import_is_quoted_to_a_bound_and_says_so():
     assert "quoted to" in context.why, context.why
     said = context.record()
     assert any(i["clipped"] for one in said["by_chunk"].values() for i in one["imports"]), said
+
+
+async def test_the_whole_context_has_a_byte_budget_and_says_what_it_dropped():
+    """Per-import and per-signature bounds do not bound the answer.
+
+    A hundred episodes of two hundred imports each is a six-hundred
+    kilobyte reply from a module whose every individual quote is bounded
+    -- the third instance of the same shape found in this one audit. The
+    budget is the caller's, matching `expansion_max_bytes` on the recall
+    route, and what it excluded is counted rather than dropped quietly.
+    """
+    source = ("import json\n" + "".join(f"import module_{n}\n" for n in range(60))
+              + "\n\ndef contact() -> str:\n"
+              "    return json.dumps({}) + \" a body long enough to be its own chunk here\"\n")
+    engine = await memory(source, source="many.py", target=70)
+    try:
+        found = await engine.recall("default", "contact json dumps body chunk", limit=6)
+        whole = await code_context(engine, "default", found.items)
+        tight = await code_context(engine, "default", found.items, max_bytes=200)
+    finally:
+        await engine.close()
+    assert whole.by_chunk and whole.beyond_budget == 0, whole.record()
+    assert len(tight.by_chunk) < len(whole.by_chunk), (tight.record(), whole.record())
+    assert tight.beyond_budget == len(whole.by_chunk) - len(tight.by_chunk), tight.record()
+    assert "budget" in tight.why, tight.why
+    for bad in (0, -1, 1.5, True):
+        with pytest.raises(InvalidInput):
+            await code_context(engine, "default", found.items, max_bytes=bad)

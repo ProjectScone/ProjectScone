@@ -62,6 +62,14 @@ MAX_SIGNATURE_LINES = 12
 #: of those is an unbounded answer. The signature beside it had been
 #: bounded all along, which is the half-measure this module kept making.
 MAX_IMPORT_LINES = 12
+#: Bytes of context one call may return, and the most a caller may ask
+#: for. Bounding each quote does not bound the answer: a hundred episodes
+#: of two hundred imports is a six-hundred kilobyte reply out of a module
+#: whose every individual quote is bounded. Shaped like the recall
+#: route's ``expansion_max_bytes``, which is the same decision made once
+#: already.
+MAX_CONTEXT_BYTES = 256_000
+DEFAULT_CONTEXT_BYTES = 16_000
 
 #: How the brace languages open a line that brings a name in. This reads
 #: **lines**, where ``ingestion/code_graph.py`` resolves **targets** --
@@ -144,13 +152,18 @@ class CodeContext:
     #: there. Counted apart from ``shortened`` because a truncated header
     #: and a truncated import are different things to a reader.
     long_imports: int = 0
+    #: Chunks whose context was not returned because the byte budget was
+    #: spent. Their items are still in the answer; only the context they
+    #: would have carried is missing, and a caller can ask again with a
+    #: larger budget or a smaller limit.
+    beyond_budget: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
         return {"chunks": len(self.by_chunk), "not_code": self.not_code, "gone": self.gone,
                 "unread": self.unread, "not_read": self.not_read, "capped": self.capped,
                 "shortened": self.shortened, "long_imports": self.long_imports,
-                "why": self.why,
+                "beyond_budget": self.beyond_budget, "why": self.why,
                 "items": [item.model_dump() for item in self.items],
                 "by_chunk": {str(key): {
                     "language": value.language, "more_imports": value.more_imports,
@@ -410,7 +423,8 @@ def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, .
 
 async def code_context(engine: "MemoryEngine", space: str, items: Sequence[RecallItem], *,
                        imports: int = MAX_IMPORTS,
-                       episodes: int = MAX_EPISODES) -> CodeContext:
+                       episodes: int = MAX_EPISODES,
+                       max_bytes: int = DEFAULT_CONTEXT_BYTES) -> CodeContext:
     """The signature and imports each recalled code chunk sits inside."""
     check_space(space)
     if type(imports) is not int or not 1 <= imports <= MAX_IMPORTS:
@@ -418,12 +432,16 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     if type(episodes) is not int or not 1 <= episodes <= MAX_EPISODES:
         raise InvalidInput(f"episodes is a whole number from 1 to {MAX_EPISODES}, not "
                            f"{episodes!r}")
+    if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_CONTEXT_BYTES:
+        raise InvalidInput(f"max_bytes is a whole number from 1 to {MAX_CONTEXT_BYTES}, not "
+                           f"{max_bytes!r}")
 
     found: dict[int, ChunkContext] = {}
     kept: list[RecallItem] = []
     read: dict[int, Optional[str]] = {}
     unavailable: set[int] = set()
     not_code = vanished = unread = unbudgeted = capped = shortened = lengthy = 0
+    spent = beyond = 0
     for item in items:
         language = code_language(item.source)
         if language is None:
@@ -472,6 +490,15 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
             shortened += 1
         if any(brought_in.clipped for brought_in in brought):
             lengthy += 1
+        size = (sum(len(s.text.encode()) for s in signatures)
+                + sum(len(i.text.encode()) for i in brought))
+        if spent + size > max_bytes and found:
+            # The item stays in the answer; only the context it would have
+            # carried is left out, and the count says how many.
+            beyond += 1
+            kept.append(item)
+            continue
+        spent += size
         found[item.chunk_id] = ChunkContext(
             chunk_id=item.chunk_id, language=language, holders=signatures,
             imports=brought, more_imports=more)
@@ -500,6 +527,10 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     if lengthy:
         why += (f"; {lengthy} chunk(s) have an import running past {MAX_IMPORT_LINES} lines, "
                 f"quoted to there, so those import lines are incomplete")
+    if beyond:
+        why += (f"; {beyond} chunk(s) have no context here because the budget of {max_bytes} "
+                f"byte(s) was spent -- their passages are still in the answer, and a larger "
+                f"budget or a smaller limit would carry them")
     return CodeContext(items=tuple(kept), by_chunk=found, not_code=not_code, gone=vanished,
                        unread=unread, not_read=unbudgeted, capped=capped, shortened=shortened,
-                       long_imports=lengthy, why=why)
+                       long_imports=lengthy, beyond_budget=beyond, why=why)
