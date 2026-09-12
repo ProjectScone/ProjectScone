@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import hashlib
 import json
 import re
+import unicodedata
 
 from ..backends.blobs import BlobStore
 from ..core.errors import InvalidInput
@@ -32,7 +33,7 @@ def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _contains_label(excerpt: str, label: str) -> bool:
     """A source label inside another word is not that label's context."""
     def word(char: str) -> bool:
-        return char.isalnum() or char == '_'
+        return char.isalnum() or char == '_' or unicodedata.category(char).startswith('M')
 
     cursor = 0
     while (start := excerpt.find(label, cursor)) >= 0:

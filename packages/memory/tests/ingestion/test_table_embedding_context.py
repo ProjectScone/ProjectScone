@@ -301,13 +301,14 @@ async def test_office_cells_restore_declared_headers_and_word_spanning_row_conte
         await memory.close()
 
 
-async def test_header_name_inside_an_unrelated_word_does_not_count_as_present_context():
+@pytest.mark.parametrize('label, word', [('US', 'RUSSIA'), ('US', 'US\u0301'), ('e', 'e\u0301')])
+async def test_header_name_inside_an_unrelated_word_does_not_count_as_present_context(label, word):
     memory, model = await open_memory()
     try:
-        raw = ('<table><tr><th>US</th></tr><tr><td>' + 'RUSSIA ' * 100 + '</td></tr></table>').encode()
+        raw = ('<table><tr><th>' + label + '</th></tr><tr><td>' + (word + ' ') * 200 + '</td></tr></table>').encode()
         saved = await ingest_document(memory, 'alpha', raw, filename='locations.html')
         chunks = await memory.documents.chunks_of('alpha', saved.added.episode_id)
-        assert 'US' in chunks[-1].text and 'US:' not in chunks[-1].text
-        assert model.inputs[-1].startswith('Table context: US\n\n')
+        assert label in chunks[-1].text and label + ':' not in chunks[-1].text
+        assert model.inputs[-1].startswith('Table context: ' + label + '\n\n')
     finally:
         await memory.close()
