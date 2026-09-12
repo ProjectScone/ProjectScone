@@ -10,6 +10,8 @@
 
 from ._wire import Capabilities
 from .agent_inputs import InputRecord
+from .agent_results import AgentResult, HandoffHop, HandoffResult, HumanOutput, ModelOutput, TaskResult
+from .agent_evidence import EvidencePacket
 from .agents import AgentClient, PlanPage, RunPage
 from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
@@ -27,6 +29,7 @@ __all__ = [
     "Capabilities",
     "AgentClient",
     "InputRecord",
+    "AgentResult", "HandoffHop", "HandoffResult", "HumanOutput", "ModelOutput", "TaskResult", "EvidencePacket",
     "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
     "DocumentSpec", "DocumentStatus", "DocumentStored", "ParserLimits", "PdfOcr",
     "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",

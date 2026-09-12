@@ -6,6 +6,7 @@ from typing import Optional
 
 from ._wire import ResourceClient, address, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_inputs import InputRecord
+from .agent_results import AgentResult, parse_result
 from .agent_models import (AgentChoice, HandoffPlan, Plan, RunPolicy, RunRequest, RunStatus,
                            SavedPlan, TaskPlan, parse_catalog)
 
@@ -188,3 +189,13 @@ class AgentClient(ResourceClient):
         if set(activated) != set(selected) or any(not activated[key].same_reply(value) for key, value in selected.items()):
             raise invalid('activation acknowledgement')
         return status
+
+
+    def result(self, run_id: str) -> AgentResult:
+        path = '/v1/agent-runs/' + address(run_id) + '/result'
+        self._check('agents.runs')
+        request = self.request(run_id)
+        inputs = self.inputs(run_id) if isinstance(request.plan.plan, TaskPlan) and request.plan.plan.interactive else ()
+        # The server's current source verification must be the final remote read.
+        raw = self._client._request('GET', path)
+        return parse_result(raw, request, inputs)
