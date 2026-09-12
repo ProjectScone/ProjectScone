@@ -1112,7 +1112,13 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders."""
         check_space(space)
-        async for record in archive.export_records(self.documents, space, wrote_at=self.clock()):
+        # What the space holds that an archive does not carry is counted
+        # here, where the blob store is, and said in the header: a dump of
+        # an illustrated space is not the whole of it, and nobody should
+        # have to find that out by restoring one.
+        left_behind = {"attachments": len(await self.blobs.linked(space))}
+        async for record in archive.export_records(self.documents, space, wrote_at=self.clock(),
+                                                   left_behind=left_behind):
             yield record
 
     async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:

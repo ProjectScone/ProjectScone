@@ -86,3 +86,21 @@ async def test_what_an_archive_carries_still_round_trips_whole():
     assert summary.episodes == 1 and summary.facts == 1 and summary.profile == ARCHIVE_PROFILE
     assert [fact.object for fact in await target.documents.list_facts(SPACE, include_closed=True)] == [
         "Acme Robotics"]
+
+
+async def test_an_archive_says_what_this_profile_does_not_carry():
+    """A space with attachments exports without them. That is a real loss,
+    so the archive says it rather than letting a reader believe a dump of
+    an illustrated space is the whole of it."""
+    engine = await memory()
+    kept = await engine.blobs.put(SPACE, b"\\x89PNG fake", "image/png", "shot.png")
+    added = await engine.remember(SPACE, "The office, photographed.")
+    await engine.blobs.link(SPACE, kept.attachment_id, added.episode_id)
+    [header, *_] = await records(engine)
+    assert header["carries"] == ["episodes", "facts", "fact_links", "affirmations"]
+    assert header["not_carried"] == {"attachments": 1}
+
+
+async def test_an_archive_of_a_space_with_nothing_left_behind_says_nothing_was():
+    [header, *_] = await records(await filled())
+    assert header["not_carried"] == {}

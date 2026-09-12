@@ -477,6 +477,13 @@ success. So:
   models the exporter writes from, so the list cannot go stale and refuse
   an archive this engine could have read perfectly well.
 - **An unknown record type is refused**, as it always was.
+- **The header says what the profile does not carry.** This one carries
+  episodes, facts, links and restatements; a space's attachments are not
+  in it, so a dump of an illustrated space says
+  `"not_carried": {"attachments": 3}` rather than letting a reader take
+  it for the whole of the space. Carrying them is a later profile's job,
+  and it will be a later profile, refused by this engine until it
+  understands it.
 - `ImportSummary.profile` says which profile an import was read as.
 
 ## What survives a crash

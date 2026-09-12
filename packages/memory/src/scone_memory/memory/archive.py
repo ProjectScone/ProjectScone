@@ -22,6 +22,10 @@ from ..ingestion.records import Record, content_hash
 #: in its first record, and an importer refuses a profile it does not
 #: know rather than reading it hopefully.
 ARCHIVE_PROFILE = "scone.archive/1"
+#: What this profile carries. Everything a space holds that is not in
+#: this list is named in the header as not carried, so that nobody reads
+#: a dump of an illustrated space as the whole of it.
+ARCHIVE_CARRIES = ("episodes", "facts", "fact_links", "affirmations")
 
 #: The fields each kind of record may carry, taken from the models the
 #: exporter writes from rather than written out here: a list kept by hand
@@ -30,7 +34,7 @@ ARCHIVE_PROFILE = "scone.archive/1"
 #: anything outside these is refused, because importing the part we
 #: recognise would look like a success and quietly drop the rest.
 KNOWN_FIELDS: dict[str, frozenset[str]] = {
-    "archive": frozenset({"type", "profile", "space", "wrote_at", "engine"}),
+    "archive": frozenset({"type", "profile", "space", "wrote_at", "engine", "carries", "not_carried"}),
     "episode": frozenset({"type", "space", "episode_id", "kind", "content", "content_hash",
                           "source", "tags", "metadata", "created_at", "dedup_key"}),
     "fact": frozenset({"type", "space"}) | frozenset(Fact.model_fields),
@@ -71,13 +75,20 @@ class ArchiveRuntime:
     remember_many: Callable[[str, Sequence[Record]], Awaitable[list[Added]]]
 
 
-async def export_records(documents: DocumentStore, space: str, *,
-                         wrote_at: str = "") -> AsyncIterator[dict]:
+async def export_records(documents: DocumentStore, space: str, *, wrote_at: str = "",
+                         left_behind: Optional[Mapping[str, int]] = None) -> AsyncIterator[dict]:
     """Yield what the space is made of: a header saying what this archive
-    is, then original episodes, facts, unique links and restatements. No
-    derived vectors: they are rebuilt by the ingestion that reads this."""
+    is and what it does not carry, then original episodes, facts, unique
+    links and restatements. No derived vectors: they are rebuilt by the
+    ingestion that reads this.
+
+    ``left_behind`` counts what the space holds that this profile does not
+    carry. The host counts it, because the document store is not where
+    those things live."""
     counts = await documents.counts(space)
-    yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at}
+    yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at,
+           "carries": list(ARCHIVE_CARRIES),
+           "not_carried": {name: count for name, count in (left_behind or {}).items() if count}}
     for episode in await documents.recent_episodes(space, max(counts.episodes, 1)):
         yield {
             "type": "episode",
