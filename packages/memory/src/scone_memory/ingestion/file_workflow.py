@@ -28,12 +28,12 @@ class DocumentIngestionWorkflow:
     def __init__(self, memory: MemoryEngine, path: str | Path, *, key: bytes,
                  parser_revision: str, parser: DocumentParser | None = None,
                  limits: DocumentLimits = DocumentLimits(), deadline: float = 120,
-                 max_retries: int = 1):
+                 max_retries: int = 1, automatic_retries: bool = True):
         self._memory = memory
         self._parser = parser or BuiltinDocumentParser()
         self._limits = limits
         self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
-            deadline=deadline, max_retries=max_retries, steps=(
+            deadline=deadline, max_retries=max_retries, automatic_retries=automatic_retries, steps=(
                 WorkflowStep('extract', parser_revision, self._extract, idempotent=True, retryable=True),
                 WorkflowStep('index', 'document-v1', self._index, idempotent=True, retryable=True)))
 
@@ -50,6 +50,12 @@ class DocumentIngestionWorkflow:
     def status(self, run_id: str, *, space: str, attachment_id: str,
                filename: str | None = None) -> WorkflowStatus | None:
         return self._runner.status(run_id, space=space, scope=self._scope(filename), inputs=attachment_id)
+
+    async def read_result(self, run_id: str, *, space: str, attachment_id: str,
+                          filename: str | None = None) -> WorkflowResult | None:
+        """Verify completed evidence without extracting, indexing or resuming work."""
+        check_space(space)
+        return await self._runner.read_result(run_id, space=space, scope=self._scope(filename), inputs=attachment_id)
 
     async def run(self, run_id: str, *, space: str, attachment_id: str,
                   filename: str | None = None) -> WorkflowResult:

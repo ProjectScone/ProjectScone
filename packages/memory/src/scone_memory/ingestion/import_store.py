@@ -32,6 +32,8 @@ class DocumentImportSpec(BaseModel):
     parser_revision: Identifier
     limits: DocumentLimits = Field(default_factory=DocumentLimits)
     pdf_ocr: PdfOcrSelection | None = None
+    deadline_s: float = Field(default=120.0, gt=0, le=300, allow_inf_nan=False)
+    max_attempts: int = Field(default=3, ge=1, le=4)
 
     @model_validator(mode='after')
     def valid(self) -> Self:
@@ -151,13 +153,18 @@ class DocumentImportStore:
                 (self._storage._seal(token, updated.model_dump_json().encode()), token))
         return updated
 
-    def request_cancel(self, space: str, import_id: str) -> DocumentImportRequest | None:
+    def request_cancel(self, space: str, import_id: str, *,
+                       expected_revision: int | None = None) -> DocumentImportRequest | None:
+        if expected_revision is not None:
+            _integer(expected_revision, 0, 2**31 - 1)
         token = self._token(space, import_id)
         with self._storage._access(write=True) as db:
             row = db.execute('SELECT payload FROM document_imports WHERE token=?', (token,)).fetchone()
             if row is None:
                 return None
             request = self._decode(token, row[0], space)
+            if expected_revision is not None and request.revision != expected_revision:
+                raise ImportConflict()
             if request.cancel_requested_at is not None:
                 return request
             updated = DocumentImportRequest.model_validate({**request.model_dump(),

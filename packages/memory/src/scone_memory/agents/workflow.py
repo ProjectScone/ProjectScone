@@ -200,12 +200,14 @@ class WorkflowRunner:
     discarding receipts. FileNotFoundError and explicit false results invalidate
     the run; adapters should report confirmed missing evidence accordingly.
     Async deadlines are cooperative; callbacks must propagate cancellation.
+    With automatic_retries=False, failed steps wait for another explicit run;
+    max_retries still bounds attempts across all runs and journal reopenings.
     """
     def __init__(
         self, path: str | Path, *, key: bytes, steps: Sequence[WorkflowStep],
         source_verifier: Callable[[StepContext], Awaitable[bool]],
         max_payload_bytes: int = 256000, deadline: float = 30.0, max_retries: int = 1,
-        verify_before_step: bool = False,
+        verify_before_step: bool = False, automatic_retries: bool = True,
         dependencies: Mapping[str, Sequence[str]] | None = None, max_parallel: int = 1,
         completion: WorkflowCompletion | None = None,
     ):
@@ -213,6 +215,9 @@ class WorkflowRunner:
             raise WorkflowError('key_must_be_32_bytes')
         if type(verify_before_step) is not bool:
             raise WorkflowError('invalid_verification_policy')
+        if type(automatic_retries) is not bool:
+            raise WorkflowError('invalid_retry_policy')
+        self._automatic_retries = automatic_retries
         self._verify_before_step = verify_before_step
         _integer(max_payload_bytes, 512, 1000000)
         _integer(max_retries, 0, 3)
@@ -251,6 +256,8 @@ class WorkflowRunner:
         self._closed = False
         self._checkpoint_attempts: dict[str, object] = {}
         revision: JSONValue = [{'id': s.step_id, 'version': s.version, 'idempotent': s.idempotent, 'retryable': s.retryable} for s in steps]
+        if not automatic_retries:
+            revision = {'steps': revision, 'automatic_retries': False, 'max_retries': max_retries}
         if verify_before_step:
             revision = {'steps': revision, 'verify_before_step': True}
         if self._dependencies is not None:
@@ -584,7 +591,7 @@ class WorkflowRunner:
                 except Exception as exc:
                     state.update(status='failed', error_class=type(exc).__name__[:80])
                     self._save(token, state)
-                    if not step.retryable or attempt == maximum:
+                    if not self._automatic_retries or not step.retryable or attempt == maximum:
                         raise WorkflowError('step_failed') from None
                     continue
                 finally:
