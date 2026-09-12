@@ -6,14 +6,18 @@ Source-page scans are bounded; aggregate counts retain their existing scans.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Optional, TypedDict
+from typing import TYPE_CHECKING, Optional, TypedDict, cast
 
+from ..core.affirmations import affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import Episode, Fact, Status
 from ..core.ports import DocumentStore, SourcePage
-from ..core.validation import KINDS, STATUSES, check_space, normalise_metadata, normalise_time
+from ..core.validation import (KINDS, STATUSES, check_space, normalise_metadata, normalise_term, normalise_time)
+
+if TYPE_CHECKING:
+    from .engine import MemoryEngine
 
 SOURCE_WALK_PAGE = 200
 SOURCE_WALK_READS = 25
@@ -23,6 +27,7 @@ class CatalogIdentity(TypedDict):
     embedder: str
     document_store: str
     vector_index: str
+    abstention: Optional[dict]
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,55 @@ class Profile:
     dynamic: list[str] = field(default_factory=list)
     #: ``dynamic`` with its evidence: same order, same excerpts, newest first.
     recent: list[RecentActivity] = field(default_factory=list)
+    #: What the profile was made from: how many facts were read, what the
+    #: read left out, the policy it kept to, and how often each shown
+    #: claim was stated again.
+    coverage: dict = field(default_factory=dict)
+
+
+#: Facts read for one profile; past this the oldest are not read.
+MAX_PROFILE_FACTS = 20_000
+#: Claims whose restatements are counted before the profile is cut.
+MAX_PROFILE_CANDIDATES = 200
+#: How many times a profile is read again when the ledger moves under it.
+#: Two, because a ledger that moves twice is a busy one, not a slow read,
+#: and waiting longer would answer later without answering better.
+ATTEMPTS = 2
+
+
+def _predicates(names: object, what: str) -> frozenset[str]:
+    if isinstance(names, (str, bytes)):
+        raise InvalidInput(f"{what} takes a collection of predicates, not one string")
+    if not isinstance(names, Iterable):
+        raise InvalidInput(f"{what} takes a collection of predicates")
+    chosen = set()
+    for name in names:
+        if not isinstance(name, str):
+            raise InvalidInput(f"a profile predicate must be text, not {type(name).__name__}")
+        chosen.add(normalise_term(name, "predicate"))
+    return frozenset(chosen)
+
+
+@dataclass(frozen=True)
+class ProfilePolicy:
+    """Which claims a profile is made of: only these predicates when any
+    are named, and never those left out. Named as the ledger names
+    predicates; nothing is inferred from a predicate's meaning."""
+
+    predicates: frozenset[str] = frozenset()
+    without: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, predicates: object = (), without: object = ()) -> "ProfilePolicy":
+        return cls(_predicates(predicates, "predicates"), _predicates(without, "without"))
+
+    def keeps(self, fact: Fact) -> bool:
+        if self.predicates and fact.predicate not in self.predicates:
+            return False
+        return fact.predicate not in self.without
+
+    def record(self) -> dict[str, list[str]]:
+        return {"predicates": sorted(self.predicates), "without": sorted(self.without)}
 
 
 async def facts(
@@ -71,19 +125,74 @@ async def facts(
     return sorted(found, key=lambda f: f.fact_id)
 
 
-async def profile(documents: DocumentStore, space: str, limit: int = 10, *, clock: Callable[[], str]) -> Profile:
+async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
+                  policy: Optional[ProfilePolicy] = None) -> Profile:
+    """Who the space is about, without being asked a question: the claims
+    that hold, what the space says most often and most recently first,
+    each with the evidence it rests on; then its recent activity.
+
+    Which predicates count is the policy's to say. The read behind it is
+    bounded and disclosed: a profile of what was read is not a profile of
+    everything, and it does not pretend to be. It is also one revision's
+    profile. A profile is several reads — the claims, how often each was
+    said again, what happened lately — and a ledger that moves between
+    them would answer with a claim from before a write beside a count
+    from after it. That answer was never true at any moment, so it is
+    read again; a ledger that will not hold still is said rather than
+    passed off as a settled one."""
     check_space(space)
     limit = max(1, min(limit, 50))
-    now = clock()
-    active = [f for f in await documents.list_facts(space, include_closed=False)
-              if f.status == "active" and not f.excluded and f.holds_at(now)]
-    active.sort(key=lambda f: (-f.confidence, f.fact_id))
+    kept = policy or ProfilePolicy()
+    answer = None
+    for _ in range(ATTEMPTS):
+        answer, settled = await _one_revision(engine, space, limit, kept)
+        if settled:
+            return answer
+    said = cast(list[str], answer.coverage["reasons"]) if answer else []
+    return Profile(static_facts=answer.static_facts if answer else [],
+                   dynamic=answer.dynamic if answer else [],
+                   recent=answer.recent if answer else [],
+                   coverage={**(answer.coverage if answer else {}),
+                             "reasons": [*said, "ledger_moved_during_read"]})
+
+
+async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
+                        kept: ProfilePolicy) -> tuple[Profile, bool]:
+    """One profile, and whether the ledger held still while it was made."""
+    from ..entities.read import read_ledger
+
+    documents = engine.documents
+    now = engine.clock()
+    began = await documents.revision(space)
+    read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS)
+    active = [fact for fact in read.facts
+              if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)]
+    # Newest first, and only as many as restatements will be counted for:
+    # each count is a read of its own.
+    active.sort(key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
+    said: dict[int, int] = {}
+    affirmations = affirmation_store(documents)
+    for fact in active[:MAX_PROFILE_CANDIDATES]:
+        said[fact.fact_id] = len(await affirmations.affirmations(space, fact.fact_id)) if affirmations else 0
+    # Newest first, then stably by how often each was stated again, so the
+    # newer of two claims said as often still leads.
+    ranked = sorted(active[:MAX_PROFILE_CANDIDATES],
+                    key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
+    ranked.sort(key=lambda fact: -said[fact.fact_id])
+    shown = ranked[:limit]
     recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
               for e in await documents.recent_episodes(space, limit)]
-    return Profile(
-        static_facts=active[:limit],
-        dynamic=[r.excerpt for r in recent],
-        recent=recent,
+    ended = await documents.revision(space)
+    return (
+        Profile(
+            static_facts=shown,
+            dynamic=[r.excerpt for r in recent],
+            recent=recent,
+            coverage={"facts_read": len(read.facts), "reasons": list(read.reasons), "policy": kept.record(),
+                      "restatements": {str(fact.fact_id): said[fact.fact_id] for fact in shown},
+                      "candidates": min(len(active), MAX_PROFILE_CANDIDATES), "revision": began},
+        ),
+        began == ended,
     )
 
 

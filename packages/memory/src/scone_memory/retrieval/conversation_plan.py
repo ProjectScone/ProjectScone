@@ -5,7 +5,9 @@ import re
 from typing import Literal, Sequence
 
 from ..core.models import RecallItem
+from ..core.validation import MAX_QUERY
 from .lexical import tokenize
+from .query_formulation import FormulatedQuery, formulate_query
 
 _GREETING = re.compile(r"^\s*(?:hello|hi|hey)(?: there)?\s*[!,.]\s*", re.IGNORECASE)
 _TRANSCRIPT_ROLE = re.compile(r"(?:^|\n)(You|Assistant)↗\s*Source\s+\d+")
@@ -23,15 +25,20 @@ _OVERVIEW_TERMS = frozenset("""been being us about lately recently recent curren
 class ConversationPlan:
     mode: Literal["search", "overview"]
     query: str
+    #: Set when the message was too long to search as written; ``query`` is
+    #: then verbatim excerpts of it, and this records which spans.
+    formulation: FormulatedQuery | None = None
 
 
 def plan_conversation_retrieval(query: str) -> ConversationPlan:
     cleaned = _GREETING.sub("", query).strip() or query
+    formulation = formulate_query(query) if len(cleaned) > MAX_QUERY else None
+    search = cleaned if formulation is None else formulation.text
     if any(character.isalpha() and not character.isascii() for character in cleaned):
-        return ConversationPlan("search", cleaned)
+        return ConversationPlan("search", search, formulation)
     terms = set(tokenize(cleaned))
     anchors = terms - _OVERVIEW_TERMS
-    return ConversationPlan("search" if anchors else "overview", cleaned)
+    return ConversationPlan("search" if anchors else "overview", search, formulation)
 
 
 def overview_evidence(items: Sequence[RecallItem], limit: int) -> list[RecallItem]:

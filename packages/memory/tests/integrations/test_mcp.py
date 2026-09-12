@@ -1,6 +1,6 @@
 """The MCP server: six tools with the names, arguments and bounds of
-crates/scone/src/mcp.rs, results as plain text, refusals as ``is_error``
-results rather than exceptions."""
+crates/scone/src/mcp.rs, and three graph tools beside them, results as
+plain text, refusals as ``is_error`` results rather than exceptions."""
 
 from __future__ import annotations
 
@@ -27,6 +27,21 @@ RUST_ARGUMENTS = {
     "memory_store_facts": {"episode_id", "facts", "space"},
     "memory_forget": {"fact_id", "reason", "space"},
 }
+#: The entity graph, read only: a packet around names or a question, one
+#: entity with its relations both ways, and the paths between two.
+GRAPH_ARGUMENTS = {
+    "memory_graph_context": {"names", "question", "space", "max_bytes", "similar", "min_similarity"},
+    "memory_entity": {"name", "space"},
+    "memory_connections": {"source", "target", "max_hops", "space"},
+    "memory_graph_schema": {"limit", "max_bytes", "space"},
+    "memory_graph_match": {"where", "returns", "limit", "status", "as_of", "together", "max_bytes", "space"},
+    "memory_graph_overview": {"question", "limit", "facts", "max_bytes", "space"},
+    "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
+    "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
+    "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
+    "memory_graph_health": {"limit", "max_bytes", "space"},
+}
+TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
 
 @pytest.fixture
@@ -40,6 +55,12 @@ async def server():
 async def call(server, name: str, **arguments) -> tuple[bool, str]:
     result = await server.call_tool(name, arguments)
     return result.is_error, "\n".join(block.text for block in result.content)
+
+
+async def _episode(server) -> int:
+    error, text = await call(server, "memory_store", content="Project Atlas is ready for the review.")
+    assert not error, text
+    return int(text.split("episode ")[1].split(" ")[0])
 
 
 async def store_and_distill(server, content: str, subject: str, predicate: str, object: str) -> int:
@@ -62,10 +83,10 @@ async def store_and_distill(server, content: str, subject: str, predicate: str, 
 # -- the contract with mcp.rs -------------------------------------------------
 
 
-async def test_exposes_the_six_rust_tools_with_their_argument_names(server):
+async def test_exposes_the_six_rust_tools_and_the_graph_tools_with_their_argument_names(server):
     tools = {t.name: t for t in await server.list_tools()}
-    assert set(tools) == set(RUST_ARGUMENTS)
-    for name, arguments in RUST_ARGUMENTS.items():
+    assert set(tools) == set(TOOL_ARGUMENTS)
+    for name, arguments in TOOL_ARGUMENTS.items():
         assert set(tools[name].input_schema["properties"]) == arguments, name
         assert tools[name].description, name
 
@@ -283,7 +304,7 @@ async def test_stdio_server_answers_a_real_client(tmp_path):
     )
     async with client_module.Client(params) as client:
         listed = await client.list_tools()
-        assert {t.name for t in listed.tools} == set(RUST_ARGUMENTS)
+        assert {t.name for t in listed.tools} == set(TOOL_ARGUMENTS)
 
         stored = await client.call_tool("memory_store", {"content": "Moved to Lisbon in March"})
         assert not stored.is_error
@@ -435,3 +456,149 @@ def test_invalid_proposal_threshold_raises_domain_error(threshold):
     engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder())
     with pytest.raises(InvalidInput, match="confidence"):
         create_server(engine, propose_below=threshold)
+
+
+
+async def test_the_graph_tools_read_an_entity_both_ways_and_the_paths_between_two(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Acme Robotics is based in Lisbon.", "acme robotics", "based_in", "Lisbon")
+    result = await server.call_tool("memory_entity", {"name": "acme robotics"})
+    error, entity = result.is_error, "\n".join(block.text for block in result.content)
+    assert not error and entity.splitlines()[1].startswith("coverage: ")
+    assert any(line.startswith("hop 1: ") and "works_at Acme Robotics" in line for line in entity.splitlines())
+    error, paths = await call(server, "memory_connections", source="alice chen", target="lisbon")
+    assert not error and any(line.startswith("path: ") and "-based_in->" in line for line in paths.splitlines())
+    error, packet = await call(server, "memory_graph_context", question="what is in lisbon?")
+    assert not error and any(line.startswith("entity: Lisbon") for line in packet.splitlines())
+    error, text = await call(server, "memory_graph_context")
+    assert error and "names or a question" in text
+
+
+async def test_the_graph_schema_tool_lists_kinds_and_predicate_shapes(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_schema")
+    lines = text.splitlines()
+    assert not error and lines[0].startswith("schema: space default, current facts as of ")
+    assert lines[1] == "coverage: complete" and "kind: person, 1 entity, inferred" in lines
+    assert "predicate: works_at, 1 fact: (person) -> (organisation) x1" in lines
+    error, text = await call(server, "memory_graph_schema", limit=0)
+    assert error and "limit" in text
+    error, text = await call(server, "memory_graph_schema", max_bytes=100)
+    assert error and "max_bytes" in text
+
+
+async def test_the_match_tool_answers_a_structured_question_with_cited_rows(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Acme Robotics is based in Lisbon.", "acme robotics", "based_in", "Lisbon")
+    where = [{"subject": "?who", "predicate": "works_at", "object": "?org"},
+             {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}]
+    error, text = await call(server, "memory_graph_match", where=where, returns=["?who"])
+    assert not error and text.splitlines()[0].startswith("match: space default, current facts as of ")
+    assert any(line.startswith("row: ?who = alice chen (person) ent:") for line in text.splitlines())
+    error, text = await call(server, "memory_graph_match", where=where * 4)
+    assert error and "between 1 and 6 patterns" in text
+    error, text = await call(server, "memory_graph_match", where=where, status="history", as_of="soon")
+    assert error and "RFC 3339" in text
+
+
+async def test_the_overview_tool_digests_the_communities_a_question_concerns(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_overview", question="who works where?")
+    assert not error and text.splitlines()[0].startswith("overview: space default, current facts as of ")
+    assert any(line.startswith("community: ") and 'matched "works"' in line for line in text.splitlines())
+    error, text = await call(server, "memory_graph_overview", limit=0)
+    assert error and "limit" in text
+
+
+async def test_the_changes_tool_says_what_changed_since_a_moment(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_changes", since="2000-01-01T00:00:00Z")
+    assert not error and text.splitlines()[0].startswith("changes: space default, current facts at 2000-01-01")
+    assert any(line.startswith("began: alice chen works_at Acme Robotics [fact ") for line in text.splitlines())
+    error, text = await call(server, "memory_graph_changes", since="soon")
+    assert error and "RFC 3339" in text
+
+
+async def test_the_duplicates_tool_suggests_pairs_with_reasons(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    await store_and_distill(server, "Dr. Alice Chen leads the lab.", "dr. alice chen", "leads", "Robotics Lab")
+    error, text = await call(server, "memory_entity_duplicates")
+    assert not error and any(line.startswith("pair: alice chen") and " ~ dr. alice chen" in line
+                             for line in text.splitlines())
+    error, text = await call(server, "memory_entity_duplicates", min_score=2.0)
+    assert error and "min_score" in text
+
+
+async def test_graph_tools_take_a_question_as_long_as_the_other_surfaces_do(server):
+    error, text = await call(server, "memory_graph_context", question="who? " * 300)
+    assert not error, text
+    error, text = await call(server, "memory_graph_context", question="q" * 2001)
+    assert error and "2000" in text
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("memory_graph_schema", {"limit": True}), ("memory_graph_schema", {"limit": "5"}),
+    ("memory_graph_schema", {"max_bytes": "2048"}), ("memory_connections", {"source": "a", "target": "b", "max_hops": True}),
+    ("memory_graph_context", {"names": ["a"], "max_bytes": True}),
+    ("memory_graph_match", {"where": [{"subject": "?a", "predicate": "knows", "object": "?b"}], "limit": True}),
+])
+async def test_graph_tools_take_whole_numbers_only_as_the_toolbox_and_http_do(server, tool, arguments):
+    """Refused either way the SDK refuses: an error result, or the argument
+    error it raises in process and turns into one over the protocol."""
+    try:
+        result = await server.call_tool(tool, arguments)
+    except Exception as refused:
+        assert "valid integer" in str(refused)
+    else:
+        assert result.is_error
+
+
+async def test_the_graph_report_and_schema_are_resources_a_client_can_attach(server):
+    """Read-only context a client can attach without calling a tool: the
+    server space's report and schema, and the same for any space by name."""
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    uris = {str(resource.uri) for resource in await server.list_resources()}
+    templates = {template.uri_template for template in await server.list_resource_templates()}
+    assert {"scone://graph/report", "scone://graph/schema", "scone://graph/health"} <= uris
+    assert {"scone://{space}/graph/report", "scone://{space}/graph/schema",
+            "scone://{space}/graph/health"} <= templates
+    report = list(await server.read_resource("scone://graph/report"))[0]
+    assert report.mime_type == "text/markdown" and str(report.content).startswith("# Knowledge report")
+    schema = list(await server.read_resource("scone://graph/schema"))[0]
+    assert str(schema.content).startswith("schema: space default,") and "works_at" in str(schema.content)
+    other = list(await server.read_resource("scone://elsewhere/graph/schema"))[0]
+    assert str(other.content).startswith("schema: space elsewhere,") and "totals: 0 entities" in str(other.content)
+    health = list(await server.read_resource("scone://graph/health"))[0]
+    assert str(health.content).startswith("health: space default,") and "ungrounded" in str(health.content)
+
+
+async def test_a_resource_for_a_space_that_cannot_exist_is_refused(server):
+    with pytest.raises(Exception, match="space"):
+        list(await server.read_resource("scone://BAD%20SPACE/graph/report"))
+
+
+async def test_graph_context_can_seed_by_resemblance(server):
+    await store_and_distill(server, "Alice Chen joined Acme Robotics.", "alice chen", "works_at", "Acme Robotics")
+    error, text = await call(server, "memory_graph_context", question="which robotics firm?", similar=True)
+    assert not error and " similar " in text
+    error, text = await call(server, "memory_graph_context", question="which robotics firm?")
+    assert not error and " similar " not in text
+
+
+async def test_the_temporal_tool_computes_the_answer_and_shows_its_working():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=Clock()).open()
+    await engine.remember("default", "I met Emma for coffee near the river.", created_at="2023-04-11T12:00:00Z")
+    server = create_server(engine, "default")
+    error, answer = await call(server, "memory_temporal_answer", question="How many days ago did I meet Emma?",
+                               now="2023-04-20T10:12:00Z")
+    assert not error and "answer: 9 days ago" in answer and "2023-04-11 → 2023-04-20 is 9 days" in answer
+    error, left = await call(server, "memory_temporal_answer", question="What did I drink?")
+    assert not error and "not a temporal question" in left
+
+
+async def test_the_health_tool_counts_what_wants_attention(server):
+    error, text = await call(server, "memory_store_facts", episode_id=(await _episode(server)),
+                             facts=[{"subject": "project atlas", "predicate": "status", "object": "ready"}])
+    assert not error, text
+    error, health = await call(server, "memory_graph_health")
+    assert not error and "health: space default" in health and "unconnected" in health

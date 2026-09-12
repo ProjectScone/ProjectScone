@@ -93,3 +93,17 @@ def test_status_counts_pending_groups_and_consolidate_runs_the_pass_over_http():
         assert features.get("processing.derive", False) is False
         assert c.get("/v1/status", headers=bearer("k")).json()["derivation"] == "off"
         assert c.post("/v1/consolidate", json={"scope": "derive"}, headers=bearer("k")).status_code == 501, "no model, no pass"
+
+
+async def test_a_derivation_already_held_under_another_spelling_is_a_restatement():
+    """Stored subjects are keys; the model writes names as people do. The
+    already-held check looked the model's spelling up as written, missed the
+    stored claim and proposed the same inference twice."""
+    engine = await seeded()
+    first = await Deriver(engine, FakeChat([INFERENCE])).derive("default")
+    assert len(first.proposed) == 1
+    engine._derive_seen.clear()
+    shouted = json.dumps([{"subject": "Mark", "predicate": "works_in", "object": "lisbon",
+                           "premises": [1, 2], "confidence": 0.7}])
+    second = await Deriver(engine, FakeChat([shouted])).derive("default")
+    assert (len(second.proposed), second.restated) == (0, 1)

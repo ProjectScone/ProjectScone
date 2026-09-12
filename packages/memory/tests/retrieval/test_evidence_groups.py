@@ -19,11 +19,11 @@ def test_branching_component_preserves_every_record_and_directed_join() -> None:
     grouping = build_evidence_groups(candidates)
     assert len(grouping.records) == 1
     group = grouping.records[0]
-    assert group["kind"] == "exact_fact_component"
+    assert group["kind"] == "fact_component"
     assert group["members"] == [candidate.model_dump(mode="json") for candidate in candidates]
     assert group["joins"] == [
-        {"kind": "exact_object_subject", "from_id": "fact:1", "to_id": "fact:2"},
-        {"kind": "exact_object_subject", "from_id": "fact:1", "to_id": "fact:3"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:1", "to_id": "fact:2"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:1", "to_id": "fact:3"},
     ]
     assert grouping.members == {group["id"]: ("fact:1", "fact:2", "fact:3")}
     assert grouping.groups == grouping.members
@@ -33,14 +33,24 @@ def test_cycles_keep_all_edges_and_exclude_self_edges() -> None:
     from scone_memory.retrieval.evidence_groups import build_evidence_groups
     grouping = build_evidence_groups((fact(1, "a", "b"), fact(2, "b", "a"), fact(3, "b", "b")))
     assert grouping.records[0]["joins"] == [
-        {"kind": "exact_object_subject", "from_id": "fact:1", "to_id": "fact:2"},
-        {"kind": "exact_object_subject", "from_id": "fact:1", "to_id": "fact:3"},
-        {"kind": "exact_object_subject", "from_id": "fact:2", "to_id": "fact:1"},
-        {"kind": "exact_object_subject", "from_id": "fact:3", "to_id": "fact:2"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:1", "to_id": "fact:2"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:1", "to_id": "fact:3"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:2", "to_id": "fact:1"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:3", "to_id": "fact:2"},
     ]
     isolated = build_evidence_groups((fact(4, "same", "same"),))
     assert isolated.groups == {}
     assert isolated.members == {"fact:4": ("fact:4",)}
+
+
+def test_a_join_that_needed_case_or_spacing_folded_says_so() -> None:
+    from scone_memory.retrieval.evidence_groups import build_evidence_groups
+    grouping = build_evidence_groups((fact(1, "alice chen", "Acme  Robotics"), fact(2, "acme robotics", "lisbon"),
+                                      fact(3, "lisbon", "portugal")))
+    assert grouping.records[0]["joins"] == [
+        {"kind": "object_subject", "match": "normalised", "from_id": "fact:1", "to_id": "fact:2"},
+        {"kind": "object_subject", "match": "literal", "from_id": "fact:2", "to_id": "fact:3"},
+    ]
 
 
 def test_components_follow_input_rank_without_losing_or_repeating_evidence() -> None:
@@ -57,8 +67,14 @@ def test_components_follow_input_rank_without_losing_or_repeating_evidence() -> 
     assert len(grouping.groups) == 2
 
 
-@pytest.mark.parametrize("left,right", [(None, None), ("", ""), ("  ", "  "), ("Entity", "entity"),
-                                        ("entity ", "entity"), ("é", "e\u0301")])
+# Case and spacing are deliberately absent from this list. Subjects are
+# stored normalised, so the ledger never holds a subject "Entity", only
+# "entity"; an object written "Entity" naming it is the ordinary case, and
+# refusing that join is what left the evidence graph in disconnected pieces.
+# See test_entity_identity.py. Precomposed and decomposed accents stay apart
+# because Unicode canonical equivalence is a separate decision: it would
+# change how subjects are stored, which needs its own migration.
+@pytest.mark.parametrize("left,right", [(None, None), ("", ""), ("  ", "  "), ("é", "e\u0301")])
 def test_blank_or_nonidentical_literals_never_join(left: str | None, right: str | None) -> None:
     from scone_memory.retrieval.evidence_groups import build_evidence_groups
     grouping = build_evidence_groups((fact(1, "start", left), fact(2, right, "end")))

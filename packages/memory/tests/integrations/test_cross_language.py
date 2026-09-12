@@ -31,6 +31,8 @@ def identity_outcomes(result):
 
 
 def assert_evidence(records):
+    # The header says what the archive is; the episodes follow it.
+    records = [record for record in records if record.get("type") != "archive"]
     assert len(records) == len(CORPUS["episodes"])
     for expected in CORPUS["episodes"]:
         matches = [r for r in records if r["content"] == expected["content"]]
@@ -88,7 +90,8 @@ async def test_real_episode_transfer_both_directions(engine, rust_roundtrip, sta
     await engine.import_records("source", source)
     exported = [r async for r in engine.export("source")]
     assert_evidence(exported)
-    transfer = rust_roundtrip(exported, python_source_space="source")
+    transfer = rust_roundtrip([r for r in exported if r.get("type") != "archive"],
+                              python_source_space="source")
     outcomes = identity_outcomes(transfer)
     assert [r["identity"] for r in outcomes] == ["accepted-verified"] * 3
     from_rust = [json.loads(line) for line in transfer.stdout.splitlines()]

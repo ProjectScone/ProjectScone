@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Callable, Mapping, Optional, Sequence
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -105,6 +108,13 @@ def _fact_link(row: Mapping) -> FactLink:
                     kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
 
 
+def _affirmation(row: Mapping) -> Affirmation:
+    return Affirmation(affirmation_id=int(row["id"]), space=row["space"], fact_id=int(row["fact_id"]),
+                       valid_from=row["valid_from"], recorded_at=row["recorded_at"],
+                       confidence=float(row["confidence"]), source_episode_id=row["source_episode_id"],
+                       origin=row["origin"], quote=row["quote"], links=read_links(json.loads(row["links"])))
+
+
 def _fact(row: Mapping) -> Fact:
     return Fact(
         fact_id=row["id"], space=row["space"], subject=row["subject"], predicate=row["predicate"], object=row["object"],
@@ -166,6 +176,13 @@ class PostgresDocumentStore:
     CREATE INDEX IF NOT EXISTS fact_links_to ON {s}.fact_links (space, to_fact);
     CREATE INDEX IF NOT EXISTS fact_links_from_id ON {s}.fact_links (space, from_fact, id);
     CREATE INDEX IF NOT EXISTS fact_links_to_id ON {s}.fact_links (space, to_fact, id);
+    CREATE TABLE IF NOT EXISTS {s}.fact_affirmations (
+        id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, fact_id BIGINT NOT NULL, valid_from TEXT NOT NULL,
+        recorded_at TEXT NOT NULL, confidence DOUBLE PRECISION NOT NULL, source_episode_id BIGINT,
+        origin TEXT NOT NULL, quote TEXT, links TEXT NOT NULL DEFAULT '[]', UNIQUE (space, fact_id, valid_from));
+    -- A schema from the build that first kept affirmations, before they
+    -- carried links: each it holds has none.
+    ALTER TABLE {s}.fact_affirmations ADD COLUMN IF NOT EXISTS links TEXT NOT NULL DEFAULT '[]';
     CREATE TABLE IF NOT EXISTS {s}.tombstones (
         space TEXT NOT NULL, episode_id BIGINT NOT NULL, content_hash TEXT NOT NULL, forgotten_at TEXT NOT NULL,
         reason TEXT, PRIMARY KEY (space, episode_id));
@@ -176,6 +193,9 @@ class PostgresDocumentStore:
     """
 
     def __init__(self, url: str, schema: str = "scone", pool: Optional[Pool] = None) -> None:
+        #: The connection a transaction holds for the task inside ``atomic``;
+        #: other tasks keep borrowing their own.
+        self._held: ContextVar[Optional[Any]] = ContextVar(f"scone_postgres_{id(self)}", default=None)
         self.schema = _ident(schema)
         self.pool = pool or Pool(url)
         self.pool.users += 1
@@ -223,9 +243,29 @@ class PostgresDocumentStore:
     async def close(self) -> None:
         await self.pool.release()
 
+    @asynccontextmanager
+    async def atomic(self) -> AsyncIterator[None]:
+        """Writes made inside, by this task, commit together at the end or
+        roll back together if anything inside fails."""
+        if self._held.get() is not None:
+            yield
+            return
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                token = self._held.set(conn)
+                try:
+                    yield
+                finally:
+                    self._held.reset(token)
+
     async def _rows(self, sql: str, params: Sequence = ()) -> list[dict]:
         from psycopg.rows import dict_row
 
+        held = self._held.get()
+        if held is not None:
+            cur = await held.execute(sql, params)
+            cur.row_factory = dict_row
+            return await cur.fetchall()
         async with self.pool.connection() as conn:
             cur = await conn.execute(sql, params)
             cur.row_factory = dict_row  # type: ignore[assignment]
@@ -268,7 +308,8 @@ class PostgresDocumentStore:
 
         gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
                             links=await count("fact_links"), tombstones=await count("tombstones"))
-        for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions"):
+        for table in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight",
+                      "revisions"):
             await self._rows(f"DELETE FROM {s}.{table} WHERE space = %s RETURNING space", (space,))
         await self._rows(
             f"INSERT INTO {s}.erased_spaces (space, erased_at) VALUES (%s, %s)"
@@ -423,6 +464,20 @@ class PostgresDocumentStore:
             sql += " AND status = 'active'"
         return [_fact(r) for r in await self._rows(sql + " ORDER BY id", (space,))]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """Newest first below the cursor, on facts_space_id."""
+        from ..core.graph_read import ledger_page_limit
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []
+        if before_id is None:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s ORDER BY id DESC LIMIT %s',
+                (space, cap))
+        else:
+            rows = await self._rows(f'SELECT * FROM {self.schema}.facts WHERE space = %s AND id < %s '
+                'ORDER BY id DESC LIMIT %s', (space, before_id, cap))
+        return [_fact(row) for row in rows]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)
@@ -471,6 +526,39 @@ class PostgresDocumentStore:
         rows = await self._rows(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s ORDER BY episode_id", (space,))
         return [_tombstone(r) for r in rows]
 
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        row = await self._row(
+            f"INSERT INTO {self.schema}.fact_affirmations (space, fact_id, valid_from, recorded_at, confidence,"
+            " source_episode_id, origin, quote, links) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (space, fact_id, valid_from) DO NOTHING RETURNING *",
+            (new.space, new.fact_id, new.valid_from, new.recorded_at, new.confidence, new.source_episode_id,
+             new.origin, new.quote, json.dumps(stored_links(new.links))),
+        )
+        if row is None:
+            row = await self._required_row(
+                f"SELECT * FROM {self.schema}.fact_affirmations WHERE space = %s AND fact_id = %s AND valid_from = %s",
+                (new.space, new.fact_id, new.valid_from),
+            )
+        return _affirmation(row)
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        rows = await self._rows(
+            f"SELECT * FROM {self.schema}.fact_affirmations WHERE space = %s AND fact_id = %s ORDER BY valid_from, id",
+            (space, fact_id),
+        )
+        return [_affirmation(row) for row in rows]
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        if affirmation_ids:
+            await self._rows(
+                f"DELETE FROM {self.schema}.fact_affirmations WHERE space = %s AND id = ANY(%s) RETURNING id",
+                (space, list(affirmation_ids)),
+            )
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        rows = await self._rows(f"SELECT * FROM {self.schema}.fact_affirmations WHERE space = %s ORDER BY id", (space,))
+        return [_affirmation(row) for row in rows]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         row = await self._row(
             f"INSERT INTO {self.schema}.fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
@@ -490,6 +578,17 @@ class PostgresDocumentStore:
             (space, fact_id, fact_id),
         )
         return [_fact_link(r) for r in rows]
+
+    async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:
+        """Bounded induced graph over returned facts, never expanding to
+        neighbours: the first 16 ids, at most 49 links, ascending id."""
+        wanted = list(dict.fromkeys(fact_ids[:16]))
+        cap = max(0, min(limit, 49))
+        if not wanted or not cap:
+            return []
+        rows = await self._rows(f"SELECT * FROM {self.schema}.fact_links WHERE space = %s AND from_fact = ANY(%s) "
+                                "AND to_fact = ANY(%s) ORDER BY id LIMIT %s", (space, wanted, wanted, cap))
+        return [_fact_link(row) for row in rows]
 
     async def fact_links_from(self, space: str, fact_id: int, limit: int) -> list[FactLink]:
         cap = max(0, min(limit, 129))

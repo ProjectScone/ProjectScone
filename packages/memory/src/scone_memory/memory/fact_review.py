@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Protocol, Sequence
 
 from ..core.errors import Conflict, InvalidInput, NotFound
-from ..core.models import BatchDecision, DecisionOutcome, Fact
+from ..core.models import DEPENDENCY_KINDS, BatchDecision, DecisionOutcome, Fact
 from ..core.ports import DocumentStore
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space
+from . import fact_placement
 from .fact_placement import Placement
 
 
@@ -62,21 +63,33 @@ async def approve(runtime: FactReviewRuntime, space: str, fact_id: int, actor: O
     fact = await runtime.proposed(space, fact_id)
     placement = await runtime.place(space, fact.subject, fact.predicate, fact.object, fact.valid_from, exclude_id=fact.fact_id)
     if placement.restates is not None:
-        await runtime.documents.update_fact(
-            fact.model_copy(update={"status": "declined", "closed_reason": f"duplicate of fact {placement.restates.fact_id}"})
-        )
-        await runtime.documents.bump_revision(space)
+        # Approved, the proposal restates what holds; its later start is
+        # kept as an affirmation, as an assertion's would be, with the
+        # dependency links it was proposed with.
+        links = [(link.kind, link.to_fact) for link in await runtime.documents.fact_links(space, fact.fact_id)
+                 if link.from_fact == fact.fact_id and link.kind in DEPENDENCY_KINDS]
+        async with fact_placement.atomic(runtime.documents):
+            await fact_placement.affirm(runtime.documents, space, placement.restates, fact.valid_from,
+                                        runtime.clock(), confidence=fact.confidence,
+                                        source_episode_id=fact.source_episode_id, origin=fact.origin,
+                                        quote=fact.quote, links=links)
+            await runtime.documents.update_fact(
+                fact.model_copy(update={"status": "declined",
+                                        "closed_reason": f"duplicate of fact {placement.restates.fact_id}"}))
+            await runtime.documents.bump_revision(space)
         await runtime.emit(space, "fact_review", {"fact_id": fact_id, "decision": "duplicate", "of": placement.restates.fact_id, "actor": actor})
         return placement.restates
-    accepted = fact.model_copy(update={
-        "status": "closed" if placement.bound else "active",
-        "valid_until": placement.bound,
-        "closed_reason": placement.bound_reason,
-        "superseded_by": placement.bound_by,
-    })
-    await runtime.documents.update_fact(accepted)
-    await runtime.truncate(placement.covering, fact.valid_from, fact.fact_id)
-    await runtime.documents.bump_revision(space)
+    async with fact_placement.atomic(runtime.documents):
+        placement = await fact_placement.resume(runtime.documents, space, placement)
+        accepted = fact.model_copy(update={
+            "status": "closed" if placement.bound else "active",
+            "valid_until": placement.bound,
+            "closed_reason": placement.bound_reason,
+            "superseded_by": placement.bound_by,
+        })
+        await runtime.documents.update_fact(accepted)
+        await runtime.truncate(placement.covering, fact.valid_from, fact.fact_id)
+        await runtime.documents.bump_revision(space)
     await runtime.emit(space, "fact_review", {
         "fact_id": fact_id, "decision": "approved", "superseded": [r.fact_id for r in placement.covering], "actor": actor,
     })
@@ -214,6 +227,58 @@ async def include(runtime: FactReviewRuntime, space: str, fact_id: int, actor: O
     return included
 
 
+async def reconsider(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str,
+                     actor: Optional[str] = None) -> Fact:
+    """Put a declined claim back for review.
+
+    A review is a person's judgement, and people are wrong sometimes; a
+    system that records judgements with no way to revise them teaches its
+    users not to judge. Nothing is erased: the decline stays in the event
+    log with its reason, and this is recorded beside it."""
+    check_space(space)
+    reason = _reason(reason)
+    fact = await runtime.documents.get_fact(space, fact_id)
+    if fact is None:
+        raise NotFound(f"fact {fact_id} not found in {space!r}")
+    if fact.status != "declined":
+        raise InvalidInput(f"fact {fact_id} is {fact.status}, not declined; there is nothing to take back")
+    back = fact.model_copy(update={"status": "proposed", "closed_reason": None})
+    await runtime.documents.update_fact(back)
+    await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_review", {"fact_id": fact_id, "decision": "reconsidered",
+                                              "reason": reason, "actor": actor})
+    return back
+
+
+async def reopen(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str,
+                 actor: Optional[str] = None) -> Fact:
+    """Take back a close: the claim holds again, from where it always did.
+
+    Only a close somebody made by hand. A claim another claim superseded
+    is not reopened behind that claim's back — both would hold at once,
+    one of them saying the other is wrong — so the claim that superseded
+    it is named and a person decides what they meant."""
+    check_space(space)
+    reason = _reason(reason)
+    fact = await runtime.documents.get_fact(space, fact_id)
+    if fact is None:
+        raise NotFound(f"fact {fact_id} not found in {space!r}")
+    if fact.status != "closed":
+        raise InvalidInput(f"fact {fact_id} is {fact.status}: it holds now, and nothing needs reopening")
+    if fact.superseded_by:
+        raise InvalidInput(
+            f"fact {fact_id} was superseded by fact {fact.superseded_by}; reopening it would leave both "
+            f"holding at once, one saying the other is wrong. Close or decline fact "
+            f"{fact.superseded_by} first if that is what you meant")
+    again = fact.model_copy(update={"status": "active", "valid_until": None, "closed_reason": None,
+                                    "superseded_by": None})
+    await runtime.documents.update_fact(again)
+    await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "action": "reopen", "reason": reason,
+                                             "actor": actor})
+    return again
+
+
 async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
     check_space(space)
     reason = _reason(reason)
@@ -224,12 +289,20 @@ async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reaso
         return fact
     if not fact.in_ledger:
         raise InvalidInput(f"fact {fact_id} is {fact.status}; decline a proposal instead of closing it")
-    closed = fact.model_copy(
-        update={"status": "closed", "valid_until": runtime.clock(), "closed_reason": reason}
-    )
-    await runtime.documents.update_fact(closed)
-    await runtime.documents.bump_revision(space)
-    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor})
+    end = runtime.clock()
+    if parse_rfc3339(end) < parse_rfc3339(fact.valid_from):
+        raise InvalidInput(f"fact {fact_id} begins at {fact.valid_from}, after now; "
+                           "closing it now would end it before it begins")
+    closed = fact.model_copy(update={"status": "closed", "valid_until": end, "closed_reason": reason})
+    # The claim stated again from a day after the close resumes there, as
+    # it would had it been stated after the close.
+    resumes = await fact_placement.resumption(runtime.documents, space, fact, parse_rfc3339(end))
+    async with fact_placement.atomic(runtime.documents):
+        resumed = await fact_placement.write_resumption(runtime.documents, space, resumes) if resumes else None
+        await runtime.documents.update_fact(closed)
+        await runtime.documents.bump_revision(space)
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor,
+                                             "resumed": resumed.fact_id if resumed else None})
     return closed
 
 

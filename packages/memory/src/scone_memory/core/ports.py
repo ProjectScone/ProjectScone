@@ -290,6 +290,32 @@ class VectorIndex(Protocol):
     async def delete(self, chunk_ids: Sequence[int]) -> None: ...
 
 
+class RecordsVectorWriter(Protocol):
+    """Optional: a vector index that remembers which embedder wrote its vectors.
+
+    A cosine means something only between vectors one embedder made under
+    one set of settings; the width alone cannot tell two embedders apart.
+    Records and the rule every write follows are in ``core.vector_writers``.
+    ``upsert_as`` and ``swap_writer`` must check and change the record
+    atomically with respect to other writers of the same index. An index
+    without these methods is reported as unverifiable, not assumed safe.
+    """
+
+    async def written_by(self) -> tuple[str, str] | None: ...
+    async def holds_vectors(self) -> bool: ...
+    async def swap_writer(self, expected: tuple[str, str] | None, record: tuple[str, str], *,
+                          require_empty: bool = False) -> bool: ...
+    async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None: ...
+    async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                        tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
+                        writer: str) -> list[tuple[int, float]]:
+        """Search only if the record vouches for ``writer``, checked in the same
+        snapshot as the comparison; otherwise raise VectorsNotComparable."""
+        ...
+    async def spaces_with_vectors(self) -> list[str]: ...
+    async def ids(self, space: str) -> list[int]: ...
+
+
 #: Bumped when an event payload changes shape; readers check it before
 #: computing anything from a payload.
 EVENT_SCHEMA_VERSION = 1

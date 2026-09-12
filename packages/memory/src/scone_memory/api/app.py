@@ -26,11 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
+from ..core.validation import MAX_QUERY
+from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
+                                  MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
+                                  MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
 from . import pdf_documents
+from .responses import LedgerJSONResponse
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -113,7 +118,8 @@ class FactBody(BaseModel):
 #: What each role may do, by request. Reads are open to every role; the
 #: decisions of review belong to review and full; every other write belongs
 #: to write and full. A key with no role recorded is full.
-_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/v1/facts/decide")
+_REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", "/reopen",
+                 "/v1/facts/decide")
 
 
 def _is_decision(path: str) -> bool:
@@ -121,7 +127,10 @@ def _is_decision(path: str) -> bool:
 
 
 def _is_space_delete(method: str, path: str) -> bool:
-    return method == "DELETE" and path.startswith("/v1/spaces/")
+    # Moving a whole space away is as final as deleting it: everything it
+    # held is somewhere else and the name is closed. It takes the same
+    # permission.
+    return (method == "DELETE" and path.startswith("/v1/spaces/")) or path.endswith("/merge")
 
 
 def permitted(role: str, method: str, path: str) -> bool:
@@ -154,6 +163,17 @@ class Forbidden(Exception):
 MAX_BATCH_RECORDS = 500
 
 
+class MergeBody(BaseModel):
+    """Where a space is being moved to, and the name said out loud."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    into: str = Field(min_length=1, max_length=128)
+    #: Repeat the space being merged. A whole space does not move by accident.
+    confirm: Optional[str] = None
+    preview: bool = False
+
+
 class BatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,6 +181,11 @@ class BatchBody(BaseModel):
     #: The caller's id for this request. Sending it again returns the job
     #: the first attempt made instead of ingesting the batch a second time.
     request_id: Optional[str] = Field(default=None, max_length=128)
+    #: Store what can be stored and answer for the rest, instead of
+    #: refusing the whole batch over one bad record. For a caller
+    #: importing from somewhere messy; off by default, because a
+    #: half-stored batch nobody asked for is worse than a refusal.
+    partial: bool = False
 
 
 class LinkBody(BaseModel):
@@ -208,6 +233,7 @@ def create_app(
     roles: Optional[Mapping[str, str]] = None,
     model_connections_available: bool = False,
     vision_available=None,
+    filesystem=None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -215,8 +241,14 @@ def create_app(
     composed conversation service. ``ingest_concurrency`` bounds simultaneous
     writes and answers excess admissions with 429 and Retry-After. ``roles``
     maps keys to read, write, review or full permissions; unspecified keys have
-    full permission. The independently installed Webapp owns browser pages.
+    full permission. ``filesystem`` is the policy the space's tree is served
+    under; without one the tree is read only, and writing a note is refused
+    however the key is permitted. The independently installed Webapp owns
+    browser pages.
     """
+    from ..filesystem import FilesystemPolicy
+
+    tree_policy = filesystem or FilesystemPolicy()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -226,7 +258,8 @@ def create_app(
         if worker is not None:
             await worker.stop()
 
-    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
+                  default_response_class=LedgerJSONResponse)
     if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
@@ -326,6 +359,7 @@ def create_app(
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
+            "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
@@ -334,6 +368,9 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
+            "filesystem.read": True, "filesystem.write": tree_policy.writable,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "graph.knowledge_seeds": True,
         }
         if conversations:
             # Present only when the service is mounted here; its own manifest
@@ -351,6 +388,10 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
+    from .entity_routes import mount_entity_routes
+    mount_entity_routes(app, engine, space_for)
+    from .filesystem_routes import mount_filesystem_routes
+    mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:
@@ -417,8 +458,11 @@ def create_app(
     @app.post("/v1/episodes/batch")
     async def post_episodes(body: BatchBody, space: str = Depends(space_for)) -> dict:
         """One bounded request, one outcome per record in the order sent;
-        the batch lands whole or not at all. Replacement is one record at
-        a time, because it forgets before it stores."""
+        the batch lands whole or not at all, unless ``partial`` asks for
+        what can be stored, in which case a record that cannot be comes
+        back as failed with the reason and the rest are stored.
+        Replacement is one record at a time, because it forgets before it
+        stores."""
         if any(r.replace for r in body.records):
             raise InvalidInput("replace is one record at a time: use POST /v1/episodes")
         if body.request_id:
@@ -436,11 +480,18 @@ def create_app(
             for r in body.records
         ]
         async with ingest_slot(len(records)):
-            added = await engine.remember_many(space, records)
+            added = await engine.remember_many(space, records, partial=body.partial)
         for record, item in zip(body.records, added):
+            if item.outcome == "failed":
+                continue
             for attachment_id in dict.fromkeys(record.attachment_ids):
                 await engine.blobs.link(space, attachment_id, item.episode_id)
-        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in ("accepted", "duplicate", "updated")}
+        # A reader of the old shape sees the old shape: "failed" appears
+        # only for a caller who asked for a partial batch, which is the
+        # only caller who can get one.
+        wanted = ("accepted", "duplicate", "updated", "failed") if body.partial else (
+            "accepted", "duplicate", "updated")
+        counts = {outcome: sum(1 for a in added if a.outcome == outcome) for outcome in wanted}
         job = await engine.record_job(space, added, request_id=body.request_id)
         return {"items": [a.model_dump() for a in added], "counts": counts, "job": job_json(job)}
 
@@ -527,6 +578,16 @@ def create_app(
         _own_space(name, space)
         return (await engine.space_impact(space)).model_dump()
 
+    @app.post("/v1/spaces/{name}/merge")
+    async def post_space_merge(name: str, body: MergeBody, space: str = Depends(space_for)) -> dict:
+        """Move everything this space holds into another. ``preview`` says
+        what would move and moves nothing; otherwise ``confirm`` must
+        repeat the space being merged, which is then closed for good."""
+        _own_space(name, space)
+        if body.preview:
+            return (await engine.merge_space(space, into=body.into, preview=True)).record()
+        return (await engine.merge_space(space, into=body.into, confirm=body.confirm)).record()
+
     @app.delete("/v1/spaces/{name}")
     async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:
         """Remove everything the space holds. ``confirm`` must repeat the
@@ -536,6 +597,77 @@ def create_app(
             raise InvalidInput("confirm must repeat the space name; a whole space is not deleted by accident")
         receipt = await engine.delete_space(space)
         return {"deleted": name, **receipt.model_dump()}
+
+    @app.get("/v1/answer")
+    async def get_answer(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        now: Optional[str] = None,
+        limit: int = Query(default=5, ge=1, le=50),
+        route: Optional[str] = Query(default=None,
+                                     description="Insist on temporal, graph or recall instead of the rule."),
+        space: str = Depends(space_for),
+    ) -> dict:
+        """One question answered by whichever machinery suits it, saying
+        which way it went and why. The rule is written down: a question
+        about dates the ledger can ground is computed, a question the graph
+        knows by name is answered from the claims, and anything else is an
+        ordinary search. Naming a route overrides it, and the answer says
+        the route was asked for."""
+        from ..retrieval.router import answer_question
+
+        return (await answer_question(engine, space, q, now=now, limit=limit, route=route)).record(space)
+
+    @app.get("/v1/recall/parts")
+    async def get_recall_parts(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        limit: int = Query(default=5, ge=1, le=50),
+        as_of: Optional[str] = None,
+        tags: Optional[str] = None,
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        rerank: bool = True,
+        graph_boost: bool = False,
+        space: str = Depends(space_for),
+    ) -> dict:
+        """A multi-part question searched a part at a time, so the part whose
+        words are commoner in the corpus cannot take every slot.
+
+        This was measured against the single query on LongMemEval and changed
+        nothing there (13 of 500 questions split; identical evidence on those
+        13 at k=5 and k=10), so it is a separate route rather than the default
+        search. What it adds over one query is the receipt: which part placed
+        each passage, which parts found nothing, and — when no similarity
+        floor is configured — that finding passages is not evidence a part was
+        answered."""
+        from ..retrieval.parts import recall_parts
+
+        parted = await recall_parts(
+            engine, space, q, limit=limit, as_of=as_of,
+            tags=[t for t in (tags or "").split(",") if t.strip()], kind=kind,
+            source_prefix=source_prefix, since=since, until=until, rerank=rerank,
+            graph_boost=graph_boost)
+        return parted.record()
+
+    @app.get("/v1/answers/temporal")
+    async def get_temporal_answer(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        now: Optional[str] = Query(default=None, description="The moment the question is asked from; default now."),
+        limit: int = Query(default=TEMPORAL_LIMIT, ge=1, le=TEMPORAL_MAX_LIMIT,
+                           description="Passages read for each event named in the question."),
+        max_bytes: int = Query(default=TEMPORAL_BYTES, ge=TEMPORAL_MIN_BYTES, le=TEMPORAL_BYTES_LIMIT),
+        as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """A question about dates answered by computation: how long between
+        two events, how long ago one was, which came first, what order they
+        were in. Each event is grounded to a passage and its day, and the
+        arithmetic is shown. ``status`` says why nothing was computed: the
+        question is not one this reads (``not_temporal``), an event is not
+        in memory (``ungrounded``), or its day is not decided
+        (``ambiguous``)."""
+        answer = await temporal_answer(engine, space, q, now=now, limit=limit, max_bytes=max_bytes, as_of=as_of)
+        return answer.record(space)
 
     @app.get("/v1/recall")
     async def get_recall(
@@ -559,6 +691,8 @@ def create_app(
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
                                           description="Byte budget per enabled expansion stage."),
+        graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
+                                                              "entities or their neighbours in the knowledge graph."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -566,7 +700,7 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
-            candidate_limit=candidate_limit, rerank=rerank,
+            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
         response: dict[str, object] = {
             "event_id": result.event_id,
@@ -582,6 +716,8 @@ def create_app(
         }
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
+        if graph_boost:
+            response["entities"] = [entity.model_dump(mode="json") for entity in result.entities]
         if evidence_graph or graph_analysis or structural_context or multi_hop:
             from ..core.ports import TextFilter
             from ..memory.engine import normalise_metadata, normalise_tags, normalise_time
@@ -747,6 +883,20 @@ def create_app(
     async def post_fact_include(fact_id: int, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         return fact_json(await engine.include(space, fact_id, actor=actor))
 
+    @app.post("/v1/facts/{fact_id}/reconsider")
+    async def post_fact_reconsider(fact_id: int, body: CloseBody, space: str = Depends(space_for),
+                                   actor: str = Depends(actor_for)) -> dict:
+        """Undo a decline: the claim goes back to being a proposal. The
+        decline stays in the event log with its reason."""
+        return fact_json(await engine.reconsider(space, fact_id, body.reason, actor=actor))
+
+    @app.post("/v1/facts/{fact_id}/reopen")
+    async def post_fact_reopen(fact_id: int, body: CloseBody, space: str = Depends(space_for),
+                               actor: str = Depends(actor_for)) -> dict:
+        """Undo a close somebody made by hand: the claim holds again. A
+        claim another claim superseded is refused, naming that claim."""
+        return fact_json(await engine.reopen(space, fact_id, body.reason, actor=actor))
+
     @app.post("/v1/facts/{fact_id}/close")
     async def post_fact_close(fact_id: int, body: CloseBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
         closed = await engine.close_fact(space, fact_id, body.reason, actor=actor)
@@ -756,7 +906,7 @@ def create_app(
     async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
         profile = await engine.profile(space, limit)
         return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
-                "recent": [asdict(r) for r in profile.recent]}
+                "recent": [asdict(r) for r in profile.recent], "coverage": profile.coverage}
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:

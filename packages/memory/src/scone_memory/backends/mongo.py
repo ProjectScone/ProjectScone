@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Mapping, Optional, Sequence
 
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
@@ -98,6 +99,7 @@ class MongoDocumentStore:
         self.chunks = self.db["chunks"]
         self.facts = self.db["facts"]
         self._fact_links = self.db["fact_links"]
+        self._affirmations = self.db["fact_affirmations"]
         self.tombstones = self.db["tombstones"]
         self.counters = self.db["counters"]
         self.revisions = self.db["revisions"]
@@ -119,6 +121,7 @@ class MongoDocumentStore:
         await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("_id", 1)])
         await self._fact_links.create_index([("space", 1), ("to_fact", 1), ("_id", 1)])
+        await self._affirmations.create_index([("space", 1), ("fact_id", 1), ("valid_from", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -190,7 +193,8 @@ class MongoDocumentStore:
             links=await self._fact_links.count_documents({"space": space}),
             tombstones=await self.tombstones.count_documents({"space": space}),
         )
-        for collection in (self.chunks, self.episodes, self._fact_links, self.facts, self.tombstones, self.inflight_marks):
+        for collection in (self.chunks, self.episodes, self._fact_links, self._affirmations, self.facts, self.tombstones,
+                           self.inflight_marks):
             await collection.delete_many({"space": space})
         await self.revisions.delete_one({"_id": space})
         await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
@@ -373,6 +377,18 @@ class MongoDocumentStore:
             query["status"] = "active"
         return [_fact(doc) async for doc in self.facts.find(query).sort("_id", 1)]
 
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        """Newest first below the cursor, on the (space, _id) index."""
+        from ..core.graph_read import ledger_page_limit
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []  # MongoDB limit(0) would remove the bound.
+        query: dict[str, object] = {'space': space}
+        if before_id is not None:
+            query['_id'] = {'$lt': before_id}
+        cursor = self.facts.find(query).sort('_id', -1).limit(cap)
+        return [_fact(doc) async for doc in cursor]
+
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
         cap = graph_fact_read_limit(source_episode_id, limit)
@@ -417,6 +433,33 @@ class MongoDocumentStore:
 
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         return [_tombstone(doc) async for doc in self.tombstones.find({"space": space}).sort("episode_id", 1)]
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        from pymongo.errors import DuplicateKeyError
+
+        key = {"space": new.space, "fact_id": new.fact_id, "valid_from": new.valid_from}
+        existing = await self._affirmations.find_one(key)
+        if existing is None:
+            doc = {"_id": await self._next_id("fact_affirmations"), **new.__dict__, "links": stored_links(new.links)}
+            try:
+                await self._affirmations.insert_one(doc)
+                return _affirmation(doc)
+            except DuplicateKeyError:
+                existing = await self._affirmations.find_one(key)
+        if existing is None:
+            raise SconeError("MongoDB affirmation disappeared during insert")
+        return _affirmation(existing)
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        cursor = self._affirmations.find({"space": space, "fact_id": fact_id}).sort([("valid_from", 1), ("_id", 1)])
+        return [_affirmation(doc) async for doc in cursor]
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        if affirmation_ids:
+            await self._affirmations.delete_many({"space": space, "_id": {"$in": list(affirmation_ids)}})
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        return [_affirmation(doc) async for doc in self._affirmations.find({"space": space}).sort("_id", 1)]
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         from pymongo.errors import DuplicateKeyError
@@ -472,3 +515,10 @@ class MongoDocumentStore:
     async def revision(self, space: str) -> int:
         doc = await self.revisions.find_one({"_id": space})
         return int(doc["revision"]) if doc else 0
+
+
+def _affirmation(doc: Mapping) -> Affirmation:
+    return Affirmation(affirmation_id=doc["_id"], space=doc["space"], fact_id=doc["fact_id"],
+                       valid_from=doc["valid_from"], recorded_at=doc["recorded_at"],
+                       confidence=doc.get("confidence", 1.0), source_episode_id=doc.get("source_episode_id"),
+                       origin=doc.get("origin", "stated"), quote=doc.get("quote"), links=read_links(doc.get("links", [])))

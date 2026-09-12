@@ -267,6 +267,10 @@ class ForgetReceipt(BaseModel):
     attachments_kept: list[str] = Field(default_factory=list)
     facts_citing: list[int] = Field(default_factory=list)
     links_citing: list[int] = Field(default_factory=list)
+    #: Restatements kept beside their facts that cite the episode. They
+    #: stand as claims do, and one that later resumes as a fact brings its
+    #: source id and quote with it.
+    affirmations_citing: list[int] = Field(default_factory=list)
     #: Set once the deed is done; a preview has none.
     forgotten_at: Optional[str] = None
 
@@ -324,6 +328,18 @@ class RecallItem(BaseModel):
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: The chunk's own UTF-8 byte span of its episode, half-open, so a
+    #: caller can quote the source exactly and cite where it stops.
+    start: int = 0
+    end: int = 0
+    #: The 1-based lines that span covers, when the episode was still
+    #: there to count them.
+    first_line: Optional[int] = None
+    last_line: Optional[int] = None
+    #: The declaration this chunk is inside, qualified by everything that
+    #: holds it ("Engine.forget"), when the source is code and one holds
+    #: all of it.
+    declaration: Optional[str] = None
 
 
 class RerankTrace(BaseModel):
@@ -334,6 +350,19 @@ class RerankTrace(BaseModel):
     candidates_omitted: int
     payload_bytes: int
     duration_ms: float
+
+
+class QueryEntity(BaseModel):
+    """An entity the entity lane searched for, and why."""
+
+    model_config = ConfigDict(frozen=True)
+    entity_id: str
+    key: str
+    label: str
+    role: Literal["seed", "neighbour"]
+    #: For a seed, the name the question used; for a neighbour, the
+    #: predicate relating it to its seed.
+    matched: str
 
 
 class RecallResult(BaseModel):
@@ -357,6 +386,8 @@ class RecallResult(BaseModel):
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)
+    #: With ``graph_boost``: the entities the entity lane searched for.
+    entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
 
@@ -371,14 +402,18 @@ class Added(BaseModel):
     """What one remembered record became. ``outcome`` says it plainly:
     accepted (stored), duplicate (a record with this identity was already
     there and the write changed nothing, whether or not its text differed),
-    or updated (a keyed record was replaced; ``replaced`` is the receipt
-    for the episode that went)."""
+    updated (a keyed record was replaced; ``replaced`` is the receipt for
+    the episode that went), or failed (nothing was stored for it, and
+    ``reason`` says what was wrong with it — only possible in a batch the
+    caller asked to be partial)."""
 
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
-    outcome: Literal["accepted", "duplicate", "updated"] = "accepted"
+    outcome: Literal["accepted", "duplicate", "updated", "failed"] = "accepted"
     replaced: Optional[ForgetReceipt] = None
+    #: Why nothing was stored, for a failed record. None for the rest.
+    reason: Optional[str] = None
 
 
 class Status(BaseModel):
@@ -392,6 +427,9 @@ class Status(BaseModel):
     embedder: str = ""
     document_store: str = ""
     vector_index: str = ""
+    #: The measured floor this engine abstains by, with what it cost and
+    #: the embedder it was measured with; None when none was configured.
+    abstention: Optional[dict] = None
 
 
 class DecisionOutcome(BaseModel):

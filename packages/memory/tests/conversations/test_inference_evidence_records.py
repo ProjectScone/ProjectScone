@@ -132,10 +132,11 @@ async def test_concept_relations_represent_only_verified_triples(memory):
     facts, _, _ = await sourced_chain(memory)
     graph = await build_query_evidence_graph(memory.documents, "alpha", "Aurora", RecallResult(facts=facts))
     concepts = {node.id: node.label for node in graph.nodes if node.kind == "concept"}
-    assert set(concepts.values()) == {"aurora", "LedgerDB", "records on this device"}
+    # 'records on this device' is a value, not a thing: it stays on its claim.
+    assert set(concepts.values()) == {"Aurora", "LedgerDB"}
     assert [(concepts[edge.source].casefold(), edge.label, concepts[edge.target].casefold()) for edge in graph.edges if edge.kind == "relation"] == [
-        ("aurora", "uses", "ledgerdb"), ("ledgerdb", "stores", "records on this device")]
-    assert len([edge for edge in graph.edges if edge.kind == "asserts"]) == 4
+        ("aurora", "uses", "ledgerdb")]
+    assert len([edge for edge in graph.edges if edge.kind == "asserts"]) == 3
     assert len(canonical_evidence(graph).claims) == 2
 
 
@@ -143,9 +144,9 @@ async def test_plain_named_mentions_do_not_invent_factual_relations(memory):
     await memory.remember("alpha", "Aurora and LedgerDB appear in the same note.")
     result = await memory.recall("alpha", "Aurora")
     graph = await build_query_evidence_graph(memory.documents, "alpha", "Aurora", result)
-    assert {node.label for node in graph.nodes if node.kind == "concept"} == {"Aurora", "LedgerDB"}
-    assert len([edge for edge in graph.edges if edge.kind == "mentions"]) == 2
-    assert not any(edge.kind in {"relation", "asserts"} for edge in graph.edges)
+    # Names in a passage are not entities until a claim is about them.
+    assert [node for node in graph.nodes if node.kind == "concept"] == []
+    assert not any(edge.kind in {"relation", "asserts", "mentions"} for edge in graph.edges)
     assert canonical_evidence(graph).claims == []
 
 

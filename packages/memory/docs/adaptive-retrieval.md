@@ -367,8 +367,14 @@ including raw provider errors or source text.
 For optional atomic relation selection, construct the assessor with
 `group_relations=True, max_evidence_bytes=16000`. The pure
 `retrieval.evidence_groups.build_evidence_groups` helper groups supplied facts
-by exact object-to-subject matches, preserving branches and cycles. It does not
-invent semantic links or search beyond the supplied candidate pool. Existing
+whose object names another fact's subject, preserving branches and cycles. Names
+are compared by `memory.identity.join_match`, the rule every join site shares:
+case folded and spacing collapsed, as the ledger stores subjects, nothing
+looser. Prose, quotations and pronouns never join, and a value whose case
+carries meaning ('MB' against 'mb') joins only when spelled exactly the same.
+Each join records `"match": "literal"` or `"match": "normalised"`, so a join
+that relied on folding stays distinguishable from literal equality. It does not invent semantic links, merge
+different spellings, or search beyond the supplied candidate pool. Existing
 stored-link kinds are still handled by the separate graph expansion stage.
 
 To gather missing connecting facts **before** assessment, pass
@@ -390,12 +396,12 @@ source scope and validity for each candidate before retaining it. These reads
 do not equate a connected route with an entailed answer.
 
 This option prioritizes connected fact components within the adaptive candidate
-and byte budgets. Exact components become host-owned atomic groups: partial
+and byte budgets. These components become host-owned atomic groups: partial
 model selections or later source loss omit the whole group. These known groups
 also survive an assessor failure, so fallback can retain a route gathered before
 assessment. Use `group_relations=True` on the self-hosted assessor to let the
 model select the components directly. Stored links retain their kinds and
-orientation in the separate evidence graph; an exact component is not a claim
+orientation in the separate evidence graph; a fact component is not a claim
 of causation or an inferred answer.
 
 `graph_limits=None` keeps expansion disabled. Enable it in the generation

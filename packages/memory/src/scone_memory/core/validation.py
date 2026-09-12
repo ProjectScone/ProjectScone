@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from .errors import InvalidInput
 from .timeutil import format_rfc3339, parse_rfc3339
@@ -68,11 +68,40 @@ def normalise_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
         clean[key] = value
     return clean
 
+def entity_key(name: str) -> str:
+    """The one rule for when two names denote the same thing.
+
+    Case is folded, including the cases lower() misses ("Straße" and
+    "STRASSE" are one name), and runs of whitespace become one space.
+    Nothing else: this is identity, not resemblance. Deciding that two
+    different spellings are one entity is a resolution decision with
+    evidence behind it, and must never happen silently inside a join.
+
+    Every join, grouping and traversal compares names through this, and so
+    does storing a subject. Four join sites once each had their own rule;
+    one compared raw strings, so a claim never met the claim naming its
+    object, and the graph came out in pieces that should have connected.
+    """
+    return " ".join(name.casefold().split())
+
 def normalise_term(value: str, what: str) -> str:
-    clean = " ".join(value.strip().casefold().split())
+    clean = entity_key(value)
     if not clean:
         raise InvalidInput(f"{what} must not be empty")
     return clean
+
+def many_valued_predicates(predicates: Iterable[str]) -> frozenset[str]:
+    """The predicates configured to hold many values at once, as the ledger
+    stores predicates. A lone string is refused: it would read as letters."""
+    if isinstance(predicates, (str, bytes)):
+        raise InvalidInput("many_valued takes a collection of predicates, not one string")
+    chosen = set()
+    for predicate in predicates:
+        if not isinstance(predicate, str):
+            raise InvalidInput(f"a many-valued predicate must be text, not {type(predicate).__name__}")
+        chosen.add(normalise_term(predicate, "predicate"))
+    return frozenset(chosen)
+
 
 def normalise_time(value: str) -> str:
     try:

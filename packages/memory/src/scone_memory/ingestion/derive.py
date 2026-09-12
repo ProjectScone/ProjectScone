@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 from ..core.models import Fact
+from ..core.validation import entity_key
 from ..memory.engine import MemoryEngine, derivation_groups
+from ..memory.identity import join_match
 from ..providers.llm import ChatError, ChatModel
 from .distill import DistillError, _find_array
 
@@ -85,7 +87,15 @@ def _text(value: object) -> Optional[str]:
 
 
 def _same(a: str, b: str) -> bool:
-    return a.strip().casefold() == b.strip().casefold()
+    """One name, by entity identity: for subjects and predicates."""
+    return entity_key(a) == entity_key(b)
+
+
+def _same_object(a: str, b: str) -> bool:
+    """One object: the same name by the join rule, or exactly the same text.
+    A value whose case can change its meaning ('3 MB', '3 mb') is not
+    restated by a different spelling."""
+    return a.strip() == b.strip() or join_match(a, b) is not None
 
 
 def parse_derivations(text: str, group: Mapping[int, Fact]) -> tuple[list[Derived], list[RejectedDerivation]]:
@@ -116,7 +126,8 @@ def parse_derivations(text: str, group: Mapping[int, Fact]) -> tuple[list[Derive
         if len(ids) < 2 and rule is None:
             rejected.append(RejectedDerivation("too_few_premises", entry))
             continue
-        if any(_same(f.subject, subject) and _same(f.predicate, predicate) and _same(f.object, obj) for f in group.values()):
+        if any(_same(f.subject, subject) and _same(f.predicate, predicate) and _same_object(f.object, obj)
+               for f in group.values()):
             rejected.append(RejectedDerivation("restates_premise", entry))
             continue
         raw = entry.get("confidence", 0.5)
@@ -195,8 +206,10 @@ class Deriver:
     async def _already_held(self, space: str, d: Derived) -> bool:
         """The same inference from the same premises is already a claim
         (proposed or active): a restatement, not a new fact."""
-        for fact in await self.engine.documents.facts_for(space, d.subject, d.predicate):
-            if fact.status not in ("proposed", "active") or not _same(fact.object, d.object):
+        # Stored subjects and predicates are keys; the model writes names as
+        # people do, so look them up the way the ledger stored them.
+        for fact in await self.engine.documents.facts_for(space, entity_key(d.subject), entity_key(d.predicate)):
+            if fact.status not in ("proposed", "active") or not _same_object(fact.object, d.object):
                 continue
             links = await self.engine.documents.fact_links(space, fact.fact_id)
             premises = {l.to_fact for l in links if l.kind == "derived_from" and l.from_fact == fact.fact_id}

@@ -10,16 +10,20 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import math
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..core.errors import InvalidInput
-from ..core.models import Episode, RecallItem, RecallResult, RerankTrace
+from ..ingestion.code import code_language, declaration_at, line_span
+from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion
+from .entity_lane import ENTITY_WEIGHT, entity_lane
 from .episode_scope import episode_fits
 from .filters import parse_filter
+if TYPE_CHECKING:
+    from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
     rerank_candidates, validate_candidate_limit, validate_rerank_options)
 
@@ -48,6 +52,12 @@ class RecallRuntime:
     contextual_embeddings: bool = False
     demote_restated: bool = True
     similarity_floor: float | None = None
+    #: The width the floor was measured at, when it came from a measured
+    #: policy. The query's own vector is checked against it, because an
+    #: embedder that never reports a width still has one.
+    floor_dim: int | None = None
+    #: Why stored vectors cannot be compared with this embedder's, if so.
+    vector_block: str | None = None
 
 
 def _ms(since: float) -> float:
@@ -70,6 +80,10 @@ async def recall(
     conditions: Mapping[str, object] | None = None,
     candidate_limit: int | None = None,
     rerank: bool = True,
+    graph_boost: bool = False,
+    entity_projection: "EntityProjection | None" = None,
+    entity_unavailable: str | None = None,
+    entity_notes: Sequence[str] = (),
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -143,15 +157,29 @@ async def recall(
     }
 
     vector_lane: list[tuple[int, float]] = []
-    try:
-        t0 = time.perf_counter()
-        [qvec] = await runtime.embedder.embed([query])
-        latency["embed"] = _ms(t0)
-        t0 = time.perf_counter()
-        vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
-        latency["vector"] = _ms(t0)
-    except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
-        degraded.append(f"vectors: {type(e).__name__}: {e}")
+    width: int | None = None
+    if runtime.vector_block is not None:
+        degraded.append(f"vectors: {runtime.vector_block}")
+    else:
+        try:
+            t0 = time.perf_counter()
+            [qvec] = await runtime.embedder.embed([query])
+            width = len(qvec)
+            latency["embed"] = _ms(t0)
+            t0 = time.perf_counter()
+            vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
+            latency["vector"] = _ms(t0)
+        except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
+            degraded.append(f"vectors: {type(e).__name__}: {e}")
+
+    # A floor is a number on one embedder's scale. The query it is about
+    # to judge says what scale this really is, whatever the embedder said
+    # of itself before it had answered anything.
+    if width is not None and runtime.floor_dim is not None and width != runtime.floor_dim:
+        raise InvalidInput(
+            f"the abstention floor was measured on {runtime.floor_dim}-d similarities; this "
+            f"embedder returns {width}-d vectors, and one width's similarities say nothing "
+            f"about another's")
 
     if candidate_limit is not None or active_reranker is not None:
         vector_lane = vector_lane[:depth]
@@ -174,8 +202,29 @@ async def recall(
     if len(degraded) == 2:
         latency["total"] = _ms(started)
         await runtime.emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                           "error": "both lanes failed"})
+                                           "error": "both lanes failed", "fact_ids": [], "history_fact_ids": []})
         raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
+
+    # The entity lane, only when asked for: passages naming the question's
+    # entities or their neighbours, under the same filter as the text lane.
+    entity_hits: list[tuple[int, float]] = []
+    query_entities: list[QueryEntity] = []
+    if graph_boost:
+        degraded.extend(entity_notes)
+        if entity_projection is None:
+            degraded.append(f"entity: {entity_unavailable or 'index_unavailable'}")
+        else:
+            try:
+                t0 = time.perf_counter()
+                entity_hits, query_entities = await entity_lane(
+                    runtime.documents, entity_projection, space, query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at))
+                latency["entity"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
+                degraded.append(f"entity: {type(e).__name__}: {e}")
+        if candidate_limit is not None or active_reranker is not None:
+            entity_hits = entity_hits[:depth]
 
     # An index that ranks without a cosine (a bridged store with an
     # unknown score) reports NaN: its order counts for fusion, but no
@@ -193,7 +242,10 @@ async def recall(
         "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
-    fused = fusion.rrf([vector_lane, text_lane])
+    if graph_boost:
+        ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
+    fused = (fusion.rrf([vector_lane, text_lane, entity_hits], weights=[1.0, 1.0, ENTITY_WEIGHT]) if graph_boost
+             else fusion.rrf([vector_lane, text_lane]))
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [
@@ -304,6 +356,13 @@ async def recall(
     for item in items:
         chunk = chunks[item.chunk_id]
         episode = episodes.get(chunk.episode_id)
+        # Where in the file this came from, worked out from the episode
+        # rather than stored: the same span always answers the same way,
+        # and a chunk written before any of this can still answer.
+        language = code_language(episode.source) if episode else None
+        held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
+                if episode is not None and language is not None else None)
+        lines = line_span(episode.content, chunk.start, chunk.end, "bytes") if episode is not None else None
         result_items.append(
             RecallItem(
                 chunk_id=chunk.chunk_id,
@@ -317,6 +376,11 @@ async def recall(
                 source=episode.source if episode else None,
                 tags=episode.tags if episode else (),
                 metadata=dict(episode.metadata) if episode else {},
+                start=chunk.start,
+                end=chunk.end,
+                first_line=lines[0] if lines else None,
+                last_line=lines[1] if lines else None,
+                declaration=held.name if held is not None else None,
             )
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
@@ -329,6 +393,7 @@ async def recall(
         facts=facts,
         history=previous,
         degraded=degraded,
+        entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
@@ -357,6 +422,7 @@ async def recall(
         "low_confidence": low_confidence,
         "facts": len(facts),
         "fact_ids": [f.fact_id for f in facts],
+        "history_fact_ids": [f.fact_id for f in previous],
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
     })

@@ -1,0 +1,1015 @@
+"""The knowledge map over HTTP: entities and how they relate, with the
+facts behind every relation, what each view left out, and nothing a
+bounded sample could be mistaken for."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.api import create_app
+
+
+def auth(key: str = "key-a") -> dict:
+    return {"Authorization": f"Bearer {key}"}
+
+
+@pytest.fixture
+async def seeded():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    works = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice chen", "joined_on", "May 2021", valid_from="2024-01-01T00:00:00Z")
+    old = await engine.assert_fact("alpha", "alice chen", "lived_in", "Porto", valid_from="2020-01-01T00:00:00Z")
+    await engine.close_fact("alpha", old.fact_id, "moved")
+    await engine.assert_fact("alpha", "alice chen", "knows", "Bob", proposed=True)
+    hidden = await engine.assert_fact("alpha", "alice chen", "met", "Mallory", valid_from="2024-01-01T00:00:00Z")
+    await engine.exclude("alpha", hidden.fact_id, "private")
+    await engine.assert_fact("beta", "zed", "works_at", "Globex", valid_from="2024-01-01T00:00:00Z")
+    app = create_app(engine, {"key-a": "alpha", "key-b": "beta"})
+    with TestClient(app) as client:
+        yield client, works
+
+
+def labels(view: dict) -> dict[str, str]:
+    return {entity["id"]: entity["label"] for entity in view["entities"]}
+
+
+def edges(view: dict) -> set[tuple[str, str, str]]:
+    names = labels(view)
+    return {(names[r["subject_id"]], r["predicate"], names[r["object_id"]]) for r in view["relations"]}
+
+
+def test_the_knowledge_map_shows_things_and_the_facts_behind_each_relation(seeded):
+    client, works = seeded
+    view = client.get("/v1/graph/knowledge", headers=auth()).json()
+    assert edges(view) == {("alice chen", "works_at", "Acme Robotics"), ("Acme Robotics", "based_in", "Lisbon")}
+    relation = next(r for r in view["relations"] if r["predicate"] == "works_at")
+    assert relation["fact_ids"] == [works.fact_id]
+    assert relation["support"]["active"] == 1 and relation["support"]["unsourced"] == 1
+    assert {(a["predicate"], a["value"], a["literal_kind"]) for a in view["attributes"]} == {("joined_on", "May 2021", "date")}
+    assert view["projection"]["version"] == "scone.entities/1" and len(view["projection"]["digest"]) == 64
+    assert view["filters"] == {"status": "current", "as_of": view["filters"]["as_of"]}
+    assert view["coverage"]["truncated"] is False and view["coverage"]["reasons"] == []
+    assert view["coverage"]["read_mode"] == "paged"
+
+
+@pytest.mark.parametrize(("status", "shown", "hidden"), [
+    ("current", {"works_at"}, {"lived_in", "knows", "met"}),
+    ("history", {"works_at", "lived_in"}, {"knows", "met"}),
+    ("proposed", {"knows"}, {"works_at", "lived_in", "met"}),
+    ("all", {"works_at", "lived_in", "knows", "met"}, set()),
+])
+def test_each_status_mode_shows_what_it_says(seeded, status, shown, hidden):
+    client, _ = seeded
+    view = client.get("/v1/graph/knowledge", params={"status": status}, headers=auth()).json()
+    predicates = {r["predicate"] for r in view["relations"]}
+    assert shown <= predicates and not hidden & predicates
+    assert view["filters"]["status"] == status
+
+
+def test_as_of_shows_what_held_then(seeded):
+    client, _ = seeded
+    view = client.get("/v1/graph/knowledge", params={"as_of": "2021-06-01T00:00:00Z"}, headers=auth()).json()
+    assert {r["predicate"] for r in view["relations"]} == {"lived_in"}
+
+
+def test_a_budget_is_reported_instead_of_passing_for_the_whole_graph(seeded):
+    client, _ = seeded
+    view = client.get("/v1/graph/knowledge", params={"limit": 2}, headers=auth()).json()
+    coverage = view["coverage"]
+    assert len(view["entities"]) == 2 and coverage["entities_shown"] == 2 and coverage["entities_total"] == 3
+    assert coverage["truncated"] is True and "entity_limit" in coverage["reasons"]
+    shown = {entity["id"] for entity in view["entities"]}
+    assert all(r["subject_id"] in shown and r["object_id"] in shown for r in view["relations"])
+
+
+def test_entities_list_their_names_and_filter_by_text(seeded):
+    client, _ = seeded
+    listed = client.get("/v1/entities", headers=auth()).json()
+    assert {entity["key"] for entity in listed["entities"]} == {"alice chen", "acme robotics", "lisbon"}
+    found = client.get("/v1/entities", params={"q": "ACME"}, headers=auth()).json()
+    assert [entity["label"] for entity in found["entities"]] == ["Acme Robotics"]
+    assert found["entities"][0]["names"][0] == {"text": "Acme Robotics", "count": 1}
+
+
+def test_the_map_is_per_space_and_needs_a_key(seeded):
+    client, _ = seeded
+    assert client.get("/v1/graph/knowledge").status_code == 401
+    assert client.get("/v1/entities").status_code == 401
+    beta = client.get("/v1/graph/knowledge", headers=auth("key-b")).json()
+    assert edges(beta) == {("zed", "works_at", "Globex")}
+
+
+def test_bad_parameters_are_refused(seeded):
+    client, _ = seeded
+    assert client.get("/v1/graph/knowledge", params={"status": "maybe"}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"as_of": "yesterday"}, headers=auth()).status_code == 422
+    for edge in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"):
+        assert client.get("/v1/graph/knowledge", params={"as_of": edge}, headers=auth()).status_code == 422
+
+
+def test_capabilities_advertise_the_entity_routes(seeded):
+    client, _ = seeded
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["entities.read"] is True and features["graph.knowledge"] is True
+    assert features["graph.schema"] is True
+
+
+def test_the_schema_counts_the_kinds_and_predicates_a_view_holds(seeded):
+    client, _ = seeded
+    body = client.get("/v1/graph/schema", headers=auth()).json()
+    assert body["schema_version"] == 1 and body["space"] == "alpha" and body["filters"]["status"] == "current"
+    by_name = {entry["predicate"]: entry for entry in body["predicates"]}
+    assert set(by_name) == {"works_at", "based_in", "joined_on"}, "closed, proposed and excluded facts are not current"
+    assert by_name["works_at"]["joins"] == [{"subject": "person", "object": "organisation", "relations": 1, "facts": 1}]
+    assert by_name["joined_on"]["values"] == [{"subject": "person", "kind": "date", "attributes": 1, "facts": 1}]
+    assert body["projection"]["version"] == "scone.entities/1" and body["complete"] is True
+    assert body["coverage"]["truncated"] is False and body["truncated"] is False
+    history = client.get("/v1/graph/schema", params={"status": "history"}, headers=auth()).json()
+    assert "lived_in" in {entry["predicate"] for entry in history["predicates"]}
+    cut = client.get("/v1/graph/schema", params={"limit": 1}, headers=auth()).json()
+    assert len(cut["predicates"]) == 1 and cut["predicates_total"] == 3 and cut["truncated"] is True
+    assert client.get("/v1/graph/schema", headers=auth("key-b")).json()["totals"]["facts"] == 1
+    assert client.get("/v1/graph/schema", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/schema", params={"max_bytes": 100}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/schema").status_code == 401
+
+
+async def test_a_view_is_classified_only_from_the_facts_it_counts():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "status", "tired", valid_from="2020-01-01T00:00:00Z")
+    hidden = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2020-01-01T00:00:00Z")
+    await engine.exclude("alpha", hidden.fact_id, "private")
+    await engine.assert_fact("alpha", "tired", "knows", "Bob", valid_from="2030-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"as_of": "2021-01-01T00:00:00Z"}, headers=auth()).json()
+        listed = client.get("/v1/entities", params={"as_of": "2021-01-01T00:00:00Z"}, headers=auth()).json()
+    assert view["relations"] == []
+    assert [(a["predicate"], a["value"]) for a in view["attributes"]] == [("status", "tired")]
+    alice = next(entity for entity in view["entities"] if entity["key"] == "alice")
+    assert alice["kind"] is None and hidden.fact_id not in alice["kind_basis"]
+    assert [entity["key"] for entity in listed["entities"]] == ["alice"]
+
+
+@pytest.fixture
+async def teams():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for team in (("Ana", "Ben", "Cho", "Dev"), ("Eli", "Fay", "Gus", "Hal")):
+        for left in team:
+            for right in team:
+                if left < right:
+                    await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    bridge = await engine.assert_fact("alpha", "Dev", "mentors", "Eli", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"})) as client:
+        yield client, bridge
+
+
+def test_the_report_names_communities_central_entities_and_surprises(teams):
+    client, bridge = teams
+    report = client.get("/v1/graph/report", headers=auth()).json()
+    assert report["analysis"]["version"] == "scone.analysis/1" and report["analysis"]["modularity"] > 0.3
+    assert len(report["communities"]) == 2 and all(c["label"] for c in report["communities"])
+    assert report["surprising_connections"][0]["fact_ids"] == [bridge.fact_id]
+    assert {e["key"] for e in report["central_entities"][:2]} <= {"dev", "eli", "ana", "ben", "cho", "fay", "gus", "hal"}
+    assert any(q["kind"] == "connection" and q["fact_ids"] == [bridge.fact_id] for q in report["suggestions"])
+    assert report["projection"]["digest"] and report["coverage"]["truncated"] is False
+
+
+def test_the_report_reads_as_markdown(teams):
+    client, _ = teams
+    response = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth())
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/markdown")
+    text = response.text
+    assert text.startswith("# Knowledge report") and "## Communities" in text and "## Surprising connections" in text
+    assert "Dev" in text and "Eli" in text
+
+
+def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
+    client, _ = teams
+    plain = client.get("/v1/graph/knowledge", headers=auth()).json()
+    assert "groupings" not in plain
+    view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 6}, headers=auth()).json()
+    groupings = view["groupings"]
+    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/1"
+    shown = {entity["id"] for entity in view["entities"]}
+    assert set(groupings["membership"]) == shown
+    assert {item["entity_id"] for item in groupings["importance"]} == shown
+    assert all(set(community["members"]) <= shown for community in groupings["communities"])
+    assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
+                                     "truncated": False, "reasons": [], "betweenness": "exact",
+                                     "betweenness_estimated": False, "levels": groupings["coverage"]["levels"],
+                                     "resolution": 1.0}
+
+
+async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
+    """Past the exact limit, betweenness is estimated. The groupings and both
+    report forms say so, apart from the view's paging and the analysis caps."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(500):
+        await engine.assert_fact("alpha", f"person{number:03d}", "knows", "hub", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 1000}, headers=auth()).json()
+        report = client.get("/v1/graph/report", headers=auth()).json()
+        markdown = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth()).text
+    analysed = view["groupings"]["coverage"]
+    assert analysed["betweenness"] == "sampled:64" and analysed["betweenness_estimated"] is True
+    assert analysed["entities_analysed"] == 501 and analysed["truncated"] is False
+    assert view["coverage"]["truncated"] is False and view["coverage"]["reasons"] == []
+    assert max(item["betweenness"] for item in view["groupings"]["importance"]) <= 1.0
+    assert report["analysis"]["coverage"] == analysed
+    assert "Betweenness (estimated)" in markdown and "estimated from 64 sampled sources" in markdown
+
+
+def test_the_report_is_per_space_and_advertised(teams):
+    client, _ = teams
+    assert client.get("/v1/graph/report").status_code == 401
+    beta = client.get("/v1/graph/report", headers=auth("key-b")).json()
+    assert beta["communities"] == [] and beta["surprising_connections"] == []
+    assert client.get("/v1/graph/report", params={"format": "pdf"}, headers=auth()).status_code == 422
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.report"] is True and features["graph.path"] is True
+
+
+@pytest.fixture
+async def quoted():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Dr. Alice Chen joined Acme Robotics. Acme Robotics is based in Lisbon.")
+    works = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", source_episode_id=note.episode_id,
+                                     quote="Dr. Alice Chen joined Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    based = await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "alice park", "joined_on", "May 2021", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha", "key-b": "beta"})) as client:
+        yield client, works, based
+
+
+def test_a_name_resolves_or_reports_ambiguity(quoted):
+    client, _, _ = quoted
+    resolved = client.get("/v1/entities/resolve", params={"name": "ACME Robotics"}, headers=auth()).json()
+    assert resolved["status"] == "resolved" and resolved["tier"] == "key"
+    assert [c["label"] for c in resolved["candidates"]] == ["Acme Robotics"]
+    ambiguous = client.get("/v1/entities/resolve", params={"name": "alice"}, headers=auth()).json()
+    assert ambiguous["status"] == "ambiguous" and len(ambiguous["candidates"]) == 2
+
+
+def test_an_entity_page_groups_relations_and_rechecks_quotes(quoted):
+    client, works, based = quoted
+    acme = client.get("/v1/entities/resolve", params={"name": "acme robotics"}, headers=auth()).json()["candidates"][0]["id"]
+    page = client.get(f"/v1/entities/{acme}", headers=auth()).json()
+    assert page["entity"]["label"] == "Acme Robotics"
+    assert [(group["predicate"], [r["subject"]["label"] for r in group["relations"]]) for group in page["incoming"]] == \
+        [("works_at", ["Alice Chen"])]
+    assert [(group["predicate"], [r["object"]["label"] for r in group["relations"]]) for group in page["outgoing"]] == \
+        [("based_in", ["Lisbon"])]
+    facts = {fact["fact_id"]: fact for fact in page["facts"]}
+    assert facts[works.fact_id]["grounding"] == "quote_verified"
+    assert facts[based.fact_id]["grounding"] == "stated"
+    assert client.get("/v1/entities/ent:000000000000000000000000", headers=auth()).status_code == 404
+
+
+def test_a_path_joins_two_names_and_refuses_an_ambiguous_one(quoted):
+    client, works, based = quoted
+    route = client.get("/v1/graph/path", params={"from": "Alice Chen", "to": "Bob Stone"}, headers=auth()).json()
+    assert route["status"] == "found"
+    hops = route["paths"][0]["hops"]
+    assert [(hop["predicate"], hop["direction"]) for hop in hops] == [("works_at", "forward"), ("based_in", "forward"),
+                                                                      ("lives_in", "reverse")]
+    assert hops[0]["fact_ids"] == [works.fact_id] and hops[0]["subject"]["label"] == "Alice Chen"
+    ambiguous = client.get("/v1/graph/path", params={"from": "alice", "to": "Bob Stone"}, headers=auth())
+    assert ambiguous.status_code == 409 and len(ambiguous.json()["candidates"]) == 2
+    assert client.get("/v1/graph/path", params={"from": "Globex", "to": "Bob Stone"}, headers=auth()).status_code == 404
+    assert client.get("/v1/graph/path", params={"from": "Alice Chen", "to": "Bob Stone"}).status_code == 401
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "cypher", "csv", "jsonld", "obsidian"])
+def test_the_graph_downloads_in_each_format_named_by_its_projection(seeded, format):
+    client, _ = seeded
+    digest = client.get("/v1/graph/knowledge", headers=auth()).json()["projection"]["digest"]
+    response = client.get("/v1/graph/export", params={"format": format}, headers=auth())
+    assert response.status_code == 200 and response.content
+    assert response.headers["x-scone-projection-digest"] == digest
+    assert response.headers["content-disposition"].startswith("attachment; filename=")
+    assert response.headers["x-scone-truncated"] == "false"
+
+
+def test_an_export_holds_what_its_view_counts_and_says_what_it_read(seeded):
+    client, works = seeded
+    current = client.get("/v1/graph/export", headers=auth()).json()
+    history = client.get("/v1/graph/export", params={"status": "history"}, headers=auth()).json()
+    assert {link["predicate"] for link in current["links"]} == {"works_at", "based_in"}
+    assert "lived_in" in {link["predicate"] for link in history["links"]}
+    assert all("met" != link["predicate"] for link in history["links"])
+    about = current["graph"]["about"]
+    assert about["status"] == "current" and about["as_of"]
+    assert about["coverage"]["truncated"] is False and about["coverage"]["facts_counted"] >= 3
+    assert client.get("/v1/graph/export", params={"format": "pdf"}, headers=auth()).status_code == 422
+    timeline = client.get("/v1/graph/export", params={"format": "gexf"}, headers=auth())
+    assert timeline.status_code == 200 and timeline.headers["content-type"].startswith("application/gexf+xml")
+    assert 'filename="graph.gexf"' in timeline.headers["content-disposition"] and b'mode="dynamic"' in timeline.content
+    assert client.get("/v1/graph/export").status_code == 401
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.export"] is True
+
+
+async def test_an_export_of_a_capped_read_is_marked_partial(monkeypatch):
+    from scone_memory.entities import read
+
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("Ana", "Ben"), ("Ben", "Cho"), ("Cho", "Dev")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/export", headers=auth())
+    assert response.headers["x-scone-truncated"] == "true"
+    assert response.json()["graph"]["about"]["coverage"]["reasons"] == ["fact_limit"]
+
+
+class WritesDuringReread(InMemoryDocumentStore):
+    """Runs a write the moment the entity page re-reads a fact."""
+    during = None
+    every_time = False
+
+    async def get_fact(self, space, fact_id):
+        if self.during is not None:
+            during = self.during
+            if not self.every_time:
+                self.during = None
+            await during()
+        return await super().get_fact(space, fact_id)
+
+
+async def test_an_entity_page_rebuilds_when_the_ledger_moves_while_it_reads():
+    """An exclusion that lands mid-page would leave relations counting a
+    fact the page's own re-read shows excluded. The page reads again, and
+    says so when the space will not hold still."""
+    from scone_memory.entities.ids import key_id
+
+    store = WritesDuringReread()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Alice works at Acme.")
+    await engine.assert_fact("alpha", "alice", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    works = await engine.assert_fact("alpha", "alice", "works_at", "Acme", source_episode_id=note.episode_id,
+                                     quote="Alice works at Acme.", valid_from="2024-01-01T00:00:00Z")
+    store.during = lambda: engine.exclude("alpha", works.fact_id, "no longer evidence")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+        assert [group["predicate"] for group in page["outgoing"]] == ["based_in"]
+        assert [fact["excluded"] for fact in page["facts"]] == [False] and page["consistent"] is True
+        store.every_time = True
+        store.during = lambda: store.bump_revision("alpha")
+        moving = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert moving["consistent"] is False and "ledger_changed_during_read" in moving["coverage"]["reasons"]
+
+
+@pytest.fixture
+async def capped(monkeypatch):
+    """A chain a-b-c-d read with room for only the two newest facts."""
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("a", "b"), ("b", "c"), ("c", "d")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        yield client
+
+
+def test_a_capped_read_never_claims_a_name_is_absent(capped):
+    found = capped.get("/v1/entities/resolve", params={"name": "a"}, headers=auth()).json()
+    assert found["status"] == "not_found_in_read" and found["complete"] is False
+    assert found["coverage"]["reasons"] == ["fact_limit"] and found["coverage"]["truncated"] is True
+
+
+def test_a_capped_read_never_claims_two_entities_are_disconnected(capped):
+    unknown = capped.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth())
+    assert unknown.status_code == 404 and unknown.json()["complete"] is False
+    assert unknown.json()["coverage"]["reasons"] == ["fact_limit"]
+    # b-c and c-d were read, so b to d is found; the result still says the read was capped.
+    found = capped.get("/v1/graph/path", params={"from": "b", "to": "d"}, headers=auth()).json()
+    assert found["status"] == "found" and found["complete"] is False
+
+
+def test_a_capped_read_marks_an_entity_page_incomplete(capped):
+    from scone_memory.entities.ids import key_id
+
+    page = capped.get(f"/v1/entities/{key_id('alpha', 'b')}", headers=auth()).json()
+    assert page["incoming"] == [] and page["complete"] is False
+    assert page["coverage"]["truncated"] is True and "fact_limit" in page["coverage"]["reasons"]
+
+
+async def test_many_candidates_are_counted_and_the_cut_is_said():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for letter in "ABCDEFGHIJKLMNOPQRSTU":
+        await engine.assert_fact("alpha", f"alice {letter}", "knows", "bob", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        first = client.get("/v1/entities/resolve", params={"name": "alice"}, headers=auth()).json()
+        every = client.get("/v1/entities/resolve", params={"name": "alice", "limit": 50}, headers=auth()).json()
+        path = client.get("/v1/graph/path", params={"from": "alice", "to": "bob"}, headers=auth())
+    assert first["status"] == "ambiguous" and len(first["candidates"]) == 20
+    assert first["candidates_total"] == 21 and first["truncated"] is True
+    assert len(every["candidates"]) == 21 and every["truncated"] is False
+    assert path.status_code == 409 and path.json()["candidates_total"] == 21 and path.json()["truncated"] is True
+
+
+async def test_a_quote_is_verified_only_against_its_own_source():
+    """A store that hands back another space's or another id's episode must
+    not have the quote checked against it."""
+    from scone_memory.entities.ids import key_id
+
+    store = InMemoryDocumentStore()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    note = await engine.remember("alpha", "Alice works at Acme.")
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", source_episode_id=note.episode_id,
+                             quote="Alice works at Acme.", valid_from="2024-01-01T00:00:00Z")
+    real = store.get_episode
+
+    async def someone_elses(space, episode_id):
+        episode = await real(space, episode_id)
+        return episode.model_copy(update={"space": "beta", "episode_id": episode_id + 100})
+
+    store.get_episode = someone_elses
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert [fact["grounding"] for fact in page["facts"]] == ["quote_source_mismatch"]
+
+
+class WritesAfterListing(InMemoryDocumentStore):
+    """Runs a write just after the whole-ledger read returns its rows,
+    paged or listed."""
+    after = None
+
+    async def _then(self, rows):
+        if self.after is not None:
+            after, self.after = self.after, None
+            await after()
+        return rows
+
+    async def list_facts(self, space, **options):
+        return await self._then(await super().list_facts(space, **options))
+
+    async def page_facts(self, space, before_id, limit):
+        return await self._then(await super().page_facts(space, before_id, limit))
+
+
+async def test_a_write_right_after_the_ledger_read_is_not_mistaken_for_the_read():
+    """The projection records the revision from before its rows; read after
+    them, it would vouch for rows that no longer hold."""
+    from scone_memory.entities.ids import key_id
+
+    store = WritesAfterListing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    works = await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    store.after = lambda: engine.exclude("alpha", works.fact_id, "no longer evidence")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        page = client.get(f"/v1/entities/{key_id('alpha', 'alice')}", headers=auth()).json()
+    assert [group["predicate"] for group in page["outgoing"]] == ["based_in"] and page["consistent"] is True
+
+
+async def test_entities_joined_only_beyond_a_capped_read_are_not_called_disconnected(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for left, right in (("b", "c"), ("a", "b"), ("c", "d")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        whole = client.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth()).json()
+        monkeypatch.setattr(read, "MAX_FACTS", 2)
+        part = client.get("/v1/graph/path", params={"from": "a", "to": "d"}, headers=auth()).json()
+    assert whole["status"] == "found" and whole["complete"] is True
+    assert part["status"] == "not_connected_in_read" and part["complete"] is False and part["paths"] == []
+
+
+async def test_a_slow_view_answers_come_back_shortly(monkeypatch):
+    from scone_memory.entities import service
+
+    class Slow(InMemoryDocumentStore):
+        async def page_facts(self, space, before_id, limit):
+            await asyncio.sleep(0.3)
+            return await super().page_facts(space, before_id, limit)
+
+    monkeypatch.setattr(service, "BUILD_TIMEOUT", 0.01)
+    engine = await MemoryEngine(Slow(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "works_at", "Acme", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        busy = client.get("/v1/graph/knowledge", headers=auth())
+        assert busy.status_code == 503 and busy.headers["retry-after"] == "1"
+        assert busy.json()["code"] == "projection_building"
+        time.sleep(0.6)
+        ready = client.get("/v1/graph/knowledge", headers=auth())
+    assert ready.status_code == 200 and ready.json()["entities"]
+
+
+def test_a_path_names_its_projection_filters_and_the_bounds_it_applied(quoted):
+    client, _, _ = quoted
+    found = client.get("/v1/graph/path", params={"from": "alice chen", "to": "lisbon", "max_hops": 3, "limit": 2,
+                                                  "hub_degree": 50}, headers=auth()).json()
+    view = client.get("/v1/graph/knowledge", params={"status": "history"}, headers=auth()).json()
+    assert found["schema_version"] == 1 and found["space"] == "alpha"
+    assert found["projection"]["digest"] and found["projection"]["version"] == "scone.entities/1"
+    assert found["filters"]["status"] == "current" and found["filters"]["as_of"]
+    assert found["policy"] == {"max_hops": 3, "limit": 2, "hub_degree": 50}
+    assert view["projection"]["version"] == found["projection"]["version"]
+
+
+def test_the_graph_context_packet_is_served_for_names_or_a_question(quoted):
+    client, _, _ = quoted
+    named = client.get("/v1/graph/context", params=[("names", "alice chen"), ("names", "lisbon")], headers=auth()).json()
+    assert named["schema_version"] == 1 and named["space"] == "alpha" and named["status"] == "prepared"
+    assert any(line.startswith("path: ") for line in named["text"].splitlines()) and len(named["seeds"]) == 2
+    asked = client.get("/v1/graph/context", params={"q": "who works in lisbon?"}, headers=auth()).json()
+    assert asked["status"] == "prepared" and asked["coverage"]["reasons"] == []
+    assert client.get("/v1/graph/context", headers=auth()).status_code == 422
+    assert client.get("/v1/graph/context", params={"q": "x", "max_bytes": 511}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context"] is True
+
+
+async def test_the_report_can_leave_hubs_out_of_its_central_entities():
+    """A hub linked to everything tops every ranking; excluding the top
+    percentile by degree lists it apart instead."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(30):
+        await engine.assert_fact("alpha", f"person {number:02d}", "works_at", "Acme Corp", valid_from="2024-01-01T00:00:00Z")
+    for left, right in (("person 01", "person 02"), ("person 02", "person 03"), ("person 03", "person 01")):
+        await engine.assert_fact("alpha", left, "knows", right, valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        plain = client.get("/v1/graph/report", headers=auth()).json()
+        trimmed = client.get("/v1/graph/report", params={"exclude_hubs": 95, "resolution": 1.5}, headers=auth()).json()
+        refused = client.get("/v1/graph/report", params={"resolution": 0}, headers=auth())
+    assert plain["central_entities"][0]["key"] == "acme corp"
+    assert "acme corp" not in {item["key"] for item in trimmed["central_entities"]}
+    assert [hub["key"] for hub in trimmed["hubs_excluded"]] == ["acme corp"]
+    assert trimmed["analysis"]["resolution"] == 1.5 and refused.status_code == 422
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        markdown = client.get("/v1/graph/report", params={"exclude_hubs": 95, "resolution": 1.5, "format": "markdown"},
+                              headers=auth()).text
+        default = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth()).text
+    assert "resolution 1.5" in markdown and "above the 95th percentile" in markdown
+    hubs = markdown.split("## Hubs left out of the ranking")[1].split("##")[0]
+    central = markdown.split("## Central entities")[1].split("##")[0]
+    assert "Acme Corp" in hubs and not any(row.startswith("| Acme Corp |") for row in central.splitlines())
+    assert "## Hubs left out" not in default and "resolution 1" in default
+
+
+
+def test_groupings_are_found_at_the_resolution_asked_for(teams):
+    client, _ = teams
+    usual = client.get("/v1/graph/knowledge", params={"groupings": "true"}, headers=auth()).json()["groupings"]
+    fine = client.get("/v1/graph/knowledge", params={"groupings": "true", "resolution": 10},
+                      headers=auth()).json()["groupings"]
+    assert usual["coverage"]["resolution"] == 1.0 and fine["coverage"]["resolution"] == 10.0
+    assert len(fine["communities"]) > len(usual["communities"]) == 2
+
+
+@pytest.mark.parametrize("format", ["json", "graphml", "obsidian"])
+def test_an_export_names_its_scope_in_its_headers(seeded, format):
+    """A client can bind any format's bytes to the view it shows without
+    opening a zip or parsing XML: space, revision, status and moment."""
+    client, _ = seeded
+    moment = "2025-06-01T00:00:00Z"
+    view = client.get("/v1/graph/knowledge", params={"status": "history", "as_of": moment}, headers=auth()).json()
+    response = client.get("/v1/graph/export", params={"format": format, "status": "history", "as_of": moment},
+                          headers=auth())
+    assert response.headers["x-scone-space"] == "alpha"
+    assert response.headers["x-scone-projection-revision"] == str(view["projection"]["revision"])
+    assert response.headers["x-scone-projection-digest"] == view["projection"]["digest"]
+    assert response.headers["x-scone-status"] == "history"
+    assert response.headers["x-scone-as-of"] == view["filters"]["as_of"]
+
+
+@pytest.fixture
+async def city():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "acme robotics", "based_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "carol diaz", "works_at", "Globex", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        yield client, engine
+
+
+def test_a_seeded_view_walks_out_from_its_seed_both_ways(city):
+    client, _ = city
+    view = client.get("/v1/graph/knowledge", params={"seed": "Lisbon"}, headers=auth()).json()
+    keys = [entity["key"] for entity in view["entities"]]
+    assert keys[0] == "lisbon" and "alice chen" in keys and "carol diaz" not in keys
+    assert keys.index("acme robotics") < keys.index("alice chen")
+    assert view["filters"]["seeds"] == [view["entities"][0]["id"]]
+
+
+async def test_a_hub_is_shown_but_not_walked_through_unless_seeded(city):
+    client, engine = city
+    for number in range(5):
+        await engine.assert_fact("alpha", f"visitor {number}", "visited", "Lisbon", valid_from="2024-01-01T00:00:00Z")
+    through = client.get("/v1/graph/knowledge", params={"seed": "alice chen", "hub_degree": 3}, headers=auth()).json()
+    keys = [entity["key"] for entity in through["entities"]]
+    assert "lisbon" in keys and not any(key.startswith("visitor") for key in keys)
+    assert "hub_skipped" in through["coverage"]["reasons"]
+    seeded = client.get("/v1/graph/knowledge", params={"seed": "lisbon", "hub_degree": 3}, headers=auth()).json()
+    assert any(entity["key"].startswith("visitor") for entity in seeded["entities"])
+
+
+async def test_pages_cover_the_ranking_once_and_a_moved_graph_refuses_the_cursor(city):
+    client, engine = city
+    seen, cursor = [], None
+    while True:
+        params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
+        page = client.get("/v1/graph/knowledge", params=params, headers=auth()).json()
+        seen += [entity["id"] for entity in page["entities"]]
+        cursor = page["coverage"].get("next_cursor")
+        if not cursor:
+            break
+    everything = client.get("/v1/graph/knowledge", params={"limit": 100}, headers=auth()).json()
+    assert seen == [entity["id"] for entity in everything["entities"]] and len(seen) == len(set(seen))
+    first = client.get("/v1/graph/knowledge", params={"limit": 2}, headers=auth()).json()["coverage"]["next_cursor"]
+    await engine.assert_fact("alpha", "dana", "works_at", "Globex", valid_from="2024-01-01T00:00:00Z")
+    moved = client.get("/v1/graph/knowledge", params={"limit": 2, "cursor": first}, headers=auth())
+    assert moved.status_code == 409
+
+
+def test_an_ambiguous_or_unknown_seed_is_refused(city):
+    client, _ = city
+    assert client.get("/v1/graph/knowledge", params={"seed": "nobody"}, headers=auth()).status_code == 404
+    assert client.get("/v1/graph/knowledge", params={"cursor": "not-a-cursor"}, headers=auth()).status_code == 422
+
+
+def test_a_walk_says_what_lies_outside_it_and_how_it_walked(city):
+    client, _ = city
+    view = client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "hub_degree": 10}, headers=auth()).json()
+    assert "carol diaz" not in {entity["key"] for entity in view["entities"]}
+    assert "outside_walk" in view["coverage"]["reasons"] and view["coverage"]["truncated"] is True
+    assert view["filters"]["hub_degree"] == 10
+
+
+def test_too_many_seeds_are_refused_not_dropped(city):
+    client, _ = city
+    response = client.get("/v1/graph/knowledge", params=[("seed", "Lisbon")] * 25, headers=auth())
+    assert response.status_code == 422
+
+
+async def test_an_ambiguous_seed_on_a_capped_read_keeps_the_coverage(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for number in range(3):
+        await engine.assert_fact("alpha", f"alice {number}", "knows", "bob", valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/knowledge", params={"seed": "alice"}, headers=auth())
+    assert response.status_code == 409 and response.json()["complete"] is False
+    assert response.json()["truncated"] is True
+
+
+def test_paging_and_seeded_walks_are_advertised(city):
+    client, _ = city
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.knowledge_paging"] is True and features["graph.knowledge_seeds"] is True
+
+
+async def test_one_huge_predicate_cannot_make_the_schema_huge():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    await engine.assert_fact("alpha", "alice", "x" * 200_000, "value", valid_from="2024-01-01T00:00:00Z")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        response = client.get("/v1/graph/schema", params={"limit": 1}, headers=auth())
+    entry = response.json()["predicates"][0]
+    assert len(response.content) < 4_000 and entry["clipped"] is True and entry["length"] == 200_000
+
+
+async def test_a_schema_from_a_capped_read_says_it_is_partial(monkeypatch):
+    from scone_memory.entities import read
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for subject, predicate, value in (("alice", "works_at", "Acme"), ("bob", "lives_in", "Lisbon"), ("carol", "knows", "Bob")):
+        await engine.assert_fact("alpha", subject, predicate, value, valid_from="2024-01-01T00:00:00Z")
+    monkeypatch.setattr(read, "MAX_FACTS", 2)
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        body = client.get("/v1/graph/schema", headers=auth()).json()
+    assert body["complete"] is False and body["truncated"] is True and body["truncated_by"] == ["read"]
+    assert body["predicates_total"] == 2
+
+
+def _walked(client, **params):
+    view = client.get("/v1/graph/knowledge", params=params, headers=auth()).json()
+    return view, {entity["key"]: entity.get("hop") for entity in view["entities"]}
+
+
+def test_a_walk_can_follow_relations_forward_only(city):
+    """From Alice forward: her employer, then where it is based. Bob, who
+    only points at Lisbon himself, is not reached."""
+    client, _ = city
+    view, hops = _walked(client, seed="alice chen", direction="out")
+    assert hops == {"alice chen": 0, "acme robotics": 1, "lisbon": 2}
+    assert view["filters"]["direction"] == "out"
+
+
+def test_a_walk_backward_finds_what_depends_on_an_entity(city):
+    """Everything that leads to Lisbon: what is based there and who lives
+    there, then who works at what is based there."""
+    client, _ = city
+    _, hops = _walked(client, seed="Lisbon", direction="in")
+    assert hops == {"lisbon": 0, "acme robotics": 1, "bob stone": 1, "alice chen": 2}
+
+
+def test_a_walk_stops_at_its_hop_limit_and_says_so(city):
+    client, _ = city
+    view, hops = _walked(client, seed="Lisbon", hops=1)
+    assert hops == {"lisbon": 0, "acme robotics": 1, "bob stone": 1}
+    assert "hop_limit" in view["coverage"]["reasons"] and view["filters"]["hops"] == 1
+    reached, whole = _walked(client, seed="Lisbon", hops=2)
+    assert "alice chen" in whole and "hop_limit" not in reached["coverage"]["reasons"], "nothing was left to reach"
+
+
+def test_walk_parameters_are_checked_and_advertised(city):
+    client, _ = city
+    assert client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "direction": "up"}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"seed": "Lisbon", "hops": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/knowledge", params={"direction": "in"}, headers=auth()).status_code == 422
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.knowledge_walk"] is True
+
+
+def test_context_can_seed_by_resemblance_when_asked(seeded):
+    client, _ = seeded
+    plain = client.get("/v1/graph/context", params={"q": "which robotics firm?"}, headers=auth()).json()
+    aided = client.get("/v1/graph/context", params={"q": "which robotics firm?", "similar": "true"}, headers=auth()).json()
+    assert plain["coverage"]["similar"] == [] and aided["coverage"]["similar"]
+    assert " similar " in aided["text"]
+    assert client.get("/v1/graph/context", params={"q": "x", "min_similarity": 2}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.context_similar"] is True
+
+
+async def test_the_map_can_show_how_often_recalls_returned_each_part():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Porto", valid_from="2024-01-01T00:00:00Z")
+    await engine.recall("alpha", "alice chen")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"usage": "true"}, headers=auth()).json()
+        plain = client.get("/v1/graph/knowledge", headers=auth()).json()
+        assert client.get("/v1/graph/knowledge", params={"usage_since": "soon"}, headers=auth()).status_code == 422
+        features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    recalled = {entity["key"]: entity["recalled"] for entity in view["entities"]}
+    assert recalled == {"alice chen": 1, "acme robotics": 1, "bob stone": 0, "porto": 0}
+    assert view["coverage"]["usage"]["recalls_read"] == 1 and "usage" not in plain["coverage"]
+    assert features["graph.knowledge_usage"] is True
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth()).json()
+        markdown = client.get("/v1/graph/report", params={"usage": "true", "format": "markdown"}, headers=auth()).text
+    assert report["recall_usage"]["recalls_read"] == 1 and "## What recall uses" in markdown
+
+
+async def test_a_recall_event_that_holds_no_ids_is_counted_not_answered_with_a_fault():
+    from scone_memory.core.ports import NewEvent
+    from scone_memory.observability.events import InMemoryEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.events.append(NewEvent(ts=engine.clock(), space="alpha", kind="recall", payload={"fact_ids": [None]}))
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        view = client.get("/v1/graph/knowledge", params={"usage": "true"}, headers=auth())
+        report = client.get("/v1/graph/report", params={"usage": "true"}, headers=auth())
+    assert view.status_code == report.status_code == 200
+    assert view.json()["coverage"]["usage"]["malformed"] == report.json()["recall_usage"]["malformed"] == 1
+
+
+def test_a_structured_question_is_answered_with_its_rows_and_facts(seeded):
+    import json
+
+    client, works = seeded
+    where = json.dumps([{"subject": "?who", "predicate": "works_at", "object": "?org"},
+                        {"subject": "?org", "predicate": "based_in", "object": "Lisbon"}])
+    found = client.get("/v1/graph/match", params={"where": where, "returns": ["?who"]}, headers=auth())
+    assert found.status_code == 200
+    body = found.json()
+    assert body["status"] == "matched" and body["variables"] == ["?who"]
+    assert body["rows"][0]["bindings"]["?who"]["key"] == "alice chen" and works.fact_id in body["rows"][0]["fact_ids"]
+    assert body["filters"] == {"status": "current", "as_of": body["filters"]["as_of"], "together": True,
+                               "limit": 20, "follows": False}
+    assert "row: ?who = " in body["text"] and body["coverage"]["reasons"] == []
+    other = client.get("/v1/graph/match", params={"where": where}, headers=auth("key-b")).json()
+    assert other["status"] == "not_found", "another space's graph answers nothing about this one"
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.match"] is True
+
+
+@pytest.mark.parametrize("params", [
+    {"where": "not json"},
+    {"where": "{}"},
+    {"where": "[]"},
+    {"where": '[{"subject": "?a", "predicate": "knows"}]'},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "returns": "?c"},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "limit": 101},
+    {"where": '[{"subject": "?a", "predicate": "knows", "object": "?b"}]', "max_bytes": 100},
+    {"where": "x" * 10_001},
+])
+def test_a_malformed_question_is_refused_with_the_reason(seeded, params):
+    client, _ = seeded
+    refused = client.get("/v1/graph/match", params=params, headers=auth())
+    assert refused.status_code == 422
+
+
+def test_a_reader_key_may_ask_structured_questions():
+    import json
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    asyncio.run(engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics"))
+    where = json.dumps([{"subject": "?who", "predicate": "works_at", "object": "?org"}])
+    with TestClient(create_app(engine, {"reader": "default"}, roles={"reader": "read"})) as client:
+        asked = client.get("/v1/graph/match", params={"where": where}, headers=auth("reader"))
+    assert asked.status_code == 200 and asked.json()["status"] == "matched"
+
+
+def test_the_overview_digests_each_community_for_a_global_question(seeded):
+    client, works = seeded
+    answered = client.get("/v1/graph/overview", params={"q": "who works where?", "limit": 5}, headers=auth())
+    assert answered.status_code == 200
+    body = answered.json()
+    assert body["status"] == "prepared" and body["filters"]["question"] == "who works where?"
+    assert works.fact_id in body["communities"][0]["fact_ids"] and body["communities"][0]["matched"] == ["works"]
+    assert body["text"].splitlines()[0].startswith("overview: space alpha, current facts as of ")
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.overview"] is True
+    for params in ({"limit": 0}, {"facts": 11}, {"resolution": 0}, {"max_bytes": 100}, {"q": "q" * 2001}):
+        assert client.get("/v1/graph/overview", params=params, headers=auth()).status_code == 422, params
+
+
+def test_the_graph_exports_as_a_drawing_and_as_a_canvas(seeded):
+    import json
+    import xml.etree.ElementTree as ElementTree
+
+    client, _ = seeded
+    drawn = client.get("/v1/graph/export", params={"format": "svg"}, headers=auth())
+    assert drawn.status_code == 200 and drawn.headers["content-type"].startswith("image/svg+xml")
+    assert ElementTree.fromstring(drawn.content).tag == "{http://www.w3.org/2000/svg}svg"
+    canvas = client.get("/v1/graph/export", params={"format": "canvas"}, headers=auth())
+    assert canvas.status_code == 200 and 'filename="graph.canvas"' in canvas.headers["content-disposition"]
+    assert {node["type"] for node in json.loads(canvas.content)["nodes"]} >= {"group", "text"}
+
+
+def test_the_graph_says_what_changed_between_two_moments(seeded):
+    client, works = seeded
+    answered = client.get("/v1/graph/changes", params={"since": "2023-01-01T00:00:00Z",
+                                                        "until": "2024-06-01T00:00:00Z"}, headers=auth())
+    assert answered.status_code == 200
+    body = answered.json()
+    assert body["status"] == "changed" and body["filters"] == {"since": "2023-01-01T00:00:00.000Z",
+                                                                 "until": "2024-06-01T00:00:00.000Z"}
+    began = [change for change in body["changes"] if change["kind"] == "began"]
+    assert any(works.fact_id in change["fact_ids"] for change in began)
+    assert body["text"].splitlines()[0].startswith("changes: space alpha, current facts at 2023-01-01T00:00:00.000Z")
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.changes"] is True
+    for params in ({}, {"since": "soon"}, {"since": "2024-06-01T00:00:00Z", "until": "2023-01-01T00:00:00Z"},
+                   {"since": "2023-01-01T00:00:00Z", "limit": 0}, {"since": "2023-01-01T00:00:00Z", "max_bytes": 1}):
+        assert client.get("/v1/graph/changes", params=params, headers=auth()).status_code == 422, params
+
+
+def test_likely_duplicates_are_suggested_with_their_reasons():
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    asyncio.run(engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z"))
+    asyncio.run(engine.assert_fact("alpha", "dr. alice chen", "leads", "Robotics Lab", valid_from="2024-01-01T00:00:00Z"))
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        found = client.get("/v1/entities/duplicates", headers=auth())
+        proposals = client.get("/v1/entities/duplicates", params={"status": "proposed"}, headers=auth()).json()
+        refused = [client.get("/v1/entities/duplicates", params=params, headers=auth()).status_code
+                   for params in ({"limit": 0}, {"min_score": 2}, {"max_bytes": 1})]
+        features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    body = found.json()
+    assert found.status_code == 200 and body["status"] == "found"
+    assert (body["pairs"][0]["a"]["key"], body["pairs"][0]["b"]["key"]) == ("alice chen", "dr. alice chen")
+    assert refused == [422, 422, 422] and features["entities.duplicates"] is True
+    assert proposals["status"] == "none", "the status asked for is the one read"
+
+
+def test_health_counts_what_wants_attention(seeded):
+    client, _ = seeded
+    found = client.get("/v1/graph/health", params={"limit": 2}, headers=auth()).json()
+    assert found["status"] == "concerns" and found["space"] == "alpha"
+    kinds = {concern["kind"]: concern["count"] for concern in found["concerns"]}
+    assert kinds["unsourced"] >= 1 and set(kinds) <= {"ungrounded", "unsourced", "contested_kind",
+                                                      "kind_unknown", "unconnected", "thin_predicate",
+                                                      "likely_duplicate"}
+    assert all(len(concern["examples"]) <= 2 for concern in found["concerns"])
+    assert client.get("/v1/graph/health", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2
+
+
+@pytest.fixture
+async def meant():
+    """A space whose vocabulary says works_at is the other side of employs."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(inverse={"works_at": "employs"})).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics",
+                             valid_from="2024-01-01T00:00:00Z")
+    app = create_app(engine, {"key-a": "alpha"})
+    with TestClient(app) as client:
+        yield client
+
+
+def test_the_knowledge_map_carries_what_follows_over_http(meant):
+    """The response model must declare what the view holds, or a reader
+    over HTTP is told less than the graph knows."""
+    view = meant.get("/v1/graph/knowledge", headers=auth()).json()
+    [followed] = view["implied"]
+    assert followed["predicate"] == "employs" and followed["follows"] == "inverse"
+    assert followed["id"].startswith("imp:")
+    assert followed["follows_from"] == [view["relations"][0]["id"]]
+    assert followed["fact_ids"] == view["relations"][0]["fact_ids"]
+    assert followed["periods"] and followed["first_valid_from"].startswith("2024-01-01")
+    coverage = view["coverage"]
+    assert coverage["implied_total"] == 1 and coverage["implied_shown"] == 1
+    assert coverage["meanings"]["inverse"] == {"employs": "works_at", "works_at": "employs"}
+    assert coverage["meanings"]["max_steps"] and coverage["meanings"]["max_walked"]
+
+
+def test_an_entity_page_carries_what_follows_over_http(meant):
+    found = meant.get("/v1/entities/resolve", params={"name": "Acme Robotics"}, headers=auth()).json()
+    [acme] = found["candidates"]
+    page = meant.get(f"/v1/entities/{acme['id']}", headers=auth()).json()
+    [followed] = page["follows"]
+    assert followed["predicate"] == "employs" and followed["object"]["label"] == "alice chen"
+    assert followed["relation_id"].startswith("imp:") and followed["follows"] == "inverse"
+    assert page["coverage"]["follows_shown"] == 1
+    assert {fact["fact_id"] for fact in page["facts"]} >= set(followed["fact_ids"])
+
+
+def test_a_relation_carries_the_spells_it_held_over_http(seeded):
+    """Declared in the response model, or a reader over HTTP is told less
+    than the graph knows."""
+    client, works = seeded
+    view = client.get("/v1/graph/knowledge", params={"status": "all"}, headers=auth()).json()
+    [relation] = [r for r in view["relations"] if r["predicate"] == "works_at"]
+    assert relation["periods"] == [["2024-01-01T00:00:00.000Z", None]]
+    assert relation["first_valid_from"] == "2024-01-01T00:00:00.000Z"
+
+
+def test_a_space_with_no_vocabulary_still_answers_the_old_shape(seeded):
+    client, _ = seeded
+    view = client.get("/v1/graph/knowledge", headers=auth()).json()
+    assert view["implied"] == [] and view["coverage"]["meanings"] is None
+    assert view["schema_version"] == 1
+
+
+@pytest.fixture
+async def chained():
+    """Five boxes, each part of the next, with part_of carrying through."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    for n in range(4):
+        await engine.assert_fact("alpha", f"Box {n}", "part_of", f"Box {n + 1}",
+                                 valid_from="2024-01-01T00:00:00Z")
+    app = create_app(engine, {"key-a": "alpha"})
+    with TestClient(app) as client:
+        yield client
+
+
+def first_box(client) -> str:
+    found = client.get("/v1/entities/resolve", params={"name": "Box 0"}, headers=auth()).json()
+    [box] = found["candidates"]
+    return str(box["id"])
+
+
+def test_an_entity_page_that_shows_some_of_what_follows_says_how_many_there_are(chained):
+    """A page cut to one implication must not read as a page with one."""
+    page = chained.get(f"/v1/entities/{first_box(chained)}", params={"limit": 1}, headers=auth()).json()
+    assert len(page["follows"]) == 1
+    assert page["coverage"]["follows_total"] == 3
+    assert page["coverage"]["truncated"] is True and "follows_limit" in page["coverage"]["reasons"]
+
+
+def test_an_entity_page_shows_all_of_what_follows_when_it_fits(chained):
+    page = chained.get(f"/v1/entities/{first_box(chained)}", headers=auth()).json()
+    assert page["coverage"]["follows_total"] == 3 and page["coverage"]["follows_shown"] == 3
+    assert "follows_limit" not in page["coverage"]["reasons"]
+
+
+def test_an_entity_page_says_the_vocabulary_and_when_the_walk_stopped(chained, monkeypatch):
+    from scone_memory.entities import project as projecting
+
+    monkeypatch.setattr(projecting, "MAX_WALKED", 1)
+    page = chained.get(f"/v1/entities/{first_box(chained)}", headers=auth()).json()
+    assert page["coverage"]["meanings"]["transitive"] == ["part_of"]
+    assert page["coverage"]["implied_capped"] is True
+    assert page["coverage"]["truncated"] is True and "implied_capped" in page["coverage"]["reasons"]
+
+
+def test_a_structured_question_can_ask_for_what_follows_over_http(meant):
+    """Off by default, on when asked, and the row says which meaning it
+    followed rather than reading as a claim."""
+    where = '[{"subject": "?who", "predicate": "employs", "object": "?whom"}]'
+    plain = meant.get("/v1/graph/match", params={"where": where}, headers=auth()).json()
+    assert plain["status"] == "not_found" and plain["filters"]["follows"] is False
+    found = meant.get("/v1/graph/match", params={"where": where, "follows": "true"}, headers=auth()).json()
+    assert found["status"] == "matched" and found["filters"]["follows"] is True
+    [row] = found["rows"]
+    assert row["follows"] == ["inverse"] and row["fact_ids"] == [1]

@@ -15,13 +15,17 @@ import math
 import sqlite3
 import time
 from array import array
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import AsyncIterator, Mapping, Optional, Sequence
 
+from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 
@@ -121,9 +125,42 @@ CREATE INDEX IF NOT EXISTS facts_space_id ON facts(space, id);
 CREATE INDEX IF NOT EXISTS facts_source_id ON facts(space, source_episode_id, id);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
+CREATE TABLE IF NOT EXISTS fact_writes (space TEXT PRIMARY KEY, writes INTEGER NOT NULL);
+-- Restatements from a later day, kept beside their facts. Additive: a
+-- reader that does not know the table leaves it alone, so the shared
+-- schema version stays where it is.
+CREATE TABLE IF NOT EXISTS fact_affirmations (
+  id INTEGER PRIMARY KEY, space TEXT NOT NULL, fact_id INTEGER NOT NULL, valid_from TEXT NOT NULL,
+  recorded_at TEXT NOT NULL, confidence REAL NOT NULL, source_episode_id INTEGER, origin TEXT NOT NULL,
+  quote TEXT, links TEXT NOT NULL DEFAULT '[]', UNIQUE(space, fact_id, valid_from));
+DROP TRIGGER IF EXISTS fact_writes_insert;
+DROP TRIGGER IF EXISTS fact_writes_update;
+DROP TRIGGER IF EXISTS fact_writes_delete;
+CREATE TRIGGER fact_writes_insert AFTER INSERT ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (NEW.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
+CREATE TRIGGER fact_writes_update AFTER UPDATE ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (OLD.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1;
+  INSERT INTO fact_writes (space, writes) VALUES (NEW.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
+CREATE TRIGGER fact_writes_delete AFTER DELETE ON facts BEGIN
+  INSERT INTO fact_writes (space, writes) VALUES (OLD.space, 1)
+  ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
 COMMIT;""")
     initialize_fact_search(conn)
+    keep_affirmation_links(conn)
     return conn
+
+
+def keep_affirmation_links(conn: sqlite3.Connection) -> None:
+    """A file from the build that first kept affirmations, before they
+    carried links, gains the column; each affirmation it holds has none.
+    Checked under the write lock, so openers racing each other add it once."""
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        if "links" not in {row["name"] for row in conn.execute("PRAGMA table_info(fact_affirmations)")}:
+            conn.execute("ALTER TABLE fact_affirmations ADD COLUMN links TEXT NOT NULL DEFAULT '[]'")
 
 
 def enable_wal(conn: sqlite3.Connection, attempts: int = 100, pause_s: float = 0.02) -> None:
@@ -281,6 +318,13 @@ def _fact_link(row: sqlite3.Row) -> FactLink:
                     kind=row["kind"], created_at=row["created_at"], source_episode_id=row["source_episode_id"], quote=row["quote"])
 
 
+def _affirmation(row: sqlite3.Row) -> Affirmation:
+    return Affirmation(affirmation_id=row["id"], space=row["space"], fact_id=row["fact_id"],
+                       valid_from=row["valid_from"], recorded_at=row["recorded_at"], confidence=row["confidence"],
+                       source_episode_id=row["source_episode_id"], origin=row["origin"], quote=row["quote"],
+                       links=read_links(json.loads(row["links"])))
+
+
 def _fact(row: sqlite3.Row) -> Fact:
     return Fact(
         fact_id=row["id"],
@@ -307,6 +351,7 @@ class SqliteDocumentStore:
     def __init__(self, path: str | Path = "~/.scone-memory/memory.db") -> None:
         self.path = path
         self.conn = connect(path)
+        self._holding = False
 
     async def close(self) -> None:
         self.conn.close()
@@ -501,7 +546,7 @@ class SqliteDocumentStore:
                 new.excluded_reason, new.superseded_by, new.quote,
             ),
         )
-        self.conn.commit()
+        self._commit()
         assert cur.lastrowid is not None
         return Fact(fact_id=cur.lastrowid, **new.__dict__)
 
@@ -514,7 +559,7 @@ class SqliteDocumentStore:
                 fact.closed_reason, fact.origin, fact.excluded_reason, fact.superseded_by, fact.fact_id, fact.space,
             ),
         )
-        self.conn.commit()
+        self._commit()
         if cur.rowcount == 0:
             raise KeyError(fact.fact_id)
 
@@ -525,6 +570,29 @@ class SqliteDocumentStore:
     async def list_facts(self, space: str, include_closed: bool) -> list[Fact]:
         sql = "SELECT * FROM facts WHERE space = ?" + ("" if include_closed else " AND status = 'active'")
         return [_fact(r) for r in self.conn.execute(sql + " ORDER BY id", (space,))]
+
+    async def ledger_stamp(self, space: str) -> str:
+        """A per-space count of fact row writes, kept by triggers in the file
+        itself, so every writer bumps it, whatever build it runs. An update
+        bumps the space a row leaves as well as the one it lands in. The
+        triggers are recreated on every open, so a file keeps no older
+        definition."""
+        row = self.conn.execute("SELECT writes FROM fact_writes WHERE space = ?", (space,)).fetchone()
+        return str(row[0] if row else 0)
+
+    async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
+        from ..core.graph_read import ledger_page_limit
+
+        cap = ledger_page_limit(limit)
+        if not cap:
+            return []
+        if before_id is None:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_space_id WHERE space = ? '
+                                     'ORDER BY id DESC LIMIT ?', (space, cap))
+        else:
+            rows = self.conn.execute('SELECT * FROM facts INDEXED BY facts_space_id WHERE space = ? AND id < ? '
+                                     'ORDER BY id DESC LIMIT ?', (space, before_id, cap))
+        return [_fact(row) for row in rows]
 
     async def facts_for_graph(self, space: str, source_episode_id: int | None, limit: int) -> list[Fact]:
         from ..core.graph_read import graph_fact_read_limit
@@ -589,8 +657,8 @@ class SqliteDocumentStore:
 
             gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
                                 links=count("fact_links"), tombstones=count("tombstones"))
-            for table in ("chunks", "episodes", "fact_links", "facts", "tombstones", "inflight", "revisions",
-                          "ingest_items", "ingest_jobs"):
+            for table in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight",
+                          "revisions", "ingest_items", "ingest_jobs"):
                 conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
             conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
             conn.commit()
@@ -688,6 +756,54 @@ class SqliteDocumentStore:
         """(chunk_id, episode_id) for every chunk of the space; for doctor."""
         return [(r[0], r[1]) for r in self.conn.execute("SELECT id, episode_id FROM chunks WHERE space = ? ORDER BY id", (space,))]
 
+    def _commit(self) -> None:
+        """Commit, unless a transaction is holding the writes for its end."""
+        if not self._holding:
+            self.conn.commit()
+
+    @asynccontextmanager
+    async def atomic(self) -> AsyncIterator[None]:
+        """Writes made inside commit together at the end, or roll back
+        together if anything inside fails. The fact writes it holds never
+        yield to the event loop, so no other task's write can join it."""
+        if self._holding:
+            yield
+            return
+        self._holding = True
+        try:
+            yield
+        except BaseException:
+            self._holding = False
+            self.conn.rollback()
+            raise
+        self._holding = False
+        self.conn.commit()
+
+    async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fact_affirmations (space, fact_id, valid_from, recorded_at, confidence,"
+            " source_episode_id, origin, quote, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (new.space, new.fact_id, new.valid_from, new.recorded_at, new.confidence, new.source_episode_id,
+             new.origin, new.quote, json.dumps(stored_links(new.links))))
+        self._commit()
+        row = self.conn.execute("SELECT * FROM fact_affirmations WHERE space = ? AND fact_id = ? AND valid_from = ?",
+                                (new.space, new.fact_id, new.valid_from)).fetchone()
+        return _affirmation(row)
+
+    async def affirmations(self, space: str, fact_id: int) -> list[Affirmation]:
+        rows = self.conn.execute("SELECT * FROM fact_affirmations WHERE space = ? AND fact_id = ? ORDER BY valid_from, id",
+                                 (space, fact_id))
+        return [_affirmation(row) for row in rows]
+
+    async def drop_affirmations(self, space: str, affirmation_ids: Sequence[int]) -> None:
+        self.conn.executemany("DELETE FROM fact_affirmations WHERE space = ? AND id = ?",
+                              [(space, affirmation_id) for affirmation_id in affirmation_ids])
+        self._commit()
+
+    async def space_affirmations(self, space: str) -> list[Affirmation]:
+        return [_affirmation(row) for row in self.conn.execute(
+            "SELECT * FROM fact_affirmations WHERE space = ? ORDER BY id", (space,))]
+
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
         self.conn.execute(
             "INSERT OR IGNORE INTO fact_links (space, from_fact, to_fact, kind, created_at, source_episode_id, quote)"
@@ -740,7 +856,7 @@ class SqliteDocumentStore:
             " ON CONFLICT(space) DO UPDATE SET revision = revision + 1",
             (space,),
         )
-        self.conn.commit()
+        self._commit()
         return await self.revision(space)
 
     async def revision(self, space: str) -> int:
@@ -765,6 +881,8 @@ class SqliteVectorIndex:
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:
             raise ValueError(f"index holds {self.dim}-d vectors, embedder makes {dim}-d")
+        if self.dim == dim:
+            return  # already recorded; opening is not a write
         self.dim = dim
         self.conn.execute("INSERT OR REPLACE INTO vector_meta (key, value) VALUES ('dim', ?)", (str(dim),))
         self.conn.commit()
@@ -795,6 +913,31 @@ class SqliteVectorIndex:
         where: Mapping[str, str] | None = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
+        return self._scored(space, vector, limit, as_of, tags, where)
+
+    async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                        tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
+                        writer: str) -> list[tuple[int, float]]:
+        """Search only if the record vouches for ``writer``, in one read snapshot.
+
+        WAL gives a read transaction one consistent view, so a write that
+        lands after the check cannot change what the search compares.
+        """
+        validate_vector(vector, self.dim)
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN")
+        try:
+            record = self._writer()
+            if not vouches(record, writer, self._holds_vectors()):
+                raise VectorsNotComparable(
+                    f"stored vectors are recorded as {record[0] if record else 'unrecorded'}, not {writer}")
+            return self._scored(space, vector, limit, as_of, tags, where)
+        finally:
+            self.conn.commit()
+
+    def _scored(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str],
+                tags: tuple[str, ...], where: Mapping[str, str] | None) -> list[tuple[int, float]]:
         sql = "SELECT chunk_id, tags, metadata, vector FROM vectors WHERE space = ?"
         params: list[object] = [space]
         if as_of:
@@ -825,6 +968,69 @@ class SqliteVectorIndex:
     async def ids(self, space: str) -> list[int]:
         """Every chunk id with a vector in the space; for doctor."""
         return [r[0] for r in self.conn.execute("SELECT chunk_id FROM vectors WHERE space = ? ORDER BY chunk_id", (space,))]
+
+    def _writer(self) -> tuple[str, str] | None:
+        rows = dict(self.conn.execute(
+            "SELECT key, value FROM vector_meta WHERE key IN ('embedder', 'embedder_basis')").fetchall())
+        if "embedder" not in rows:
+            return None
+        return str(rows["embedder"]), str(rows.get("embedder_basis", "written"))
+
+    def _set_writer(self, record: tuple[str, str]) -> None:
+        self.conn.executemany("INSERT OR REPLACE INTO vector_meta (key, value) VALUES (?, ?)",
+                              [("embedder", record[0]), ("embedder_basis", record[1])])
+
+    def _holds_vectors(self) -> bool:
+        return self.conn.execute("SELECT 1 FROM vectors LIMIT 1").fetchone() is not None
+
+    @contextmanager
+    def _immediate(self) -> Iterator[None]:
+        # Take the write lock before reading the record, so another process
+        # cannot write between the check and the write it guards.
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
+
+    async def written_by(self) -> tuple[str, str] | None:
+        """The recorded writer of these vectors; see core.vector_writers."""
+        return self._writer()
+
+    async def holds_vectors(self) -> bool:
+        return self._holds_vectors()
+
+    async def swap_writer(self, expected: tuple[str, str] | None, record: tuple[str, str], *,
+                          require_empty: bool = False) -> bool:
+        """Replace the record only if it still reads ``expected``."""
+        with self._immediate():
+            if self._writer() != expected or (require_empty and self._holds_vectors()):
+                return False
+            self._set_writer(record)
+            return True
+
+    async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None:
+        """Write vectors, changing the record in the same transaction if the
+        write breaks what it claims."""
+        for point in points:
+            validate_vector(point.vector, self.dim)
+        with self._immediate():
+            current = self._writer()
+            settled = after_write(current, writer, self._holds_vectors())
+            if settled != current:
+                self._set_writer(settled)
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO vectors (chunk_id, space, episode_id, created_at, tags, metadata, vector)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(p.chunk_id, p.space, p.episode_id, p.created_at, json.dumps(list(p.tags)),
+                  json.dumps(dict(p.metadata)), array("f", p.vector).tobytes()) for p in points])
+
+    async def spaces_with_vectors(self) -> list[str]:
+        return [r[0] for r in self.conn.execute("SELECT DISTINCT space FROM vectors ORDER BY space")]
 
     async def delete_space(self, space: str) -> None:
         self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
