@@ -595,9 +595,26 @@ Three things this gets right that one predicate would not:
   the innermost declaration whose lines contain it, not to the file that
   happens to hold it, using the same declaration spans recall cites.
 
-Comments are read from the source text because no parser keeps them —
-Python's `ast` drops every one. Only tagged comments become claims: an
-untagged line is a remark, not a statement about the code.
+Only tagged comments become claims: an untagged line is a remark, not a
+statement about the code.
+
+**Never from a string literal.** A string holding `# WHY: …`, `ADR-0007`
+or `class X extends Y` is data, and reading it would have the graph
+assert something the source never said — the one thing this must not do.
+Python comments therefore come from `tokenize`, which knows a comment
+from a string that looks like one, and citations additionally from
+docstrings, because a docstring is documentation while an arbitrary
+string is not. The brace languages have no tokenizer here, so their
+source is scanned with string contents blanked in place, which keeps
+every line and column where it was.
+
+An earlier version read the raw source with a regex and fabricated
+claims from quoted text. It also joined `extends Base implements Face`
+into one invented target, resolved `Store as Shelf` to the local
+nickname, and let `import json, csv` claim both names came from the last
+module. Those were found by review, on hand-built counterexamples rather
+than on a corpus — a graph whose claim is that it does not guess has to
+be tested on the shapes that tempt it into guessing.
 
 ## Code: cut where the declarations are
 

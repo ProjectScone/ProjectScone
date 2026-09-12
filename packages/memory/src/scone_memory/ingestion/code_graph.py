@@ -17,6 +17,8 @@ everywhere else: a file that does not parse says nothing.
 from __future__ import annotations
 
 import ast
+import io
+import tokenize
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -58,9 +60,13 @@ _FLAG = re.compile(r"(?:#|//|/\*|\*)\s*(TODO|FIXME|HACK|XXX)\s*:?\s*(.+?)\s*(?:\
 #: A decision record or a standard, however it is spelled. Normalised to
 #: one node name so two spellings of the same document are one thing.
 _CITED = re.compile(r"\b(ADR|RFC)[\s\-_#]*([0-9]{1,6})\b", re.IGNORECASE)
-#: Where a brace language says what a class is built on.
-_EXTENDS = re.compile(r"\b(?:class|interface|struct)\s+([A-Za-z_]\w*)[^{;]*?"
-                      r"\b(?:extends|implements|:)\s+([A-Za-z_][\w.:<>,\s]*)")
+#: Where a brace language names a class, and the clauses saying what it is
+#: built on. Read separately: `extends Base implements Face` is two
+#: relationships, and one capture for both invented a single target named
+#: after neither.
+_DECLARES = re.compile(r"\b(?:class|interface|struct)\s+([A-Za-z_]\w*)")
+_BUILT_ON = re.compile(r"\b(?:extends|implements)\s+([A-Za-z_][\w.:<>,\s]*?)"
+                       r"(?=\b(?:extends|implements)\b|[{;]|$)")
 
 #: How the brace languages write an import. A header line is written
 #: down, so it can be read; what a name in the body refers to is not, so
@@ -75,8 +81,59 @@ _OPENS = re.compile(r"^\s*import\s*\($")
 
 
 def _cited(text: str) -> list[str]:
-    """The decision records a line names, one node name per document."""
-    return [f"{tag.upper()}-{number}" for tag, number in _CITED.findall(text)]
+    """The decision records a line names, one node name per document.
+
+    The number is normalised, so ``ADR-0007``, ``ADR 7`` and ``adr#7`` are
+    one node rather than three. Without it the graph holds a document per
+    spelling, and reaching every declaration that cites one -- the whole
+    reason to put a citation in a graph -- stops working.
+    """
+    return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
+
+
+def _masked(content: str) -> str:
+    """The source with the inside of every string literal blanked.
+
+    A regex over raw source cannot tell code from data: a string holding
+    ``# WHY: ...`` or ``class X extends Y`` reads as a comment or a
+    declaration, and the graph would then assert something the code never
+    said. Blanking string contents in place keeps every line and column
+    where it was, so line numbers and quotes are unaffected. Comments are
+    recognised before strings, which is what makes ``// "unclosed`` safe.
+    """
+    out: list[str] = []
+    quote = comment = ""
+    at = 0
+    while at < len(content):
+        here, pair = content[at], content[at:at + 2]
+        if comment:
+            if comment == "//" and here == "\n":
+                comment = ""
+            elif comment == "/*" and pair == "*/":
+                comment = ""
+                out.append(pair)
+                at += 2
+                continue
+            out.append(here)
+        elif quote:
+            if here == "\\" and at + 1 < len(content):
+                out.append("  " if content[at + 1] != "\n" else " \n")
+                at += 2
+                continue
+            out.append(here if here == quote or here == "\n" else " ")
+            if here == quote:
+                quote = ""
+        elif pair in ("//", "/*"):
+            comment = pair
+            out.append(pair)
+            at += 2
+            continue
+        else:
+            if here in "\"'`":
+                quote = here
+            out.append(here)
+        at += 1
+    return "".join(out)
 
 
 def _holder(declared: tuple, path: str, line: int) -> str:
@@ -91,28 +148,72 @@ def _holder(declared: tuple, path: str, line: int) -> str:
     return f"{path}:{max(inside, key=lambda d: d.first_line).name}"
 
 
+def _tagged(text: str, path: str, line: int, declared: tuple,
+            say: "Callable[[str, str, str, int], None]") -> None:
+    """Read one piece of prose for rationale, problems and citations."""
+    note = _WHY.search(text)
+    if note:
+        say(_holder(declared, path, line), NOTES, note.group(2), line)
+    flagged = _FLAG.search(text)
+    if flagged:
+        say(_holder(declared, path, line), FLAGS, flagged.group(2), line)
+    for document in _cited(text):
+        say(_holder(declared, path, line), CITES, document, line)
+
+
+def _python_prose(content: str) -> list[tuple[int, str]]:
+    """Every comment and docstring, with its line. Nothing else.
+
+    Comments come from ``tokenize`` rather than a regex over the source,
+    because a regex cannot tell a comment from a string that looks like
+    one, and asserting a claim the code never made is the one thing this
+    must not do. Docstrings come from the tree: a docstring is
+    documentation and belongs here, an arbitrary string is data and does
+    not.
+    """
+    found: list[tuple[int, str]] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if token.type == tokenize.COMMENT:
+                found.append((token.start[0], token.string))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return []
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError, RecursionError):
+        return found
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        written = ast.get_docstring(node)
+        if not written:
+            continue
+        body = getattr(node, "body", [])
+        at = getattr(body[0], "lineno", 1) if body else 1
+        for offset, line in enumerate(written.split("\n")):
+            found.append((at + offset, line))
+    return found
+
+
 def _meaning(content: str, path: str, language: str,
              say: "Callable[[str, str, str, int], None]") -> None:
     """Why the code is the way it is, and what it says it follows.
 
-    Comments are read from the source text because no parser keeps them:
-    Python's ``ast`` drops every one. Only tagged comments become claims —
-    an untagged line is a remark, not a statement about the code — and a
-    citation is read from any comment or docstring, since that is where
-    people put them.
+    Only tagged comments become claims -- an untagged line is a remark,
+    not a statement about the code -- and a citation is read from a
+    comment or a docstring, which is where people put them. Never from a
+    string literal: that is data, and reading it would have the graph
+    assert something the source never said.
     """
     from .code import declarations
 
     declared = declarations(content, language=language)  # type: ignore[arg-type]
-    for number, line in enumerate(content.split("\n"), start=1):
-        note = _WHY.search(line)
-        if note:
-            say(_holder(declared, path, number), NOTES, note.group(2), number)
-        flagged = _FLAG.search(line)
-        if flagged:
-            say(_holder(declared, path, number), FLAGS, flagged.group(2), number)
-        for document in _cited(line):
-            say(_holder(declared, path, number), CITES, document, number)
+    if language == "python":
+        for at, prose in _python_prose(content):
+            _tagged(prose, path, at, declared, say)
+        return
+    for number, line in enumerate(_masked(content).split("\n"), start=1):
+        _tagged(line, path, number, declared, say)
 
 
 @dataclass(frozen=True)
@@ -153,7 +254,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     lines = content.split("\n")
     found: list[CodeClaim] = []
     named: dict[str, str] = {}
-    imported: dict[str, str] = {}
+    imported: dict[str, tuple[str, Optional[str]]] = {}
 
     def at(line: int) -> tuple[str, int, int]:
         """The line as a quote, and the bytes it occupies."""
@@ -186,11 +287,19 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
             elif isinstance(child, (ast.Import, ast.ImportFrom)):
                 for module in _imported(child, path, resolve):
                     say(path, IMPORTS, module, child.lineno)
-                # What each imported name came from, so a base class can be
-                # named by where it lives rather than by a bare word.
-                for alias in getattr(child, "names", ()):
-                    for module in _imported(child, path, resolve):
-                        imported[alias.asname or alias.name] = module
+                # One entry per alias, keeping the name it had in its
+                # module. Pairing every alias with every module of a
+                # multi-name import made `import json, csv` claim both
+                # names came from the last one, and using the local alias
+                # made `Store as Shelf` resolve to Shelf.
+                if isinstance(child, ast.Import):
+                    for alias in child.names:
+                        imported[alias.asname or alias.name] = (alias.name, None)
+                else:
+                    came = _imported(child, path, resolve)
+                    for alias in child.names:
+                        if came:
+                            imported[alias.asname or alias.name] = (came[0], alias.name)
             else:
                 walk(child, owner, inside)
 
@@ -200,42 +309,58 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     return tuple(found)
 
 
-def _base(node: ast.AST, path: str, named: dict[str, str], imported: dict[str, str]) -> Optional[str]:
+def _base(node: ast.AST, path: str, named: dict[str, str],
+          imported: dict[str, tuple[str, Optional[str]]]) -> Optional[str]:
     """What a base class names, and where it lives when that is knowable.
 
     A base defined in this file is named by its path, like any other
-    declaration. One that arrived through an import whose module could be
-    resolved to a file is named there. Anything else is recorded as the
-    source wrote it — the same rule imports follow, because the name is
-    what the file said even when its home is unknown. A base that is not a
-    plain name (a subscripted generic, a call) is left out rather than
-    guessed at.
+    declaration. One that arrived through an import is named by the module
+    it came from and **the name it had there**, not by whatever this file
+    calls it locally: `Store as Shelf` is Store. Anything else is recorded
+    as the source wrote it -- the same rule imports follow, because the
+    name is what the file said even when its home is unknown. A base that
+    is not a plain name (a subscripted generic, a call) is left out rather
+    than guessed at.
     """
-    if isinstance(node, ast.Name):
-        written = node.id
-    elif isinstance(node, ast.Attribute):
-        parts: list[str] = []
-        here: ast.AST = node
-        while isinstance(here, ast.Attribute):
-            parts.append(here.attr)
-            here = here.value
-        if not isinstance(here, ast.Name):
-            return None
-        parts.append(here.id)
-        written = ".".join(reversed(parts))
-    else:
+    written = _written(node)
+    if written is None:
         return None
     if written in named:
         return named[written]
     stem, _, last = written.rpartition(".")
-    where = imported.get(written) or (imported.get(stem) if stem else None)
-    if where is None:
-        return written
-    # A module resolved to a file names the class inside that file; a
-    # module that is only a dotted name keeps the dotted form.
-    if where.endswith((".py", ".pyi")):
-        return f"{where}:{last if stem else written}"
-    return f"{where}.{last}" if stem else f"{where}.{written}"
+    if written in imported:
+        module, inside = imported[written]
+        return _joined(module, inside or written)
+    if stem and stem in imported:
+        module, _inside = imported[stem]
+        return _joined(module, last)
+    return written
+
+
+def _written(node: ast.AST) -> Optional[str]:
+    """A base as the source spelled it, or None when it is not a name."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if not isinstance(node, ast.Attribute):
+        return None
+    parts: list[str] = []
+    here: ast.AST = node
+    while isinstance(here, ast.Attribute):
+        parts.append(here.attr)
+        here = here.value
+    if not isinstance(here, ast.Name):
+        return None
+    parts.append(here.id)
+    return ".".join(reversed(parts))
+
+
+def _joined(module: str, name: str) -> str:
+    """A module and a name in it. A module resolved to a file is joined
+    with a colon, the way every declaration here is named; a module that is
+    only a dotted name keeps the dotted form."""
+    if module.endswith((".py", ".pyi")):
+        return f"{module}:{name}"
+    return f"{module}.{name}" if module != name else module
 
 
 def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[str]:
@@ -348,17 +473,18 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    for number, line in enumerate(lines, start=1):
-        extends = _EXTENDS.search(line)
-        if not extends:
+    for number, line in enumerate(_masked(content).split("\n"), start=1):
+        declares = _DECLARES.search(line)
+        if not declares:
             continue
-        child = extends.group(1)
+        child = declares.group(1)
         subject = held.get(child, f"{path}:{child}")
-        for base in extends.group(2).split(","):
-            written = base.strip().split("<")[0].strip().rstrip("{").strip()
-            if not written or not written[0].isalpha() and written[0] != "_":
-                continue
-            say(subject, INHERITS, held.get(written, written), number)
+        for clause in _BUILT_ON.finditer(line, declares.end()):
+            for base in clause.group(1).split(","):
+                written = base.strip().split("<")[0].strip().rstrip("{").strip()
+                if not written or not (written[0].isalpha() or written[0] == "_"):
+                    continue
+                say(subject, INHERITS, held.get(written, written), number)
 
     inside = False
     for number, line in enumerate(lines, start=1):

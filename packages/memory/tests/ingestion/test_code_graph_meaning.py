@@ -95,7 +95,7 @@ def test_a_rationale_and_a_known_problem_are_not_the_same_claim():
 
 
 def test_a_decision_record_becomes_something_the_graph_can_reach():
-    assert ("pkg/shelf.py:Shelf.open", "ADR-0007") in said(CITES), said(CITES)
+    assert ("pkg/shelf.py:Shelf.open", "ADR-7") in said(CITES), said(CITES)
     assert ("pkg/shelf.py:loose", "RFC-7231") in said(CITES), said(CITES)
 
 
@@ -118,4 +118,73 @@ class Shelf extends Store {
     found = code_claims(source, "web/shelf.ts", language="braces")
     pairs = [(c.subject, c.predicate, c.object) for c in found]
     assert ("web/shelf.ts:Shelf", INHERITS, "Store") in pairs, pairs
-    assert any(p == CITES and o == "ADR-12" for _, p, o in pairs), pairs
+    assert any(p == CITES and o == "ADR-12" for _, p, o in pairs), pairs  # already canonical
+
+
+# The counterexamples below are hand-built rather than drawn from a real
+# corpus. A graph whose whole claim is that it does not guess has to be
+# tested on the shapes that tempt it into guessing.
+
+def test_a_comment_inside_a_string_is_not_a_comment():
+    """The most damaging failure available to this feature: text that
+    happens to look like a comment, quoted as data, asserted as a claim
+    the code never made."""
+    source = '''
+TEMPLATE = "# WHY: this is a template, not a reason"
+HELP = "see ADR-0007 for the rationale"
+CODE = "class Fake extends Invented {}"
+
+
+def real() -> None:
+    pass
+'''
+    found = claims(content=source)
+    assert said(NOTES, content=source) == [], said(NOTES, content=source)
+    assert said(CITES, content=source) == [], said(CITES, content=source)
+    assert [c.object for c in found if c.predicate == INHERITS] == []
+
+
+def test_a_citation_in_a_docstring_is_still_read():
+    """A docstring is documentation, not data. This is the line the
+    string rule must not cross."""
+    source = '''"""The shelves, per ADR-0007."""
+
+
+def keep() -> None:
+    """Kept because RFC 7231 says so."""
+    pass
+'''
+    assert ("pkg/shelf.py", "ADR-7") in said(CITES, content=source), said(CITES, content=source)
+    assert ("pkg/shelf.py:keep", "RFC-7231") in said(CITES, content=source)
+
+
+def test_two_spellings_of_one_decision_record_are_one_node():
+    """The docs claim this normalises. It has to be true."""
+    source = "# WHY: see ADR-0007 and ADR 7 and adr#7\nx = 1\n"
+    assert {obj for _, obj in said(CITES, content=source)} == {"ADR-7"}
+
+
+def test_an_aliased_import_does_not_rename_another_one():
+    """`import a, b` must not make every alias point at the last module."""
+    source = '''import json, csv
+from pkg.base import Store as Shelf
+
+
+class Reader(Shelf):
+    pass
+'''
+    found = said(INHERITS, content=source)
+    assert found == [("pkg/shelf.py:Reader", "pkg.base.Store")], found
+
+
+def test_typescript_extends_and_implements_are_separate_targets():
+    source = "class Shelf extends Base implements Face, Other {\n}\n"
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    bases = sorted(c.object for c in found if c.predicate == INHERITS)
+    assert bases == ["Base", "Face", "Other"], bases
+
+
+def test_a_brace_comment_inside_a_string_is_not_a_comment():
+    source = 'const t = "// WHY: not a reason, see ADR-0007";\nclass Real {}\n'
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    assert [c.predicate for c in found if c.predicate in (NOTES, CITES)] == []
