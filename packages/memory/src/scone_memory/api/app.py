@@ -127,7 +127,10 @@ def _is_decision(path: str) -> bool:
 
 
 def _is_space_delete(method: str, path: str) -> bool:
-    return method == "DELETE" and path.startswith("/v1/spaces/")
+    # Moving a whole space away is as final as deleting it: everything it
+    # held is somewhere else and the name is closed. It takes the same
+    # permission.
+    return (method == "DELETE" and path.startswith("/v1/spaces/")) or path.endswith("/merge")
 
 
 def permitted(role: str, method: str, path: str) -> bool:
@@ -158,6 +161,17 @@ class Forbidden(Exception):
 
 #: Records one batch request may carry. A batch is bounded work, not an import.
 MAX_BATCH_RECORDS = 500
+
+
+class MergeBody(BaseModel):
+    """Where a space is being moved to, and the name said out loud."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    into: str = Field(min_length=1, max_length=128)
+    #: Repeat the space being merged. A whole space does not move by accident.
+    confirm: Optional[str] = None
+    preview: bool = False
 
 
 class BatchBody(BaseModel):
@@ -563,6 +577,16 @@ def create_app(
         """What deleting the space would take with it; nothing is removed."""
         _own_space(name, space)
         return (await engine.space_impact(space)).model_dump()
+
+    @app.post("/v1/spaces/{name}/merge")
+    async def post_space_merge(name: str, body: MergeBody, space: str = Depends(space_for)) -> dict:
+        """Move everything this space holds into another. ``preview`` says
+        what would move and moves nothing; otherwise ``confirm`` must
+        repeat the space being merged, which is then closed for good."""
+        _own_space(name, space)
+        if body.preview:
+            return (await engine.merge_space(space, into=body.into, preview=True)).record()
+        return (await engine.merge_space(space, into=body.into, confirm=body.confirm)).record()
 
     @app.delete("/v1/spaces/{name}")
     async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:

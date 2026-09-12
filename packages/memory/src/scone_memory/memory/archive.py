@@ -44,6 +44,22 @@ KNOWN_FIELDS: dict[str, frozenset[str]] = {
 
 
 @dataclass
+class MergeReceipt:
+    """What a merge would move, or did. ``moved`` says which it was, so a
+    preview and a deed are never mistaken for each other."""
+
+    space: str
+    into: str
+    episodes: int = 0
+    facts: int = 0
+    moved: bool = False
+
+    def record(self) -> dict[str, object]:
+        return {"space": self.space, "into": self.into, "episodes": self.episodes,
+                "facts": self.facts, "moved": self.moved}
+
+
+@dataclass
 class ImportSummary:
     #: The profile the archive was read as: what its header said, or the
     #: first profile when it had no header.

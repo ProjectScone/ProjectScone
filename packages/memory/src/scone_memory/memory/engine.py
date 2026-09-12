@@ -645,6 +645,40 @@ class MemoryEngine:
     async def _space_receipt(self, space: str) -> SpaceReceipt:
         return await retention.space_receipt(self._retention_runtime(), space)
 
+    async def merge_space(self, space: str, *, into: str, confirm: Optional[str] = None,
+                          preview: bool = False) -> "archive.MergeReceipt":
+        """Move everything one space holds into another.
+
+        It is the archive read out of one and into the other, so
+        everything that makes an import honest holds: identity is
+        re-derived for the space it lands in, what was forgotten there
+        stays forgotten, and claims arrive with their history. With
+        ``preview`` nothing moves and the receipt says what would.
+
+        The space merged from is closed for good afterwards. Everything it
+        held is somewhere else now, and leaving the name open would invite
+        somebody to write into a space whose contents have moved and find
+        them missing."""
+        check_space(space)
+        check_space(into)
+        if space == into:
+            raise InvalidInput(f"a space is not merged into itself ({space!r})")
+        await self._living(space)
+        await self._living(into)
+        counts = await self.documents.counts(space)
+        facts = len(await self.documents.list_facts(space, include_closed=True))
+        if preview:
+            return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts)
+        if confirm != space:
+            raise InvalidInput(
+                f"confirm must repeat the space being merged ({space!r}); a whole space does not move "
+                f"by accident")
+        records = [record async for record in self.export(space)]
+        await self.import_records(into, records)
+        await self.delete_space(space)
+        return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts,
+                                    moved=True)
+
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""
         return await retention.space_impact(self._retention_runtime(), space)

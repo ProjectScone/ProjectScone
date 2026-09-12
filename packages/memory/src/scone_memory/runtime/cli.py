@@ -112,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job_id")
     p = sub.add_parser("cancel-job", help="stop expecting more of a batch; stored records stay stored")
     p.add_argument("job_id")
+    p = sub.add_parser("merge-space", help="move everything this space holds into another; --dry-run previews it")
+    p.add_argument("--into", required=True, help="the space to move it into")
+    p.add_argument("--confirm", help="repeat the space being merged; a whole space does not move by accident")
+    p.add_argument("--dry-run", action="store_true", help="say what would move and move nothing")
+
     p = sub.add_parser("delete-space", help="delete everything the space holds; --dry-run previews the receipt")
     p.add_argument("--confirm", metavar="SPACE", help="repeat the space name to do it")
     p.add_argument("--dry-run", action="store_true", help="show what would go, and remove nothing")
@@ -1179,6 +1184,22 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         job = await (engine.cancel_job(space, args.job_id) if args.command == "cancel-job"
                      else engine.job(space, args.job_id))
         emit(job_payload(job)) if args.json else print(job_line(job), file=out)
+        return 0
+
+    if args.command == "merge-space":
+        if args.dry_run:
+            preview = await engine.merge_space(space, into=args.into, preview=True)
+            emit(preview.record()) if args.json else print(
+                f"would move {preview.episodes} episode(s) and {preview.facts} claim(s) "
+                f"from {space} into {args.into}", file=out)
+            return 0
+        if args.confirm != space:
+            print(f"refusing: --confirm must repeat the space being merged {space!r}; nothing moved", file=out)
+            return 2
+        moved = await engine.merge_space(space, into=args.into, confirm=args.confirm)
+        emit(moved.record()) if args.json else print(
+            f"moved {moved.episodes} episode(s) and {moved.facts} claim(s) from {space} "
+            f"into {args.into}; {space} is closed", file=out)
         return 0
 
     if args.command == "delete-space":

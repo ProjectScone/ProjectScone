@@ -563,6 +563,30 @@ order as history.
 - Saying the same thing twice at one moment is agreement, not a
   collision, and is not counted.
 
+## Moving one space into another
+
+```bash
+scone --space old merge-space --into new --dry-run
+# would move 412 episode(s) and 1,308 claim(s) from old into new
+scone --space old merge-space --into new --confirm old
+```
+
+A merge is not a new kind of write: it is the archive read out of one
+space and into another, so everything that makes an import honest holds —
+identity is re-derived for the space it lands in, what was forgotten
+there stays forgotten, and claims arrive with their history.
+
+- **It previews.** `--dry-run` (or `"preview": true` on
+  `POST /v1/spaces/{name}/merge`) says what would move and moves nothing;
+  the receipt's `moved` says which it was, so a preview and a deed are
+  never mistaken for each other.
+- **It needs the name said out loud**, as deleting a space does.
+- **It takes the same permission as a deletion**, not an ordinary write:
+  moving a whole space away is as final as removing it.
+- **The space merged from is closed for good.** Everything it held is
+  somewhere else now, and leaving the name open would invite somebody to
+  write into a space whose contents have moved and find them missing.
+
 ## What an archive says it is
 
 `scone export` writes a header first:
