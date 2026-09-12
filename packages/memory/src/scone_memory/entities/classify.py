@@ -183,24 +183,46 @@ def _prose(text: str) -> bool:
     return False
 
 
+#: The tail of a qualified symbol: a declaration name, possibly dotted.
+_SYMBOL_TAIL = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*$")
+#: A file extension at the end of a path segment.
+_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
 def _code_shaped(text: str) -> bool:
-    """Whether a code predicate's object looks like a code symbol.
+    """Whether a code predicate's object is shaped like a code symbol.
 
-    Not "one token", which was the first rule and was wrong: a source
-    path may legally contain a space, so `my module.py:leaf` is an
-    ordinary qualified symbol and was refused. And not "anything a code
-    predicate points at", which would make `defines` turn every
-    description into an entity.
+    Three rules were tried here and the first two were too loose.
 
-    So: one token, or **qualified** by a separator a sentence does not
-    use in the middle of itself -- a path or a declaration inside one.
-    "a quorum of three members" has neither and stays a literal.
+    "One token" refused `my module.py:leaf`, because a source path may
+    legally contain a space. "Contains a colon or a slash" then admitted
+    ordinary prose -- `a quorum: three members`, `the ratio 1:2`,
+    `a choice between input/output` -- because both marks appear inside
+    sentences, and a rule about delimiter *presence* cannot tell a
+    sentence from a path.
+
+    What our extractor actually emits is a path, a dotted module, or a
+    declaration qualified by one: `pkg/store.py`, `pkg.store`,
+    `my module.py:leaf`. So a multi-word object qualifies only when the
+    separator has no space beside it, the tail is a declaration name, and
+    the head is recognisably a path -- it contains a slash, or its last
+    segment carries a file extension. `input/output` fails on the last of
+    those, which is the one that distinguishes a path from a pair of
+    words with a mark between them.
     """
     if not text:
         return False
     if len(text.split()) == 1:
         return True
-    return ":" in text or "/" in text
+    cut = max(text.rfind(":"), text.rfind("/"))
+    if cut <= 0 or cut == len(text) - 1:
+        return False
+    head, separator, tail = text[:cut], text[cut], text[cut + 1:]
+    if head[-1].isspace() or tail[0].isspace():
+        return False
+    if not _SYMBOL_TAIL.fullmatch(tail):
+        return False
+    return "/" in head or bool(_EXTENSION.search(head.split()[-1]))
 
 
 def _uncased_name(text: str) -> bool:
@@ -253,17 +275,19 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification(decided[0], None if decided[0] == "entity" else "value", "decision", str(decided[1]))
     if key in context.identity_keys:
         return ObjectClassification("entity", None, "identity_decision")
-    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
-        # Before the shape tests, not after: a module called `2024` or a
-        # path holding a version would otherwise be read as a date or a
-        # measurement.
-        return ObjectClassification("entity", None, "code_symbol")
     if _quoted(stripped):
         return ObjectClassification("literal", "text", "quoted_text")
     if _prose(stripped):
         return ObjectClassification("literal", "text", "prose")
     if key in _PRONOUNS:
         return ObjectClassification("literal", "pronoun", "pronoun")
+    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
+        # After quoting and prose, so `"a quorum: three members"` stays
+        # the quoted text it is -- the first version ran before them and
+        # bypassed both. Still before `literal_shape`, so a module called
+        # `2024` is not read as a date or a path holding a version as a
+        # measurement.
+        return ObjectClassification("entity", None, "code_symbol")
     shape = literal_shape(stripped)
     if shape is not None:
         if key in context.anchors and is_case_safe(stripped):

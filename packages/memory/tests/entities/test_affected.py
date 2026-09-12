@@ -26,7 +26,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
-from scone_memory.entities.affected import MAX_HOPS, affected
+from scone_memory.entities.affected import MAX_HOPS, MAX_NAME, affected
 
 pytestmark = pytest.mark.asyncio
 
@@ -261,3 +261,86 @@ async def test_a_name_that_means_two_things_is_refused_rather_than_guessed():
         # The resolver settled it; then the answer must be about the one
         # it settled on and say which.
         assert blast.target, blast.record()
+
+
+async def test_a_dependency_that_no_longer_holds_is_not_reported_as_current():
+    """I read the graph as `mode="all"` while taking a `when` argument,
+    so an edge closed years ago and an edge that does not begin until
+    2030 were both reported as things that break if you change the
+    target. **An argument that implies a filter it does not apply is
+    worse than no filter at all.**
+
+    The default is `current` now, and the mode and the moment are on
+    every answer including the empty ones.
+    """
+    engine = await graphed()
+    try:
+        await engine.assert_fact("default", "pkg/old.py", "imports", "pkg.store",
+                                 valid_from="2019-01-01T00:00:00Z")
+        closed = [f for f in await engine.facts("default")
+                  if f.subject == "pkg/old.py"][0]
+        await engine.close_fact("default", closed.fact_id, "the module was removed in 2021")
+        blast = await affected(engine, "default", "pkg.store")
+    finally:
+        await engine.close()
+    labels = {one.label for one in blast.reached}
+    assert "pkg/old.py" not in labels, (blast.record(), sorted(labels))
+    assert blast.mode == "current" and blast.at, blast.record()
+    assert "read as current at" in blast.why, blast.why
+
+
+async def test_a_name_longer_than_the_bound_is_refused_rather_than_echoed():
+    """`target` and `why` echo the name, so a 20,000-character name gave a
+    40,000-byte answer under a 512-byte budget. The same
+    metadata-outside-the-budget fault the context receipts had, which I
+    had fixed there a few hours earlier."""
+    engine = await graphed()
+    try:
+        with pytest.raises(InvalidInput) as raised:
+            await affected(engine, "default", "x" * (MAX_NAME + 1))
+        assert "echoed in the answer" in str(raised.value), str(raised.value)
+        blast = await affected(engine, "default", "x" * MAX_NAME)
+        assert len(blast.why.encode()) < 2_000, len(blast.why.encode())
+    finally:
+        await engine.close()
+
+
+async def test_a_deleted_space_is_not_answered_from_the_snapshot_it_read():
+    """The rule merging and windowing already follow and this did not: a
+    source confirmed gone is dropped, never served. A projection is a
+    snapshot, so a space deleted while it was being read would otherwise
+    be answered from rows that no longer exist."""
+    from scone_memory.core.errors import SconeError
+
+    engine = await graphed()
+    try:
+        await engine.delete_space("default")
+        with pytest.raises(SconeError):
+            await affected(engine, "default", "pkg.store")
+    finally:
+        await engine.close()
+
+
+async def test_a_truncated_read_is_disclosed_rather_than_answered_as_nothing():
+    """The projection reports what its read covered and I discarded it
+    with `_`. So a read cut short by the fact limit could omit every
+    incoming edge and the answer would say "nothing rests on this" --
+    a bound biting with nothing saying so, in a module whose own
+    docstring makes that a rule."""
+    from scone_memory.entities import read
+
+    engine = await graphed()
+    try:
+        whole = await affected(engine, "default", "pkg.store")
+        assert whole.reached and not whole.partial_read, whole.record()
+        before = read.MAX_FACTS
+        read.MAX_FACTS = 1
+        try:
+            cut = await affected(engine, "default", "pkg.store")
+        finally:
+            read.MAX_FACTS = before
+    finally:
+        await engine.close()
+    assert cut.partial_read is True, cut.record()
+    assert "truncated" in cut.why, cut.why
+    assert "missing from the graph it walked" in cut.why, cut.why
