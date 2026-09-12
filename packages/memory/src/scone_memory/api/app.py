@@ -369,7 +369,7 @@ def create_app(
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if conversations:
@@ -597,6 +597,25 @@ def create_app(
             raise InvalidInput("confirm must repeat the space name; a whole space is not deleted by accident")
         receipt = await engine.delete_space(space)
         return {"deleted": name, **receipt.model_dump()}
+
+    @app.get("/v1/answer")
+    async def get_answer(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        now: Optional[str] = None,
+        limit: int = Query(default=5, ge=1, le=50),
+        route: Optional[str] = Query(default=None,
+                                     description="Insist on temporal, graph or recall instead of the rule."),
+        space: str = Depends(space_for),
+    ) -> dict:
+        """One question answered by whichever machinery suits it, saying
+        which way it went and why. The rule is written down: a question
+        about dates the ledger can ground is computed, a question the graph
+        knows by name is answered from the claims, and anything else is an
+        ordinary search. Naming a route overrides it, and the answer says
+        the route was asked for."""
+        from ..retrieval.router import answer_question
+
+        return (await answer_question(engine, space, q, now=now, limit=limit, route=route)).record(space)
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(

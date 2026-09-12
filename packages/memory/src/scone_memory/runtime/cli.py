@@ -300,6 +300,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("answer", help="answer a question with whichever machinery suits it, and say which")
+    p.add_argument("question")
+    p.add_argument("--route", choices=("temporal", "graph", "recall"),
+                   help="insist on one route instead of letting the rule choose")
+    p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with")
+    p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
+
     p = sub.add_parser("map", help="remember every source file under a directory, and optionally what each says")
     p.add_argument("directory")
     p.add_argument("--graph", action="store_true",
@@ -1247,6 +1254,18 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         link = await engine.link_facts(space, args.from_fact, args.to_fact, args.kind,
                                        source_episode_id=args.source, quote=args.quote)
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
+        return 0
+
+    if args.command == "answer":
+        from ..retrieval.router import answer_question
+
+        routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
+                                       route=args.route)
+        if getattr(args, "json", False):
+            print(_ledger_json(routed.record(space)), file=out)
+            return 0
+        print(f"route: {routed.route} — {routed.why}", file=out)
+        print(routed.text, file=out)
         return 0
 
     if args.command == "map":

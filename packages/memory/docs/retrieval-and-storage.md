@@ -152,6 +152,36 @@ embedder whose similarities separate them better would be measured the
 same way, which is the point of measuring rather than shipping a
 constant.
 
+## One question, and the machinery that suits it
+
+```bash
+scone answer "How long ago did I move to Lisbon?"
+# route: temporal — it asks about dates and the ledger grounds it (computed)
+# answer: 121 days
+```
+
+Growing a computed temporal answer, an entity graph and two retrieval
+lanes left callers with a problem they did not have when there was only
+recall: knowing which to ask. The leading frameworks answer that with a
+model writing a plan, which is expensive and inscrutable when it is
+wrong. Here the rule is written down, tried in order, and **every answer
+says which way it went and why**:
+
+1. **A question about dates** goes to the one that computes — but only if
+   the ledger can actually ground it. "Looks temporal" is not enough: a
+   question whose events are not there is better served by the passages,
+   and the answer says *"it reads as a question about dates, but the
+   ledger could not ground it"* rather than leaving a caller unable to
+   tell a gap in the ledger from a gap in the rule.
+2. **A question about something the graph knows by name** is answered
+   from the claims, naming the entities it recognised.
+3. **Anything else** is an ordinary search.
+
+`route=` insists on one instead, and the answer says it was asked for
+rather than chosen: a rule that cannot be overridden is a rule somebody
+will work around, and then the framework learns nothing from being
+wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
+
 ## Questions about dates, answered by computation
 
 Much of what people ask memory is arithmetic over dates: how long between
