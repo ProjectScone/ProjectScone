@@ -224,3 +224,29 @@ async def test_normalized_playback_refuses_changed_audio_or_final_source(media_s
     assert decoded == [True]
     assert response.status_code == {'bytes':422, 'forgotten':410, 'scope':401}[change], response.text
     assert response.headers['content-type'].startswith('application/json')
+
+
+async def test_media_format_discovery_rechecks_the_configured_decoder(tmp_path):
+    from scone_memory.ingestion.document_media import DocumentMedia
+    executable=tmp_path/'ffmpeg-fixture'
+    executable.write_text('#!/bin/sh\nexit 1\n')
+    executable.chmod(0o700)
+    async def unused(audio): raise AssertionError('format discovery must not transcribe')
+    media=DocumentMedia(MediaDocumentParser(unused,ffmpeg_executable=str(executable)),revision='fixture-v1')
+    engine=await MemoryEngine(InMemoryDocumentStore(),InMemoryVectorIndex(),HashEmbedder()).open()
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(engine,{'reader':'alpha'},
+            roles={'reader':'read'},document_media=media)),base_url='http://fixture',headers={'authorization':'Bearer reader'}) as client:
+            async def formats(): return (await client.get('/v1/documents/formats')).json()['formats']
+            first=await formats()
+            assert first['.wav']['available'] is True
+            executable.chmod(0o600)
+            assert (await formats())['.wav']['available'] is False
+            executable.chmod(0o700)
+            assert (await formats())['.wav']['available'] is True
+            executable.unlink()
+            latest=await formats()
+            assert latest['.wav']['available'] is False
+            assert latest['.txt']['available'] is True
+            assert latest['.wav']['requires']=='configured ffmpeg and timestamped transcriber'
+    finally: await engine.close()

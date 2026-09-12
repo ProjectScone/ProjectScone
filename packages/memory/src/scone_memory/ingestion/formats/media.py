@@ -159,6 +159,11 @@ class MediaDocumentParser:
         self._ffmpeg = ffmpeg_executable
         self._max_duration = max_duration_seconds
 
+    @property
+    def decoder_available(self) -> bool:
+        """Whether the configured local decoder is still an executable file."""
+        return Path(self._ffmpeg).is_file() and os.access(self._ffmpeg, os.X_OK)
+
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits = DocumentLimits()) -> ParsedDocument:
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds

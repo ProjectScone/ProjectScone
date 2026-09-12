@@ -33,7 +33,9 @@ class DocumentMedia:
         return BuiltinDocumentParser(parsers={suffix: self for suffix in MEDIA_DOCUMENT_EXTENSIONS})
 
     def formats(self) -> dict[str, dict[str, object]]:
-        return {suffix: {'available': True, 'parser': 'media-transcription', 'extraction': 'audio-only'}
+        available = self.media_parser.decoder_available
+        return {suffix: {'available': available, 'parser': 'media-transcription', 'extraction': 'audio-only',
+                         'requires': 'configured ffmpeg and timestamped transcriber'}
                 for suffix in sorted(MEDIA_DOCUMENT_EXTENSIONS)}
 
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocument:
