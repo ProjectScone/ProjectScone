@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
+from ..core.validation import KINDS, normalise_time
 from ..memory.engine import MemoryEngine
 
 #: The most a search may return however the model asks.
@@ -71,6 +72,20 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
                       "description": f"How many passages to return, 1 to {MAX_ITEMS}. Defaults to 5."},
             "tags": {"type": "array", "items": {"type": "string"},
                      "description": "Only passages carrying every one of these tags."},
+            "kind": {"type": "string",
+                     "description": f"Only episodes of this kind: {', '.join(KINDS)}."},
+            "source_prefix": {"type": "string",
+                              "description": "Only episodes whose source starts with this text, read literally."},
+            "since": {"type": "string",
+                      "description": "Only episodes that happened at or after this instant (RFC 3339)."},
+            "until": {"type": "string",
+                      "description": "Only episodes that happened at or before this instant (RFC 3339)."},
+            "where": {"type": "object", "additionalProperties": {"type": "string"},
+                      "description": ("Only episodes whose recorded metadata matches every one of these "
+                                      "key/value pairs exactly. Metadata narrows a search; it never grants "
+                                      "access to a space.")},
+            "as_of": {"type": "string",
+                      "description": "Answer as the space stood at this instant (RFC 3339). Defaults to now."},
         }, ["query"]),
     ),
     ToolSpec(
@@ -314,6 +329,31 @@ _TREE_TOOLS = frozenset({"list_path", "read_path", "search_paths", "write_note"}
 BY_NAME = {tool.name: tool for tool in MEMORY_TOOLS}
 
 
+def _narrowing(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """The filters a search was asked for, checked here so that one this
+    space cannot answer is refused in words rather than ignored. A filter
+    silently dropped is worse than one refused: the caller believes it
+    narrowed the search and it did not."""
+    # A kind that is not one is refused by the engine, which names it; a
+    # second check here would be a second place to keep the list of kinds
+    # in step, and no test could tell the two apart.
+    kind = arguments.get("kind")
+    for name in ("since", "until", "as_of"):
+        given = arguments.get(name)
+        if given is not None:
+            try:
+                normalise_time(str(given))
+            except (InvalidInput, ValueError):
+                raise InvalidInput(f"{name} must be an RFC 3339 instant, not {given!r}") from None
+    where = arguments.get("where")
+    if where is not None and not isinstance(where, Mapping):
+        raise InvalidInput("where takes key and value pairs")
+    return {name: value for name, value in
+            {"kind": kind, "source_prefix": arguments.get("source_prefix"),
+             "since": arguments.get("since"), "until": arguments.get("until"),
+             "where": dict(where) if where else None}.items() if value}
+
+
 def _chosen(names: Optional[Sequence[str]]) -> tuple[ToolSpec, ...]:
     if names is None:
         return MEMORY_TOOLS
@@ -413,16 +453,26 @@ class ToolBox:
         if name in _TREE_TOOLS:
             return await self._tree(name, arguments)
         if name == "search_memory":
+            # Everything the engine can narrow by, so a model asks for what
+            # it wants rather than reading the space and deciding itself.
+            narrowed = _narrowing(arguments)
             found = await self.engine.recall(
                 self.space, arguments["query"],
                 limit=min(int(arguments.get("limit") or 5), MAX_ITEMS),
                 tags=tuple(arguments.get("tags") or ()),
+                as_of=arguments.get("as_of"),
+                **narrowed,
             )
             return {
                 "items": [{"episode_id": i.episode_id, "chunk_id": i.chunk_id, "text": i.text,
                            "score": i.score, "source": i.source, "created_at": i.created_at}
                           for i in found.items],
                 "facts": [self._fact(f) for f in found.facts],
+                # What it was narrowed by, so a model can tell a narrow
+                # search from an empty space.
+                "narrowed": {name: value for name, value in
+                             {**narrowed, "tags": list(arguments.get("tags") or ()),
+                              "as_of": arguments.get("as_of")}.items() if value},
             }
         if name == "add_memory":
             added = await self.engine.remember(

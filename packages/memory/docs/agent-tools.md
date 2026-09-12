@@ -54,6 +54,14 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   refusal than an error it may argue with. A note is an ordinary memory
   whose source is its path. Passing the `version` a read gave refuses a
   write onto a note that moved since.
+- `search_memory` narrows by everything the engine can: `tags`, `kind`,
+  `source_prefix`, `since`, `until`, `where` (recorded metadata, matched
+  exactly) and `as_of`. A filter this space cannot answer is refused in
+  words rather than ignored — a filter ignored is worse than one refused,
+  because the caller believes it narrowed the search and it did not — and
+  the answer carries `narrowed`, so a model can tell a narrow search from
+  an empty space. Metadata narrows a search; it never grants access to a
+  space.
 - `graph_context` returns what the entity graph records around up to 24
   names, or around the entities a question names. Lines beginning
   `follows:` are worked out from the claims rather than claimed, and say

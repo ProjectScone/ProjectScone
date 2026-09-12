@@ -35,7 +35,9 @@ def test_the_same_tools_are_offered_in_every_rendering():
     assert openai[0]["type"] == "function"
     assert openai[0]["function"]["parameters"] == anthropic[0]["input_schema"], "one set of arguments, two wrappers"
     assert anthropic[0]["input_schema"]["required"] == ["query"]
-    assert set(anthropic[0]["input_schema"]["properties"]) == {"query", "limit", "tags"}
+    assert set(anthropic[0]["input_schema"]["properties"]) == {
+        "query", "limit", "tags", "kind", "source_prefix", "since", "until", "where", "as_of"}, \
+        "a search offers everything the engine can narrow by"
     assert all(t["input_schema"]["additionalProperties"] is False for t in anthropic), "an unknown argument is a mistake"
 
 
