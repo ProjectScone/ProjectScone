@@ -174,3 +174,46 @@ async def test_decoder_changes_refuse_completed_prefix_without_another_observati
     with pytest.raises(InvalidInput, match='checkpoint'):
         await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
     assert len(observer.calls) == 2
+
+
+async def test_process_death_reuses_completed_windows_in_the_encrypted_workflow(ffmpeg, tmp_path):
+    import os
+    from pathlib import Path
+    import sys
+    import scone_memory
+
+    (tmp_path / 'input.wav').write_bytes(recording())
+    worker = Path(__file__).parent / 'fixtures' / 'media_receipt_worker.py'
+    env = {key: value for key, value in os.environ.items() if key in {'PATH', 'TMPDIR', 'LANG'}}
+    env['PYTHONPATH'] = str(Path(scone_memory.__file__).resolve().parent.parent)
+    child = None
+    try:
+        child = await asyncio.create_subprocess_exec(sys.executable, str(worker), str(tmp_path), ffmpeg, 'hold', 'chunked',
+            env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE)
+
+        async def entered():
+            while not (tmp_path / 'window-entered').exists():
+                if child.returncode is not None:
+                    raise AssertionError((await child.stderr.read()).decode())
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(entered(), 15)
+        assert (tmp_path / 'model-calls').read_text() == 'hold\nhold\n'
+        child.kill()
+        await asyncio.wait_for(child.wait(), 10)
+        child = await asyncio.create_subprocess_exec(sys.executable, str(worker), str(tmp_path), ffmpeg, 'resume', 'chunked',
+            env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE)
+        await asyncio.wait_for(child.wait(), 20)
+        assert child.returncode == 0, (await child.stderr.read()).decode()
+        assert (tmp_path / 'model-calls').read_text() == 'hold\nhold\nresume\nresume\n'
+        result = json.loads((tmp_path / 'result.json').read_text())
+        assert result['text'] == 'Checkpointed Café survives process death.'
+        assert len(result['audio_sha256']) == 64
+        assert result['starts'] == ['0.0', '1.0', '2.0']
+        assert b'Checkpointed' not in (tmp_path / 'journal.db').read_bytes()
+    finally:
+        if child is not None and child.returncode is None:
+            child.kill()
+            await child.wait()

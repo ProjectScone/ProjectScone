@@ -183,3 +183,22 @@ async def test_response_parsing_consumes_the_same_deadline(monkeypatch):
         transport=httpx.MockTransport(lambda r:response(payload())))
     with pytest.raises(InvalidInput,match='time limit'):
         await provider.transcribe(wav_bytes())
+
+
+async def test_empty_observations_require_explicit_opt_in_and_an_empty_text_reply():
+    options = {'base_url': 'http://localhost:9/v1', 'model': 'local', 'allow_empty': True}
+    provider = LocalDocumentTranscriber(**options, transport=httpx.MockTransport(
+        lambda request: response({'text': '', 'segments': []})))
+    assert await provider.transcribe(wav_bytes()) == ()
+    for value in ({'segments': []}, {'text': 'Unlocated words', 'segments': []},
+                  {'text': None, 'segments': []}, {'text': '', 'segments': None}):
+        provider = LocalDocumentTranscriber(**options, transport=httpx.MockTransport(
+            lambda request: response(value)))
+        with pytest.raises(InvalidInput):
+            await provider.transcribe(wav_bytes())
+
+
+@pytest.mark.parametrize('allow_empty', [1, 'yes', None])
+def test_empty_observation_opt_in_requires_a_boolean(allow_empty):
+    with pytest.raises(ValueError, match='allow_empty'):
+        LocalDocumentTranscriber(base_url='http://localhost:9/v1', model='local', allow_empty=allow_empty)

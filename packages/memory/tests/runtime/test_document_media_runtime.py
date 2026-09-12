@@ -132,3 +132,30 @@ async def test_standard_host_loads_media_for_both_compositions(tmp_path,composed
             assert formats['.wav']['available'] is True
             assert formats['.ts']['parser']=='text'
     finally:await engine.close()
+
+
+def test_chunk_policy_is_opt_in_and_binds_the_host_revision(tmp_path):
+    import hashlib
+    from scone_memory.runtime.document_media import DocumentMediaConfig, _decoder_digest
+
+    path = configuration(tmp_path)
+    whole = load_document_media(str(path))
+    settings = DocumentMediaConfig.model_validate_json(path.read_bytes()).model_dump(exclude={'api_key_env', 'chunk_seconds'})
+    raw = json.dumps({'implementation': 'local-document-media-v2', 'settings': settings,
+        'decoder_sha256': _decoder_digest(str(tmp_path / 'ffmpeg'))}, sort_keys=True,
+        separators=(',', ':'), ensure_ascii=False).encode()
+    assert whole.revision == 'media-' + hashlib.sha256(raw).hexdigest(), 'retain existing whole-file bindings'
+    chunked = load_document_media(str(configuration(tmp_path, chunk_seconds=30)))
+    assert chunked.revision != whole.revision
+    assert chunked.media_parser._chunk_seconds == 30
+    assert chunked.media_parser._transcribe.__self__._allow_empty is True
+    changed = load_document_media(str(configuration(tmp_path, chunk_seconds=60)))
+    assert changed.revision != chunked.revision
+    disabled = load_document_media(str(configuration(tmp_path, chunk_seconds=None)))
+    assert disabled.revision == whole.revision
+
+
+@pytest.mark.parametrize('chunk_seconds', [True, 0, 121, '30', 1.5])
+def test_invalid_chunk_configuration_is_refused_without_contact(tmp_path, chunk_seconds):
+    with pytest.raises(ValueError, match='configuration contents'):
+        load_document_media(str(configuration(tmp_path, chunk_seconds=chunk_seconds)))
