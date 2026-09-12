@@ -560,3 +560,20 @@ async def test_sync_says_a_removal_needs_apply(tmp_path):
         sys.stderr = saved
     assert code == 0 and "needs --apply" in err.getvalue(), err.getvalue()
     assert (await memory.status("default")).episodes == 0
+
+
+async def test_map_reads_a_directory_reached_through_a_hidden_one(tmp_path):
+    """The same filter fault as sync had: judged on the whole path it skips
+    the entire tree whenever the root itself sits under a dot-segment, which
+    is what "a map that quietly skipped half a repository" describes."""
+    root = tmp_path / ".cache" / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "a.py").write_text("def a(): pass", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "hooks.py").write_text("def hook(): pass", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["map", str(root)]), memory, io.StringIO(""), out)
+    assert code == 0, out.getvalue()
+    assert (await memory.status("default")).episodes == 1, out.getvalue()
+    assert ".git" not in out.getvalue(), "a hidden directory under the root is still skipped"

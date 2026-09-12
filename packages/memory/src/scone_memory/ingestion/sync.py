@@ -101,6 +101,10 @@ class SyncReceipt:
     removed: int = 0
     #: Of those, the ones actually forgotten. Zero unless ``remove``.
     forgotten: int = 0
+    #: Episodes this marker holds whose file this run would not have looked
+    #: for -- the suffixes no longer select it. Counted apart from missing,
+    #: because a narrowed flag is not a deleted file.
+    out_of_scope: int = 0
     #: Files with nothing but whitespace in them, which are not stored.
     #: Counted apart from a file that could not be read at all: a count
     #: that adds them together tells a reader neither.
@@ -125,6 +129,7 @@ class SyncReceipt:
                 "files_found": self.files_found, "files_read": self.files_read,
                 "capped": self.capped, "added": self.added, "updated": self.updated,
                 "unchanged": self.unchanged, "removed": self.removed,
+                "out_of_scope": self.out_of_scope,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
                 "listed_all": self.listed_all, "checked_for_missing": self.checked_for_missing,
                 "changes": [{"path": c.path, "what": c.what} for c in self.changes]}
@@ -141,6 +146,9 @@ class SyncReceipt:
         elif self.removed:
             lines.append(f"{self.removed} file(s) are gone from disk but not removed from memory; "
                          f"pass remove to forget them")
+        if self.out_of_scope:
+            lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
+                         f"suffixes and were left alone, not treated as gone")
         if self.empty:
             lines.append(f"{self.empty} file(s) had nothing in them")
         if self.cut:
@@ -167,14 +175,39 @@ class _Tally:
             self.listed_all = False
 
 
+def _wanted(suffixes: Sequence[str]) -> set[str]:
+    return {suffix.lower() for suffix in suffixes}
+
+
+def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
+    """Whether a path **below the root** is one a sync reads.
+
+    The hidden-directory rule is about what is under the root — a
+    repository means its source and not its ``.git``. It must be judged on
+    the part below the root and never on the whole path: a root reached
+    through a dot-segment (``~/.config/notes``, ``~/.claude/projects``, or
+    the checkout this is developed in) would otherwise exclude its own
+    entire tree, and the receipt would report ``files_found: 0`` with every
+    file sitting on disk.
+    """
+    return (here.suffix.lower() in wanted
+            and not any(part.startswith(".") or part == "__pycache__" for part in here.parts))
+
+
+def _key(marker: str, path: str) -> str:
+    """The identity a synced file is stored under: its marker and its path.
+
+    Length-prefixed rather than separated, because a marker and a path are
+    both text a caller chose and any separator could appear in either.
+    """
+    return f"{len(marker)}:{marker}/{path}"
+
+
 def _files(root: pathlib.Path, suffixes: Sequence[str], limit: int) -> tuple[list[pathlib.Path], int]:
-    """(the files to read, how many are there). Hidden directories and
-    caches are left out, because a sync of a repository means its source
-    and not its ``.git``."""
-    wanted = {suffix.lower() for suffix in suffixes}
+    """(the files to read, how many are there)."""
+    wanted = _wanted(suffixes)
     found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and path.suffix.lower() in wanted
-             and not any(part.startswith(".") or part == "__pycache__" for part in path.parts)]
+             if path.is_file() and _in_scope(path.relative_to(root), wanted)]
     return found[:limit], len(found)
 
 
@@ -238,16 +271,31 @@ async def sync_directory(
             continue
         what = "updated" if held is not None else "added"
         if apply:
+            # The key carries the marker. Without it two directories synced
+            # into one space share an identity for every filename they have
+            # in common, and `replace` forgets the other's episode to store
+            # this one -- a deletion nobody asked for and the receipt does
+            # not mention. The marker's length goes in front so no marker
+            # and path can be split two ways; a separator alone could be,
+            # since both halves are text a caller chose.
             await engine.replace(space, Record(content=text, kind="file", source=here,
-                                               dedup_key=here, metadata={"sync": name}))
+                                               dedup_key=_key(name, here),
+                                               metadata={"sync": name}))
         setattr(tally, what, getattr(tally, what) + 1)
         tally.saw(here, what)
 
-    # A file the cap stopped us reading is unread, not missing. A capped
-    # walk therefore says nothing about what is gone, and must not: a
-    # limit that deleted memory would be the worst bug in here.
+    # Two different reasons an episode's file is not in `seen`, and only
+    # one of them means it is gone.
+    #
+    # A file the cap stopped us reading is unread. A file this run's
+    # suffixes no longer select was never looked for. Neither is missing,
+    # and forgetting on either would delete memory because a flag changed
+    # rather than because anything left the disk.
     whole = len(reading) == there
-    missing = [path for path in known if path not in seen] if whole else []
+    wanted = _wanted(suffixes)
+    out_of_scope = [path for path in known if not _in_scope(pathlib.PurePosixPath(path), wanted)]
+    missing = ([path for path in known
+                if path not in seen and path not in set(out_of_scope)] if whole else [])
     forgotten = 0
     for gone in missing:
         tally.saw(gone, "missing")
@@ -259,6 +307,7 @@ async def sync_directory(
         root=str(where), marker=name, space=space, applied=apply, removing=remove,
         files_found=there, files_read=len(reading), added=tally.added, updated=tally.updated,
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
+        out_of_scope=len(out_of_scope),
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
         listed_all=tally.listed_all, checked_for_missing=whole)
     if apply:

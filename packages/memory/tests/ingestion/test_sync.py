@@ -233,3 +233,68 @@ async def test_a_store_with_no_event_log_says_it_cannot_tell(tmp_path):
             await last_sync(engine, "default", "repo")
     finally:
         await engine.close()
+
+
+async def test_a_root_inside_a_hidden_directory_is_read_not_skipped_whole(tmp_path):
+    """The filter is meant to skip `.git` *under* the root. Applied to the
+    whole path it skips the entire tree whenever the root itself is reached
+    through a dot-segment -- `~/.config/notes`, `~/.claude/projects`, and
+    this very worktree. `files_found` then reads 0 with the files on disk."""
+    root = tmp_path / ".cache" / "repo"
+    tree(root, **{"a.md": "# notes", "b/c.md": "# more"})
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", root, apply=True, marker="repo")
+        assert done.files_found == 2 and done.added == 2, done.record()
+    finally:
+        await engine.close()
+
+
+async def test_a_hidden_directory_under_the_root_is_still_skipped(tmp_path):
+    """The rule the filter was for, which must survive the fix."""
+    tree(tmp_path, **{"a.md": "# notes", ".git/config.md": "# not source",
+                      "__pycache__/x.md": "# not source"})
+    engine = await memory()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True)
+        assert done.files_found == 1 and done.added == 1, done.record()
+    finally:
+        await engine.close()
+
+
+async def test_the_same_filename_under_two_markers_is_two_memories(tmp_path):
+    """Two directories synced into one space both holding `README.md` must
+    not be one memory that each sync steals from the other. The identity a
+    sync writes has to carry its marker, or the second sync forgets the
+    first's file without being asked and without saying so."""
+    left = tree(tmp_path / "left", **{"README.md": "the left project"})
+    right = tree(tmp_path / "right", **{"README.md": "the right project"})
+    engine = await memory()
+    try:
+        first = await sync_directory(engine, "default", left, apply=True, marker="left")
+        second = await sync_directory(engine, "default", right, apply=True, marker="right")
+        assert (first.added, second.added) == (1, 1), (first.record(), second.record())
+        assert await count(engine) == 2, "neither sync may forget the other's file"
+        held = {e.content for e in await engine.episodes("default", {"sync": "left"})}
+        assert held == {"the left project"}, held
+    finally:
+        await engine.close()
+
+
+async def test_narrowing_the_suffixes_does_not_report_the_rest_as_gone(tmp_path):
+    """A file that dropped out of the walk is out of scope, not missing. The
+    file cap was one way to stop seeing a file and it was handled; this is
+    another, and forgetting on it would delete memory because a flag
+    changed."""
+    tree(tmp_path, **{"a.md": "# notes", "b.py": "def b(): pass"})
+    engine = await memory()
+    try:
+        await sync_directory(engine, "default", tmp_path, apply=True)
+        narrow = await sync_directory(engine, "default", tmp_path, apply=True,
+                                      remove=True, suffixes=(".md",))
+        assert narrow.removed == 0 and narrow.forgotten == 0, narrow.record()
+        assert narrow.out_of_scope == 1, narrow.record()
+        assert "out of scope" in narrow.text(), narrow.text()
+        assert await count(engine) == 2, "a narrowed suffix list must never delete memory"
+    finally:
+        await engine.close()

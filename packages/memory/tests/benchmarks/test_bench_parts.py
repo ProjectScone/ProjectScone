@@ -76,6 +76,12 @@ async def test_the_report_names_the_difference_in_questions(dataset):
     assert "question(s))" in scored.text() and f"{scored.parted_all - scored.whole_all:+d}" in scored.text()
 
 
-async def test_the_limit_applies_before_anything_is_searched(dataset):
+async def test_the_limit_says_what_it_read_and_what_the_file_holds(dataset):
+    """`questions` is what we read. text() prints it as "N question(s) of
+    <dataset>", which reads as the size of the file -- so with a limit the
+    file's own count has to be there too, or the report understates the
+    corpus and nothing could notice."""
     scored = await run_parts_bench(dataset, limit=1, k=2)
     assert scored.questions == 1 and scored.split == 1
+    assert scored.questions_found == 2 and scored.capped, scored.record()
+    assert "1 of 2 question(s)" in scored.text(), scored.text()

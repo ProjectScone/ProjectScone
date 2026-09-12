@@ -201,6 +201,15 @@ read nor written, and the computed answers are scored against the file's
 own answers — read from the file, because the bench loader keeps only the
 fields retrieval is scored on.
 
+The temporal route answers two ways and the report keeps them apart. It
+either **computes** an answer or hands back the day's **passages**, and
+only the first has arithmetic to compare with the file; a recalled answer
+in the `computed` denominator made the ratio report the computation as
+wrong when nothing had been computed. Of the computed ones, `agree`,
+`disagree` and "a shape this cannot judge" are three separate counts,
+because the scorer returns *cannot tell* for answer shapes it does not
+handle and adding those to the wrong ones tells a reader neither.
+
 What this **cannot** say is the more interesting half: whether a question
 the rule sent to search would have been answered better by computing it.
 That needs a known answer for every question under every route, which
@@ -644,20 +653,48 @@ are three separate guards, each with its own test:
   anything and says so. A repository whose every file was deleted is far
   rarer than a wrong path.
 
-A fourth guard is about honesty rather than intent. If the walk stops at
-the file cap it has not seen the whole directory, so it **cannot** tell a
-file that is gone from one it never reached. Such a sync reports
-`checked_for_missing: false` and forgets nothing — without that, lowering
-`--limit` would silently delete memory, and a `removed: 0` would read as
-"nothing is gone" when it means "we did not look".
+Two further guards are about honesty rather than intent, and both exist
+because a file can stop appearing in the walk for reasons that have
+nothing to do with the disk:
+
+- If the walk stops at the **file cap** it has not seen the whole
+  directory, so it cannot tell a file that is gone from one it never
+  reached. Such a sync reports `checked_for_missing: false` and forgets
+  nothing — without that, lowering `--limit` would silently delete
+  memory, and `removed: 0` would read as "nothing is gone" when it means
+  "we did not look".
+- If this run's **`--suffix` list** no longer selects a file the marker
+  holds, that file was never looked for. It is counted as `out_of_scope`
+  and left alone, never as missing. Otherwise narrowing a flag between
+  two runs would delete every memory the narrower run stopped asking
+  about.
+
+An earlier version got the hidden-directory rule wrong in a way worth
+recording, because the report it produced was confident and false. The
+rule is meant to skip a repository's own `.git`, and it was judged on the
+whole path rather than on the part below the root — so syncing any root
+*reached through* a dot-segment (`~/.config/notes`, `~/.claude/projects`,
+the checkout this is developed in) excluded the entire tree. `files_found`
+came back 0 with every file on disk, `checked_for_missing` was `true`
+because `0 == 0`, and the receipt said every memory the marker held was
+gone from disk and offered to forget it. The guard above refused the
+deletion, which is the only reason it was not data loss.
 
 ### The marker is a name, not a path
 
 Every episode a sync writes carries its marker in metadata, so "what did
 the last sync of this directory leave here" has an exact answer rather
-than a guess from path prefixes. Two directories synced into one space
-cannot delete each other's memories, and `--marker` lets a directory be
-moved or renamed without losing what it stored.
+than a guess from path prefixes. `--marker` lets a directory be moved or
+renamed without losing what it stored.
+
+The **identity** a file is stored under carries the marker too, and has
+to: keyed on the relative path alone, two directories synced into one
+space would share an identity for every filename they had in common —
+`README.md` and `README.md` — and the second sync's `replace` would
+forget the first's episode to store its own. No `--remove`, nothing in
+the receipt, memory gone. The marker's length precedes it in the key, so
+no marker and path can be read two ways; a separator alone could be,
+since both halves are text a caller chose.
 
 `last sync` comes from the event log, and only an **applied** sync is
 recorded — a plan succeeded at nothing. A store with no event log raises
