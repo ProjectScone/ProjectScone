@@ -132,3 +132,96 @@ async def test_the_record_is_what_every_surface_gives():
     assert record["schema_version"] == 1 and record["space"] == "alpha"
     assert record["status"] in ("clean", "concerns") and isinstance(record["concerns"], list)
     assert record["totals"]["entities"] == 3 and "text" in record and "coverage" in record
+
+
+async def test_a_claim_whose_source_was_forgotten_no_longer_reads_as_grounded():
+    """The projection records what a claim said when it was written. A
+    source can be forgotten since, and then the claim rests on nothing:
+    grounding is checked against the sources kept now."""
+    engine = await engine_with()
+    source = await engine.remember("alpha", "Alice works at Acme. Bob works at Globex.")
+    for name, firm in (("Alice", "Acme"), ("Bob", "Globex")):
+        await engine.assert_fact("alpha", name, "works_at", firm, valid_from=DAY,
+                                 source_episode_id=source.episode_id, quote=f"{name} works at {firm}.")
+    assert (await graph_health(engine, "alpha")).status == "clean"
+    await engine.forget("alpha", source.episode_id)
+    found = await graph_health(engine, "alpha")
+    ungrounded = next(c for c in found.concerns if c["kind"] == "ungrounded")
+    assert ungrounded["count"] == 2
+    assert all(example["grounding"] == "quote_source_missing" for example in ungrounded["examples"])
+    assert found.status == "concerns"
+
+
+async def test_a_ledger_that_moves_while_health_is_read_is_said(monkeypatch):
+    """Everything in one answer is read at one revision: the totals, the
+    grounding and the duplicate pairs. A ledger that keeps moving while
+    that is done is said, not hidden."""
+    from scone_memory.entities import health as health_module
+
+    engine = await engine_with()
+    original = health_module.likely_duplicates
+    added = []
+
+    async def meanwhile(*arguments, **options):
+        if not added:
+            added.append(1)
+            await engine.assert_fact("alpha", "Acme Robotics", "based_in", "Lisbon", valid_from=DAY)
+            await engine.assert_fact("alpha", "AcmeRobotics", "based_in", "Lisbon", valid_from=DAY)
+        return await original(*arguments, **options)
+
+    monkeypatch.setattr(health_module, "likely_duplicates", meanwhile)
+    found = await graph_health(engine, "alpha")
+    # The second read sees the new facts, so it settles and reports them.
+    assert found.totals["entities"] == 3 and concerns(found).get("likely_duplicate") == 1
+    assert found.coverage["revision"] == (await engine.documents.revision("alpha"))
+
+
+async def test_a_ledger_that_never_settles_is_said(monkeypatch):
+    from scone_memory.entities import health as health_module
+
+    engine = await engine_with(("alice chen", "works_at", "Acme Robotics"))
+    original = health_module.likely_duplicates
+    written = []
+
+    async def always(*arguments, **options):
+        written.append(1)
+        await engine.assert_fact("alpha", f"person {len(written)}", "knows", "Someone New", valid_from=DAY)
+        return await original(*arguments, **options)
+
+    monkeypatch.setattr(health_module, "likely_duplicates", always)
+    found = await graph_health(engine, "alpha")
+    assert "ledger_moved_during_read" in found.coverage["reasons"]
+    assert "coverage: limited: " in found.text and "ledger_moved_during_read" in found.text
+
+
+async def test_pairs_read_at_another_revision_do_not_settle_the_answer(monkeypatch):
+    """The duplicate pairs are evidence like the rest, so they must come
+    from the revision the rest was read at."""
+    from dataclasses import replace as _replace
+
+    from scone_memory.entities import health as health_module
+
+    engine = await engine_with(("alice chen", "works_at", "Acme Robotics"))
+    original = health_module.likely_duplicates
+
+    async def elsewhere(*arguments, **options):
+        found = await original(*arguments, **options)
+        return _replace(found, coverage={**found.coverage, "revision": 999})
+
+    monkeypatch.setattr(health_module, "likely_duplicates", elsewhere)
+    found = await graph_health(engine, "alpha")
+    assert "ledger_moved_during_read" in found.coverage["reasons"]
+
+
+async def test_a_capped_grounding_check_is_said(monkeypatch):
+    from scone_memory.entities import health as health_module
+
+    monkeypatch.setattr(health_module, "MAX_CHECKED", 1)
+    engine = await engine_with()
+    source = await engine.remember("alpha", "Alice works at Acme. Bob works at Globex.")
+    for name, firm in (("Alice", "Acme"), ("Bob", "Globex")):
+        await engine.assert_fact("alpha", name, "works_at", firm, valid_from=DAY,
+                                 source_episode_id=source.episode_id, quote=f"{name} works at {firm}.")
+    found = await graph_health(engine, "alpha")
+    assert "grounding_checked 1 of 2" in found.coverage["reasons"]
+    assert found.coverage["grounding_checked"] == 1 and "coverage: limited: " in found.text

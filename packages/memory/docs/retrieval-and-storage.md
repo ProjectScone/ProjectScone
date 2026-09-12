@@ -696,9 +696,13 @@ answer. It reads and changes nothing.
 | `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
 | `status`, `as_of` | `current`, now | Which facts count, and when |
 
-- **ungrounded**: claims whose source cannot be checked against them (no
-  quote), or that have no source at all. Each example names the claim,
-  its fact and which of the two it is.
+- **ungrounded**: claims whose source is gone, cannot be checked against
+  them (no quote), or never existed. Grounding is checked against the
+  sources kept now, not against what the projection recorded when the
+  claim was written, so a claim whose source was forgotten reads as
+  `quote_source_missing`. At most 500 claims are checked that way; past
+  that the projection's own record is used and the coverage says
+  `grounding_checked N of M`.
 - **contested_kind**: entities whose kind hints disagree, so they have no
   kind. **kind_unknown**: entities nothing implies a kind for.
 - **unconnected**: entities nothing links to and that link to nothing.
@@ -710,6 +714,11 @@ answer. It reads and changes nothing.
   `duplicates:` prefix.
 - A graph with none of these says `nothing to fix`, and a capped read
   says `among the facts read` instead of claiming the whole space.
+- **One answer, one revision.** The totals, the grounding checks and the
+  duplicate pairs are all read at one revision; the answer says which. A
+  ledger that changed while it was read is read again, and one that keeps
+  moving is said (`ledger_moved_during_read`) rather than answered from
+  two different moments.
 
 #### `GET /v1/entities/duplicates`
 

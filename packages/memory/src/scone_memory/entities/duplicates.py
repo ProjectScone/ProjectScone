@@ -490,4 +490,5 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
                  *summary, *lines, *tail], max_bytes)
     settled = projection.revision == await engine.documents.revision(space)
     return Duplicates("found" if pairs else "none", text, pairs,
-                      {"reasons": reasons, "read": read_answer, "compared": len(candidates)}), settled
+                      {"reasons": reasons, "read": read_answer, "compared": len(candidates),
+                       "revision": projection.revision}), settled
