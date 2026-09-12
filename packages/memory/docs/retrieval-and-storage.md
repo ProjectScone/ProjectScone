@@ -429,6 +429,8 @@ and every item points back to the facts behind it.
   so on. Dates, amounts, identifiers, prose and pronouns are values.
 - **Relations** are entity-to-entity claims grouped by
   `(subject, predicate, object)`, with direction kept.
+- **What follows** from the relations, when the space says what its
+  predicates mean. Its own kind of item, never a relation (see below).
 - **Attributes** are value claims grouped by `(entity, predicate, exact value)`.
   Values keep their exact text: `3 MB` and `3 mb` are two attributes.
 - **Names** are the entity's recorded spellings. The label is the most
@@ -438,6 +440,51 @@ and every item points back to the facts behind it.
   are inferred hints from the predicates around an entity. They carry
   `kind_status: "inferred"` and list the fact ids that suggested them. Hints
   that disagree give `"conflict"` and no kind, never a guess.
+
+### What a predicate means, and what follows from it
+
+A ledger holds what was said. "Alice Chen works at Acme Robotics" says
+nothing, by itself, about what Acme employs, whether Bob is married to
+Alice when Alice is married to Bob, or where a shelf is when its aisle is
+in a warehouse. A space can say what three of its predicates mean, and
+the projection works out the rest:
+
+```bash
+SCONE_RELATION_INVERSE=works_at:employs,wrote:written_by
+SCONE_RELATION_SYMMETRIC=married_to,colleague_of
+SCONE_RELATION_TRANSITIVE=part_of,located_in
+```
+
+Configured, never guessed: nothing here decides that two predicates are
+opposites because they look alike. A vocabulary that cannot mean what it
+says is refused where it is built — a predicate cannot be its own
+opposite (that is what symmetric means), cannot have two opposites, and
+cannot be both symmetric and have another side.
+
+What follows is kept apart from what was said, everywhere it travels:
+
+- It is an `Implied`, not a `Relation`, so nothing can pass one where the
+  other is expected, and `paths_between`, the export and retrieval walk
+  the stated relations as before.
+- Its id is an `imp:` id under its own scheme, so an implication joining
+  the same two things by the same predicate can never be read as the
+  claim.
+- It names the facts under it (`fact_ids`) and the relations it was
+  worked out from (`follows_from`), so a reader can check the sources.
+- It holds only while every claim under it does: it begins at the latest
+  beginning of them, ends at the earliest ending, and is no better
+  grounded than its least grounded link — one unsourced leg makes an
+  unsourced chain. Exclude a leg and the chain goes; its neighbour stands.
+
+Nothing already said is implied, nothing is implied twice, nothing is
+implied about a thing and itself, and a ring goes round once. A chain is
+followed four claims at most, and a projection holds at most 50,000
+implications; `coverage.meanings` names the vocabulary and both bounds,
+and `coverage.implied_capped` says when the closure stopped early.
+
+Where to see it: `implied` in the knowledge view, `follows` on an
+entity's page, and `follows:` lines in the packet `graph context` writes
+for a model, each naming what it followed from.
 
 Names are one entity when their keys match: case folded and spacing
 collapsed, nothing looser. `Lisbon` and `Lisboa` stay two entities. A value

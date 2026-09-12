@@ -44,14 +44,20 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity_duplicates`, beside the computed `memory_temporal_answer`:
 
 - `graph_context` returns what the entity graph records around up to 24
-  names, or around the entities a question names. `max_bytes` (512 to
+  names, or around the entities a question names. Lines beginning
+  `follows:` are worked out from the claims rather than claimed, and say
+  which meaning they follow from. `max_bytes` (512 to
   64,000) bounds the packet text. The candidates and ids around it are
   capped on their own: 24 candidates at most, with names clipped to 120
   characters. With `similar: true`, a question also finds up to three
   entities it resembles by vector, each marked with its score. Only a
   `min_similarity` you pass keeps weak matches out.
 - `explain_entity` returns one entity's relations in both directions and
-  its values, or the candidates for an ambiguous name.
+  its values, or the candidates for an ambiguous name. Where the space
+  says what its predicates mean, `follows` lists what follows from the
+  claims about the entity, each naming the claims and relations it was
+  worked out from. What follows is never listed as a claim, and its id
+  carries an `imp:` prefix rather than a relation's `rel:`.
 - `connect_entities` returns the shortest paths between two entities,
   within `max_hops` (1 to 4).
 - `graph_schema` returns what the graph is made of: its entity kinds,
