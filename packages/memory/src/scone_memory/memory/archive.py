@@ -10,16 +10,40 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from dataclasses import dataclass
 from typing import Optional
 
-from ..core.affirmations import NewAffirmation, affirmation_store
+from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
-from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact
+from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
 from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
 from ..ingestion.records import Record, content_hash
 
 
+#: What this version of the archive format is called. An archive says it
+#: in its first record, and an importer refuses a profile it does not
+#: know rather than reading it hopefully.
+ARCHIVE_PROFILE = "scone.archive/1"
+
+#: The fields each kind of record may carry, taken from the models the
+#: exporter writes from rather than written out here: a list kept by hand
+#: goes stale the first time a model gains a field, and then refuses an
+#: archive this engine could have read perfectly well. A record carrying
+#: anything outside these is refused, because importing the part we
+#: recognise would look like a success and quietly drop the rest.
+KNOWN_FIELDS: dict[str, frozenset[str]] = {
+    "archive": frozenset({"type", "profile", "space", "wrote_at", "engine"}),
+    "episode": frozenset({"type", "space", "episode_id", "kind", "content", "content_hash",
+                          "source", "tags", "metadata", "created_at", "dedup_key"}),
+    "fact": frozenset({"type", "space"}) | frozenset(Fact.model_fields),
+    "fact_link": frozenset({"type", "space"}) | frozenset(FactLink.model_fields),
+    "affirmation": frozenset({"type", "space"}) | frozenset(Affirmation.model_fields),
+}
+
+
 @dataclass
 class ImportSummary:
+    #: The profile the archive was read as: what its header said, or the
+    #: first profile when it had no header.
+    profile: str = ARCHIVE_PROFILE
     episodes: int = 0
     #: Episodes already present in the target.
     deduplicated: int = 0
@@ -47,9 +71,13 @@ class ArchiveRuntime:
     remember_many: Callable[[str, Sequence[Record]], Awaitable[list[Added]]]
 
 
-async def export_records(documents: DocumentStore, space: str) -> AsyncIterator[dict]:
-    """Yield original episodes, facts and unique links; no derived vectors."""
+async def export_records(documents: DocumentStore, space: str, *,
+                         wrote_at: str = "") -> AsyncIterator[dict]:
+    """Yield what the space is made of: a header saying what this archive
+    is, then original episodes, facts, unique links and restatements. No
+    derived vectors: they are rebuilt by the ingestion that reads this."""
     counts = await documents.counts(space)
+    yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at}
     for episode in await documents.recent_episodes(space, max(counts.episodes, 1)):
         yield {
             "type": "episode",
@@ -93,6 +121,15 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
     affirmations: list[Mapping] = []
     for record in records:
         kind = record.get("type", "episode")
+        _check_fields(kind, record)
+        if kind == "archive":
+            said = str(record.get("profile") or "")
+            if said and said != ARCHIVE_PROFILE:
+                raise InvalidInput(
+                    f"this archive says it is {said}; this engine reads {ARCHIVE_PROFILE}, and reading "
+                    f"a format it does not know would drop whatever it did not recognise")
+            summary.profile = said or ARCHIVE_PROFILE
+            continue
         if kind == "episode":
             episode = _rederived(Record.from_dict(record), record.get("space"), space)
             # Forgetting was a decision; an archive that carries the
@@ -231,3 +268,16 @@ def _rederived(record: Record, source_space: Optional[str], space: str) -> Recor
     if record.content_hash == content_hash(str(source_space), record.content):
         return dataclasses.replace(record, content_hash=None)
     return record
+
+
+def _check_fields(kind: str, record: Mapping) -> None:
+    """Refuse a record carrying anything this version cannot keep, naming
+    every field it did not know."""
+    known = KNOWN_FIELDS.get(kind)
+    if known is None:
+        return  # an unknown type is refused where types are decided
+    strange = sorted(set(record) - known)
+    if strange:
+        raise InvalidInput(
+            f"a {kind} record carries {', '.join(strange)}, which this engine does not keep; "
+            f"importing the rest would drop it silently")

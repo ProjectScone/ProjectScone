@@ -41,7 +41,8 @@ async def test_a_dump_carries_identity_so_repeated_turns_survive_import():
     source = await fresh()
     await source.remember_many("default", [Record("ok", dedup_key="s1#0"), Record("ok", dedup_key="s1#1")])
     dump = [r async for r in source.export("default")]
-    assert len({r["content_hash"] for r in dump}) == 2 and all(r["content"] == "ok" for r in dump)
+    carried = [r for r in dump if r["type"] == "episode"]
+    assert len({r["content_hash"] for r in carried}) == 2 and all(r["content"] == "ok" for r in carried)
     target = await fresh()
     summary = await target.import_records("default", dump)
     assert (summary.episodes, summary.deduplicated) == (2, 0), "without the identity the two turns would collapse into one"

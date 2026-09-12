@@ -21,7 +21,11 @@ async def test_a_dump_moved_into_a_renamed_space_still_deduplicates_there():
     source = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await source.remember("work", "the harbour crane was repainted")
     dump = [json.loads(json.dumps(r)) async for r in source.export("work")]
-    assert dump[0]["space"] == "work" and dump[0]["content_hash"] == content_hash("work", "the harbour crane was repainted")
+    # An archive says what it is first; the episode follows.
+    assert dump[0]["type"] == "archive" and dump[0]["profile"] == "scone.archive/1"
+    [episode] = [record for record in dump if record["type"] == "episode"]
+    assert episode["space"] == "work" and episode["content_hash"] == content_hash(
+        "work", "the harbour crane was repainted")
 
     target = await moved(dump, into="archive")
     [again] = await target.remember_many("archive", [Record(content="the harbour crane was repainted")])
@@ -39,7 +43,7 @@ async def test_a_keyed_identity_is_carried_as_the_source_made_it():
     source = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await source.remember_many("work", [Record(content="ok", dedup_key="chat#1"), Record(content="ok", dedup_key="chat#2")])
     dump = [json.loads(json.dumps(r)) async for r in source.export("work")]
-    keyed = {r["content_hash"] for r in dump}
+    keyed = {r["content_hash"] for r in dump if r["type"] == "episode"}
     assert len(keyed) == 2 and content_hash("work", "ok") not in keyed
 
     target = await moved(dump, into="archive")

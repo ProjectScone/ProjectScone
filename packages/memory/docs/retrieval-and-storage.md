@@ -455,6 +455,30 @@ What both measurements say is that the lever here is the embedder, not
 the question: with a hash embedder the lexical lane is doing the work,
 and cleverness around the query does not add to it.
 
+## What an archive says it is
+
+`scone export` writes a header first:
+
+```json
+{"type": "archive", "profile": "scone.archive/1", "space": "alpha", "wrote_at": "…"}
+```
+
+An archive that does not name its own shape can only be read by guessing,
+and a reader that guesses will one day drop something and call it a
+success. So:
+
+- **A profile this engine does not know is refused**, naming it, rather
+  than read hopefully. An archive with no header at all is read as the
+  first profile, which is what archives written before the header are.
+- **A record carrying a field this engine cannot keep is refused**, naming
+  every field it did not know. Importing the part we recognise would look
+  like a success and quietly lose the rest, which is the one failure an
+  archive must not have. The fields each record may carry come from the
+  models the exporter writes from, so the list cannot go stale and refuse
+  an archive this engine could have read perfectly well.
+- **An unknown record type is refused**, as it always was.
+- `ImportSummary.profile` says which profile an import was read as.
+
 ## What survives a crash
 
 A `remember` marks the episode's identity in the document store before

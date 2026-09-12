@@ -1112,7 +1112,7 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders."""
         check_space(space)
-        async for record in archive.export_records(self.documents, space):
+        async for record in archive.export_records(self.documents, space, wrote_at=self.clock()):
             yield record
 
     async def import_records(self, space: str, records: Iterable[Mapping], *, resurrect: bool = False) -> ImportSummary:
