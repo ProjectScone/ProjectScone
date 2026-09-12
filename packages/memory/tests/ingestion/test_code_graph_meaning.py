@@ -188,3 +188,64 @@ def test_a_brace_comment_inside_a_string_is_not_a_comment():
     source = 'const t = "// WHY: not a reason, see ADR-0007";\nclass Real {}\n'
     found = code_claims(source, "web/shelf.ts", language="braces")
     assert [c.predicate for c in found if c.predicate in (NOTES, CITES)] == []
+
+
+# Three regressions the corrections above introduced. Hand-built again,
+# and each one is a position or a target that has to be exactly right:
+# a claim citing the wrong line is a citation nobody can check.
+
+def test_a_citation_on_the_third_line_of_a_docstring_points_at_that_line():
+    """`ast.get_docstring` returns cleaned, escape-decoded text, so
+    counting its lines drifts from the file. The position has to come from
+    the source."""
+    source = '''def keep() -> None:
+    """Kept.
+
+    Because ADR-0007 says so.
+    """
+    pass
+'''
+    [cite] = [c for c in claims(content=source) if c.predicate == CITES]
+    assert cite.first_line == 4, cite
+    assert "ADR-0007" in cite.quote, cite.quote
+
+
+def test_an_escaped_newline_in_a_docstring_does_not_move_a_citation():
+    source = 'def keep() -> None:\n    """One line\\nwith an escape, per ADR-7."""\n    pass\n'
+    [cite] = [c for c in claims(content=source) if c.predicate == CITES]
+    assert cite.first_line == 2, cite
+    assert "pass" not in cite.quote, cite.quote
+
+
+def test_each_name_of_a_from_dot_import_keeps_its_own_module():
+    """`from . import alpha, beta` names two modules, and pairing every
+    alias with the first one sends a base class to the wrong file."""
+    def resolve(path, level, module):
+        return {"alpha": "pkg/alpha.py", "beta": "pkg/beta.py"}.get(module)
+
+    source = '''from . import alpha, beta
+
+
+class Child(beta.Parent):
+    pass
+'''
+    found = said(INHERITS, content=source, resolve=resolve)
+    assert found == [("pkg/shelf.py:Child", "pkg/beta.py:Parent")], found
+
+
+def test_colon_inheritance_is_still_read():
+    """The clause rewrite dropped it. C++ and C# write a base after a
+    colon, and the previous version read them."""
+    for source, base in (("class Child : Base {\n}\n", "Base"),
+                         ("class Child : public Base {\n}\n", "Base"),
+                         ("struct Pair : First, Second {\n}\n", "First")):
+        found = code_claims(source, "web/a.cpp", language="braces")
+        bases = [c.object for c in found if c.predicate == INHERITS]
+        assert base in bases, (source, bases)
+
+
+def test_a_colon_that_is_not_inheritance_is_not_read():
+    """A type annotation in a body is not a base class."""
+    source = "class Shelf {\n  size: number = 3;\n}\n"
+    found = code_claims(source, "web/a.ts", language="braces")
+    assert [c.object for c in found if c.predicate == INHERITS] == []

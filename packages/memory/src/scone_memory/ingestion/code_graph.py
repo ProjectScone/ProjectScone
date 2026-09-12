@@ -67,6 +67,12 @@ _CITED = re.compile(r"\b(ADR|RFC)[\s\-_#]*([0-9]{1,6})\b", re.IGNORECASE)
 _DECLARES = re.compile(r"\b(?:class|interface|struct)\s+([A-Za-z_]\w*)")
 _BUILT_ON = re.compile(r"\b(?:extends|implements)\s+([A-Za-z_][\w.:<>,\s]*?)"
                        r"(?=\b(?:extends|implements)\b|[{;]|$)")
+#: C++ and C# write the bases after a colon, immediately following the
+#: declared name. Anchored there on purpose: a colon anywhere else is a
+#: type annotation or a label, and reading those would invent bases.
+_AFTER_COLON = re.compile(r"\s*:\s*([^{;]+)")
+#: Specifiers a C++ base list carries, which name no type.
+_SPECIFIERS = frozenset("public private protected internal virtual override sealed".split())
 
 #: How the brace languages write an import. A header line is written
 #: down, so it can be read; what a name in the body refers to is not, so
@@ -182,16 +188,26 @@ def _python_prose(content: str) -> list[tuple[int, str]]:
         tree = ast.parse(content)
     except (SyntaxError, ValueError, RecursionError):
         return found
+    # Read from the file's own lines, never from `ast.get_docstring`. That
+    # returns cleaned, escape-decoded text, so counting its lines drifts
+    # from the source: a citation on the third line of a docstring pointed
+    # at the opening quotes, and one after an escaped newline pointed at
+    # the statement below. A claim citing the wrong line is a citation
+    # nobody can check.
+    lines = content.split("\n")
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        written = ast.get_docstring(node)
-        if not written:
-            continue
         body = getattr(node, "body", [])
-        at = getattr(body[0], "lineno", 1) if body else 1
-        for offset, line in enumerate(written.split("\n")):
-            found.append((at + offset, line))
+        if not body:
+            continue
+        first = body[0]
+        if not (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            continue
+        last = getattr(first, "end_lineno", first.lineno) or first.lineno
+        for number in range(first.lineno, min(last, len(lines)) + 1):
+            found.append((number, lines[number - 1]))
     return found
 
 
@@ -295,11 +311,20 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 if isinstance(child, ast.Import):
                     for alias in child.names:
                         imported[alias.asname or alias.name] = (alias.name, None)
-                else:
+                elif child.module:
+                    # One module, several names taken out of it.
                     came = _imported(child, path, resolve)
                     for alias in child.names:
                         if came:
                             imported[alias.asname or alias.name] = (came[0], alias.name)
+                elif resolve is not None and child.level:
+                    # "from . import alpha, beta" names a module per alias.
+                    # Reusing the first resolved module for all of them sent
+                    # `beta.Parent` to alpha's file.
+                    for alias in child.names:
+                        where = resolve(path, child.level, alias.name)
+                        if where:
+                            imported[alias.asname or alias.name] = (where, None)
             else:
                 walk(child, owner, inside)
 
@@ -479,9 +504,16 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             continue
         child = declares.group(1)
         subject = held.get(child, f"{path}:{child}")
-        for clause in _BUILT_ON.finditer(line, declares.end()):
-            for base in clause.group(1).split(","):
+        clauses = [clause.group(1) for clause in _BUILT_ON.finditer(line, declares.end())]
+        colon = _AFTER_COLON.match(line, declares.end())
+        if colon:
+            clauses.append(colon.group(1))
+        for clause in clauses:
+            for base in clause.split(","):
                 written = base.strip().split("<")[0].strip().rstrip("{").strip()
+                # A base list may lead with specifiers that name no type.
+                words = [word for word in written.split() if word.lower() not in _SPECIFIERS]
+                written = words[-1] if words else ""
                 if not written or not (written[0].isalpha() or written[0] == "_"):
                     continue
                 say(subject, INHERITS, held.get(written, written), number)
