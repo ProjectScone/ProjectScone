@@ -647,6 +647,9 @@ def create_server(engine: MemoryEngine, space: str = "default",
     async def schema_lines_of(space: str) -> str:
         return schema_text(await schema_record(engine, readable(space), max_bytes=8_000))
 
+    async def health_lines_of(space: str) -> str:
+        return (await graph_health(engine, readable(space), max_bytes=8_000)).text
+
     # The report and schema as resources a client can attach as context:
     # the server's own space at a fixed address, any other by name.
     @server.resource("scone://graph/report", name="graph-report", mime_type="text/markdown",
@@ -659,6 +662,16 @@ def create_server(engine: MemoryEngine, space: str = "default",
                      description="What the server's space's graph is made of: kinds and predicates.")
     async def own_schema() -> str:
         return await schema_lines_of(default_space)
+
+    @server.resource("scone://graph/health", name="graph-health", mime_type="text/plain",
+                     description="What in the server's space's graph wants attention: claims resting on nothing, "
+                                 "kinds that disagree or are missing, entities nothing links to, predicates used "
+                                 "once, and names that may be one thing.")
+    async def own_health() -> str:
+        return await health_lines_of(default_space)
+
+    server.resource("scone://{space}/graph/health", name="space-graph-health", mime_type="text/plain",
+                    description="What in one space's graph wants attention.")(health_lines_of)
 
     server.resource("scone://{space}/graph/report", name="space-graph-report", mime_type="text/markdown",
                     description="The knowledge report of one space.")(report_markdown)
