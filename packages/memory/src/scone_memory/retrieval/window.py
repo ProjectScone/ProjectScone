@@ -45,8 +45,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: Bytes a window may reach in either direction. Past this it is not a
 #: window, it is the document.
 MAX_WINDOW = 100_000
-#: Episodes read in one call. More than this and the rest are returned
-#: unwidened, counted rather than dropped.
+#: Episodes read in one call, and the most a caller may ask for. A read
+#: that fails counts: it is work done, and a budget that only counted
+#: successes bounded nothing. Past the budget the rest are returned
+#: unwidened and counted in ``not_read`` rather than dropped.
 MAX_EPISODES = 100
 
 
@@ -76,6 +78,10 @@ class Widened:
     #: Items whose episode could not be read, which is not a finding that
     #: it is absent. Left as they were.
     unread: int = 0
+    #: Items left as they were because the episode budget was spent
+    #: before their episode was reached. Not a failure to read and not a
+    #: finding about the episode: nobody looked at it.
+    not_read: int = 0
     #: Chunk id to the span it was widened to, so a caller can see what
     #: was read rather than trust that it was.
     by_chunk: dict[int, tuple[int, int]] = field(default_factory=dict)
@@ -83,7 +89,8 @@ class Widened:
 
     def record(self) -> dict[str, object]:
         return {"widened": self.widened, "clipped": self.clipped, "aligned": self.aligned,
-                "gone": self.gone, "unread": self.unread, "why": self.why,
+                "gone": self.gone, "unread": self.unread, "not_read": self.not_read,
+                "why": self.why,
                 "by_chunk": {str(k): list(v) for k, v in self.by_chunk.items()},
                 "items": [item.model_dump() for item in self.items]}
 
@@ -93,6 +100,14 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
                 episodes: int = MAX_EPISODES) -> Widened:
     """Return each item with the episode's text around it."""
     check_space(space)
+    # Byte distances, checked as exact integers at the door. A fractional
+    # window passed the `< 0` test and then failed much later as a
+    # TypeError from a byte slice, which tells a caller nothing about
+    # what they asked for. `bool` is excluded deliberately: `True` is an
+    # integer to `isinstance` and is not a distance.
+    for name, value in (("before", before), ("after", after)):
+        if type(value) is not int:
+            raise InvalidInput(f"{name} is a whole number of bytes, not {value!r}")
     if before < 0 or after < 0:
         raise InvalidInput("a window cannot reach a negative distance")
     if before == 0 and after == 0:
@@ -100,14 +115,29 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
     if before > MAX_WINDOW or after > MAX_WINDOW:
         raise InvalidInput(f"a window may reach at most {MAX_WINDOW} bytes either way, not "
                            f"{max(before, after)}; past that it is the document, not a window")
+    # MAX_EPISODES documented a cap that nothing enforced, so a caller
+    # could ask for more reads than the module says it will do.
+    if type(episodes) is not int or not 1 <= episodes <= MAX_EPISODES:
+        raise InvalidInput(f"episodes is a whole number from 1 to {MAX_EPISODES}, not "
+                           f"{episodes!r}")
 
     kept: list[RecallItem] = []
     by_chunk: dict[int, tuple[int, int]] = {}
-    widened = clipped = moved = vanished = unread = 0
+    widened = clipped = moved = vanished = unread = unbudgeted = 0
     read: dict[int, Optional[str]] = {}
+    # An episode we tried and could not read. Held apart from `read`
+    # because "we could not read it" is not "it is not there", and held
+    # at all because a read that failed is still a read: leaving it out
+    # let one budgeted episode become one failed read per item.
+    unavailable: set[int] = set()
     for item in items:
+        if item.episode_id in unavailable:
+            unread += 1
+            kept.append(item)
+            continue
         if item.episode_id not in read:
-            if len(read) >= episodes:
+            if len(read) + len(unavailable) >= episodes:
+                unbudgeted += 1
                 kept.append(item)
                 continue
             try:
@@ -115,6 +145,7 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             except (Gone, NotFound):
                 read[item.episode_id] = None
             except SconeError:
+                unavailable.add(item.episode_id)
                 unread += 1
                 kept.append(item)
                 continue
@@ -167,5 +198,9 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
     if unread:
         why += (f"; {unread} item(s) could not be read and stand as they were -- that is a "
                 f"failure to widen, not a finding that there was nothing to widen")
+    if unbudgeted:
+        why += (f"; {unbudgeted} item(s) stand as they were because the budget of {episodes} "
+                f"episode(s) was spent before theirs was reached -- nobody looked at those, "
+                f"which is not a finding about them either")
     return Widened(items=tuple(kept), widened=widened, clipped=clipped, aligned=moved,
-                   gone=vanished, unread=unread, by_chunk=by_chunk, why=why)
+                   gone=vanished, unread=unread, not_read=unbudgeted, by_chunk=by_chunk, why=why)

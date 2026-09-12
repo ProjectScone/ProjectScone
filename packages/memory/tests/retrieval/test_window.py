@@ -21,9 +21,9 @@ from __future__ import annotations
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
-from scone_memory.core.errors import InvalidInput
+from scone_memory.core.errors import InvalidInput, SconeError
 from scone_memory.core.models import RecallItem
-from scone_memory.retrieval.window import MAX_WINDOW, widen
+from scone_memory.retrieval.window import MAX_EPISODES, MAX_WINDOW, widen
 
 pytestmark = pytest.mark.asyncio
 
@@ -172,3 +172,82 @@ async def test_moving_to_a_character_boundary_is_not_hitting_the_edge():
     assert widened.clipped == 0, "neither end of this window met either end of the episode"
     assert widened.aligned == 1, widened.record()
     assert "character" in widened.why, widened.why
+
+
+async def test_the_episode_budget_counts_reads_that_failed():
+    """A bound on work that only counts the work that succeeded is not a
+    bound. A failed read never entered the cache, so `episodes=1` against
+    a store failing every read performed one read per item -- the
+    caller's budget asked for one.
+    """
+    engine = await memory()
+    reads = 0
+    real = engine.episode
+
+    async def failing(space, episode_id):
+        nonlocal reads
+        reads += 1
+        raise SconeError("the store is not answering")
+
+    # Built by hand: five items in five distinct episodes is the shape
+    # this bound is about, and how many chunks a corpus happens to yield
+    # is not the point of the test.
+    items = [RecallItem(chunk_id=index, episode_id=500 + index, text="x", score=1.0,
+                        created_at="2026-09-12", start=0, end=1) for index in range(5)]
+    try:
+        engine.episode = failing  # type: ignore[method-assign]
+        widened = await widen(engine, "default", items, before=20, after=20, episodes=1)
+    finally:
+        engine.episode = real  # type: ignore[method-assign]
+        await engine.close()
+    assert reads == 1, f"asked for 1 episode, read {reads}"
+    assert widened.items == tuple(items), "items that could not be widened stand as they were"
+    assert widened.unread == 1, widened.record()
+    assert widened.not_read == len(items) - 1, widened.record()
+    assert "budget" in widened.why, widened.why
+
+
+async def test_repeated_failures_for_one_episode_are_read_once():
+    """Several items from one unavailable episode are one failed read,
+    and each item still has to be accounted for."""
+    engine = await memory(target=40)
+    reads = 0
+    real = engine.episode
+
+    async def failing(space, episode_id):
+        nonlocal reads
+        reads += 1
+        raise SconeError("the store is not answering")
+
+    try:
+        found = await engine.recall("default", "rust jib slew crane survey", limit=5)
+        items = list(found.items)
+        assert len({item.episode_id for item in items}) == 1, "one episode, several chunks"
+        assert len(items) >= 2
+        engine.episode = failing  # type: ignore[method-assign]
+        widened = await widen(engine, "default", items, before=20, after=20, episodes=4)
+    finally:
+        engine.episode = real  # type: ignore[method-assign]
+        await engine.close()
+    assert reads == 1, f"one episode, {reads} reads"
+    assert widened.unread == len(items), widened.record()
+    assert widened.not_read == 0, widened.record()
+
+
+async def test_a_budget_beyond_the_cap_and_a_fractional_window_are_refused():
+    """`MAX_EPISODES` documented a cap it did not enforce, so a caller
+    could ask for 101 reads; and a fractional window passed the `< 0`
+    test and failed much later as a TypeError from a byte slice."""
+    engine = await memory()
+    try:
+        found = await engine.recall("default", "rust jib", limit=1)
+        for bad in (0, -1, MAX_EPISODES + 1, 1.5, True):
+            with pytest.raises(InvalidInput):
+                await widen(engine, "default", found.items, before=10, after=10, episodes=bad)
+        for bad in (0.5, 1.5, True, "10"):
+            with pytest.raises(InvalidInput):
+                await widen(engine, "default", found.items, before=bad, after=10)
+            with pytest.raises(InvalidInput):
+                await widen(engine, "default", found.items, before=10, after=bad)
+    finally:
+        await engine.close()
