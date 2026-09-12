@@ -430,3 +430,16 @@ def test_a_multi_part_question_can_be_searched_a_part_at_a_time(client):
     assert whole["decomposition"]["split"] is False and "one thing" in whole["why"]
     assert client.get("/v1/recall/parts", params={"q": ""}, headers=auth()).status_code == 422
     assert client.get("/v1/recall/parts", params=asked).status_code == 401
+
+
+def test_parked_records_can_be_retried_on_purpose(client):
+    """Restarting the server retries everything; this retries what you
+    name. Without a worker there is nothing parked in this process, and
+    the endpoint says so rather than pretending it cleared something."""
+    assert client.post("/v1/episodes", json={"content": "Alice Chen works at Acme Robotics."},
+                       headers=auth()).status_code == 200
+    refused = client.post("/v1/consolidate/retry", json={}, headers=auth())
+    assert refused.status_code == 501 and "nothing is parked" in refused.json()["error"]
+    assert client.post("/v1/consolidate/retry", json={}).status_code == 401
+    assert client.post("/v1/consolidate/retry", json={"episodes": [1], "extra": 1},
+                       headers=auth()).status_code == 422

@@ -115,3 +115,37 @@ def test_build_worker_needs_both_chat_settings_and_serve_reports_the_lane():
         assert s["semantic_lane"] == "active" and s["pending_distill"] == 0 and s["last_distill"]["proposed"] == 1
         assert w2.running
     assert w2._task is None, "stopped with the app, not merely finished"
+
+
+def test_a_parked_record_is_retried_over_http_without_restarting_the_server():
+    """The point of the endpoint: the park lives in the server's process,
+    so before this the only way to try a record again was a restart — and
+    a restart retries everything."""
+    from scone_memory.providers.llm import ChatError
+
+    engine = asyncio.run(engine_with("Ana moved to Lisbon.", "Carol drinks black coffee."))
+    failing = FakeChat([ChatError("the model is down"), ChatError("the model is down"),
+                        ChatError("the model is down"), ChatError("the model is down")])
+    worker = ConsolidationWorker(engine, Distiller(engine, failing, max_attempts=1), ["default"],
+                                 interval_s=999)
+    with TestClient(create_app(engine, {"k": "default"}, worker=worker)) as c:
+        h = {"authorization": "Bearer k"}
+        assert c.get("/v1/capabilities", headers=h).json()["features"]["consolidation.retry"] is True
+        # The worker's own first pass runs on startup and both records fail
+        # there, so by the time a pass is asked for by hand they are parked
+        # and it has nothing left to try. That is the state under test.
+        report = c.post("/v1/consolidate", json={"scope": "distill"}, headers=h).json()
+        assert report["parked"] == 2 and report["episodes"] == 0, report
+        parked = sorted(worker.distiller.parked("default"))
+        assert len(parked) == 2, parked
+
+        one = c.post("/v1/consolidate/retry", json={"episodes": [parked[0]]}, headers=h).json()
+        assert (one["cleared"], one["unparked"], one["unknown"]) == (1, 1, 0), one
+        assert one["parked_now"] == 1, "the record we did not name stays parked"
+
+        nothing = c.post("/v1/consolidate/retry", json={"episodes": [999999]}, headers=h).json()
+        assert (nothing["cleared"], nothing["unknown"]) == (0, 1), nothing
+        assert nothing["parked_now"] == 1, "an unknown id changes nothing"
+
+        rest = c.post("/v1/consolidate/retry", json={}, headers=h).json()
+        assert rest["cleared"] == 1 and rest["parked_now"] == 0, rest

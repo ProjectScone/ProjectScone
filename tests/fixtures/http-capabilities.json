@@ -73,6 +73,7 @@
       "answers.temporal": true,
       "answers.routed": true,
       "recall.parts": true,
+      "consolidation.retry": false,
       "graph.health": true,
       "recall.graph_boost": true,
       "graph.knowledge_paging": true,

@@ -568,6 +568,43 @@ lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
 
+## Trying a parked record again, on purpose
+
+A record the extractor keeps failing on is **parked** after
+`SCONE_DISTILL_MAX_ATTEMPTS` tries, and reported as failed without
+another model call. That is right: a poisoned record should not burn a
+call every pass forever.
+
+But the park lives in the **running process**. Until now the only way to
+try a parked record again was to restart the server — which un-parks
+*everything*, including the records there was every reason to leave
+alone. So there is a deliberate version:
+
+```bash
+curl -XPOST $SCONE/v1/consolidate/retry -H "$AUTH" -d '{"episodes": [412]}'
+# {"cleared": 1, "unparked": 1, "unknown": 0, "asked": 1, "parked_now": 3}
+```
+
+`POST /v1/consolidate/retry` (capability `consolidation.retry`, present
+only when a consolidation worker is configured). With no `episodes` it
+retries every failure the running distiller holds for the space.
+
+- **`cleared` and `unparked` are counted apart.** A record with one
+  failure of five against it is not the same as one that has been given
+  up on, and a single number for both would hide which happened.
+- **The durable attempt count is not reset.** A retry that works still
+  shows it took two goes, which is what the job item's `attempts` is for.
+- **An unknown id is reported, not refused.** A record may have succeeded
+  since it last failed, so `unknown` counts ids with nothing recorded
+  against them rather than failing the whole call.
+- **`parked_now` is what is left**, so a caller can tell "I cleared the
+  one I named" from "I cleared the lot".
+
+There is deliberately **no `scone retry`**. The park is in the process
+that holds it, and a command-line invocation is a *new* process with
+nothing parked in it — a CLI retry would report success and do nothing.
+`scone distill` already retries everything, for the same reason.
+
 ## Keeping a space in step with a directory
 
 `map` remembers the files under a directory and notices when it has seen

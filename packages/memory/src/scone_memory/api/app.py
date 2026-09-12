@@ -46,6 +46,20 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
+class RetryBody(BaseModel):
+    """Which parked records to let the next pass try again.
+
+    ``episodes`` names them; omitting it retries every failure the running
+    distiller holds for this space. Naming them is the point of the
+    endpoint: restarting the process already retries everything, and that
+    is usually not what anyone wants.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    episodes: Optional[list[int]] = None
+
+
 class ConsolidateBody(BaseModel):
     """One pass by hand: ``distill`` runs the worker's pass (extraction,
     retention and, when configured, derivation); ``derive`` runs only the
@@ -369,7 +383,8 @@ def create_app(
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if conversations:
@@ -836,6 +851,30 @@ def create_app(
             return JSONResponse({"error": "no consolidation worker configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL, or SCONE_RETAIN)"}, status_code=501)
         report = await worker.run_once(space)
         return JSONResponse({"space": space, "scope": "distill", **report.as_payload()})
+
+    @app.post("/v1/consolidate/retry")
+    async def post_consolidate_retry(body: RetryBody, space: str = Depends(space_for)) -> JSONResponse:
+        """Let the next pass try parked records again, on purpose.
+
+        A record the extractor keeps failing on is parked so it does not
+        burn a model call every pass. The park lives in this process, so
+        the only other way to try one again is to restart the server —
+        which un-parks **everything**, including the records there was
+        every reason to leave alone.
+
+        The durable attempt count is not reset: a retry that works still
+        shows it took two goes. Ids with nothing recorded against them are
+        reported as unknown rather than refused, since a record may have
+        succeeded since it last failed.
+        """
+        distiller = getattr(worker, "distiller", None) if worker is not None else None
+        if distiller is None:
+            return JSONResponse(
+                {"error": "no consolidation worker configured, so nothing is parked in this "
+                          "process to retry (SCONE_CHAT_URL and SCONE_CHAT_MODEL)"},
+                status_code=501)
+        again = await distiller.retry(space, episodes=body.episodes)
+        return JSONResponse({"parked_now": len(distiller.parked(space)), **again.record()})
 
     @app.post("/v1/facts/decide")
     async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
