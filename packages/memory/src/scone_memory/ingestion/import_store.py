@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from ..agents._encrypted_store import EncryptedRecordStore
 from ..agents.catalog import Identifier
@@ -36,6 +36,13 @@ class DocumentImportSpec(BaseModel):
     video_ocr: bool = False
     deadline_s: float = Field(default=120.0, gt=0, le=300, allow_inf_nan=False)
     max_attempts: int = Field(default=3, ge=1, le=4)
+
+    @model_serializer(mode='wrap')
+    def serialize_selection(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result: dict[str, object] = handler(self)
+        if not self.video_ocr:
+            result.pop('video_ocr', None)
+        return result
 
     @model_validator(mode='after')
     def valid(self) -> Self:

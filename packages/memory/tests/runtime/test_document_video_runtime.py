@@ -99,3 +99,13 @@ async def test_replaced_ocr_binary_refuses_before_invocation(tmp_path):
     (tmp_path / 'tesseract').write_text('#!/bin/sh\nexit 2\n')
     with pytest.raises(InvalidInput, match='executable changed'):
         await configured.parser._engine.recognize(b'not-an-image')
+
+
+def test_default_import_choice_preserves_legacy_serialization():
+    from scone_memory.ingestion.import_store import DocumentImportSpec
+    spec = DocumentImportSpec(attachment_id='a' * 64, filename='notes.txt', parser_revision='v1')
+    assert 'video_ocr' not in spec.model_dump()
+    assert b'video_ocr' not in spec.model_dump_json().encode()
+    assert DocumentImportSpec.model_validate_json(spec.model_dump_json()) == spec
+    selected = DocumentImportSpec(attachment_id='a' * 64, filename='slides.mp4', parser_revision='v1', video_ocr=True)
+    assert selected.model_dump()['video_ocr'] is True

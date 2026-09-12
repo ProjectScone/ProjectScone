@@ -7,7 +7,7 @@ import re
 from typing import Optional
 
 from ._wire import ResourceClient, address, bounded_body, cursor, digest, identifier, integer, invalid, items, record
-from .document_models import (DocumentAttachment, DocumentFormats, DocumentRequest, DocumentResult, DocumentStatus, PdfOcr, check_ocr, filename)
+from .document_models import (DocumentAttachment, DocumentFormats, DocumentRequest, DocumentResult, DocumentStatus, PdfOcr, check_ocr, check_video_ocr, filename)
 
 
 @dataclass(frozen=True)
@@ -60,26 +60,31 @@ class DocumentJobs(ResourceClient):
         return DocumentPage(values, next_after)
 
     def start(self, import_id: str, *, attachment_id: str, filename: str,
-              pdf_ocr: Optional[PdfOcr] = None) -> DocumentStatus:
-        body = self._submission(import_id, attachment_id, filename, pdf_ocr)
+              pdf_ocr: Optional[PdfOcr] = None, video_ocr: bool = False) -> DocumentStatus:
+        body = self._submission(import_id, attachment_id, filename, pdf_ocr, video_ocr)
         self._check('documents.jobs', mutation=True)
         status = DocumentStatus.from_json(self._client._request('POST', '/v1/document-jobs', json=body),
                                           expected_space=self.expected_space, import_id=import_id)
         request = self.request(import_id)
-        if (request.spec.attachment_id != attachment_id or request.spec.filename != filename or request.spec.pdf_ocr != pdf_ocr):
+        if (request.spec.attachment_id != attachment_id or request.spec.filename != filename
+                or request.spec.pdf_ocr != pdf_ocr or request.spec.video_ocr != video_ocr):
             raise invalid('document start acknowledgement')
         status.match(request)
         return status
 
     @staticmethod
-    def _submission(import_id: str, attachment_id: str, name: str, ocr: Optional[PdfOcr]) -> dict[str, object]:
+    def _submission(import_id: str, attachment_id: str, name: str, ocr: Optional[PdfOcr],
+                    video_ocr: bool = False) -> dict[str, object]:
         identifier(import_id)
         digest(attachment_id)
         filename(name)
         check_ocr(name, ocr)
+        check_video_ocr(name, video_ocr, ocr)
         body: dict[str, object] = {'import_id': import_id, 'attachment_id': attachment_id, 'filename': name}
         if ocr is not None:
             body['pdf_ocr'] = ocr.to_json()
+        if video_ocr:
+            body['video_ocr'] = True
         return bounded_body(body)
 
     def result(self, import_id: str) -> DocumentResult:
