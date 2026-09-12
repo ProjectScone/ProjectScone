@@ -285,6 +285,30 @@ process releases its lock; uncertain journal attempts still prevent replay.
 `aclose` rejects new admissions and waits for cooperative task cancellation.
 Use one owning process for served cancellation; this is not distributed execution.
 
+## Serve run controls
+
+Pass `agent_run_service=service` alongside the same `agent_catalog` and
+`agent_plan_store` objects to `create_app`. The service must use that app's memory
+engine. The app advertises `agents.runs` only when this service is mounted and
+closes its owned tasks during lifespan shutdown; the caller still owns the engine
+and plan store.
+
+- `POST /v1/agent-runs` accepts `run_id`, `workflow_id`, `plan_revision` and
+  `question`, returning 202 after bounded admission. It requires a write key.
+- `GET /v1/agent-runs?limit=20&after=...` lists space-scoped progress; individual
+  status is at `/v1/agent-runs/{run_id}`.
+- `GET /v1/agent-runs/{run_id}/request` returns the original invocation snapshot.
+- `GET /v1/agent-runs/{run_id}/result` verifies retained sources and current host
+  scope/model bindings without calling a model or resuming tasks.
+- `POST /v1/agent-runs/{run_id}/cancel` accepts an empty body or `{}` and requires
+  a write key. Unknown cancellation options are rejected.
+
+Reads accept read keys. All routes enforce the current key's space, reject
+deleted spaces and return non-cacheable responses. Full admission returns 429;
+stale plans, changed scope/configuration and uncertain outcomes return 409.
+After a lost start response, inspect the original run ID before deciding to
+submit again. Never automatically replay an interrupted model call.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.
@@ -294,7 +318,7 @@ Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
 Declared dependency handoffs and sequential recovery are implemented natively.
-Parallel workflow scheduling, dynamic handoffs and HTTP run management remain
-separate work. Saved plan editing is available through the native store and
+Parallel workflow scheduling and dynamic handoffs remain separate work.
+Saved plan editing is available through the native store and
 authenticated HTTP configuration routes. Catalog factories
 remain host-managed application code.

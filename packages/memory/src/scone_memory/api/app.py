@@ -37,6 +37,7 @@ from . import file_documents, pdf_documents
 if TYPE_CHECKING:
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
+    from ..agents.run_service import AgentRunService
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -216,6 +217,7 @@ def create_app(
     vision_available=None,
     agent_catalog: AgentCatalog | None = None,
     agent_plan_store: AgentPlanStore | None = None,
+    agent_run_service: AgentRunService | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -228,14 +230,24 @@ def create_app(
 
     if (agent_catalog is None) != (agent_plan_store is None):
         raise ValueError("Agent catalog and plan store must be configured together")
+    if agent_run_service is not None:
+        if agent_catalog is None or agent_plan_store is None:
+            raise ValueError("Agent run service requires the host catalog and plan store")
+        agent_run_service.require_host(engine, agent_plan_store, agent_catalog)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if worker is not None:
             worker.start()
-        yield
-        if worker is not None:
-            await worker.stop()
+        try:
+            yield
+        finally:
+            try:
+                if agent_run_service is not None:
+                    await agent_run_service.aclose()
+            finally:
+                if worker is not None:
+                    await worker.stop()
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
@@ -263,7 +275,7 @@ def create_app(
     app.state.keys = dict(keys)
     app.state.worker = worker
 
-    async def space_for(request: Request) -> str:
+    def current_space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         if scheme.lower() != "bearer" or not token.strip():
@@ -274,9 +286,17 @@ def create_app(
         role = app.state.roles.get(token.strip(), "full")
         if not permitted(role, request.method, request.url.path):
             raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
-        # A deleted space's key answers 404 on every route: the space is
-        # gone, and a key left in config must not bring it back.
+        return space
+
+    def assert_current_space(request: Request, space: str) -> None:
+        if current_space_for(request) != space:
+            raise Unauthorized("key scope changed during request")
+
+    async def space_for(request: Request) -> str:
+        space = current_space_for(request)
+        # The storage read can yield while host keys or roles are updated.
         when = await engine.space_deleted(space)
+        assert_current_space(request, space)
         if when is not None:
             raise NotFound(f"space {space!r} was deleted at {when}")
         return space
@@ -352,6 +372,8 @@ def create_app(
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
             features["agents.plans"] = True
+        if agent_run_service is not None:
+            features["agents.runs"] = True
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
@@ -368,6 +390,9 @@ def create_app(
     if agent_catalog is not None and agent_plan_store is not None:
         from .agent_plans import mount_agent_plan_routes
         mount_agent_plan_routes(app, agent_catalog, agent_plan_store, space_for)
+    if agent_run_service is not None:
+        from .agent_runs import mount_agent_run_routes
+        mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
 
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)

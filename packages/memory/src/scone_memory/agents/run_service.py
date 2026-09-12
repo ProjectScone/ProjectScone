@@ -24,6 +24,8 @@ from ..retrieval.recall_scope import RecallScope
 @dataclass(frozen=True)
 class AgentRunStatus:
     run_id: str
+    space: str
+    created_at: str
     workflow_id: str
     plan_revision: int
     status: str
@@ -32,6 +34,12 @@ class AgentRunStatus:
     inflight: str | None
     outcome_unknown: bool
     error_class: str | None
+
+
+@dataclass(frozen=True)
+class AgentRunStatusPage:
+    items: tuple[AgentRunStatus, ...]
+    next_after: str | None
 
 
 class AgentRunService:
@@ -67,6 +75,10 @@ class AgentRunService:
         self._failures: dict[tuple[str, str], str] = {}
         self._owners: dict[tuple[str, str], int] = {}
         self._closed = self._closing = False
+
+    def require_host(self, memory: MemoryEngine, plans: AgentPlanStore, catalog: AgentCatalog) -> None:
+        if memory is not self._memory or plans is not self._plans or catalog is not self._catalog:
+            raise ValueError('Agent run service must use this host memory, plan store and catalog')
 
     def _available(self) -> None:
         if self._closed or self._closing:
@@ -129,25 +141,46 @@ class AgentRunService:
         identity = (request.space, request.run_id)
         active = identity in self._tasks
         unknown = bool(progress and any(name not in progress.completed_steps for name in progress.attempts))
-        return AgentRunStatus(request.run_id, request.plan.plan.workflow_id, request.plan.revision,
-            ('completed' if progress and progress.status == 'completed' else
-             'cancelled' if request.cancel_requested_at is not None and not active else
-             progress.status if progress else 'registered'), active,
-            progress.completed_steps if progress else (), progress.inflight if progress else None,
-            unknown and not active, progress.error_class if progress else self._failures.get(identity))
+        return AgentRunStatus(run_id=request.run_id, space=request.space,
+            created_at=request.created_at.isoformat(), workflow_id=request.plan.plan.workflow_id,
+            plan_revision=request.plan.revision,
+            status=('completed' if progress and progress.status == 'completed' else
+                    'cancelled' if request.cancel_requested_at is not None and not active else
+                    progress.status if progress else 'registered'), active_local=active,
+            completed_steps=progress.completed_steps if progress else (),
+            inflight=progress.inflight if progress else None, outcome_unknown=unknown and not active,
+            error_class=progress.error_class if progress else self._failures.get(identity))
 
     async def status(self, space: str, run_id: str) -> AgentRunStatus | None:
         await self._space(space)
         request = self._runs.get(space, run_id)
         return None if request is None else self._status(request)
 
+    async def list(self, space: str, *, limit: int = 20, after: str | None = None) -> AgentRunStatusPage:
+        await self._space(space)
+        page = self._runs.list(space, limit=limit, after=after)
+        items = []
+        for request in page.items:
+            try:
+                items.append(self._status(request))
+            except WorkflowError as error:
+                items.append(AgentRunStatus(run_id=request.run_id, space=request.space,
+                    created_at=request.created_at.isoformat(), workflow_id=request.plan.plan.workflow_id,
+                    plan_revision=request.plan.revision, status='unavailable', active_local=False,
+                    completed_steps=(), inflight=None, outcome_unknown=True, error_class=error.code))
+        return AgentRunStatusPage(tuple(items), page.next_after)
+
     async def request(self, space: str, run_id: str) -> AgentRunRequest | None:
         await self._space(space)
         return self._runs.get(space, run_id)
 
     async def start(self, space: str, run_id: str, *, workflow_id: str,
-                    plan_revision: int, question: str) -> AgentRunStatus:
+                    plan_revision: int, question: str,
+                    admission_guard: Callable[[], None] | None = None) -> AgentRunStatus:
         await self._space(space)
+        if admission_guard is not None:
+            admission_guard()
+        self._available()
         _name(run_id)
         _name(workflow_id)
         _integer(plan_revision, 1, 2**63 - 1)
@@ -232,8 +265,12 @@ class AgentRunService:
             await asyncio.shield(task)
         return await self.status(space, run_id)
 
-    async def cancel(self, space: str, run_id: str) -> AgentRunStatus | None:
+    async def cancel(self, space: str, run_id: str, *,
+                     admission_guard: Callable[[], None] | None = None) -> AgentRunStatus | None:
         await self._space(space)
+        if admission_guard is not None:
+            admission_guard()
+        self._available()
         request = self._runs.get(space, run_id)
         if request is None:
             return None
@@ -274,7 +311,11 @@ class AgentRunService:
             raise WorkflowError('not_completed')
         workflow = self._open(request)
         try:
-            return await workflow.read_result(run_id, request.question)
+            result = await workflow.read_result(run_id, request.question)
+            if self._scope(space).as_dict() != request.scope:
+                raise WorkflowError('run_scope_changed')
+            request.plan.checked_plan(self._catalog)
+            return result
         finally:
             workflow.close()
 
