@@ -370,6 +370,50 @@ lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
 
+## Memory as a tree of paths
+
+An agent that can list and read paths can explore a space without being
+taught an API for every kind of thing in it. A tree is opened for one
+space:
+
+```
+/episodes/12.md          one episode, exactly as it was stored
+/facts/alice%20chen.md   every claim about a subject, each citing its fact
+/entities/acme.md        an entity: its relations, what follows, its values
+/notes/plan.md           a note an agent wrote
+```
+
+It holds nothing of its own. Every path resolves to something the engine
+already has, and reading one changes nothing — which is the only reason a
+filesystem is a safe shape for memory rather than a second place where
+things are true.
+
+- **The space is not in the path.** A tree is opened for one space, so
+  there is no path that could name another and nothing to escape from.
+  `..` is refused rather than resolved.
+- **Names are encoded, not cleaned.** A subject called `a/b c` is a real
+  subject; its file is `a%2Fb%20c.md`, and two different names never
+  become one file.
+- **A note is an episode.** Writing `/notes/plan.md` remembers an episode
+  whose source is `fs:/notes/plan.md`, so it is recalled, distilled,
+  forgotten and exported like anything else. Writing it again supersedes
+  it and keeps what was there; nothing stored is rewritten.
+- **Nothing is writable unless the owner says so**
+  (`FilesystemPolicy(writable=True)`), and then only under `/notes`.
+- **A write that would land on top of a newer one is refused**, not
+  resolved: `write(..., if_version=...)` takes the note's own version, as
+  a read reports it. A space revision would not do — it moves whenever
+  anything at all is written, so it would refuse writers who conflicted
+  with nobody.
+- **`search`** answers a query in paths, using the engine's ordinary
+  recall underneath: a passage written as a note is answered at its note
+  path, and a matching claim at the page of its subject.
+- **Every action is recorded** where the space keeps its events —
+  `filesystem.list`, `.read`, `.write`, `.search` and `.refused` — each
+  carrying the path under one key, so an audit reads without knowing
+  which action it was. What was searched for is not recorded: an audit is
+  for what was done, not for what was wondered.
+
 ## Measured and not shipped
 
 Two cheap ideas for better recall were measured on this machine and left
