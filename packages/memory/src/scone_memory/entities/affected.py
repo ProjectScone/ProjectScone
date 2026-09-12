@@ -24,8 +24,10 @@ No model is called and nothing is re-embedded.
 
 from __future__ import annotations
 
+import json
+
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -107,10 +109,12 @@ class Blast:
     #: Whether the byte budget was spent on the answer's own framing
     #: before a single dependant could be listed.
     framing_spent_budget: bool = False
-    #: What that framing cost. A budget charged invisibly is a budget the
-    #: caller cannot reason about: this is the number subtracted from
-    #: ``max_bytes`` before the first dependant was measured.
-    framing_bytes: int = 0
+    #: What this answer serializes to, which is what ``max_bytes``
+    #: bounds and what the caller receives. Reported rather than left to
+    #: be inferred: a budget enforced invisibly is one nobody can check.
+    #: It sits inside the record it measures, so it is settled by
+    #: measuring until it stops moving.
+    bytes_spent: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
@@ -120,16 +124,21 @@ class Blast:
                 "deepest": self.deepest, "stopped_at_depth": self.stopped_at_depth,
                 "not_listed": self.not_listed, "graph_moved": self.graph_moved,
                 "framing_spent_budget": self.framing_spent_budget,
-                "framing_bytes": self.framing_bytes, "why": self.why,
+                "bytes_spent": self.bytes_spent, "why": self.why,
                 "entities": [[r.label, r.depth, r.through, r.depends_on] for r in self.reached]}
 
 
 def _why(label: str, said: str, listed: int, not_listed: int, more_beyond: bool,
-         max_hops: int, limit: int, max_bytes: int) -> str:
-    """The answer's own prose, built in one place because it is charged
-    against the caller's budget before it is written into the answer. An
-    estimate here would drift from the sentence it estimates; the charge
-    is this function called with its widest arguments."""
+         max_hops: int, limit: int) -> str:
+    """The answer's own prose, built in one place because the answer is
+    measured before it is returned and an estimate would drift from the
+    sentence it estimates.
+
+    ``max_bytes`` is deliberately not named here. It would put the budget
+    inside the thing the budget measures, so the answer's size would move
+    with the number it was given -- and then the refusal below could not
+    promise that the size it names is a budget that works. ``bytes_spent``
+    and ``not_listed`` carry the same information without that knot."""
     why = (f"{listed} thing(s) rest on {label!r}, nearest first, through "
            f"{', '.join(DEPENDS_ON)}")
     if more_beyond:
@@ -137,7 +146,8 @@ def _why(label: str, said: str, listed: int, not_listed: int, more_beyond: bool,
                 f"beyond is unexplored rather than absent")
     if not_listed:
         why += (f"; {not_listed} more were reached and not listed, because the limit of {limit} "
-                f"or the budget of {max_bytes} byte(s) was spent -- they are counted in by_depth")
+                f"or the byte budget was spent -- bytes_spent says what this answer cost, and "
+                f"all of them are counted in by_depth")
     return why + (f"; {said}; this is what this graph holds, which is the code it was given "
                   f"and not the whole of any codebase")
 
@@ -161,6 +171,52 @@ async def _read_graph(engine: "MemoryEngine", space: str, mode: StatusMode,
     # answer; only whether it settled is still in question.
     projection, covered = await engine.entities.projection(space, mode=mode, when=moment)
     return projection, covered, (await engine.documents.revision(space)) != projection.revision
+
+
+def _serialized(blast: "Blast") -> int:
+    """The bytes a caller actually receives. ``runtime/cli.py`` prints
+    exactly ``json.dumps(record())``, and that is the thing ``max_bytes``
+    has to bound -- not the raw strings inside it. JSON writes one emoji
+    as twelve bytes and puts every key around them, so a budget charged
+    against UTF-8 was short by a factor of three on a name like that.
+    Measured, because an estimate of a serializer is a guess about a
+    serializer."""
+    return len(json.dumps(blast.record()).encode())
+
+
+def _settle(blast: "Blast") -> "Blast":
+    """``blast`` with ``bytes_spent`` telling the truth about itself.
+
+    The number sits inside the record it measures, so writing it changes
+    it. Measure again until it stops moving; only a digit's worth of
+    steps is ever needed, and the cap keeps a pathological case finite
+    rather than trusting that claim."""
+    spent = 0
+    for _ in range(4):
+        one = replace(blast, bytes_spent=spent)
+        measured = _serialized(one)
+        if measured == spent:
+            return one
+        spent = measured
+    return replace(blast, bytes_spent=spent)
+
+
+def _within(blast: "Blast", max_bytes: int) -> "Blast":
+    """``blast`` if it fits, otherwise a refusal naming what it would cost.
+
+    An answer with nothing left to drop cannot be made smaller without
+    dropping what it says about itself, and an answer that has quietly
+    stopped saying what it covers is the failure this whole module is
+    written against. So the bound is kept and the caller is told the
+    number that would hold it."""
+    one = _settle(blast)
+    if one.bytes_spent > max_bytes:
+        raise InvalidInput(
+            f"this answer serializes to {one.bytes_spent} bytes and max_bytes is {max_bytes}, with nothing "
+            f"left to drop -- what remains is the target, the status and what the read covered, "
+            f"and an answer that stops saying those is worse than no answer; ask again with "
+            f"max_bytes at least {one.bytes_spent}, which this answer does not vary with")
+    return one
 
 
 def _whole(value: object, name: str, top: int) -> int:
@@ -216,18 +272,19 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
 
     found = resolve(projection, name.strip())
     if found.status == "not_found" or not found.candidates:
-        return Blast(target=name, status="unknown", graph_moved=moved,
+        return _within(Blast(target=name, status="unknown", graph_moved=moved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} is not in this graph ({said}) -- which is not a finding that "
-                         f"nothing depends on it, only that this memory has not been given it")
+                         f"nothing depends on it, only that this memory has not been given it"),
+                       max_bytes)
     if found.status == "ambiguous":
         # The resolver's own verdict, not a score comparison of my own
         # invention: it knows what "ambiguous" means here and I do not.
-        return Blast(target=name, status="ambiguous", graph_moved=moved,
+        return _within(Blast(target=name, status="ambiguous", graph_moved=moved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"{name!r} names more than one thing in this graph "
                          f"({', '.join(one.label for one in found.candidates[:4])}); "
-                         f"ask for one of them by its own name ({said})")
+                         f"ask for one of them by its own name ({said})"), max_bytes)
     target = found.candidates[0].entity_id
     label = {entity.entity_id: entity.label for entity in projection.entities}
 
@@ -246,7 +303,7 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # walk turns out to need and the charge is made before the walk.
     shown = label.get(target, name)
     framing = len(shown.encode()) + len(
-        _why(shown, said, limit, limit, True, max_hops, limit, max_bytes).encode())
+        _why(shown, said, limit, limit, True, max_hops, limit).encode())
     room = max_bytes - framing
     framing_spent = room <= 0
 
@@ -283,20 +340,39 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
                 spent += size
             queue.append((dependant, step))
     if not listed and not not_listed:
-        return Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved,
-                     framing_bytes=framing,
+        return _within(Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved,
                      mode=mode, at=moment.isoformat(), partial_read=limit_hit,
                      why=f"nothing in this graph rests on {shown!r} through "
                          f"{', '.join(DEPENDS_ON)} ({said}) -- a memory holds the code it was "
-                         f"given, so this is not a finding that nothing depends on it")
+                         f"given, so this is not a finding that nothing depends on it"), max_bytes)
 
-    why = _why(shown, said, len(listed), not_listed, more_beyond, max_hops, limit, max_bytes)
-    if framing_spent:
-        why += (f"; nothing could be listed at all: the answer's own framing costs {framing} "
-                f"byte(s) and the budget was {max_bytes}, so the budget was spent before the "
-                f"first dependant -- by_depth is the whole shape of what was reached")
-    return Blast(target=shown, status="found", reached=tuple(listed),
-                 by_depth=counted, deepest=deepest, stopped_at_depth=more_beyond,
-                 not_listed=not_listed, mode=mode, at=moment.isoformat(),
-                 partial_read=limit_hit, graph_moved=moved,
-                 framing_spent_budget=framing_spent, framing_bytes=framing, why=why)
+    reached = len(listed)
+
+    def answer(kept: int) -> Blast:
+        """The answer carrying the first ``kept`` dependants, claiming to
+        cost ``spent`` bytes. Nothing here is said in a sentence of its
+        own when ``kept`` is zero: the clause naming what was dropped and
+        why already covers it, and an extra sentence at exactly one size
+        would break the monotonicity the fit below relies on."""
+        dropped = not_listed + reached - kept
+        return Blast(target=shown, status="found", reached=tuple(listed[:kept]),
+                     by_depth=counted, deepest=deepest, stopped_at_depth=more_beyond,
+                     not_listed=dropped, mode=mode, at=moment.isoformat(),
+                     partial_read=limit_hit, graph_moved=moved,
+                     framing_spent_budget=not kept and bool(reached or not_listed),
+                     why=_why(shown, said, kept, dropped, more_beyond, max_hops, limit))
+
+    whole = _settle(answer(reached))
+    if whole.bytes_spent <= max_bytes:
+        return whole
+    # Every answer below the whole one carries the same clauses, so its
+    # serialized length rises with the count and the largest that fits
+    # can be bisected rather than walked down one dependant at a time.
+    low, high = 0, reached - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _settle(answer(middle)).bytes_spent <= max_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return _within(answer(low), max_bytes)

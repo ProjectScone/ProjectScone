@@ -26,7 +26,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
-from scone_memory.entities.affected import MAX_HOPS, MAX_NAME, affected
+from scone_memory.entities.affected import MAX_BYTES, MAX_HOPS, MAX_NAME, affected
 
 pytestmark = pytest.mark.asyncio
 
@@ -364,35 +364,85 @@ async def test_a_name_is_bounded_in_the_bytes_it_costs_not_the_characters():
         await engine.close()
 
 
-async def test_the_answer_s_own_framing_is_charged_against_the_byte_budget():
+async def wide(count=8):
+    """One module with many direct dependants, so a budget has something
+    to drop. The narrow fixture has exactly one, and dropping it costs
+    more than it saves -- the clause explaining the omission is longer
+    than the entity omitted."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    await engine.remember("default", SOURCES["pkg/store.py"], source="pkg/store.py")
+    for index in range(count):
+        await engine.remember("default", f"from pkg.store import Shelf\n\n\ndef put{index}() -> str:\n"
+                              f"    return Shelf().keep('{index}')\n", source=f"pkg/reader{index}.py")
+    return engine
+
+
+async def test_a_budget_drops_dependants_from_the_tail_and_says_how_many():
     """`max_bytes` bounded the entity list and nothing else, so `target`
-    and `why` -- both of which echo the name -- were spent outside it.
-    Charge the framing first: a budget too small to hold it lists
-    nothing and says the framing spent it, rather than quietly
-    returning ten times what was asked for."""
-    engine = await graphed()
+    and `why` -- which echo the name -- were spent outside it and the
+    answer came back larger than the budget that asked for it. The whole
+    serialized record is bounded now.
+
+    Asserted over the range rather than at one budget: the count kept
+    never rises as the budget falls, every answer fits the budget it was
+    given, what is kept is always a prefix of the whole, and somewhere in
+    the range a genuine part of the list is served -- which is the case
+    all-or-nothing would pass a single-point test without serving."""
+    import json
+
+    engine = await wide()
     try:
         whole = await affected(engine, "default", "pkg.store")
-        assert whole.reached and whole.framing_bytes > 0, whole.record()
-        tiny = await affected(engine, "default", "pkg.store", max_bytes=1)
-        # The one that proves the charge rather than the flag: four bytes
-        # of room is less than any entity costs, while `max_bytes` here is
-        # hundreds -- so a budget that forgot to subtract its own framing
-        # would list the dependant happily.
-        squeezed = await affected(engine, "default", "pkg.store",
-                                  max_bytes=whole.framing_bytes + 4)
+        assert len(whole.reached) >= 6, whole.record()
+        with pytest.raises(InvalidInput) as raised:
+            await affected(engine, "default", "pkg.store", max_bytes=1)
+        least = max(int(word) for word in str(raised.value).replace(",", " ").split()
+                    if word.isdigit())
+        steps = [(budget, await affected(engine, "default", "pkg.store", max_bytes=budget))
+                 for budget in range(whole.bytes_spent, least - 1, -8)]
     finally:
         await engine.close()
-    assert not tiny.reached, tiny.record()
-    assert tiny.not_listed == len(whole.reached), (tiny.record(), whole.record())
-    assert tiny.framing_spent_budget is True, tiny.record()
-    assert "framing" in tiny.why, tiny.why
 
-    cheapest = min(len(one.label.encode()) + len(one.depends_on.encode()) for one in whole.reached)
-    assert cheapest > 4, cheapest
-    assert squeezed.framing_spent_budget is False, squeezed.record()
-    assert not squeezed.reached, squeezed.record()
-    assert squeezed.not_listed == len(whole.reached), (squeezed.record(), whole.record())
+    kept = [len(answer.reached) for _, answer in steps]
+    assert kept[0] == len(whole.reached), (kept, whole.record())
+    assert kept[-1] == 0, kept
+    assert any(0 < one < len(whole.reached) for one in kept), kept
+    assert all(before >= after for before, after in zip(kept, kept[1:])), kept
+    for budget, answer in steps:
+        assert len(json.dumps(answer.record()).encode()) <= budget, (budget, answer.record())
+        assert answer.bytes_spent <= budget, (budget, answer.record())
+        assert answer.reached == whole.reached[:len(answer.reached)], (budget, answer.record())
+        assert answer.not_listed == len(whole.reached) - len(answer.reached), (budget, answer.record())
+        # by_depth keeps the whole shape, so what was dropped is still counted.
+        assert sum(answer.by_depth.values()) == len(whole.reached), (budget, answer.record())
+
+
+async def test_a_budget_that_holds_no_dependant_at_all_says_so_or_is_refused():
+    """Two ends of the same bound. A budget that holds the answer but
+    not one dependant lists nothing and sets the flag; a budget that
+    cannot hold even that is refused, naming the number that would --
+    because what is left is the target, the status and what the read
+    covered, and an answer that stops saying those is worse than none."""
+    engine = await wide()
+    try:
+        whole = await affected(engine, "default", "pkg.store")
+        with pytest.raises(InvalidInput) as raised:
+            await affected(engine, "default", "pkg.store", max_bytes=1)
+        # The refusal names a budget that works, and this is the test of
+        # that promise: asked again at exactly that number, it answers.
+        least = max(int(word) for word in str(raised.value).replace(",", " ").split()
+                    if word.isdigit())
+        bare = await affected(engine, "default", "pkg.store", max_bytes=least)
+        with pytest.raises(InvalidInput):
+            await affected(engine, "default", "pkg.store", max_bytes=least - 1)
+    finally:
+        await engine.close()
+    assert bare.bytes_spent == least, (bare.record(), least)
+    assert not bare.reached, bare.record()
+    assert bare.framing_spent_budget is True, bare.record()
+    assert bare.not_listed == len(whole.reached), (bare.record(), whole.record())
+    assert "not listed" in bare.why, bare.why
 
 
 async def test_a_dependency_excluded_while_the_graph_was_read_is_not_reported():
@@ -458,3 +508,40 @@ async def test_a_ledger_that_will_not_hold_still_is_said_rather_than_passed_off(
     assert restless.graph_moved is True, restless.record()
     assert "moved under all" in restless.why, restless.why
     assert restless.record()["graph_moved"] is True, restless.record()
+
+
+async def test_the_budget_bounds_the_answer_the_caller_receives_not_the_strings_in_it():
+    """Charging the framing was the right idea measured in the wrong
+    unit. A caller receives `json.dumps(record())`; I charged raw UTF-8.
+    JSON escapes one emoji to twelve bytes and adds every key around
+    them, so `max_bytes=600` returned 631 and a 50-emoji name under 512
+    returned 1,682 -- the second because the unknown and ambiguous
+    branches return before the budget is ever consulted.
+
+    Measured on the serialized answer now, on every path out."""
+    import json
+
+    engine = await graphed()
+    try:
+        # This graph has one dependant, and dropping it costs more than
+        # it saves -- the clause explaining the omission is longer than
+        # the entity omitted -- so the whole answer is the smallest one.
+        full = (await affected(engine, "default", "pkg.store")).bytes_spent
+        for budget in (full, full + 1, 1_400, MAX_BYTES):
+            answer = await affected(engine, "default", "pkg.store", max_bytes=budget)
+            size = len(json.dumps(answer.record()).encode())
+            assert size <= budget, (budget, size, answer.record())
+            assert answer.bytes_spent == size, (answer.bytes_spent, size)
+
+        # A name that fits MAX_NAME and still cannot be echoed inside the
+        # budget: 50 emoji are 200 UTF-8 bytes and 600 JSON bytes, twice
+        # over. Refused, naming both numbers, rather than answered at
+        # three times what was asked for.
+        wide = "\N{GRINNING FACE}" * 50
+        assert len(wide.encode()) == MAX_NAME, len(wide.encode())
+        with pytest.raises(InvalidInput) as raised:
+            await affected(engine, "default", wide, max_bytes=512)
+        assert "512" in str(raised.value), str(raised.value)
+        assert "unknown" not in str(raised.value).lower() or "byte" in str(raised.value)
+    finally:
+        await engine.close()
