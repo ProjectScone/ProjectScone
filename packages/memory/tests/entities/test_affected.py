@@ -797,3 +797,48 @@ async def test_a_package_beside_a_module_of_the_same_name_wins_as_python_says():
         await engine.close()
     assert any(one.label == "pkg/shelf.py" for one in package.reached), package.record()
     assert not module.reached, module.record()
+
+
+async def test_a_spelling_is_matched_within_one_language_and_not_across_them():
+    """Four faults in one fallback, all found by Codex's reviewer against
+    the real TypeScript compiler rather than recalled lore.
+
+    The candidate list was one global tuple of every extension in
+    precedence order of my own invention, so: a Python import could land
+    on a TypeScript file; a `.tsx` importer's `./store` chose `store.tsx`
+    while `tsc --traceResolution` chooses `store.ts`; `index.tsx` beat
+    `index.ts` the same way; and `./foo.bar` had its unknown `.bar`
+    dropped and replaced, reaching `foo.ts` rather than `foo.bar.ts`.
+
+    A language's own resolution order is a fact about that language. It
+    is not shared between languages and it is not mine to order.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "export function keep(p: string) { return p; }\n",
+                              source="pkg/core.ts")
+        await engine.remember("default", "from .core import Base\n\n\n"
+                              "class Derived(Base):\n    pass\n", source="pkg/use.py")
+        python = await affected(engine, "default", "pkg/core.ts")
+    finally:
+        await engine.close()
+    # A Python import must never be answered with a TypeScript file.
+    assert not any(one.label == "pkg/use.py" for one in python.reached), python.record()
+
+
+def test_the_spellings_a_candidate_may_stand_for():
+    """The list itself, because it decides every match above and every
+    miss is silent. Orders confirmed against `tsc --traceResolution`
+    (TypeScript 7.0.2) by Codex, not from memory."""
+    from scone_memory.entities.affected import _spellings
+
+    assert _spellings("pkg/core", "py") == ("pkg/core.py", "pkg/core/__init__.py")
+    # TypeScript: .ts before .tsx, and the directory after every file.
+    typescript = _spellings("web/store", "ts")
+    assert typescript[:2] == ("web/store.ts", "web/store.tsx"), typescript
+    assert typescript.index("web/store/index.ts") > typescript.index("web/store.jsx"), typescript
+    assert "web/store.py" not in typescript, typescript
+    assert "pkg/core.ts" not in _spellings("pkg/core", "py"), _spellings("pkg/core", "py")
+    # An extension from no family this reader knows stands only for itself.
+    assert _spellings("web/foo", "bar") == ("web/foo.bar",), _spellings("web/foo", "bar")

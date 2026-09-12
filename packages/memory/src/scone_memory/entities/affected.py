@@ -233,20 +233,39 @@ def labels_of(projection: "EntityProjection", entity_id: str) -> str:
     return ""
 
 
-#: Spellings one stem may be written under. An import names one of them
-#: and the graph may hold another; `index` and `__init__` are the two
-#: ways a directory answers to its own name.
-SUFFIXES = ("py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs")
+#: How each language answers "which file did that import mean", in that
+#: language's own order, and what its directory form is. These are facts
+#: about the languages, not preferences: the TypeScript order is what
+#: `tsc --traceResolution` selects (7.0.2), and Python's is that a
+#: package shadows a module of the same name.
+#:
+#: One global list ordered by my own guess put a Python import on a
+#: TypeScript file, chose `store.tsx` where the compiler chooses
+#: `store.ts`, and preferred `index.tsx` to `index.ts`. A resolution
+#: order is not shared between languages and is not mine to invent.
+FAMILIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("py",), "__init__"),
+    (("ts", "tsx", "d.ts", "js", "jsx", "mjs", "cjs"), "index"),
+    (("go",), ""),
+    (("rs",), "mod"),
+)
 
 
 def _spellings(stem: str, suffix: str) -> tuple[str, ...]:
-    """The files a candidate named ``stem.suffix`` could have meant, the
-    likeliest first: the same directory under another extension, then the
-    directory itself answering to its own name."""
-    others = (suffix, *(one for one in SUFFIXES if one != suffix))
-    return (*(f"{stem}.{one}" for one in others),
-            f"{stem}/__init__.py",
-            *(f"{stem}/index.{one}" for one in others))
+    """The files a candidate named ``stem.suffix`` could have meant, in
+    the order that language resolves them, then its directory form.
+
+    A suffix belonging to no family this reader knows stands only for
+    itself. `./foo.bar` means `foo.bar`, and swapping the `.bar` it was
+    given for an extension it was not is how that import came to reach an
+    unrelated `foo.ts`.
+    """
+    for suffixes, directory in FAMILIES:
+        if suffix not in suffixes:
+            continue
+        return (*(f"{stem}.{one}" for one in suffixes),
+                *((f"{stem}/{directory}.{one}" for one in suffixes) if directory else ()))
+    return (f"{stem}.{suffix}",)
 
 
 def _unresolved(target: str, joined: bool) -> str:
