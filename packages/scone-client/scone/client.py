@@ -252,13 +252,15 @@ class Scone:
         finally:
             response.close()
 
-        try:
-            text = body.decode(response.encoding or "utf-8", errors="replace")
-        except LookupError:
-            text = body.decode("utf-8", errors="replace")
+        def error_text() -> str:
+            try:
+                return body.decode(response.encoding or "utf-8", errors="replace")
+            except LookupError:
+                return body.decode("utf-8", errors="replace")
         try:
             payload = _json.loads(body) if body else {}
         except (ValueError, UnicodeError, RecursionError) as exc:
+            text = error_text()
             if not response.ok:
                 raise SconeError(text.strip() or f"HTTP {response.status_code}",
                                  response.status_code, body=text) from exc
@@ -267,12 +269,13 @@ class Scone:
                 body=text,
             ) from exc
         if not response.ok:
+            text = error_text()
             error = payload.get("error") if isinstance(payload, dict) else None
             message = error if isinstance(error, str) else text.strip() or f"HTTP {response.status_code}"
             raise SconeError(message, response.status_code, body=text)
         if not isinstance(payload, dict):
             raise SconeError(
                 f"{method} {path} returned {type(payload).__name__}, expected an object",
-                response.status_code, body=text,
+                response.status_code, body=error_text(),
             )
         return payload

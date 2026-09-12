@@ -334,3 +334,28 @@ def test_large_configured_byte_budget_does_not_overflow_decoder():
     with endpoint(gzip.compress(b"{}"), coding="gzip") as (url, _):
         with Scone(url, "key", max_response_bytes=2**100) as client:
             assert client._request("GET", "/value") == {}
+
+
+def test_successful_json_does_not_decode_an_error_body(monkeypatch):
+    import codecs
+    decoded = []
+    def record_codec(name):
+        if name == 'scone_error_body_probe':
+            decoded.append(name)
+            return codecs.lookup('utf-8')
+    codecs.register(record_codec)
+    response = requests.Response()
+    response.status_code = 200
+    response.encoding = 'scone-error-body-probe'
+    response.raw = io.BytesIO(b'{"ok":true}')
+    response.headers['Content-Type'] = 'application/json'
+    session = Mock(spec=requests.Session)
+    session.headers = {}
+    session.request.return_value = response
+    try:
+        assert Scone('http://127.0.0.1:1', 'key', session=session)._request('GET', '/fixture') == {'ok': True}
+        assert decoded == []
+    finally:
+        unregister = getattr(codecs, 'unregister', None)
+        if unregister is not None:
+            unregister(record_codec)
