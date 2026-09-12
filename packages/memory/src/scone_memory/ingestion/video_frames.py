@@ -16,7 +16,7 @@ import tempfile
 from time import monotonic
 import zlib
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..core.errors import InvalidInput
 from ..ocr.process import python_worker, run_bounded
@@ -124,8 +124,27 @@ def _json(data: bytes) -> dict[str, object]:
         raise InvalidInput('video inventory is malformed') from error
 
 
+def _validated_policy(policy: VideoFramePolicy) -> VideoFramePolicy:
+    if not isinstance(policy, VideoFramePolicy):
+        raise InvalidInput('video policy must be a VideoFramePolicy')
+    try:
+        return VideoFramePolicy.model_validate(policy.model_dump(mode='python'))
+    except (ValueError, ValidationError) as error:
+        raise InvalidInput('video policy exceeds its declared limits') from error
+
+
+def _validated_limits(limits: DocumentLimits) -> DocumentLimits:
+    if not isinstance(limits, DocumentLimits):
+        raise InvalidInput('video limits must be DocumentLimits')
+    try:
+        return DocumentLimits.model_validate(limits.model_dump(mode='python'))
+    except (ValueError, ValidationError) as error:
+        raise InvalidInput('video limits exceed their declared bounds') from error
+
+
 def plan_frames(data: bytes, policy: VideoFramePolicy) -> FramePlan:
     """Plan from ffprobe's decoded inventory; missing PTS are never guessed."""
+    policy = _validated_policy(policy)
     root = _json(data)
     stream, base, origin, declared_duration = _stream(root, policy)
     frames = root.get('frames')
@@ -228,7 +247,8 @@ class VideoFrameDecoder:
 
     async def sample(self, data: bytes, filename: str, *, policy: VideoFramePolicy | None = None,
                      limits: DocumentLimits | None = None) -> VideoFrames:
-        policy, limits = policy or VideoFramePolicy(), limits or DocumentLimits()
+        policy = _validated_policy(VideoFramePolicy() if policy is None else policy)
+        limits = _validated_limits(DocumentLimits() if limits is None else limits)
         suffix = _input(data, filename, limits, VIDEO_EXTENSIONS - {'.ts'})
         deadline = monotonic() + limits.timeout_seconds
         versions = []
