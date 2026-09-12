@@ -161,11 +161,25 @@ def _identifier(key: str) -> bool:
     graph: `scone_memory/audio/gate.py` and `scone_memory/audio/rate.py`
     shared four words of five, differed in one letter of the fifth, and
     were suggested as one thing at 0.667 against a default of 0.5.
+
+    **Only a path or a colon counts**, and a bare dotted name is left to
+    prose deliberately. `J.Anderson` and `pkg.store` are the same string
+    shape, and by the time a name reaches here it has been folded to
+    lower case, so even the capital is gone. A first attempt read any
+    dotted chain as a module path and turned the spelling comparison off
+    for everyone whose name carries an initial -- `J.Anderson` and
+    `J.Andersen` stopped being offered -- which is the opposite of the
+    "prose is unaffected" it was written as.
+
+    So the test here is the one that cannot be wrong: our code labels
+    carry their path (`pkg/store.py:Shelf.keep`), and no name does. Bare
+    module names keep the old behaviour, false pairs and all. Telling
+    those apart needs evidence from the graph -- whether the entity
+    appears in a code relation -- rather than a guess about a string, and
+    that is the next step if two module names one letter apart ever turn
+    up.
     """
-    if _QUALIFIED.search(key):
-        return True
-    parts = key.split(".")
-    return len(parts) > 1 and all(part.isidentifier() for part in parts)
+    return bool(_QUALIFIED.search(key))
 
 
 def _spellings(word: str) -> frozenset[str]:

@@ -626,6 +626,53 @@ async def test_two_files_one_letter_apart_are_not_one_thing():
     assert not paths, shown
 
 
+async def test_a_persons_initial_does_not_make_their_name_a_module_path():
+    """The narrowing over-reached. `J.Anderson` splits on its dot into two
+    valid Python identifiers, so a rule that called any dotted chain a
+    qualified symbol turned the spelling comparison off for everyone
+    whose name carries an initial -- `J.Anderson` and `J.Andersen` were
+    offered at 0.55 before it and silently gone after, which is the exact
+    opposite of the "prose is unaffected" it was committed as.
+
+    Code's bare dotted names are module paths, and module paths are lower
+    case. A capital, with no path or extension to say otherwise, is a
+    name.
+    """
+    engine = await engine_with(
+        ("J.Anderson", "works_at", "Acme"),
+        ("J.Andersen", "works_at", "Acme"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", limit=100)
+    finally:
+        await engine.close()
+    pairs = [tuple(sorted((tuple(pair.values())[0]["label"], tuple(pair.values())[1]["label"])))
+             for pair in found.pairs]
+    assert ("j.andersen", "j.anderson") in pairs, found.pairs
+
+
+def test_what_counts_as_an_identifier_rather_than_a_name():
+    """The rule itself, case by case, because it decides whether a pair is
+    judged by spelling at all and every miss is silent in both
+    directions."""
+    from scone_memory.entities.duplicates import _identifier
+
+    for identifier in ("pkg/store.py", "pkg/store.py:Shelf.keep",
+                       "scone_memory/audio/gate.py", "a b/c d.py:Holder.keep"):
+        assert _identifier(identifier), identifier
+    for name in ("J.Anderson", "Katherine Brown", "Acme Inc.", "St. Louis",
+                 "J.R.R. Tolkien", "Ana.Maria", "quarterly report"):
+        assert not _identifier(name), name
+    # Bare dotted names sit on the prose side on purpose. `pkg.store` and
+    # `j.anderson` are the same string shape, and folding has already
+    # removed the capital by the time either arrives, so no rule written
+    # over the string can separate them. The one that reads a module as
+    # prose costs a false pair nobody has seen; the one that reads a
+    # person as a module stopped offering real pairs, which is worse.
+    for ambiguous in ("pkg.store", "store.py", "j.anderson"):
+        assert not _identifier(ambiguous), ambiguous
+
+
 async def test_a_misspelt_person_is_still_found_beside_an_identifier():
     """The narrowing above must cost the heuristic nothing where it
     belongs. A one-letter difference between two people's names is what
