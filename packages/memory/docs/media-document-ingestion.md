@@ -154,11 +154,21 @@ put the credential value in JSON. Missing credentials, unknown fields, duplicate
 keys and invalid or nonprivate files refuse startup. Loading config does not
 contact the endpoint, start a model, or resume an interrupted import.
 
-The derived transcriber revision binds the nonsecret settings and the explicit
-`model_revision`. Changing the model, endpoint, decoder path or limits changes that
-identity and prevents a saved job from resuming or returning a result under the new
-configuration. Bump `model_revision` when changing weights, decoder builds or server
-behavior at unchanged paths. Credential rotation alone preserves extraction identity.
+The derived transcriber revision binds the nonsecret settings, the explicit
+`model_revision` and the SHA-256 of the decoder executable's contents. Loading the
+configuration reads the decoder in bounded blocks without executing it; empty,
+nonregular, changing or larger-than-512-MiB executables refuse startup. Installer
+symlinks are supported and bind the target's contents. Changing the model, endpoint,
+decoder bytes, decoder path or limits changes that identity and prevents a saved
+job from resuming or returning a result under the new configuration.
+
+Restart the host after changing the decoder; its fingerprint is captured at config
+load, not monitored continuously. The hash covers the executable itself, not dynamic
+libraries or programs called by a wrapper. Bump `model_revision` when changing those
+dependencies, model weights or server behavior at unchanged paths. Credential
+rotation alone preserves extraction identity. Startup errors identify file,
+configuration-content, provider/credential or decoder-fingerprint failures without
+printing configuration values or secrets.
 
 Provider timeouts are ceilings, not an extension of extraction budgets. Synchronous
 imports and checked audio decoding each use the default 30-second document budget.

@@ -1,5 +1,6 @@
 """Explicit local media configuration and durable extraction identity."""
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,55 @@ def test_load_configures_without_calling_the_endpoint(tmp_path):
     second=load_document_media(str(tmp_path/'media.json'))
     assert first.revision==second.revision
     assert 'selected-local-model' not in first.revision
+
+
+def test_decoder_replacement_changes_identity_even_with_same_size_and_mtime(tmp_path):
+    path = configuration(tmp_path)
+    executable = tmp_path / 'ffmpeg'
+    first = load_document_media(str(path))
+    original = executable.stat()
+    executable.write_text('#!/bin/sh\nexit 2\n')
+    os.utime(executable, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert executable.stat().st_size == original.st_size
+    assert load_document_media(str(path)).revision != first.revision
+
+
+def test_decoder_symlink_binds_target_contents_without_executing_it(tmp_path):
+    path = configuration(tmp_path)
+    executable = tmp_path / 'ffmpeg'
+    target = tmp_path / 'decoder-build'
+    executable.rename(target)
+    executable.symlink_to(target)
+    first = load_document_media(str(path))
+    target.write_text('#!/bin/sh\nexit 2\n')
+    assert load_document_media(str(path)).revision != first.revision
+
+
+@pytest.mark.parametrize('size', [0, 512 * 1024 * 1024 + 1])
+def test_decoder_fingerprint_refuses_empty_or_oversized_executable(tmp_path, size):
+    path = configuration(tmp_path)
+    with (tmp_path / 'ffmpeg').open('wb') as output:
+        output.truncate(size)
+    with pytest.raises(ValueError, match='decoder'):
+        load_document_media(str(path))
+
+
+@pytest.mark.parametrize('failure, message', [
+    ('permissions', 'configuration file'),
+    ('malformed', 'configuration contents'),
+    ('missing_secret', 'credential is missing'),
+])
+def test_configuration_failures_identify_safe_category(tmp_path, failure, message):
+    path = configuration(tmp_path)
+    if failure == 'permissions':
+        path.chmod(0o644)
+    elif failure == 'malformed':
+        path.write_text('{"secret-marker":')
+    else:
+        path = configuration(tmp_path, api_key_env='SCONE_MISSING_MEDIA_FIXTURE_KEY')
+    with pytest.raises(ValueError, match=message) as error:
+        load_document_media(str(path))
+    assert 'secret-marker' not in str(error.value)
 
 
 @pytest.mark.parametrize('changes',[{'model':'other'}, {'model_revision':'weights-v2'},
