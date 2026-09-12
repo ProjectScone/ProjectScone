@@ -28,5 +28,12 @@ def relation_id(space: str, subject_id: str, predicate: str, object_id: str) -> 
     return "rel:" + _digest("scone.relation/1", space, subject_id, predicate, object_id)
 
 
+def implied_id(space: str, subject_id: str, predicate: str, object_id: str) -> str:
+    """An edge nobody claimed, which follows from ones they did. Its own
+    prefix and its own scheme, so that it can never be read as the id of a
+    claim, even when it joins the same two things by the same predicate."""
+    return "imp:" + _digest("scone.implied/1", space, subject_id, predicate, object_id)
+
+
 def attribute_id(space: str, entity_id: str, predicate: str, value: str) -> str:
     return "att:" + _digest("scone.attribute/1", space, entity_id, predicate, value)

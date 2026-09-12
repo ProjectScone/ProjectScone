@@ -109,4 +109,4 @@ class RelationMeanings:
         """The vocabulary as it will be applied, which is what a projection
         is digested with and what a reader is shown."""
         return {"inverse": dict(self.inverse), "symmetric": list(self.symmetric),
-                "transitive": list(self.transitive), "max_steps": MAX_STEPS}
+                "transitive": list(self.transitive), "max_steps": MAX_STEPS, "max_implied": MAX_IMPLIED}

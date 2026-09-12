@@ -17,7 +17,7 @@ from typing import Literal
 import unicodedata
 
 from ..core.validation import entity_key
-from .project import Attribute, Entity, EntityProjection, Relation
+from .project import Attribute, Entity, EntityProjection, Implied, Relation
 
 ResolveTier = Literal["id", "key", "variant", "prefix", "tokens"]
 
@@ -221,10 +221,13 @@ class Neighbourhood:
     outgoing: tuple[Relation, ...]
     incoming: tuple[Relation, ...]
     attributes: tuple[Attribute, ...]
+    #: What follows from claims about this entity under the space's
+    #: vocabulary, either way round. Kept apart from what was said.
+    follows: tuple["Implied", ...] = ()
     #: Counted claims the entity takes part in, as subject or object.
-    claims: int
-    relations_total: int
-    truncated: bool
+    claims: int = 0
+    relations_total: int = 0
+    truncated: bool = False
 
 
 def neighbourhood(projection: EntityProjection, entity_id: str, *, limit: int = 100) -> Neighbourhood | None:
@@ -238,7 +241,10 @@ def neighbourhood(projection: EntityProjection, entity_id: str, *, limit: int = 
                       key=strongest)
     attributes = sorted((a for a in projection.attributes if a.entity_id == entity_id),
                         key=lambda attribute: (attribute.predicate, attribute.value))
+    follows = sorted((item for item in projection.implied
+                      if entity_id in (item.subject_id, item.object_id)), key=strongest)
     total = len(outgoing) + len(incoming)
     claims = sum(1 for role in projection.roles if entity_id in (role.subject_id, role.object_id))
     return Neighbourhood(entity, tuple(outgoing[:limit]), tuple(incoming[:limit]), tuple(attributes[:limit]),
-                         claims, total, len(outgoing) > limit or len(incoming) > limit or len(attributes) > limit)
+                         tuple(follows[:limit]), claims, total,
+                         len(outgoing) > limit or len(incoming) > limit or len(attributes) > limit)

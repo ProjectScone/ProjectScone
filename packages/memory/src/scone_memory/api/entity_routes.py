@@ -659,7 +659,8 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
         return [{"predicate": predicate, "relations": items} for predicate, items in groups.items()]
 
     cited = sorted({fact_id for relation in (*found.outgoing, *found.incoming) for fact_id in relation.fact_ids}
-                   | {fact_id for attribute in found.attributes for fact_id in attribute.fact_ids})
+                   | {fact_id for attribute in found.attributes for fact_id in attribute.fact_ids}
+                   | {fact_id for item in found.follows for fact_id in item.fact_ids})
     reasons = [*_read_reasons(coverage), *(["relation_limit"] if found.truncated else [])]
     return {"schema_version": 1, "space": space, "projection": projection_meta(projection),
             "filters": {"status": status, "as_of": when}, "entity": entity_record(found.entity, found.claims),
@@ -667,7 +668,16 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
             "attributes": [{"predicate": attribute.predicate, "value": attribute.value,
                             "literal_kind": attribute.literal_kind, "fact_ids": list(attribute.fact_ids)}
                            for attribute in found.attributes],
+            # What nobody said, in its own place, each saying what it was
+            # worked out from so a reader can check the claims behind it.
+            "follows": [{"relation_id": item.relation_id, "predicate": item.predicate,
+                         "subject": names[item.subject_id], "object": names[item.object_id],
+                         "follows": item.follows, "follows_from": list(item.follows_from),
+                         "fact_ids": list(item.fact_ids),
+                         "support": support([roles[fact_id] for fact_id in item.fact_ids if fact_id in roles])}
+                        for item in found.follows],
             "facts": await checked_facts(engine.documents, space, cited), "complete": complete,
             "coverage": {**read, "relations_total": found.relations_total,
                          "relations_shown": len(found.outgoing) + len(found.incoming),
+                         "follows_shown": len(found.follows),
                          "truncated": bool(reasons), "reasons": reasons}}

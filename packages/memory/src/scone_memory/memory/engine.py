@@ -28,6 +28,7 @@ from ..ingestion.records import (
     content_hash as content_hash, contextual_prefix as contextual_prefix,
 )
 from ..retrieval import fact_recall
+from ..entities.meanings import RelationMeanings
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -153,6 +154,7 @@ class MemoryEngine:
         rerank_max_bytes: int = 64000,
         rerank_timeout: float = 1.0,
         many_valued: Iterable[str] = (),
+        relation_meanings: "RelationMeanings | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
     ) -> None:
@@ -160,6 +162,10 @@ class MemoryEngine:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
             raise InvalidInput(_other_scale(abstention, embedder.id, embedder.dim))
+        #: What this space's predicates mean to each other: which are
+        #: opposites, which read the same both ways, which carry through.
+        #: None means the graph holds only what was said.
+        self.relation_meanings = relation_meanings
         #: Whether a source stored under a name that says it is code is cut
         #: at its declarations. Names say it, never the content: a note that
         #: quotes code is prose.

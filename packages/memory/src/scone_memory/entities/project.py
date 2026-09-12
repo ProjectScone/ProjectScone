@@ -24,7 +24,7 @@ from ..core.models import Fact
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..core.validation import entity_key
 from .classify import CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, reference_flag
-from .ids import attribute_id, key_id, relation_id
+from .ids import attribute_id, implied_id, key_id, relation_id
 from .meanings import MAX_IMPLIED, MAX_STEPS, RelationMeanings
 from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, hint, infer_kind
 
@@ -150,6 +150,9 @@ class EntityProjection:
     implied: tuple[Implied, ...] = ()
     #: Whether more followed than a projection will hold.
     implied_capped: bool = False
+    #: The vocabulary the implications were worked out under, so a view can
+    #: say what it applied and where it stopped. None when none was given.
+    meanings: RelationMeanings | None = None
 
     def components(self) -> list[frozenset[str]]:
         """Groups of entities connected by relations in either direction."""
@@ -304,7 +307,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
            if meanings else {}),
     })).hexdigest()
     return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles),
-                            digest, implied=tuple(implied), implied_capped=capped)
+                            digest, implied=tuple(implied), implied_capped=capped, meanings=meanings)
 
 
 def _implied(space: str, relations: list[Relation],
@@ -340,7 +343,7 @@ def _implied(space: str, relations: list[Relation],
                                               item.support.facts, item.relation_id))
         ends = [item.last_valid_until for item in path]
         found[key] = Implied(
-            relation_id(space, subject, predicate, other), subject, predicate, other,
+            implied_id(space, subject, predicate, other), subject, predicate, other,
             tuple(sorted({fact for item in path for fact in item.fact_ids})), weakest.support,
             max(item.first_valid_from for item in path),
             None if all(end is None for end in ends) else min(end for end in ends if end),

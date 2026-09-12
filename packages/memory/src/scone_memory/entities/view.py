@@ -85,6 +85,11 @@ class _Counted:
         self.relations = [(relation, [self.roles[f] for f in relation.fact_ids if f in self.roles])
                           for relation in projection.relations]
         self.relations = [(relation, roles) for relation, roles in self.relations if roles]
+        # A relation that follows from others holds only while every claim
+        # under it does, so all of them must pass the filter, not just one.
+        self.implied = [(item, [self.roles[f] for f in item.fact_ids if f in self.roles])
+                        for item in projection.implied]
+        self.implied = [(item, roles) for item, roles in self.implied if len(roles) == len(item.fact_ids)]
         self.attributes = [(attribute, [self.roles[f] for f in attribute.fact_ids if f in self.roles])
                            for attribute in projection.attributes]
         self.attributes = [(attribute, roles) for attribute, roles in self.attributes if roles]
@@ -187,6 +192,8 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
     ids = {entity.entity_id for entity in shown}
     relations = [(relation, roles) for relation, roles in counted.relations
                  if relation.subject_id in ids and relation.object_id in ids]
+    implied = [(item, roles) for item, roles in counted.implied
+               if item.subject_id in ids and item.object_id in ids]
     attributes = [(attribute, roles) for attribute, roles in counted.attributes if attribute.entity_id in ids]
     if len(attributes) > attribute_limit:
         reasons.append("attribute_limit")
@@ -222,6 +229,16 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
                        else max(role.valid_until for role in roles if role.valid_until),
                        **used(relation_uses, relation.relation_id)}
                       for relation, roles in relations],
+        # Kept apart from the relations above: what follows from claims is
+        # never listed as a claim. Each says what it was worked out from.
+        "implied": [{"id": item.relation_id, "subject_id": item.subject_id, "predicate": item.predicate,
+                     "object_id": item.object_id, "fact_ids": [role.fact_id for role in roles],
+                     "support": support(roles), "follows": item.follows,
+                     "follows_from": list(item.follows_from),
+                     "first_valid_from": max(role.valid_from for role in roles),
+                     "last_valid_until": None if all(role.valid_until is None for role in roles)
+                     else min(role.valid_until for role in roles if role.valid_until)}
+                    for item, roles in implied],
         "attributes": [{"id": attribute.attribute_id, "entity_id": attribute.entity_id,
                         "predicate": attribute.predicate, "value": attribute.value,
                         "literal_kind": attribute.literal_kind, "fact_ids": [role.fact_id for role in roles],
@@ -230,6 +247,9 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(counted.entities), "entities_shown": len(shown),
                      "relations_total": len(counted.relations), "relations_shown": len(relations),
+                     "meanings": projection.meanings.record() if projection.meanings else None,
+                     "implied_total": len(counted.implied), "implied_shown": len(implied),
+                     **({"implied_capped": True} if projection.implied_capped else {}),
                      "attributes_total": len(counted.attributes),
                      "attributes_shown": min(len(attributes), attribute_limit),
                      "truncated": bool(reasons), "reasons": reasons,

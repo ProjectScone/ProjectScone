@@ -30,6 +30,9 @@
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
+    SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
+    SCONE_RELATION_SYMMETRIC=married_to       which read the same both ways
+    SCONE_RELATION_TRANSITIVE=part_of         which carry through
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
@@ -157,6 +160,9 @@ class Settings:
     contextual_embeddings: bool = False
     demote_restated: bool = True
     many_valued: tuple[str, ...] = ()
+    relation_inverse: tuple[str, ...] = ()
+    relation_symmetric: tuple[str, ...] = ()
+    relation_transitive: tuple[str, ...] = ()
     abstention_policy: str | None = None
     profile_predicates: tuple[str, ...] = ()
     profile_without: tuple[str, ...] = ()
@@ -358,6 +364,12 @@ class Settings:
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
+                                   if item.strip()),
+            relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
+                                     if item.strip()),
+            relation_transitive=tuple(item.strip() for item in env.get("SCONE_RELATION_TRANSITIVE", "").split(",")
+                                      if item.strip()),
             abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
             profile_predicates=tuple(item.strip() for item in env.get("SCONE_PROFILE_PREDICATES", "").split(",")
                                      if item.strip()),
@@ -464,6 +476,26 @@ def build_profile_policy(settings: Settings):
     from ..memory.catalog import ProfilePolicy
 
     return ProfilePolicy.of(predicates=settings.profile_predicates, without=settings.profile_without)
+
+
+def build_relation_meanings(settings: Settings):
+    """What the space's predicates mean to each other, as the operator
+    wrote it, or None when nothing was configured and the graph holds only
+    what was said."""
+    from ..entities.meanings import RelationMeanings
+
+    opposites: dict[str, str] = {}
+    for pair in settings.relation_inverse:
+        one, sep, other = pair.partition(":")
+        if not sep or not one.strip() or not other.strip():
+            raise InvalidInput(
+                f"SCONE_RELATION_INVERSE takes pairs written predicate:its opposite, separated by commas; "
+                f"{pair!r} is not one")
+        opposites[one] = other
+    if not (opposites or settings.relation_symmetric or settings.relation_transitive):
+        return None
+    return RelationMeanings(inverse=opposites, symmetric=settings.relation_symmetric,
+                            transitive=settings.relation_transitive)
 
 
 def build_abstention(settings: Settings):
@@ -711,6 +743,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
+        relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         profile_policy=build_profile_policy(settings),
     ).open()
@@ -884,6 +917,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         rerank_max_bytes=settings.rerank_max_bytes,
         rerank_timeout=settings.rerank_timeout,
         many_valued=settings.many_valued,
+        relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         profile_policy=build_profile_policy(settings),
         blobs=blobs,

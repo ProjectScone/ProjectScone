@@ -415,6 +415,11 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         wanted += relation.fact_ids
     for attribute in values:
         wanted += attribute.fact_ids
+    near = sorted((item for item in projection.implied
+                   if item.subject_id in reached and item.object_id in reached),
+                  key=lambda item: (-len(item.fact_ids), item.relation_id))[:limits.max_relations]
+    for item in near:
+        wanted += item.fact_ids
     await evidence.fetch(wanted)
 
     def still(fact_ids: Sequence[int]) -> tuple[list[int], str | None, bool]:
@@ -436,6 +441,17 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         unverified += unchecked
         relation_lines.append(f"hop {hop}: {label(relation.subject_id)} {one_line(relation.predicate, 60)} "
                               f"{label(relation.object_id)} {cite(kept, quote)}")
+    # What nobody said, on its own lines and never among the claims: each
+    # one holds only while every claim under it does, so a leg that no
+    # longer counts takes the whole line with it.
+    follows_lines: list[str] = []
+    for item in near:
+        kept, quote, unchecked = still(item.fact_ids)
+        if len(kept) != len(item.fact_ids):
+            continue
+        unverified += unchecked
+        follows_lines.append(f"follows: {label(item.subject_id)} {one_line(item.predicate, 60)} "
+                             f"{label(item.object_id)} ({item.follows}) {cite(kept, quote)}")
     value_lines: list[str] = []
     for attribute in sorted(values, key=lambda a: (a.entity_id, a.predicate, a.value)):
         kept, quote, unchecked = still(attribute.fact_ids)
@@ -458,7 +474,7 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
                   + (f" similar {closeness[entity.entity_id]:.2f}" if entity.entity_id in closeness else "")
                   for entity in seeds]
     lines = [*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,
-             *seed_lines, *path_lines, *relation_lines, *value_lines]
+             *seed_lines, *path_lines, *relation_lines, *follows_lines, *value_lines]
     return GraphContext("prepared", _fit(lines, limits.max_bytes), tuple(entity.entity_id for entity in seeds), (),
                         {"reasons": reasons, "read": read, "hubs_not_crossed": sorted(hubs), "similar": resembled})
 
