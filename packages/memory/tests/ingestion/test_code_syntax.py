@@ -232,3 +232,73 @@ def test_a_declaration_is_claimed_once():
     the reader does not know what it has seen."""
     found = [one for one in claims("export const caller = (p) => p;\n") if one[1] == "defines"]
     assert len(found) == len(set(found)) == 1, found
+
+
+@pytest.mark.parametrize("source, why", [
+    ("export function leaf() { return 1; }\n"
+     "export function caller(k: number) { switch (k) { case 1: { const leaf = () => 2;"
+     " return leaf(); } default: return 0; } }\n",
+     "a const declared inside a switch case"),
+    ("export function leaf() { return 1; }\n"
+     "export function caller() { const inner = function* (leaf) { return leaf(); };"
+     " return inner(() => 2).next().value; }\n",
+     "a parameter of a nested generator expression"),
+])
+def test_an_unmodelled_scope_does_not_fall_through_to_a_global(source, why):
+    """The architectural fault under all of these, in Codex's reviewer's
+    words: *an unmodelled scope must not silently fall through to a
+    global binding*.
+
+    The scope stack was a whitelist of node types I had thought of, so
+    anything absent from it -- a switch body, a generator expression --
+    bound nothing and the name resolved to the file's own declaration. It
+    failed **open**, which for a graph means inventing an edge.
+
+    Every node opens a scope now and binds whatever is declared directly
+    in it, so a construct nobody modelled still holds its own names. A
+    whitelist can only be as complete as its author; this cannot be
+    incomplete in that direction.
+    """
+    assert not [one for one in claims(source) if one[1] == "calls"], why
+
+
+def test_a_nested_function_is_not_the_same_thing_as_a_top_level_one():
+    """`function worker` inside `caller` was given the same name as an
+    unrelated exported `worker` beside it, so the blast radius of a
+    global named one when only the other called it. A declaration is
+    qualified by what holds it, which is what `path:Class.method` already
+    did for classes and nothing did for functions."""
+    source = ("export function leaf() { return 1; }\n"
+              "export function caller() { function worker() { return leaf(); } return worker(); }\n"
+              "export function worker() { return 0; }\n")
+    found = claims(source)
+    calls = {(one[0], one[2]) for one in found if one[1] == "calls"}
+    assert ("web/app.ts:caller.worker", "web/app.ts:leaf") in calls, calls
+    assert ("web/app.ts:worker", "web/app.ts:leaf") not in calls, calls
+    # And the nested one is declared as belonging to its holder.
+    assert ("web/app.ts:caller", "defines", "web/app.ts:caller.worker") in found, found
+
+
+def test_a_parameter_default_is_evaluated_before_the_body_binds_anything():
+    """The one finding in this round that was an **omission**, not a
+    false edge, and the only one Codex's reviewer proved by counting
+    calls under Node rather than by reading.
+
+    `function caller(x = leaf()) { var leaf = … }` really does call the
+    outer `leaf`: a parameter default is evaluated in the parameter
+    environment, which cannot see the body's `var`. Hoisting that `var`
+    to the *function* rather than to its *body* hid a real call.
+
+    The distinction costs nothing anywhere else, because a body block
+    contains every nested block, so hoisting to it reaches the same
+    names for every call written inside the body.
+    """
+    source = ("export function leaf() { return 1; }\n"
+              "export function caller(x = leaf()) {\n"
+              "  var leaf = () => 2;\n"
+              "  return x + leaf();\n"
+              "}\n")
+    calls = {(one[0], one[2]) for one in claims(source) if one[1] == "calls"}
+    assert ("web/app.ts:caller", "web/app.ts:leaf") in calls, calls
+    # And exactly once: the body's own `leaf()` is the local var.
+    assert len([one for one in claims(source) if one[1] == "calls"]) == 1, claims(source)
