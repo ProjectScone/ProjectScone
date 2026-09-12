@@ -42,6 +42,7 @@ ClassBasis = Literal[
     "decision", "identity_decision", "quoted_text", "prose", "pronoun", "date_shape", "quantity_shape",
     "identifier_shape", "value_shape", "subject_anchor", "literal_predicate", "determiner_name", "description",
     "name_shape", "uncased_name", "entity_predicate", "shared_object", "common_value",
+    "code_symbol",
 ]
 
 
@@ -85,6 +86,23 @@ _ENTITY_PREDICATES = frozenset("""works_at worked_at works_for worked_for employ
     founded founded_by owns owned_by created_by built_by uses used_by depends_on works_on contributes_to
     leads led_by partner_of friend_of sibling_of parent_of child_of colleague_of acquired acquired_by
     invested_in subsidiary_of competitor_of mentor_of customer_of supplier_of""".split())
+
+#: Predicates whose object is a code symbol by construction -- a file, a
+#: module, a declaration -- rather than something whose shape has to be
+#: guessed at.
+#:
+#: Without this, a code symbol reached the graph only by looking like a
+#: prose name, and `name_shaped` requires a capital letter. Python names
+#: functions and modules in lower case, so `class Shelf` became an entity
+#: while `def put`, `import json` and `import pkg.store` did not: five
+#: facts extracted from two files produced two relations, and every call
+#: edge to a lowercase function left the graph without saying so. The
+#: entity classifier was written for prose about people -- `works_at`,
+#: `lives_in`, `married_to` -- and a code graph was being judged by it.
+#:
+#: The case of a code symbol is a convention of its language, not
+#: evidence about what it is.
+CODE_PREDICATES = frozenset("defines imports calls inherits mixes_in".split())
 
 _MONTHS = ("january|february|march|april|may|june|july|august|september|october|november|december"
            "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec")
@@ -215,6 +233,13 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification(decided[0], None if decided[0] == "entity" else "value", "decision", str(decided[1]))
     if key in context.identity_keys:
         return ObjectClassification("entity", None, "identity_decision")
+    if predicate_key.replace(" ", "_") in CODE_PREDICATES and len(stripped.split()) == 1:
+        # Before the shape tests, not after: a module called `2024` or a
+        # path holding a version would otherwise be read as a date or a
+        # measurement. One token, because a code symbol is one token and
+        # "a quorum of three members" is not a symbol whatever the
+        # predicate says.
+        return ObjectClassification("entity", None, "code_symbol")
     if _quoted(stripped):
         return ObjectClassification("literal", "text", "quoted_text")
     if _prose(stripped):
