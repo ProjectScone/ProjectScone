@@ -5,9 +5,94 @@ explicit set of host-registered models. A caller selects a model by its catalog
 ID, or uses that agent's declared default. Unknown or disallowed choices fail
 before any model is created. A failed selected model never triggers a fallback.
 
-This is a native Python interface. It builds on `EvidenceToolLoop` and
-`ScopedMemoryTools`; it does not provision services, discover models, install
-providers, or grant access to a memory space.
+Native Python and optional authenticated HTTP interfaces build on
+`EvidenceToolLoop` and `ScopedMemoryTools`. They do not provision services,
+discover models, install providers, or grant access to a memory space.
+
+## Enable agents in the standard local server
+
+Set `SCONE_AGENTS_CONFIG` to a private JSON configuration file to enable agent
+editing and runs under `scone-memory` or `scone serve`. This works with the
+memory-only host and with `SCONE_CONVERSATIONS_JOURNAL` configured. It requires
+no custom Python host. The independent Webapp's Agents page uses the resulting
+catalog, task and handoff plan editors, and run controls.
+
+Example `agents.json` (replace the model names with models already served locally):
+
+```json
+{
+  "schema_version": 1,
+  "state_dir": "./agent-state",
+  "key_env": "SCONE_AGENT_STATE_KEY",
+  "max_active": 4,
+  "max_parallel_tasks": 2,
+  "deadline_s": 120,
+  "models": [
+    {
+      "model_id": "fast", "label": "Fast local model", "revision": "1",
+      "base_url": "http://127.0.0.1:8000/v1", "model": "model-a",
+      "protocol": "native"
+    },
+    {
+      "model_id": "careful", "label": "Careful local model", "revision": "1",
+      "base_url": "http://127.0.0.1:8000/v1", "model": "model-b",
+      "protocol": "structured"
+    }
+  ],
+  "agents": [
+    {
+      "agent_id": "research", "instructions": "Find relevant retained evidence.",
+      "models": ["fast", "careful"], "default_model": "careful"
+    },
+    {
+      "agent_id": "writer", "instructions": "Answer using retained evidence.",
+      "models": ["fast", "careful"], "default_model": "fast"
+    }
+  ]
+}
+```
+
+The file must be owned by the server user with mode `0600`; symlinks, hardlinks,
+special files, duplicate JSON keys, unknown fields and files over 1 MiB are
+rejected. `state_dir` is relative to the config file unless absolute, must be
+private to that user, and is created only after config/catalog/key validation.
+Its parent must exist. Plans and run state stay encrypted in this directory.
+
+Before starting, set the environment variable named by `key_env` to exactly 64
+hex characters representing a 32-byte encryption key. Keep that same key securely
+for subsequent restarts and backups; changing it cannot decrypt prior state.
+For example, generate a key once with `openssl rand -hex 32`, store it outside
+source control, and export it as `SCONE_AGENT_STATE_KEY`. Then:
+
+```sh
+chmod 600 agents.json
+export SCONE_AGENTS_CONFIG=/absolute/path/to/agents.json
+scone serve
+```
+
+Normal API bearer/space/role configuration still applies. Local model endpoints
+must use a loopback IP or `localhost`. Optional model `api_key_env` names a
+service-token environment variable resolved only when that model is used; token
+values are never written into configuration or public catalog responses. Missing
+tokens fail that selected invocation, with no fallback. No model is contacted at
+startup, and enabling agents does not download or start a model service.
+
+Choose `native` for native tool calls or `structured` for the explicit JSON-schema
+action protocol supported by your model server. Per-model `timeout_s`,
+`max_tokens`, `max_response_bytes` and `think` are optional. Agent `limits` and
+`initial_search` use the native definition fields. The whole-run deadline remains
+an upper bound. `max_plans` and `max_runs` default to 4096 each; admission defaults
+to four runs and one simultaneous task per run.
+
+The catalog is fixed for the host lifetime. Restart to apply configuration changes.
+Normalized endpoint, model, protocol and provider options contribute to the model
+revision automatically, alongside the declared revision. Existing saved plans
+then require review and a new revision before running. Public metadata contains
+only selection information, not endpoints, instructions or token names. All
+configured API spaces share this host catalog; each run's tools remain bound to
+its authenticated space. Use the native host API for a more restricted catalog
+or recall policy. Shutdown cancels and awaits owned work before closing agent
+state; caller-owned memory resources retain their existing lifecycle.
 
 ## Register and select models
 
@@ -445,7 +530,7 @@ registration. A handoff result contains `status`, `final`, `hops` and
 As with native progress, run status describes execution; inspect the verified
 result to distinguish a final answer from exhausted partial work. Result reads
 recheck the current host scope and model bindings before publication. The browser
-handoff editor is being implemented separately.
+handoff editor retains explicit models, allowed targets and the original run plan.
 
 ## Current boundary
 

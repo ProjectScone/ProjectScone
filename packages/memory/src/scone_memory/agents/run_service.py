@@ -346,6 +346,16 @@ class AgentRunService:
         finally:
             workflow.close()
 
+    def close_idle(self) -> None:
+        """Close before serving or after all work ends; never discard owned tasks."""
+        if self._tasks or self._owners:
+            raise WorkflowError('run_busy')
+        if self._closed:
+            return
+        self._closing = True
+        self._runs.close()
+        self._closed = True
+
     async def aclose(self) -> None:
         if self._closed:
             return
