@@ -41,7 +41,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 
 from .markdown import literal
-from .project import Entity, EntityProjection
+from .project import Entity, EntityProjection, merged_periods
 
 if TYPE_CHECKING:
     from .layout import Drawing
@@ -192,18 +192,13 @@ Span = tuple[str, str | None]
 
 
 def _merged(spans: list[Span]) -> list[Span]:
-    """The union of half-open intervals [start, end), as few as cover it:
-    overlapping or touching ones join, and None is an end still open. The
-    projection writes every instant in one fixed format, so text order is
-    time order."""
-    merged: list[Span] = []
-    for start, end in sorted(spans, key=lambda span: span[0]):
-        if merged and (merged[-1][1] is None or start <= merged[-1][1]):
-            last_start, last_end = merged[-1]
-            merged[-1] = (last_start, None if last_end is None or end is None else max(last_end, end))
-        else:
-            merged.append((start, end))
-    return merged
+    """The union of half-open intervals [start, end), as few as cover it.
+
+    One rule, shared with the projection's own periods and the ledger's
+    answers about how long a claim held, so that a graph exported for
+    Gephi and a question asked at the command line cannot disagree about
+    when something was true."""
+    return list(merged_periods(spans))
 
 
 def _held(projection: EntityProjection) -> dict[str, list[Span]]:
