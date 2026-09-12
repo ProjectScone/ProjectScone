@@ -199,3 +199,25 @@ async def test_a_source_that_could_not_be_read_keeps_its_fragments_and_says_so()
     assert merged.merged == 0 and merged.gone == 0, merged.record()
     assert merged.unread == 1 and "could not be read" in merged.why, merged.why
     assert len(merged.items) == len(found.items), "nothing is dropped for an unknown failure"
+
+
+async def test_a_merge_across_a_gap_returns_more_bytes_not_fewer():
+    """Neighbours are not always adjacent. Merging a chunk with one that
+    starts well after it ends returns the text between them too, so the
+    passage is *longer* than the fragments were. Any byte accounting has
+    to get that direction right, and adjacent chunks hide it."""
+    engine = await memory()
+    try:
+        found = await engine.recall("default", "crane survey rust jib", limit=5)
+        [one] = [i for i in found.items if (i.source or "") == "crane.txt"][:1]
+        pair = [one.model_copy(update={"start": 0, "end": 20, "text": "x" * 20}),
+                one.model_copy(update={"chunk_id": one.chunk_id + 99, "score": 0.1,
+                                       "start": 120, "end": 140, "text": "y" * 20})]
+        merged = await merge_neighbours(engine, "default", pair)
+    finally:
+        await engine.close()
+    assert merged.merged == 1 and merged.absorbed == 2, merged.record()
+    [whole] = merged.items
+    assert (whole.start, whole.end) == (0, 140), (whole.start, whole.end)
+    assert len(whole.text.encode()) == 140, len(whole.text.encode())
+    assert len(whole.text.encode()) > 40, "the gap between the fragments is in the passage"

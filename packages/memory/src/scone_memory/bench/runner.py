@@ -197,6 +197,10 @@ class RunReport:
     items: int
     scored: int  # items in the denominator
     include_abstention: bool
+    #: Whether passage merging was on. Recorded because a saved run whose
+    #: metadata cannot say which configuration produced it is not evidence
+    #: of anything.
+    merge: bool
     ks: list[int]
     recall_any: dict[int, float]
     recall_all: dict[int, float]
@@ -311,7 +315,17 @@ async def run(
                 from ..retrieval.merging import merge_neighbours
 
                 joined = await merge_neighbours(engine, space, pack.items)
-                pack = pack.model_copy(update={"items": list(joined.items)})
+                # The byte count has to be recomputed, not carried over.
+                # Merging replaces fragments with the span containing them,
+                # which across a gap is *longer* than the fragments were --
+                # keeping recall's number would report a context reduction
+                # that never happened, and a measurement published from it
+                # would be wrong in the flattering direction. The
+                # definition here is recall's own: the bytes of the text
+                # actually handed back.
+                pack = pack.model_copy(update={
+                    "items": list(joined.items),
+                    "returned_bytes": sum(len(i.text.encode()) for i in joined.items)})
             result.recall_ms = round((time.perf_counter() - t0) * 1000, 3)
             result.retrieved_sessions = [i.source or "" for i in pack.items]
             result.returned_bytes = pack.returned_bytes
@@ -359,7 +373,8 @@ async def run(
             verdicts[key] = verdicts.get(key, 0) + 1
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
-        dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention, ks=list(ks),
+        dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
+        merge=merge, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, by_type=by_type,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
