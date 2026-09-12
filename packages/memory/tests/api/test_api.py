@@ -625,3 +625,73 @@ def test_code_context_is_refused_beside_withholding(client):
         "q": "anything", "limit": 3, "withhold": "email", "code_context": True}, headers=auth())
     assert refused.status_code == 422, (refused.status_code, refused.text)
     assert "code_context" in refused.text, refused.text
+
+
+async def test_code_context_is_the_last_stage_over_http_and_not_merely_the_last_written():
+    """I claimed code context runs last and it did not.
+
+    The expansions -- evidence graph, structural context, multi-hop --
+    are awaited *after* the response dictionary is built, and I put the
+    code context stage next to that dictionary. So a source deleted while
+    the evidence graph was being built came back with its signature and
+    imports quoted and `gone: 0`, from a file that no longer existed when
+    the response was written.
+
+    Running last is the whole of the fence, because code context is a
+    second copy of the source that no amount of tidying receipts removes.
+    Asserted here through the real route with the real combination,
+    because reading the code is what convinced me it was already true.
+    """
+    from scone_memory.api import create_app
+    from scone_memory.retrieval import evidence_graph
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    try:
+        added = await engine.remember("alpha", "import json\n\n\ndef keep(paper):\n"
+                                      "    return json.dumps(paper)\n", source="pkg/store.py")
+        whole = evidence_graph.build_query_evidence_graph
+
+        async def forget_while_the_graph_is_built(documents, space, q, result, **rest):
+            await engine.forget(space, added.episode_id)
+            return await whole(documents, space, q, result, **rest)
+
+        evidence_graph.build_query_evidence_graph = forget_while_the_graph_is_built
+        try:
+            with TestClient(create_app(engine, {"key-a": "alpha"})) as gone:
+                answered = gone.get("/v1/recall", params={
+                    "q": "keep paper json", "limit": 3,
+                    "code_context": True, "evidence_graph": True}, headers=auth())
+        finally:
+            evidence_graph.build_query_evidence_graph = whole
+    finally:
+        await engine.close()
+
+    assert answered.status_code == 200, answered.text
+    assert "def keep" not in answered.text, "a deleted file was quoted back"
+    assert not answered.json()["items"], answered.json()["items"]
+
+
+def test_the_expansion_budget_governs_code_context_too(client):
+    """`expansion_max_bytes` is described on the route as the byte budget
+    per enabled expansion stage. Code context ignored it and kept its own
+    16,000-byte default, so a request asking for 512 got 2,208 bytes of
+    quoted code back and `beyond_budget: 0` -- a bound that read as a
+    fact, in the answer's own receipt.
+    """
+    source = "".join(f"import module_with_a_long_name_{index}\n" for index in range(25))
+    source += "\n\ndef keep(paper):\n    return paper\n"
+    assert client.post("/v1/episodes", json={
+        "content": source, "source": "pkg/store.py"}, headers=auth()).status_code == 200
+    asked = {"q": "keep paper", "limit": 3, "code_context": True}
+
+    roomy = client.get("/v1/recall", params={**asked, "expansion_max_bytes": 16000},
+                       headers=auth()).json()
+    tight = client.get("/v1/recall", params={**asked, "expansion_max_bytes": 512},
+                       headers=auth()).json()
+    assert "code_context" in tight, tight
+    quoted = len(json.dumps(tight["code_context"]["by_chunk"]).encode())
+    assert quoted <= 2 * 512, (quoted, tight["code_context"])
+    assert quoted < len(json.dumps(roomy["code_context"]["by_chunk"]).encode()), tight
+    # And the bound that bit has to say so rather than be inferred.
+    assert tight["code_context"]["beyond_budget"] > 0, tight["code_context"]
