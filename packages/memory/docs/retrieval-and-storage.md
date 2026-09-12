@@ -610,19 +610,23 @@ code and pipe tables and is already used by retrieval and source
 inspection. Only what that parser deliberately leaves out is new:
 setext headings, numbered and lettered clauses, `Q:`/`A:` pairs.
 
-Measured over this repository's own 23 documents (433,769 bytes):
+Measured over this repository's own 23 documents, 437,141 bytes, at
+commit 90ea0ce:
 
 | | default | structure-aware |
 | --- | --- | --- |
-| chunks | 824 | 860 (+4.4%) |
-| tables split across chunks | **10 of 33** | **0** |
+| chunks | 829 | 867 (+4.6%) |
+| tables split across chunks | **10 of 34** | **0** |
 | headings left as the last line of a chunk | **105** | **0** |
 
 That measures the defect, not recall. Recall on our benchmark corpus
 would have been zero and meaningless: it is chat sessions, which have no
 headings, clauses or tables at all. Whether a reader answers better from
-these chunks is unmeasured, and the cost of 4.4% more chunks — more
-embeddings at ingestion, more candidates per query — is real.
+these chunks is unmeasured, and the cost of 4.6% more chunks — more
+embeddings at ingestion, more candidates per query — is real. The sha
+matters because the corpus is this directory: editing these docs changes
+the numbers slightly, and the script that produces them lives beside the
+write-up in `bench-runs/structure-chunking-2026-09-12/`.
 
 Four rules, each with a test:
 
@@ -655,6 +659,55 @@ unretrievable — and a heading above a table was separated from it. The
 invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
+
+## A recalled body, with the signature and imports that make it readable
+
+A chunk of code already says which declaration it came from —
+`Engine.forget` — and that was where the answer stopped. It did not say
+the declaration's **signature**, so a caller saw a body without its
+parameters, and it did not say what the file **imported**, so a name in
+the body could not be traced to where it came from. For "how is this
+done here", a body without its signature and its imports is a fragment.
+
+```bash
+scone recall "write the paper to the shelf" --code-context
+#   #4 inside Shelf.keep (line 17)
+#       def keep(
+#           self,
+#           paper: str,
+#           *,
+#           tag: str = "unsorted",
+#       ) -> Path:
+#   #4 line 3: from __future__ import annotations
+#   #4 line 5: import json
+#   #4 line 6: from pathlib import Path
+```
+
+The reference that has this prepends the context **into** the chunk text.
+Ours does not: invariant I1 says `content[span.start:span.end]` is the
+source unchanged, and a chunk that has grown a header is no longer a
+quotation of the file. So the context sits beside the chunk, quoted from
+the source with the line numbers it came from, and every line of it can
+be checked against the file.
+
+Three rules, each with a test:
+
+- **Nothing is guessed from content.** A file called `notes.md` holding a
+  code block is prose that quotes code, and gets no code context — the
+  language comes from the stored name, as everywhere else.
+- **A source confirmed gone is dropped, not answered.** The rule merging
+  and windowing already follow.
+- **A list that stopped says so.** A file bringing in more names than the
+  bound reports `more_imports`, because a count of what was listed must
+  never read as a count of what the file imports. The episode budget
+  counts reads that failed, for the same reason.
+
+The signature runs from the declaring keyword to the end of its parameter
+list, found by bracket depth rather than by masking strings: the `:`
+ending a Python header and the `{` opening a brace body are always at
+depth zero, because a colon inside a default argument is inside brackets
+by definition. A header longer than twelve lines is quoted to there and
+says it was clipped.
 
 ## One passage instead of three fragments of it
 

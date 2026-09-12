@@ -111,6 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
                         "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
+    p.add_argument("--code-context", action="store_true",
+                   help="for a passage of code, also quote the signature it sits inside and the "
+                        "imports of its file; the passage itself is not changed")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -1293,6 +1296,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             kept = withhold(result.items,
                             kinds=tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
             result = result.model_copy(update={"items": list(kept.items)})
+        inside = None
+        if args.code_context:
+            from ..retrieval.code_context import code_context
+
+            # After widening and withholding, so the context describes the
+            # passages actually being handed back.
+            inside = await code_context(engine, space, result.items)
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
@@ -1303,12 +1313,22 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             said = result.model_dump() | {"context_reduction": result.context_reduction}
             emit(said | ({"merged": joined.record()} if joined else {})
                       | ({"widened": opened.record()} if opened else {})
-                      | ({"withheld": kept.record()} if kept else {}))
+                      | ({"withheld": kept.record()} if kept else {})
+                      | ({"code_context": inside.record()} if inside else {}))
             return 0
         if kept is not None:
             print(kept.why, file=out)
         if opened is not None:
             print(opened.why, file=out)
+        if inside is not None:
+            print(inside.why, file=out)
+            for chunk, context in inside.by_chunk.items():
+                for holder in context.holders:
+                    print(f"  #{chunk} inside {holder.name} (line {holder.line})", file=out)
+                    for line in holder.text.splitlines():
+                        print(f"      {line}", file=out)
+                for brought in context.imports:
+                    print(f"  #{chunk} line {brought.line}: {brought.text}", file=out)
         if joined is not None:
             print(joined.why, file=out)
             for chunk, absorbed in joined.from_chunks.items():
