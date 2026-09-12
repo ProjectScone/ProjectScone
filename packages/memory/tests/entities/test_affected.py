@@ -609,39 +609,37 @@ async def test_a_graph_with_no_resolved_cross_file_imports_says_so():
     """A file's blast radius is empty here for a reason that has nothing
     to do with the file.
 
-    `_imported` returns nothing for a relative import unless a resolver
-    that knows the tree is supplied, and `engine.remember` supplies none
-    -- only `scone sync --graph` does, from the files it actually read.
-    So a Python package ingested through `remember` or the HTTP episodes
-    route records `import json` and drops `from ..core import errors`,
-    and every file's dependants are missing.
+    When no file in the graph imports any other, the answer would have
+    been empty for every file in it, and that is a fact about the graph
+    rather than about the target. "Nothing rests on this" is technically
+    hedged already; a caller reading it about every file in their
+    codebase deserves the actual reason.
 
-    Measured over 57 files of this package: through `remember` alone, 0
-    files had any dependant; with the resolver, 27 cross-file import
-    edges and 15 files with dependants, reached at up to four hops.
-
-    "Nothing rests on this" is technically hedged already, but a caller
-    reading it about every file in their codebase deserves the actual
-    reason.
+    This notice was written when a relative import recorded nothing
+    without a resolver that knew the tree, which was true of every
+    language and made the case common. Both forms name their file now,
+    so what is left is a graph that genuinely holds no edge between two
+    of its own files -- one file, or files importing only packages
+    outside it, or a language this reader does not read.
     """
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 code_graph=True).open()
     try:
-        # TypeScript, because `./store` could be store.ts, store.tsx,
-        # store.js or store/index.ts and arithmetic cannot choose. Python
-        # names its file and no longer needs the resolver for this.
-        await engine.remember("default", "export function keep(p: string) { return p; }\n",
-                              source="pkg/store.ts")
-        await engine.remember("default", "import {keep} from './store';\n"
-                              "export function put(p: string) { return keep(p); }\n",
-                              source="pkg/api.ts")
-        blast = await affected(engine, "default", "pkg/store.ts")
+        # Two files that import only packages outside this graph. Both
+        # relative-import forms now name their file, so this is what is
+        # left: a graph with no edge between two of its own files, where
+        # the empty answer would have been empty for every file in it.
+        await engine.remember("default", "import json\n\n\ndef keep(p):\n"
+                              "    return json.dumps(p)\n", source="pkg/store.py")
+        await engine.remember("default", "import csv\n\n\ndef put(p):\n"
+                              "    return csv.writer(p)\n", source="pkg/api.py")
+        blast = await affected(engine, "default", "pkg/store.py")
     finally:
         await engine.close()
     assert not blast.reached, blast.record()
     assert blast.unresolved_imports is True, blast.record()
-    assert "relative import" in blast.why, blast.why
-    assert "sync --graph" in blast.why, blast.why
+    assert "no file in this graph imports another" in blast.why, blast.why
+    assert "whatever the file is" in blast.why, blast.why
 
 
 async def test_a_package_imported_by_its_directory_is_matched_to_its_init():
@@ -708,3 +706,94 @@ async def test_a_relative_import_reaches_the_file_it_names_without_a_resolver():
     assert blast.status == "found", blast.record()
     assert any(one.label == "pkg/api/routes.py" for one in blast.reached), blast.record()
     assert blast.unresolved_imports is False, blast.record()
+
+
+async def test_a_candidate_spelling_finds_the_file_the_graph_really_holds():
+    """`./store` from a `.tsx` file is recorded as `store.tsx`, and the
+    file may well be `store.ts`. The spelling is a candidate; which one
+    exists is a question for read time, when every file is visible.
+
+    Aliased only onto a name nothing was ever ingested for -- a label
+    that is the object of edges and the subject of none. Two files that
+    genuinely exist under different extensions stay two files.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "export function keep(p: string) { return p; }\n",
+                              source="web/memory/store.ts")
+        await engine.remember("default", "import {keep} from './store';\n"
+                              "export function put(p: string) { return keep(p); }\n",
+                              source="web/memory/page.tsx")
+        blast = await affected(engine, "default", "web/memory/store.ts")
+    finally:
+        await engine.close()
+    assert blast.status == "found", blast.record()
+    assert any(one.label == "web/memory/page.tsx" for one in blast.reached), blast.record()
+
+
+async def test_two_files_that_both_exist_are_not_merged_by_their_extension():
+    """The guard on the alias above. `store.ts` and `store.tsx` can both
+    be real, and then neither stands in for the other."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "export function keep(p: string) { return p; }\n",
+                              source="web/store.ts")
+        await engine.remember("default", "export function draw(p: string) { return p; }\n",
+                              source="web/store.tsx")
+        await engine.remember("default", "import {keep} from './store';\n"
+                              "export function put(p: string) { return keep(p); }\n",
+                              source="web/page.ts")
+        reached = await affected(engine, "default", "web/store.tsx")
+    finally:
+        await engine.close()
+    # page.ts records `web/store.ts`, which exists. Nothing reaches the
+    # .tsx file, and it is not handed page.ts by resemblance.
+    assert not reached.reached, reached.record()
+
+
+async def test_a_symbol_in_a_package_is_reached_under_either_spelling():
+    """The file-level match was not enough. `from .core import Base` in a
+    package names `pkg/core.py:Base`, and the graph holds
+    `pkg/core/__init__.py:Base` -- two symbol entities, and only the two
+    *file* entities were being matched, so the real symbol had no
+    dependants while the candidate had them all."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "class Base:\n    pass\n",
+                              source="pkg/core/__init__.py")
+        await engine.remember("default", "from .core import Base\n\n\n"
+                              "class Derived(Base):\n    pass\n", source="pkg/shelf.py")
+        blast = await affected(engine, "default", "pkg/core/__init__.py:Base")
+    finally:
+        await engine.close()
+    assert any(one.label.startswith("pkg/shelf.py") for one in blast.reached), blast.record()
+
+
+async def test_a_package_beside_a_module_of_the_same_name_wins_as_python_says():
+    """`core.py` and `core/__init__.py` in one directory is legal, and
+    Python imports the **package**. Both were claiming the importer.
+
+    This is the one place a language rule decides it, so this match is
+    not conditional on the module being a phantom the way the extension
+    match is: there is no rule saying `store.ts` beats `store.tsx`, and
+    there is one saying a package beats a module."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        # Each needs a declaration of its own: a file becomes an entity
+        # when something in the graph names it, and a bare assignment
+        # names nothing.
+        await engine.remember("default", "def shadowed():\n    return 1\n", source="pkg/core.py")
+        await engine.remember("default", "def chosen():\n    return 2\n",
+                              source="pkg/core/__init__.py")
+        await engine.remember("default", "from .core import chosen\n\n\n"
+                              "def put():\n    return chosen()\n", source="pkg/shelf.py")
+        package = await affected(engine, "default", "pkg/core/__init__.py")
+        module = await affected(engine, "default", "pkg/core.py")
+    finally:
+        await engine.close()
+    assert any(one.label == "pkg/shelf.py" for one in package.reached), package.record()
+    assert not module.reached, module.record()
