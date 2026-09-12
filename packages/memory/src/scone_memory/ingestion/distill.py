@@ -184,14 +184,28 @@ class Retried:
     unknown: int = 0
     #: Ids named, or the number cleared when the whole space was asked for.
     asked: int = 0
+    #: Of the cleared ones, how many a later pass will actually look at.
+    queued: int = 0
+    #: How many it will not, because a claim already cites the episode and
+    #: a pass only considers episodes nothing cites yet. Clearing one of
+    #: these is real -- the park is gone -- but nothing follows from it,
+    #: and reporting it as cleared alone reads as "queued".
+    blocked: int = 0
 
     def record(self) -> dict[str, object]:
         return {"space": self.space, "cleared": self.cleared, "unparked": self.unparked,
-                "unknown": self.unknown, "asked": self.asked}
+                "unknown": self.unknown, "asked": self.asked, "queued": self.queued,
+                "blocked": self.blocked}
 
     def text(self) -> str:
         lines = [f"retry {self.space}: {self.cleared} record(s) cleared, "
                  f"{self.unparked} of them parked"]
+        if self.queued:
+            lines.append(f"{self.queued} will be looked at again on the next pass")
+        if self.blocked:
+            lines.append(f"{self.blocked} will not: a claim already cited the episode, and a "
+                         f"pass only considers episodes nothing cites yet, so clearing the "
+                         f"failure changes nothing on its own")
         if self.unknown:
             lines.append(f"nothing recorded against {self.unknown} of {self.asked} "
                          f"episode(s) asked for")
@@ -352,9 +366,16 @@ class Distiller:
         unparked = sum(1 for key in going if self._failures[key].count >= self.max_attempts)
         for key in going:
             del self._failures[key]
+        # Clearing a failure is not the same as queueing the work. A pass
+        # only considers episodes no claim cites yet, so an episode whose
+        # extraction failed after writing one fact is never looked at
+        # again, and saying "cleared" alone would promise otherwise.
+        waiting = {episode.episode_id for episode in await self._pending(space)}
+        queued = sum(1 for key in going if key[1] in waiting)
         return Retried(space=space, cleared=len(going), unparked=unparked,
                        unknown=0 if wanted is None else len(wanted - held),
-                       asked=len(going) if wanted is None else len(wanted))
+                       asked=len(going) if wanted is None else len(wanted),
+                       queued=queued, blocked=len(going) - queued)
 
     async def distill_text(self, space: str, text: str, created_at: Optional[str] = None) -> list[Fact]:
         """Facts from text that is not stored as an episode. They date

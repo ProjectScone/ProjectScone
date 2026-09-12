@@ -476,3 +476,13 @@ def test_a_parted_search_refuses_a_filter_it_cannot_honour_rather_than_dropping_
     refused = client.get("/v1/recall/parts", params=asked, headers=auth())
     assert refused.status_code == 422, refused.json()
     assert "history" in refused.json()["error"] and "part" in refused.json()["error"]
+
+
+def test_a_retry_will_not_take_a_boolean_or_a_string_for_an_episode_id(client):
+    """Pydantic coerces true, "1" and 1.0 to the integer 1, so a caller
+    could clear episode 1 without ever naming it. An id is an id."""
+    for wrong in (True, "1", 1.0, None):
+        refused = client.post("/v1/consolidate/retry", json={"episodes": [wrong]}, headers=auth())
+        assert refused.status_code == 422, (wrong, refused.status_code, refused.json())
+    assert client.post("/v1/consolidate/retry", json={"episodes": [1]},
+                       headers=auth()).status_code in (200, 501)

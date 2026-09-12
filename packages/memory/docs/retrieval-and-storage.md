@@ -621,6 +621,14 @@ retries every failure the running distiller holds for the space.
   against them rather than failing the whole call.
 - **`parked_now` is what is left**, so a caller can tell "I cleared the
   one I named" from "I cleared the lot".
+- **`queued` and `blocked` are counted apart from `cleared`.** A pass only
+  considers episodes no claim cites yet, so an episode whose extraction
+  failed *after* writing one fact is never looked at again: clearing its
+  park is real and nothing follows from it. Reporting that as `cleared`
+  alone would read as "queued", which is a promise this cannot keep.
+- **Episode ids are strict integers.** Pydantic's default would coerce
+  `true`, `"1"` and `1.0` all to the integer 1, so a caller could clear
+  episode 1 without ever naming it.
 
 There is deliberately **no `scone retry`**. The park is in the process
 that holds it, and a command-line invocation is a *new* process with

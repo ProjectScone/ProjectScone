@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal, Mapping, Optional
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, StrictInt, Field
 
 from contextlib import asynccontextmanager
 
@@ -64,7 +64,9 @@ class RetryBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    episodes: Optional[list[int]] = None
+    #: Strict, because the default would coerce true, "1" and 1.0 all to
+    #: the integer 1 -- a caller could clear episode 1 without naming it.
+    episodes: Optional[list[StrictInt]] = None
 
 
 class ConsolidateBody(BaseModel):

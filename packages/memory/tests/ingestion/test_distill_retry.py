@@ -126,3 +126,39 @@ async def test_a_retry_of_a_bad_space_or_a_bad_id_is_refused():
             await distiller.retry("default", episodes=[])
     finally:
         await engine.close()
+
+
+async def test_a_retry_does_not_promise_to_reconsider_what_the_next_pass_will_skip():
+    """A pass only looks at episodes no claim cites yet. An episode whose
+    extraction failed *after* writing one fact is therefore never looked at
+    again, and reporting it as cleared reads as "queued" when nothing will
+    happen. Cleared and queued are different facts."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        chat = Broken()
+        distiller = Distiller(engine, chat, max_attempts=1, require_grounding=False)
+        said = await engine.remember("default", "Alice Chen works at Acme Robotics.")
+        with pytest.raises(DistillError):
+            await distiller.distill_pending("default")
+        assert distiller.parked("default"), "the record is parked to begin with"
+        # A claim now cites the episode, as a half-finished extraction leaves it.
+        await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics",
+                                 valid_from="2024-01-01T00:00:00Z",
+                                 source_episode_id=said.episode_id,
+                                 quote="Alice Chen works at Acme Robotics.")
+        again = await distiller.retry("default")
+        assert again.cleared == 1 and again.unparked == 1, again.record()
+        assert again.queued == 0 and again.blocked == 1, again.record()
+        assert "already cited" in again.text(), again.text()
+    finally:
+        await engine.close()
+
+
+async def test_a_retry_of_an_uncited_record_does_say_it_is_queued():
+    engine, chat, distiller = await parked_engine()
+    try:
+        again = await distiller.retry("default")
+        assert again.queued == 1 and again.blocked == 0, again.record()
+        assert "next pass" in again.text(), again.text()
+    finally:
+        await engine.close()
