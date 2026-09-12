@@ -89,7 +89,9 @@ Set `SCONE_DOCUMENT_VIDEO_CONFIG` to an owned, mode-0600 regular JSON file
 ```
 
 Both the memory host and conversation host load this configuration without
-executing tools or downloading models. Executable bytes, OCR settings, sampling
+executing tools or downloading models. Install `scone-memory[images]` for frame
+validation, along with the chosen local executables and OCR language data.
+Executable bytes, OCR settings, sampling
 policy and the operator revision bind the extraction revision. Replace installed
 executables only with an explicit configuration reload; bump `model_revision`
 for changed trained data or shared-library behavior. The standard loader uses
