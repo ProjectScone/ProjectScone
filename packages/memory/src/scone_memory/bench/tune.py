@@ -92,6 +92,8 @@ class Tuning:
     embedder: str
     k: int
     sample: int
+    #: The sample's seed, so the same questions can be drawn again.
+    seed: int = 42
     rows: tuple[Measured, ...] = ()
     chosen: Optional[Setting] = None
     reason: str = ""
@@ -99,6 +101,7 @@ class Tuning:
 
     def record(self) -> dict[str, object]:
         return {"dataset": self.dataset, "embedder": self.embedder, "k": self.k, "sample": self.sample,
+                "seed": self.seed,
                 "rows": [row.record() for row in self.rows],
                 "chosen": self.chosen.record() if self.chosen else None,
                 "environment": self.chosen.environment() if self.chosen else [],
@@ -107,7 +110,7 @@ class Tuning:
     def text(self) -> str:
         """What a person needs: every setting's score, then the one to take
         and the lines that put it in force."""
-        lines = [f"tuning: {self.dataset}, {self.sample} question(s) at k={self.k}, "
+        lines = [f"tuning: {self.dataset}, {self.sample} question(s) at k={self.k} (seed {self.seed}), "
                  f"embedded by {self.embedder}"]
         for row in sorted(self.rows, key=lambda item: (-item.recall_any, item.recall_ms_p50 or 0.0)):
             lines.append(f"  {row.setting.text()}: recall_any {row.recall_any:.3f}, "
@@ -177,6 +180,6 @@ async def tune(dataset: str | Path, *, settings: Sequence[Setting], k: int = 5, 
                              recall_any=report.recall_any[k], recall_all=report.recall_all[k],
                              recall_ms_p50=report.recall_ms_p50, errors=report.errors))
     chosen, reason = chosen_setting(rows)
-    return Tuning(dataset=str(dataset), embedder=embedder.id, k=k, sample=len(items),
+    return Tuning(dataset=str(dataset), embedder=embedder.id, k=k, sample=len(items), seed=seed,
                   rows=tuple(rows), chosen=chosen, reason=reason,
                   measured={"questions": rows[0].questions if rows else 0, "settings": len(rows)})

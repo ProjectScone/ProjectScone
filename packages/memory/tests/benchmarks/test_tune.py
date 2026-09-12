@@ -81,6 +81,7 @@ async def test_a_sweep_measures_every_setting_it_names(tmp_path):
     assert [row.setting for row in report.rows] == swept
     assert all(row.questions == 2 for row in report.rows)
     assert report.embedder and report.dataset == str(dataset)
+    assert report.seed == 42 and report.record()["seed"] == 42, "a sample can be drawn again"
     assert report.chosen is not None or "nothing" in report.reason
 
 
