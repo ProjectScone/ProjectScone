@@ -299,6 +299,15 @@ carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.
 
+**Languages other than Python get what can be read and not what would
+have to be inferred.** For the brace family the declarations come from
+the same scanner that cuts those files into chunks, and imports are read
+from the lines that write them (`from "./x"`, a bare `import "x"`,
+`require("x")`, a Go import block, a Rust `use`). **No call is claimed**:
+resolving a call means knowing what a name refers to, which needs a
+parser this does not have, and an edge nobody can check is worse than no
+edge. Python gets calls because Python's own parser gives them.
+
 A relative import is followed only to a file the map actually read.
 Resolution belongs to the walk, because that is what knows which files
 exist; a file on its own cannot tell where its package root is, so on its

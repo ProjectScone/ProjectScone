@@ -522,7 +522,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     it was read from. With --graph, also record what each file says about
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
-    from ..ingestion.code import PYTHON_SUFFIXES, code_language, declarations
+    from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
     from ..ingestion.code_graph import record_claims
 
     root = pathlib.Path(args.directory)
@@ -533,7 +533,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     if not 1 <= args.max_bytes <= 50_000_000:
         raise InvalidInput("--max-bytes must be from 1 to 50000000")
     found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and path.suffix in PYTHON_SUFFIXES
+             if path.is_file() and path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
              and not any(part.startswith(".") or part == "__pycache__" for part in path.parts)]
     # Resolution belongs here, because this is what knows which files
     # exist: a relative import is followed only to a file actually read,
@@ -545,6 +545,17 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         for _ in range(level - 1):
             here = posixpath.dirname(here)
         stem = posixpath.join(here, *module.split(".")) if module else here
+        # A relative import names a file however the language spells it:
+        # Python by module, the brace family by path with the extension
+        # left off. Only a file this walk really read is followed.
+        stems = [stem, posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
+                 if module.startswith(".") else stem]
+        for base in dict.fromkeys(stems):
+            for suffix in ("py", "ts", "tsx", "js", "jsx", "go", "rs"):
+                if f"{base}.{suffix}" in seen:
+                    return f"{base}.{suffix}"
+                if f"{base}/index.{suffix}" in seen:
+                    return f"{base}/index.{suffix}"
         for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
             if candidate in seen:
                 return candidate

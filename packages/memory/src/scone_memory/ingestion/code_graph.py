@@ -28,7 +28,9 @@ from typing import Callable, Optional
 #: resolves to is left out rather than guessed at.
 Resolve = Callable[[str, int, str], Optional[str]]
 
-from .code import Language, MAX_LINES, _line_starts
+import re
+
+from .code import Language, MAX_LINES, _line_starts, declarations
 
 #: Claims from one file, past which a generated file is not worth reading.
 MAX_CLAIMS = 20_000
@@ -36,6 +38,17 @@ MAX_CLAIMS = 20_000
 DEFINES = "defines"
 IMPORTS = "imports"
 CALLS = "calls"
+
+#: How the brace languages write an import. A header line is written
+#: down, so it can be read; what a name in the body refers to is not, so
+#: it is not guessed at. Nothing here claims a call for these languages.
+_FROM = re.compile(r"""\bfrom\s+["']([^"']+)["']""")
+_BARE = re.compile(r"""^\s*import\s+["']([^"']+)["']""")
+_REQUIRE = re.compile(r"""\brequire\s*\(\s*["']([^"']+)["']""")
+_QUOTED = re.compile(r"""^\s*(?:_\s+|\w+\s+)?["']([^"']+)["']\s*$""")
+_USE = re.compile(r"^\s*(?:pub\s+)?use\s+([A-Za-z_][\w:]*)")
+#: Where a language writes its imports in a block rather than a line.
+_OPENS = re.compile(r"^\s*import\s*\($")
 
 
 @dataclass(frozen=True)
@@ -62,7 +75,11 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     stay two things. ``resolve`` turns a relative import into something
     nameable; without one, relative imports are left out, because a file
     on its own cannot tell where its package root is."""
-    if language != "python" or not content or content.count("\n") > MAX_LINES:
+    if not content or content.count("\n") > MAX_LINES:
+        return ()
+    if language == "braces":
+        return _brace_claims(content, path, resolve)
+    if language != "python":
         return ()
     try:
         tree = ast.parse(content)
@@ -186,3 +203,63 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
                                  quote=claim.quote, origin="extracted")
         said += 1
     return said
+
+
+def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tuple[CodeClaim, ...]:
+    """What a brace-language file declares and imports, and nothing else.
+
+    Declarations come from the same scanner that cuts these files into
+    chunks. Imports are read from the lines that write them, including a
+    block of them where the language does that. No call is claimed: a call
+    means knowing what a name refers to, which needs a parser this does
+    not have, and an edge nobody can check is worse than no edge."""
+    starts = _line_starts(content)
+    lines = content.split("\n")
+    found: list[CodeClaim] = []
+
+    def say(subject: str, predicate: str, obj: str, line: int) -> None:
+        if len(found) >= MAX_CLAIMS:
+            return
+        text = lines[line - 1] if 0 <= line - 1 < len(lines) else ""
+        begins = len(content[: starts[line - 1]].encode()) if line - 1 < len(starts) else 0
+        found.append(CodeClaim(subject, predicate, obj, text.strip(), line, begins,
+                               begins + len(text.encode())))
+
+    for item in declarations(content, language="braces"):
+        owner = path if "." not in item.name else f"{path}:{item.name.rsplit('.', 1)[0]}"
+        say(owner, DEFINES, f"{path}:{item.name}", item.first_line)
+
+    inside = False
+    for number, line in enumerate(lines, start=1):
+        if _OPENS.match(line):
+            inside = True
+            continue
+        if inside:
+            if line.strip().startswith(")"):
+                inside = False
+                continue
+            named = _QUOTED.match(line)
+            if named:
+                say(path, IMPORTS, named.group(1), number)
+            continue
+        for pattern in (_FROM, _BARE, _REQUIRE):
+            match = pattern.search(line)
+            if match:
+                where = _named(match.group(1), path, resolve)
+                if where:
+                    say(path, IMPORTS, where, number)
+                break
+        else:
+            used = _USE.match(line)
+            if used:
+                say(path, IMPORTS, used.group(1).split("::")[0], number)
+    return tuple(found)
+
+
+def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
+    """An import as it can be named. One written relative to this file is
+    left to whoever knows the tree, because this file cannot say what it
+    points at; anything else is a package, and names itself."""
+    if not module.startswith("."):
+        return module
+    return resolve(path, 1, module) if resolve is not None else None

@@ -93,8 +93,15 @@ def test_a_file_that_does_not_parse_says_nothing_rather_than_guessing():
     assert code_claims("def broken(:\n", "app/broken.py", language="python") == ()
 
 
-def test_a_language_this_cannot_read_yet_says_nothing():
-    assert code_claims("function f() {}", "app/x.ts", language="braces") == ()
+def test_a_language_without_a_parser_says_what_is_written_and_no_more():
+    """Its declarations and imports are written down and can be read; what
+    a call refers to is not, so none is claimed."""
+    found = code_claims("import 'x'\nfunction f() {\n  g()\n}\n", "app/x.ts", language="braces")
+    assert {(c.predicate, c.object) for c in found} == {("defines", "app/x.ts:f"), ("imports", "x")}
+
+
+def test_a_language_this_does_not_read_at_all_says_nothing():
+    assert code_claims("print 'hello'", "app/x.rb", language=None) == ()
 
 
 RELATIVE = '''from . import shared
