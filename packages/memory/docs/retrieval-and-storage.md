@@ -495,6 +495,45 @@ gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
 `periods` (every stretch, half-open); the working names each stretch. A
 claim that still holds is counted up to the moment asked and says so.
 
+## One passage instead of three fragments of it
+
+Small chunks match precisely and read badly. Three neighbouring fragments
+of one paragraph are three citations to the same thought, and between them
+they crowd the rest of the answer out of the limit.
+
+The leading frameworks fix this by indexing a hierarchy at ingestion — a
+parent node holding children — and merging children back into the parent
+at retrieval. That means choosing the hierarchy before anyone has asked a
+question, and re-indexing to change it.
+
+```bash
+scone recall "crane survey rust jib slew" --merge --limit 5
+# 1 passage(s) joined from 3 chunk(s)
+# joined 3 chunk(s) into #12: 11, 12, 13
+```
+
+**No hierarchy and no re-index**, because every chunk already carries the
+byte span it came from: neighbours from one episode are merged by reading
+the span that contains them. The shape of a merge is therefore decided by
+what was actually retrieved, not by a decision taken at ingestion.
+
+Three rules it keeps:
+
+- **A merged passage says what went into it.** `from_chunks` names every
+  chunk absorbed, because a citation nobody can check is worse than three
+  that can.
+- **It keeps the best score of its parts, never their sum.** A sum would
+  make a merged passage outrank everything by arithmetic rather than by
+  relevance.
+- **It is a passage, not a document.** Fragments further apart than
+  `max_merged` bytes are left alone and the report says so — silently
+  returning most of a document to answer a question about a sentence
+  would be worse than not merging.
+
+Opt-in, because it is not yet measured. It changes the shape of an answer
+for certain; whether it changes what is *found* is a question for the
+bench, and until that number exists this does not become the default.
+
 ## What a codebase says about itself beyond who calls whom
 
 Call edges are not a code graph. Two questions people actually ask are

@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
+    p.add_argument("--merge", action="store_true",
+                   help="join neighbouring chunks of one episode into the passage holding them, "
+                        "and say which chunks went into each")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -1256,9 +1259,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost,
         )
+        joined = None
+        if args.merge:
+            from ..retrieval.merging import merge_neighbours
+
+            joined = await merge_neighbours(engine, space, result.items)
+            result = result.model_copy(update={"items": list(joined.items)})
         if args.json:
-            emit(result.model_dump() | {"context_reduction": result.context_reduction})
+            said = result.model_dump() | {"context_reduction": result.context_reduction}
+            emit(said | ({"merged": joined.record()} if joined else {}))
             return 0
+        if joined is not None:
+            print(joined.why, file=out)
+            for chunk, absorbed in joined.from_chunks.items():
+                print(f"joined {len(absorbed)} chunk(s) into #{chunk}: "
+                      f"{', '.join(str(c) for c in absorbed)}", file=out)
         for f in result.facts:
             print(f"fact  {f.subject} {f.predicate} {f.object}  (since {f.valid_from[:10]})", file=out)
         for f in result.history:
