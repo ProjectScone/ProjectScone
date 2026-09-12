@@ -36,12 +36,14 @@ class AgentRunRequest(BaseModel):
     scope: dict[str, object]
     exclude_session_id: Identifier | None = None
     created_at: datetime
+    cancel_requested_at: datetime | None = None
 
     @model_validator(mode='after')
     def valid(self) -> Self:
         check_space(self.space)
         if (self.plan.space != self.space or not self.question.strip()
-                or len(self.question.encode()) > 4000 or self.created_at.tzinfo is None):
+                or len(self.question.encode()) > 4000 or self.created_at.tzinfo is None
+                or (self.cancel_requested_at is not None and self.cancel_requested_at.tzinfo is None)):
             raise ValueError('invalid agent run request')
         try:
             canonical = RecallScope.from_mapping(self.scope).as_dict()
@@ -67,7 +69,8 @@ class AgentRunStore:
     The caller authorizes the space and validates the saved plan against the host
     catalog before registration/execution. The store keeps a detached snapshot;
     changing a plan later cannot change a registered run. Execution receipts live
-    separately in AgentWorkflow journals. Closing this store never cancels runs.
+    separately in AgentWorkflow journals. A separate cancellation-intent timestamp
+    may be added without changing the invocation. Closing this store never cancels runs.
     """
     def __init__(self, path: str | Path, *, key: bytes, max_runs: int = 4096) -> None:
         _integer(max_runs, 1, 100000)
@@ -112,13 +115,29 @@ class AgentRunStore:
             row = db.execute('SELECT payload FROM agent_runs WHERE token=?', (token,)).fetchone()
             if row is not None:
                 prior = self._decode(token, row[0], space)
-                if prior.model_dump(exclude={'created_at'}) != saved.model_dump(exclude={'created_at'}):
+                if prior.model_dump(exclude={'created_at', 'cancel_requested_at'}) != saved.model_dump(exclude={'created_at', 'cancel_requested_at'}):
                     raise RunConflict()
                 return prior
             if db.execute('SELECT COUNT(*) FROM agent_runs').fetchone()[0] >= self._maximum:
                 raise WorkflowError('run_store_limit')
             db.execute('INSERT INTO agent_runs VALUES (?, ?)', (token, payload))
         return saved
+
+    def request_cancel(self, space: str, run_id: str) -> AgentRunRequest | None:
+        """Persist cancellation intent without changing the bound invocation."""
+        token = self._token(space, run_id)
+        with self._storage._access(write=True) as db:
+            row = db.execute('SELECT payload FROM agent_runs WHERE token=?', (token,)).fetchone()
+            if row is None:
+                return None
+            request = self._decode(token, row[0], space)
+            if request.cancel_requested_at is not None:
+                return request
+            request = AgentRunRequest.model_validate({**request.model_dump(),
+                'cancel_requested_at': datetime.now(timezone.utc)})
+            db.execute('UPDATE agent_runs SET payload=? WHERE token=?',
+                       (self._storage._seal(token, request.model_dump_json().encode()), token))
+            return request
 
     def list(self, space: str, *, limit: int = 50, after: str | None = None) -> AgentRunPage:
         _integer(limit, 1, 100)

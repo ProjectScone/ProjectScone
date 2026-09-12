@@ -238,7 +238,52 @@ before execution. Registration itself calls no model and does not start or resum
 work. Run requests and execution receipts use separate stores. The registry shares
 the plan store's private-file, encryption, payload and pagination protections,
 with a distinct schema and encryption domain. It defaults to 4,096 run records.
-The host owns retention and cleanup; records are not automatically expired.
+The host owns retention and cleanup; records are not automatically expired. A
+separate `cancel_requested_at` timestamp records cancellation intent without
+changing the bound invocation. Repeating registration preserves that marker.
+
+## Own bounded background runs
+
+`AgentRunService` owns local background tasks, durable requests and execution
+journals. The host supplies an allowed catalog, plan store, memory engine and
+scope resolver; it remains responsible for authentication and lifecycle.
+
+```python
+from scone_memory.agents.run_service import AgentRunService
+
+service = AgentRunService("agent-run-data", key=key, catalog=agents,
+    plans=store, memory=memory, scope_for=lambda space: RecallScope.validated(
+        where={"project": "approved-project"}), max_active=4)
+try:
+    admitted = await service.start("team-space", "request-1",
+        workflow_id="research-report", plan_revision=stored.revision,
+        question="What should our team do next?")
+    progress = await service.wait("team-space", "request-1")
+    answer = await service.result("team-space", "request-1")
+finally:
+    await service.aclose()
+```
+
+Starting a run does not await its model call. The owned task outlives its caller;
+cancelling a `wait` caller does not cancel that task. `status` reports committed
+progress and whether this process owns an active task. It does not verify answer
+content. `result` uses the non-executing evidence verifier. A saved plan edit does
+not change an admitted run; changed host model configuration or recall scope
+refuses execution/result reuse under the old binding.
+
+`cancel(space, run_id)` persists intent and stops the locally owned task. An
+interrupted model call remains an unknown outcome and cannot be automatically
+replayed. Cancellation before execution remains recorded after restart. Even if
+intent persistence fails, cancellation still stops the local task and reports the
+storage failure. Starting a cancelled request requires a new run ID.
+
+Admission is bounded per service instance and excess new work raises `run_busy`;
+there is no unbounded queue. A private process-held lock protects each run from
+admission through completion, including the time before its coroutine starts.
+Another instance cannot acknowledge cancellation of that owned work. A dead
+process releases its lock; uncertain journal attempts still prevent replay.
+`aclose` rejects new admissions and waits for cooperative task cancellation.
+Use one owning process for served cancellation; this is not distributed execution.
 
 ## Current boundary
 
