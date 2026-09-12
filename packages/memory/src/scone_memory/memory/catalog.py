@@ -147,8 +147,11 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
     affirmations = affirmation_store(documents)
     for fact in active[:MAX_PROFILE_CANDIDATES]:
         said[fact.fact_id] = len(await affirmations.affirmations(space, fact.fact_id)) if affirmations else 0
+    # Newest first, then stably by how often each was stated again, so the
+    # newer of two claims said as often still leads.
     ranked = sorted(active[:MAX_PROFILE_CANDIDATES],
-                    key=lambda fact: (-said[fact.fact_id], _reverse(fact.valid_from), -fact.fact_id))
+                    key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
+    ranked.sort(key=lambda fact: -said[fact.fact_id])
     shown = ranked[:limit]
     recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
               for e in await documents.recent_episodes(space, limit)]
@@ -161,10 +164,6 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
                   "candidates": min(len(active), MAX_PROFILE_CANDIDATES)},
     )
 
-
-def _reverse(moment: str) -> tuple[int, ...]:
-    """A sort key that puts a later moment first among equals."""
-    return tuple(-ord(letter) for letter in moment)
 
 
 async def tags(documents: DocumentStore, space: str) -> dict[str, int]:
