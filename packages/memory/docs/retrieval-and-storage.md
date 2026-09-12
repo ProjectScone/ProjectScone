@@ -286,11 +286,23 @@ because nobody said it: it was read.
 
 ```bash
 scone map src/scone_memory --graph
-# map: 278 file(s) read, 8869 claim(s), 23 had nothing to say
+# map: 278 file(s) read, 10049 claim(s), 10 had nothing to say
+
+scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
+# row: ?who = retrieval/temporal.py:_ledger [fact 7690; quote verified:
+#      "if len(spells) == 1 else f\"answer: in {_spelled(len(spells))} spells\""]
 ```
 
 `map` walks a directory, remembers every source file under the path it
-was read from, and with `--graph` records what each says. What it read
+was read from, and with `--graph` records what each says. An answer
+carries the line it rests on, **re-read from the file** before it is
+shown: a graph of a codebase goes stale the moment somebody edits it, and
+a citation that was not checked is the thing least worth trusting.
+
+A relative import is followed only to a file the map actually read.
+Resolution belongs to the walk, because that is what knows which files
+exist; a file on its own cannot tell where its package root is, so on its
+own it says nothing about `from .code import x` rather than guessing. What it read
 and what it did not is said: files already here, files with nothing to
 say, files it could not read, files left unread past the limit, and files
 read only as far as the byte budget. A map that quietly skipped half a

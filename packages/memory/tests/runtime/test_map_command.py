@@ -115,3 +115,27 @@ async def test_mapping_the_same_directory_again_changes_nothing(tree):
     assert (await engine.documents.counts("default")).episodes == episodes
     assert len(await engine.documents.list_facts("default", include_closed=True)) == facts
     assert "3 already here" in said, said
+
+
+async def test_mapping_resolves_the_imports_between_the_files_it_saw(tmp_path):
+    """The edges that matter most in a codebase are the ones inside it."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "worker.py").write_text(
+        "from .shared import VALUE\nfrom . import shared\nimport json\n", encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(tmp_path), "--graph")
+    triples = {(f.subject, f.predicate, f.object)
+               for f in await engine.documents.list_facts("default", include_closed=True)}
+    assert ("pkg/worker.py", "imports", "pkg/shared.py") in triples
+    assert ("pkg/worker.py", "imports", "json") in triples
+
+
+async def test_mapping_leaves_out_an_import_of_something_it_did_not_see(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "worker.py").write_text("from .missing import thing\n", encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(tmp_path), "--graph")
+    assert not [f for f in await engine.documents.list_facts("default", include_closed=True)
+                if f.predicate == "imports"], "nothing points at a file that is not there"

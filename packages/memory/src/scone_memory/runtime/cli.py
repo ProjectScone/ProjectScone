@@ -20,6 +20,7 @@ from dataclasses import asdict
 import argparse
 import hashlib
 import pathlib
+import posixpath
 import asyncio
 import json
 import os
@@ -534,6 +535,21 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     found = [path for path in sorted(root.rglob("*"))
              if path.is_file() and path.suffix in PYTHON_SUFFIXES
              and not any(part.startswith(".") or part == "__pycache__" for part in path.parts)]
+    # Resolution belongs here, because this is what knows which files
+    # exist: a relative import is followed only to a file actually read,
+    # and one that leads anywhere else is left out rather than guessed at.
+    seen = {str(path.relative_to(root)) for path in found[: args.limit]}
+
+    def resolve(path: str, level: int, module: str) -> str | None:
+        here = posixpath.dirname(path)
+        for _ in range(level - 1):
+            here = posixpath.dirname(here)
+        stem = posixpath.join(here, *module.split(".")) if module else here
+        for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
+            if candidate in seen:
+                return candidate
+        return None
+
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     for path in found[: args.limit]:
         raw = path.read_bytes()
@@ -549,7 +565,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         read += 1
         if args.graph:
             said = await record_claims(engine, args.space, episode_id=added.episode_id,
-                                       content=text, path=where, when=engine.clock())
+                                       content=text, path=where, when=engine.clock(),
+                                       resolve=resolve)
             claims += said
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells

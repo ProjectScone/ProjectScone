@@ -18,7 +18,15 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
+
+#: How a relative import is turned into something nameable. It takes the
+#: importing file's path, how many dots the import had, and the module it
+#: named, and answers with the thing imported or None. A file alone cannot
+#: do this — it does not know where the package root is or what else
+#: exists — so whoever walked the tree decides, and a name nothing
+#: resolves to is left out rather than guessed at.
+Resolve = Callable[[str, int, str], Optional[str]]
 
 from .code import Language, MAX_LINES, _line_starts
 
@@ -45,12 +53,15 @@ class CodeClaim:
     end: int
 
 
-def code_claims(content: str, path: str, *, language: Optional[Language]) -> tuple[CodeClaim, ...]:
+def code_claims(content: str, path: str, *, language: Optional[Language],
+                resolve: Optional["Resolve"] = None) -> tuple[CodeClaim, ...]:
     """What a source file defines, imports and calls, as claims about it.
 
     Names are paths: a module is its path, and a declaration is its path
     and its qualified name, so two files with a function of the same name
-    stay two things."""
+    stay two things. ``resolve`` turns a relative import into something
+    nameable; without one, relative imports are left out, because a file
+    on its own cannot tell where its package root is."""
     if language != "python" or not content or content.count("\n") > MAX_LINES:
         return ()
     try:
@@ -86,7 +97,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language]) -> tup
                 say(owner, DEFINES, whole, child.lineno)
                 walk(child, whole, name)
             elif isinstance(child, (ast.Import, ast.ImportFrom)):
-                for module in _imported(child):
+                for module in _imported(child, path, resolve):
                     say(path, IMPORTS, module, child.lineno)
             else:
                 walk(child, owner, inside)
@@ -96,13 +107,23 @@ def code_claims(content: str, path: str, *, language: Optional[Language]) -> tup
     return tuple(found)
 
 
-def _imported(node: ast.AST) -> list[str]:
-    """The modules an import names, as written."""
+def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[str]:
+    """What an import names: an absolute module as written, and a relative
+    one only when somebody who knows the tree can say what it is."""
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
-    if isinstance(node, ast.ImportFrom):
-        return [node.module] if node.module and not node.level else []
-    return []
+    if not isinstance(node, ast.ImportFrom):
+        return []
+    if not node.level:
+        return [node.module] if node.module else []
+    if resolve is None:
+        return []
+    # "from .code import x" names the module in module; "from . import
+    # code" names it in the aliases. Either way what is imported is a
+    # module, and that is what the resolver is asked for.
+    wanted = [node.module] if node.module else [alias.name for alias in node.names]
+    found = [resolve(path, node.level, one) for one in wanted]
+    return [one for one in found if one]
 
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str], say) -> None:
@@ -151,7 +172,7 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str]) -> Opti
 
 
 async def record_claims(engine, space: str, *, episode_id: int, content: str, path: str,
-                        when: str) -> int:
+                        when: str, resolve: Optional["Resolve"] = None) -> int:
     """Record what a file says about itself, and say how many claims that
     was. One place decides how these are written — quoted from the line,
     cited to the episode, extracted rather than stated — so the engine and
@@ -159,7 +180,7 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     from .code import code_language
 
     said = 0
-    for claim in code_claims(content, path, language=code_language(path)):
+    for claim in code_claims(content, path, language=code_language(path), resolve=resolve):
         await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
                                  valid_from=when, source_episode_id=episode_id,
                                  quote=claim.quote, origin="extracted")

@@ -95,3 +95,49 @@ def test_a_file_that_does_not_parse_says_nothing_rather_than_guessing():
 
 def test_a_language_this_cannot_read_yet_says_nothing():
     assert code_claims("function f() {}", "app/x.ts", language="braces") == ()
+
+
+RELATIVE = '''from . import shared
+from .code import declarations
+from ..entities.read import load
+'''
+
+
+def test_a_relative_import_is_left_out_when_nobody_can_resolve_it():
+    """The file alone cannot know whether .code is a module or a package,
+    or where the package root is. Guessing would put an edge in the graph
+    that nobody can check."""
+    found = code_claims(RELATIVE, "pkg/ingestion/graph.py", language="python")
+    assert not [claim for claim in found if claim.predicate == "imports"]
+
+
+def test_a_relative_import_resolves_against_the_files_that_were_seen():
+    """Resolution belongs to whoever walked the tree, because that is who
+    knows what is there."""
+    seen = {"pkg/ingestion/shared.py", "pkg/ingestion/code.py", "pkg/entities/read.py"}
+    found = code_claims(RELATIVE, "pkg/ingestion/graph.py", language="python",
+                        resolve=lambda path, level, module: _by_path(path, level, module, seen))
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"pkg/ingestion/shared.py", "pkg/ingestion/code.py", "pkg/entities/read.py"}
+
+
+def test_a_relative_import_of_something_not_there_is_left_out():
+    found = code_claims(RELATIVE, "pkg/ingestion/graph.py", language="python",
+                        resolve=lambda path, level, module: _by_path(path, level, module,
+                                                                     {"pkg/ingestion/code.py"}))
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"pkg/ingestion/code.py"}, "only the one that is really there"
+
+
+def _by_path(path: str, level: int, module: str, seen: set[str]):
+    """The resolution the mapper does: by path, against what it saw."""
+    import posixpath
+
+    here = posixpath.dirname(path)
+    for _ in range(level - 1):
+        here = posixpath.dirname(here)
+    stem = posixpath.join(here, *module.split(".")) if module else here
+    for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
+        if candidate in seen:
+            return candidate
+    return None
