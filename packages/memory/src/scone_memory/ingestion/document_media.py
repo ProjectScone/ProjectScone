@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 
+from ..core.errors import InvalidInput
+from .extraction_checkpoint import ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.media import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaDocumentParser
+from .formats.media_checkpoint import TRANSCRIPTION_CHECKPOINT_KEY
 from .formats.registry import BuiltinDocumentParser
 from .formats.types import DocumentLimits, ParsedDocument
 
@@ -39,7 +42,26 @@ class DocumentMedia:
                 for suffix in sorted(MEDIA_DOCUMENT_EXTENSIONS)}
 
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocument:
-        parsed = await self.media_parser.parse(data, filename, limits)
+        return await self._parse(data, filename, limits)
+
+    async def parse_checkpointed(self, data: bytes, filename: str, limits: DocumentLimits,
+                                 checkpoints: ExtractionCheckpoints) -> ParsedDocument:
+        return await self._parse(data, filename, limits, checkpoints)
+
+    async def _parse(self, data: bytes, filename: str, limits: DocumentLimits,
+                     checkpoints: ExtractionCheckpoints | None = None) -> ParsedDocument:
+        if checkpoints is not None and checkpoint_dispatch_allowed(self.media_parser):
+            revision = self.revision.encode('ascii')
+            saved_revision = checkpoints.get('media-host-binding')
+            if saved_revision is None:
+                if checkpoints.get(TRANSCRIPTION_CHECKPOINT_KEY) is not None:
+                    raise InvalidInput('media transcription checkpoint has no host revision binding')
+                checkpoints.put('media-host-binding', revision)
+            elif saved_revision != revision:
+                raise InvalidInput('media transcription checkpoints do not match the host revision')
+            parsed = await self.media_parser.parse_checkpointed(data, filename, limits, checkpoints)
+        else:
+            parsed = await self.media_parser.parse(data, filename, limits)
         return ParsedDocument.model_validate({**parsed.model_dump(), 'metadata': {
             **parsed.metadata, 'transcriber_revision': self.revision,
         }})

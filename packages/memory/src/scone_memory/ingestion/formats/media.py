@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ...ocr.types import OcrEngine
+from ..extraction_checkpoint import ExtractionCheckpoints
 from .registry import extension
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
@@ -165,38 +166,48 @@ class MediaDocumentParser:
         return Path(self._ffmpeg).is_file() and os.access(self._ffmpeg, os.X_OK)
 
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits = DocumentLimits()) -> ParsedDocument:
+        return await self._parse(data, filename, limits)
+
+    async def parse_checkpointed(self, data: bytes, filename: str, limits: DocumentLimits,
+                                 checkpoints: ExtractionCheckpoints) -> ParsedDocument:
+        """Reuse completed observations after rechecking their decoded audio.
+
+        The checkpoint owner must bind the model revision, source and space.
+        DocumentMedia also binds its explicit transcriber revision.
+        """
+        return await self._parse(data, filename, limits, checkpoints)
+
+    async def _parse(self, data: bytes, filename: str, limits: DocumentLimits,
+                     checkpoints: ExtractionCheckpoints | None = None) -> ParsedDocument:
+        # Deferred because the receipt schema uses the public segment type above.
+        from .media_checkpoint import CompletedTranscription, read_transcription, save_transcription, transcription_binding
+
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds
+        binding = (transcription_binding(data, filename, limits, self._ffmpeg, self._max_duration)
+                   if checkpoints is not None else '')
+        saved = read_transcription(checkpoints, binding) if checkpoints is not None else None
         audio_wav, duration = await self._decode_audio(data, limits, deadline)
-        transcript = await asyncio.wait_for(self._transcribe(audio_wav), _remaining(deadline))
-        if not isinstance(transcript, tuple) or not transcript or len(transcript) > limits.max_segments:
-            raise InvalidInput('transcription requires a bounded nonempty tuple of segments')
-        segments: list[DocumentSegment] = []
-        size = 0
-        previous_start = 0.0
-        for number, segment in enumerate(transcript, 1):
-            if not isinstance(segment, TranscriptionSegment):
-                raise InvalidInput('transcription provider returned an invalid segment')
-            try:
-                segment = TranscriptionSegment.model_validate(segment.model_dump())
-                text_size = len(segment.text.encode('utf-8'))
-            except (ValidationError, UnicodeError):
-                raise InvalidInput('transcription provider returned an invalid segment') from None
-            if segment.start_seconds < previous_start or segment.end_seconds > duration + 1 / _SAMPLE_RATE:
-                raise InvalidInput('transcription timestamps are unordered or outside decoded audio')
-            previous_start = segment.start_seconds
-            size += text_size + (2 if segments else 0)
-            if size > limits.max_text_bytes:
-                raise InvalidInput('transcription exceeds its extracted text byte limit')
-            segments.append(DocumentSegment(text=segment.text,
-                locator=f'audio:0/segment:{number}/seconds:{segment.start_seconds}-{segment.end_seconds}',
-                metadata={'start_seconds': str(segment.start_seconds), 'end_seconds': str(segment.end_seconds),
-                          'audio_stream': '0', 'extraction': 'transcription'}))
-        parsed = ParsedDocument(format=suffix, parser='media-transcription', segments=tuple(segments),
-            metadata={'extraction': 'audio-only', 'duration_seconds': str(duration), 'sample_rate': str(_SAMPLE_RATE),
-                      'audio_wav_sha256': hashlib.sha256(audio_wav).hexdigest(),
-                      'audio_wav_bytes': str(len(audio_wav))})
-        validate_document(parsed, limits)
+        audio_hash = hashlib.sha256(audio_wav).hexdigest()
+        if saved is not None:
+            if (saved.audio_sha256 != audio_hash or saved.audio_bytes != len(audio_wav)
+                    or saved.duration_seconds != duration):
+                raise InvalidInput('media transcription checkpoint does not match the decoded audio')
+            transcript = saved.segments
+        else:
+            remaining = _remaining(deadline)
+            transcript = await asyncio.wait_for(self._transcribe(audio_wav), remaining)
+        try:
+            parsed, validated = _transcription_document(suffix, transcript, duration, audio_hash, len(audio_wav), limits)
+        except InvalidInput:
+            if saved is not None:
+                raise InvalidInput('media transcription checkpoint contains invalid observations') from None
+            raise
+        _remaining(deadline)
+        if checkpoints is not None and saved is None:
+            save_transcription(checkpoints, CompletedTranscription(binding=binding, audio_sha256=audio_hash,
+                audio_bytes=len(audio_wav), duration_seconds=duration, segments=validated))
+        _remaining(deadline)
         return parsed
 
     async def decode_audio(self, data: bytes, filename: str,
@@ -230,6 +241,42 @@ class MediaDocumentParser:
             wav.setframerate(_SAMPLE_RATE)
             wav.writeframes(pcm)
         return buffer.getvalue(), duration
+
+
+def _transcription_document(suffix: str, transcript: tuple[TranscriptionSegment, ...], duration: float,
+                            audio_hash: str, audio_bytes: int,
+                            limits: DocumentLimits) -> tuple[ParsedDocument, tuple[TranscriptionSegment, ...]]:
+    if not isinstance(transcript, tuple) or not transcript or len(transcript) > limits.max_segments:
+        raise InvalidInput('transcription requires a bounded nonempty tuple of segments')
+    segments: list[DocumentSegment] = []
+    validated: list[TranscriptionSegment] = []
+    size = 0
+    previous_start = 0.0
+    for number, segment in enumerate(transcript, 1):
+        if not isinstance(segment, TranscriptionSegment):
+            raise InvalidInput('transcription provider returned an invalid segment')
+        try:
+            segment = TranscriptionSegment.model_validate(segment.model_dump())
+            text_size = len(segment.text.encode('utf-8'))
+        except (ValidationError, UnicodeError):
+            raise InvalidInput('transcription provider returned an invalid segment') from None
+        if segment.start_seconds < previous_start or segment.end_seconds > duration + 1 / _SAMPLE_RATE:
+            raise InvalidInput('transcription timestamps are unordered or outside decoded audio')
+        previous_start = segment.start_seconds
+        validated.append(segment)
+        size += text_size + (2 if segments else 0)
+        if size > limits.max_text_bytes:
+            raise InvalidInput('transcription exceeds its extracted text byte limit')
+        segments.append(DocumentSegment(text=segment.text,
+            locator=f'audio:0/segment:{number}/seconds:{segment.start_seconds}-{segment.end_seconds}',
+            metadata={'start_seconds': str(segment.start_seconds), 'end_seconds': str(segment.end_seconds),
+                      'audio_stream': '0', 'extraction': 'transcription'}))
+    parsed = ParsedDocument(format=suffix, parser='media-transcription', segments=tuple(segments),
+        metadata={'extraction': 'audio-only', 'duration_seconds': str(duration), 'sample_rate': str(_SAMPLE_RATE),
+                  'audio_wav_sha256': audio_hash,
+                  'audio_wav_bytes': str(audio_bytes)})
+    validate_document(parsed, limits)
+    return parsed, tuple(validated)
 
 
 class _Frame(BaseModel):
