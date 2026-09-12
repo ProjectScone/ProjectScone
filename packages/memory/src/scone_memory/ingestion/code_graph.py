@@ -307,7 +307,19 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     if not content or content.count("\n") > MAX_LINES:
         return ()
     if language == "braces":
-        return _brace_claims(content, path, resolve)
+        line_read = _brace_claims(content, path, resolve)
+        # A syntax tree settles what a line cannot: which declaration a
+        # bare call names, once parameters and locals are allowed to
+        # shadow. It is an optional extra, so this adds to the line
+        # reader's answer where it is installed and changes nothing at
+        # all where it is not. Duplicates are dropped, not doubled: the
+        # two readers agree about a declaration they both see.
+        from .code_syntax import syntax_claims
+
+        extra = [claim for claim in syntax_claims(content, path)
+                 if (claim.subject, claim.predicate, claim.object) not in
+                 {(one.subject, one.predicate, one.object) for one in line_read}]
+        return (*line_read, *extra)
     if language != "python":
         return ()
     try:

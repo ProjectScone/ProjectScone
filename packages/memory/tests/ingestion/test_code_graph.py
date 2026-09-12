@@ -293,6 +293,8 @@ def test_an_import_that_writes_its_own_extension_is_not_given_a_second():
     assert imports == {"web/personas.ts", "web/wire.js", "web/foo.bar.ts"}, imports
 
 
+@pytest.mark.skipif(__import__("scone_memory.ingestion.code_syntax", fromlist=["x"]).available(),
+                    reason="the code-graph extra is installed, so a parser does bind these")
 def test_a_brace_language_gets_no_call_graph_without_a_parser():
     """Withdrawn after three rounds of false edges, and the record of why
     belongs here rather than in a commit nobody reads.
@@ -320,10 +322,11 @@ def test_a_brace_language_gets_no_call_graph_without_a_parser():
     file, and 40 of those 51 named a symbol the graph holds no
     declaration for -- a larger count, not better evidence.
 
-    Closing it properly means a syntax-aware reader for the brace family,
-    which is the same work as the tree-sitter question the reference
-    survey already records as open. Written down in
-    bench-runs/code-graph-imports-2026-09-12/results.md.
+    It was closed properly afterwards, by a syntax-aware reader behind
+    the `code-graph` extra -- `ingestion/code_syntax.py`, which reads a
+    real tree and lets parameters and locals shadow. This test describes
+    what the framework does **without** that extra, which is the default,
+    and skips when it is installed.
     """
     source = ("function helper(p) { return p; }\n"
               "export class Shelf {\n"
