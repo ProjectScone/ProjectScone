@@ -213,6 +213,7 @@ def create_app(
     roles: Optional[Mapping[str, str]] = None,
     model_connections_available: bool = False,
     vision_available=None,
+    filesystem=None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -220,8 +221,14 @@ def create_app(
     composed conversation service. ``ingest_concurrency`` bounds simultaneous
     writes and answers excess admissions with 429 and Retry-After. ``roles``
     maps keys to read, write, review or full permissions; unspecified keys have
-    full permission. The independently installed Webapp owns browser pages.
+    full permission. ``filesystem`` is the policy the space's tree is served
+    under; without one the tree is read only, and writing a note is refused
+    however the key is permitted. The independently installed Webapp owns
+    browser pages.
     """
+    from ..filesystem import FilesystemPolicy
+
+    tree_policy = filesystem or FilesystemPolicy()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -340,6 +347,7 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
+            "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
@@ -361,6 +369,8 @@ def create_app(
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for)
+    from .filesystem_routes import mount_filesystem_routes
+    mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:

@@ -50,6 +50,8 @@
       "profile.read": true,
       "recall.structural_context": true,
       "recall.multi_hop": true,
+      "filesystem.read": true,
+      "filesystem.write": false,
       "entities.read": true,
       "graph.knowledge": true,
       "graph.report": true,

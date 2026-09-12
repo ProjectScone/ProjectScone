@@ -408,6 +408,14 @@ things are true.
 - **`search`** answers a query in paths, using the engine's ordinary
   recall underneath: a passage written as a note is answered at its note
   path, and a matching claim at the page of its subject.
+- **Over HTTP**: `GET /v1/fs`, `GET /v1/fs/read`, `GET /v1/fs/search` and
+  `POST /v1/fs/notes`, with the refusals keeping their meanings — a path
+  that cannot mean anything is a 422, a write to a tree nobody made
+  writable is a 403, and a write onto a note that moved is a 409 carrying
+  the version it now stands at. `create_app(..., filesystem=...)` decides,
+  and `/v1/capabilities` says so as `filesystem.read` and
+  `filesystem.write`. A read-only key is refused by the key's own role
+  before the tree is asked.
 - **Every action is recorded** where the space keeps its events —
   `filesystem.list`, `.read`, `.write`, `.search` and `.refused` — each
   carrying the path under one key, so an audit reads without knowing

@@ -64,7 +64,12 @@ class PathRefused(SconeError):
 
 
 class PathConflict(SconeError):
-    """A write onto something that moved since it was read."""
+    """A write onto something that moved since it was read. Carries the
+    version it now stands at, so a caller can re-read rather than guess."""
+
+    def __init__(self, message: str, version: int = 0) -> None:
+        super().__init__(message)
+        self.version = version
 
 
 @dataclass(frozen=True)
@@ -524,7 +529,7 @@ class MemoryFilesystem:
         if if_version is not None and standing is not None and standing.episode_id != if_version:
             raise PathConflict(
                 f"{at} moved since it was read: it stands at version {standing.episode_id}, "
-                f"not {if_version}")
+                f"not {if_version}", standing.episode_id)
         added = await self.engine.remember(self.space, text, kind="note", source=f"{NOTE_SOURCE}{at}")
         return Written(at, added.episode_id, len(text.encode()),
                        await self.engine.documents.revision(self.space))
