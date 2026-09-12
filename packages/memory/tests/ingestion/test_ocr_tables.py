@@ -86,3 +86,22 @@ def test_limits_and_mutated_extension_observations_are_refused():
         infer_tables([region]*5001)
     with pytest.raises(InvalidInput):
         infer_tables([region.model_copy(update={'box':(float('nan'),0.,.5,.5)})])
+
+
+@pytest.mark.parametrize('separator_budget', [0, 19])
+def test_joined_cell_separators_count_toward_text_budget(separator_budget):
+    from scone_memory.ocr.tables import infer_tables
+    regions = [OcrRegion(text='x' * 100000, box=(0.1, 0.1, 0.2, 0.15)) for _ in range(19)]
+    regions.append(OcrRegion(text='x' * (99995 - separator_budget), box=(0.1, 0.1, 0.2, 0.15)))
+    regions.append(OcrRegion(text='y', box=(0.6, 0.1, 0.7, 0.15)))
+    for top in (0.19, 0.28):
+        for left in (0.1, 0.6):
+            regions.append(OcrRegion(text='y', box=(left, top, left + 0.1, top + 0.05)))
+    assert sum(len(region.text.encode()) for region in regions) == 2_000_000 - separator_budget
+    if not separator_budget:
+        with pytest.raises(InvalidInput, match='text limit'):
+            infer_tables(regions)
+        return
+    result = infer_tables(regions)
+    assert len(result.tables) == 1
+    assert sum(len(cell.text.encode()) for cell in result.tables[0].cells) == 2_000_000

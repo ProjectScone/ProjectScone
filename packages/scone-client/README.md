@@ -52,6 +52,10 @@ refused. Compressed wire bytes are capped at twice `max_response_bytes` plus
 limit on the Python objects subsequently created by JSON parsing. The configured
 `timeout` still controls connection and idle read timeouts, not a total deadline.
 
+The client sets `Accept-Encoding: gzip, deflate` after copying caller headers;
+caller-supplied values cannot opt into an unsupported coding. Successful JSON
+responses are not also decoded into an unused error-body string.
+
 Each response is closed, including failed reads. An injected `requests.Session`
 remains caller-owned. If a custom adapter or response hook already buffers or
 decodes the body, its earlier allocation is outside these bounds; the cached
