@@ -603,3 +603,51 @@ async def test_the_budget_bounds_the_answer_the_caller_receives_not_the_strings_
         assert "unknown" not in str(raised.value).lower() or "byte" in str(raised.value)
     finally:
         await engine.close()
+
+
+async def test_a_graph_with_no_resolved_cross_file_imports_says_so():
+    """A file's blast radius is empty here for a reason that has nothing
+    to do with the file.
+
+    `_imported` returns nothing for a relative import unless a resolver
+    that knows the tree is supplied, and `engine.remember` supplies none
+    -- only `scone sync --graph` does, from the files it actually read.
+    So a Python package ingested through `remember` or the HTTP episodes
+    route records `import json` and drops `from ..core import errors`,
+    and every file's dependants are missing.
+
+    Measured over 57 files of this package: through `remember` alone, 0
+    files had any dependant; with the resolver, 27 cross-file import
+    edges and 15 files with dependants, reached at up to four hops.
+
+    "Nothing rests on this" is technically hedged already, but a caller
+    reading it about every file in their codebase deserves the actual
+    reason.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", "import json\n\n\ndef keep(p: str) -> str:\n"
+                              "    return json.dumps(p)\n", source="pkg/store.py")
+        await engine.remember("default", "from .store import keep\n\n\ndef put(p: str) -> str:\n"
+                              "    return keep(p)\n", source="pkg/api.py")
+        blast = await affected(engine, "default", "pkg/store.py")
+    finally:
+        await engine.close()
+    assert not blast.reached, blast.record()
+    assert blast.unresolved_imports is True, blast.record()
+    assert "relative import" in blast.why, blast.why
+    assert "sync --graph" in blast.why, blast.why
+
+
+async def test_a_graph_that_did_resolve_its_imports_says_nothing_of_the_kind():
+    """The other half: the notice must not appear when the graph does
+    hold cross-file edges, or it becomes noise that is skipped."""
+    engine = await graphed()
+    try:
+        blast = await affected(engine, "default", "pkg.store")
+    finally:
+        await engine.close()
+    assert blast.reached, blast.record()
+    assert blast.unresolved_imports is False, blast.record()
+    assert "sync --graph" not in blast.why, blast.why
