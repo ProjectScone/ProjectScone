@@ -268,3 +268,46 @@ async def test_context_refuses_stored_chunk_text_that_contradicts_its_span(monke
         assert model.inputs == []
     finally:
         await memory.close()
+
+
+@pytest.mark.parametrize('suffix', ['docx', 'xlsx'])
+async def test_office_cells_restore_declared_headers_and_word_spanning_row_context(suffix):
+    long_text = 'Shared cell text with details. ' * 80 + 'violet milestone'
+    if suffix == 'docx':
+        from .test_word_tables import cell, document, row
+        raw = document(row(cell('Region') + cell('Revenue'), '<w:tblHeader/>') +
+            row(cell('West', '<w:vMerge w:val="restart"/>') + cell('10')) +
+            row(cell('', '<w:vMerge/>') + cell(long_text)))
+    else:
+        from .test_xlsx_tables import workbook, cell, row
+        raw = workbook(row(1, cell('A1', 'Revenue')) + row(2, cell('A2', long_text)),
+            'id="1" name="RevenueTable" ref="A1:A2"><tableColumns count="1">'
+            '<tableColumn id="1" name="Revenue"/></tableColumns>')
+    memory, model = await open_memory()
+    try:
+        saved = await ingest_document(memory, 'alpha', raw, filename='source.' + suffix)
+        chunks = await memory.documents.chunks_of('alpha', saved.added.episode_id)
+        found = [(chunk, embedded) for chunk, embedded in zip(chunks, model.inputs) if 'violet milestone' in chunk.text]
+        assert len(found) == 1
+        chunk, embedded = found[0]
+        assert embedded.startswith('Table context: ') and 'Revenue' in embedded
+        assert embedded.endswith(chunk.text) and 'Revenue' not in chunk.text
+        if suffix == 'docx':
+            assert 'West' in embedded and 'West' not in chunk.text
+        evidence = await document_provenance(memory, 'alpha', saved.added.episode_id)
+        assert all(header.text == 'Revenue' for segment in evidence.segments for c in segment.table_cells
+                   if 'violet milestone' in c.text for header in c.headers)
+    finally:
+        await memory.close()
+
+
+async def test_header_name_inside_an_unrelated_word_does_not_count_as_present_context():
+    memory, model = await open_memory()
+    try:
+        raw = ('<table><tr><th>US</th></tr><tr><td>' + 'RUSSIA ' * 100 + '</td></tr></table>').encode()
+        saved = await ingest_document(memory, 'alpha', raw, filename='locations.html')
+        chunks = await memory.documents.chunks_of('alpha', saved.added.episode_id)
+        assert 'US' in chunks[-1].text and 'US:' not in chunks[-1].text
+        assert model.inputs[-1].startswith('Table context: US\n\n')
+    finally:
+        await memory.close()

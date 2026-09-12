@@ -7,8 +7,6 @@ import hashlib
 import json
 import re
 
-from pydantic import ValidationError
-
 from ..backends.blobs import BlobStore
 from ..core.errors import InvalidInput
 from ..core.ports import NewEpisode
@@ -29,6 +27,22 @@ def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError('duplicate manifest key')
         result[key] = value
     return result
+
+
+def _contains_label(excerpt: str, label: str) -> bool:
+    """A source label inside another word is not that label's context."""
+    def word(char: str) -> bool:
+        return char.isalnum() or char == '_'
+
+    cursor = 0
+    while (start := excerpt.find(label, cursor)) >= 0:
+        end = start + len(label)
+        left = start == 0 or not word(label[0]) or not word(excerpt[start - 1])
+        right = end == len(excerpt) or not word(label[-1]) or not word(excerpt[end])
+        if left and right:
+            return True
+        cursor = start + 1
+    return False
 
 
 def context_inputs(parsed: ParsedDocument, spans: Sequence[tuple[int, int]]) -> list[str]:
@@ -55,14 +69,21 @@ def context_inputs(parsed: ParsedDocument, spans: Sequence[tuple[int, int]]) -> 
             excerpt = content[start:end].decode('utf-8')
         except UnicodeError:
             raise InvalidInput('document embedding chunk span splits UTF-8') from None
+        present: dict[str, bool] = {}
+
+        def missing(label: str) -> bool:
+            if label not in present:
+                present[label] = _contains_label(excerpt, label)
+            return not present[label]
+
         selected: list[str] = []
         size = 2
         for index in range(bisect_right(ends, start), len(cells)):
-            cell_start, cell_end, cell = cells[index]
+            cell_start, _, cell = cells[index]
             if cell_start >= end:
                 break
-            headers = [header for header in cell.headers if header.text not in excerpt]
-            context = [reference for reference in cell.context if reference.text not in excerpt]
+            headers = [header for header in cell.headers if missing(header.text)]
+            context = [reference for reference in cell.context if missing(reference.text)]
             if not headers and not context:
                 continue
             values = [header.text for header in headers] + [reference.text for reference in context]
@@ -107,7 +128,7 @@ async def embedding_inputs(episode: NewEpisode, spans: Sequence[tuple[int, int]]
     try:
         json.loads(encoded, object_pairs_hook=_unique)
         manifest = DocumentManifest.model_validate_json(encoded)
-    except (ValueError, RecursionError, ValidationError):
+    except (ValueError, RecursionError):
         raise InvalidInput('document table embedding context requires a valid manifest') from None
     if (manifest.original_sha256 != original_id
             or manifest.parsed.format != episode.metadata.get('document_format')
