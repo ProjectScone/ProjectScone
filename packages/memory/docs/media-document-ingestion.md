@@ -77,8 +77,9 @@ transcription call on explicit resume; there are no intermediate audio checkpoin
 Use the normal workflow:
 
 1. Read authenticated `GET /v1/documents/formats`. Media suffixes appear only when
-   the host configured them. Availability describes configuration, not a provider
-   health check or an accuracy measurement.
+   the host configured them. Availability rechecks that the configured local decoder
+   is still an executable file. It is not a transcriber health check or an accuracy
+   measurement; the `requires` field names the decoder and timestamped provider.
 2. Upload the original bytes to `POST /v1/attachments`.
 3. Pass its attachment ID and explicit filename to `POST /v1/documents`, or to
    `POST /v1/document-jobs` with a caller-chosen import ID for durable execution.
