@@ -27,7 +27,9 @@ declaration it came from and on which lines. Nothing is rewritten:
 from __future__ import annotations
 
 import ast
+import bisect
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Literal, Optional, Sequence
 
@@ -69,6 +71,12 @@ _MEMBER = re.compile(
 MAX_HEADER_LINES = 6
 #: Scanning stops long before a machine-written file can exhaust memory.
 MAX_LINES = 200_000
+#: Declarations nested deeper than this are not something a person reads,
+#: and naming them would cost more than the names are worth.
+MAX_DEPTH = 32
+#: How many files' declarations are kept, so that a recall naming several
+#: chunks of one file parses it once.
+MAX_PARSED = 8
 
 
 @dataclass(frozen=True)
@@ -121,6 +129,13 @@ def declarations(content: str, *, language: Optional[Language]) -> tuple[Declara
         return ()
     if content.count("\n") > MAX_LINES:
         return ()
+    return _found(str(content), language)
+
+
+@lru_cache(maxsize=MAX_PARSED)
+def _found(content: str, language: Language) -> tuple[Declaration, ...]:
+    """The last few files' declarations, so that naming every chunk of one
+    recall does not parse the same file over and over."""
     return _python(content) if language == "python" else _braces(content)
 
 
@@ -178,9 +193,16 @@ def line_span(content: str, start: int, end: int,
     if where is None:
         return (1, 1)
     first, last = where
-    begins = content.count("\n", 0, first) + 1
-    body = content[first:last]
-    return (begins, begins + body.rstrip("\n").count("\n"))
+    begins = _endings(content, 0, first) + 1
+    body = content[first:last].rstrip("\r\n")
+    return (begins, begins + _endings(body, 0, len(body)))
+
+
+def _endings(content: str, first: int, last: int) -> int:
+    """How many lines end between two offsets, counting a carriage return
+    with a newline after it as the one ending it is."""
+    return (content.count("\n", first, last) + content.count("\r", first, last)
+            - content.count("\r\n", first, last))
 
 
 def code_context(source: Optional[str], names: Sequence[str]) -> str:
@@ -206,11 +228,29 @@ def _as_chars(content: str, start: int, end: int,
 
 
 def _line_starts(content: str) -> list[int]:
+    """Where every line begins. Line endings are counted as Python's own
+    parser counts them: a lone carriage return ends a line, and so does a
+    carriage return with a newline after it, which is one ending and not
+    two. Offsets stay offsets into the source exactly as it arrived."""
     starts = [0]
-    for index, ch in enumerate(content):
-        if ch == "\n":
-            starts.append(index + 1)
+    index, length = 0, len(content)
+    while index < length:
+        ch = content[index]
+        if ch == "\r":
+            index += 2 if index + 1 < length and content[index + 1] == "\n" else 1
+            starts.append(index)
+        elif ch == "\n":
+            index += 1
+            starts.append(index)
+        else:
+            index += 1
     return starts
+
+
+def _lines(content: str, starts: list[int]) -> list[str]:
+    """Each line with its ending still on it, in one pass over the source."""
+    edges = [*starts[1:], len(content)]
+    return [content[start:end] for start, end in zip(starts, edges)]
 
 
 def _line_end(content: str, starts: list[int], line: int) -> int:
@@ -236,23 +276,27 @@ def _python(content: str) -> tuple[Declaration, ...]:
         return ()
     starts = _line_starts(content)
     found: list[Declaration] = []
-
-    def visit(node: ast.AST, prefix: str, in_class: bool) -> None:
+    # An explicit stack, because a file that parses can still be nested
+    # deeper than Python will recurse: a sum of a thousand terms is a
+    # thousand nodes deep and is perfectly ordinary code.
+    work: list[tuple[ast.AST, str, bool, int]] = [(tree, "", False, 0)]
+    while work:
+        node, prefix, in_class, depth = work.pop()
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                name = prefix + child.name
-                opens = min([child.lineno, *(d.lineno for d in child.decorator_list)])
-                first = _with_comments(content, starts, opens)
-                last = child.end_lineno or child.lineno
-                kind = ("class" if isinstance(child, ast.ClassDef)
-                        else "method" if in_class else "function")
-                found.append(Declaration(name, kind, starts[first - 1],
-                                         _line_end(content, starts, last), first, last))
-                visit(child, f"{name}.", isinstance(child, ast.ClassDef))
-            else:
-                visit(child, prefix, in_class)
-
-    visit(tree, "", False)
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                work.append((child, prefix, in_class, depth))
+                continue
+            if depth >= MAX_DEPTH:
+                continue
+            name = prefix + child.name
+            opens = min([child.lineno, *(d.lineno for d in child.decorator_list)])
+            first = _with_comments(content, starts, opens)
+            last = min(child.end_lineno or child.lineno, len(starts))
+            kind = ("class" if isinstance(child, ast.ClassDef)
+                    else "method" if in_class else "function")
+            found.append(Declaration(name, kind, starts[first - 1],
+                                     _line_end(content, starts, last), first, last))
+            work.append((child, f"{name}.", isinstance(child, ast.ClassDef), depth + 1))
     return tuple(sorted(found, key=lambda d: (d.start, -d.end)))
 
 
@@ -310,37 +354,37 @@ def _header(line: str) -> Optional[str]:
 
 
 def _braces(content: str) -> tuple[Declaration, ...]:
-    lines = content.split("\n")
     starts = _line_starts(content)
+    lines = _lines(content, starts)
     bare: list[str] = []
     in_block = False
     for line in lines:
         clean, in_block = _bare(line, in_block)
         bare.append(clean)
     found: list[Declaration] = []
-    _scan(content, starts, bare, 0, len(lines), "", found)
+    # A stack rather than recursion: a thousand nested braces are still a
+    # file somebody generated, and it should be read, not crashed on.
+    work: list[tuple[int, int, str, int]] = [(0, len(lines), "", 0)]
+    while work:
+        first, limit, prefix, depth = work.pop()
+        index = first
+        while index < limit:
+            name = _header(bare[index])
+            opened = _opens(bare, index, limit)
+            if name is None or opened is None:
+                index += 1
+                continue
+            close = _closes(bare, opened, limit)
+            if close is None:
+                index += 1
+                continue
+            began = _with_comments(content, starts, index + 1)
+            found.append(Declaration(prefix + name, _kind(bare[index]), starts[began - 1],
+                                     _line_end(content, starts, close + 1), began, close + 1))
+            if depth + 1 < MAX_DEPTH:
+                work.append((opened + 1, close, f"{prefix}{name}.", depth + 1))
+            index = close + 1
     return tuple(sorted(found, key=lambda d: (d.start, -d.end)))
-
-
-def _scan(content: str, starts: list[int], bare: list[str], first: int, limit: int,
-          prefix: str, found: list[Declaration]) -> None:
-    """Declarations between two line indexes, then what is inside them."""
-    index = first
-    while index < limit:
-        name = _header(bare[index])
-        opened = _opens(bare, index, limit)
-        if name is None or opened is None:
-            index += 1
-            continue
-        close = _closes(bare, opened, limit)
-        if close is None:
-            index += 1
-            continue
-        line = _with_comments(content, starts, index + 1)
-        found.append(Declaration(prefix + name, _kind(bare[index]), starts[line - 1],
-                                 _line_end(content, starts, close + 1), line, close + 1))
-        _scan(content, starts, bare, opened + 1, close, f"{prefix}{name}.", found)
-        index = close + 1
 
 
 def _kind(line: str) -> str:
@@ -398,22 +442,26 @@ def _units(content: str, tops: Sequence[Declaration]) -> list[CodeSpan]:
 def _split(content: str, unit: CodeSpan, target: int, found: Sequence[Declaration],
            starts: list[int]) -> list[CodeSpan]:
     """One unit, cut at its own lines when it is longer than the target.
-    A nested declaration is preferred as a cut, then a blank line."""
+    A nested declaration is preferred as a cut, then a blank line. Which
+    lines are blank is worked out once, a line at a time, rather than by
+    reading back over the file for every candidate."""
     if unit.end - unit.start <= target:
         return [unit]
     inner = {d.start for d in found if unit.start < d.start < unit.end}
-    places = [start for start in starts if unit.start < start < unit.end]
+    places = starts[bisect.bisect_right(starts, unit.start):bisect.bisect_left(starts, unit.end)]
+    above = [unit.start, *places[:-1]]
+    blank = {place for start, place in zip(above, places) if not content[start:place].strip()}
     pieces: list[CodeSpan] = []
     cursor = unit.start
     while unit.end - cursor > target:
-        room = [place for place in places if cursor < place <= cursor + target]
+        room = places[bisect.bisect_right(places, cursor):bisect.bisect_right(places, cursor + target)]
         if not room:
-            following = [place for place in places if place > cursor]
+            following = places[bisect.bisect_right(places, cursor):]
             if not following:
                 break
             cut = following[0]
         else:
-            cut = _prefer(room, inner, content, cursor, target)
+            cut = _prefer(room, inner, blank, cursor, target)
         pieces.append(CodeSpan(cursor, cut, unit.names))
         cursor = cut
     pieces.append(CodeSpan(cursor, unit.end, unit.names))
@@ -426,11 +474,10 @@ def _split(content: str, unit: CodeSpan, target: int, found: Sequence[Declaratio
     return pieces
 
 
-def _prefer(room: list[int], inner: set[int], content: str, cursor: int, target: int) -> int:
+def _prefer(room: Sequence[int], inner: set[int], blank: set[int], cursor: int, target: int) -> int:
     """The furthest cut that is worth taking: a nested declaration, then a
     blank line, then any line, and never so early that it wastes a chunk."""
     enough = cursor + target // 2
-    blank = {place for place in room if content[:place].rstrip(" \t").endswith("\n\n")}
     for wanted in (inner, blank):
         liked = [place for place in room if place in wanted and place >= enough]
         if liked:

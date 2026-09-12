@@ -88,3 +88,26 @@ async def test_a_recalled_paragraph_names_no_declaration():
     result = await memory.recall("alpha", "planning")
     [item] = result.items
     assert item.declaration is None and item.first_line == 1
+
+
+CR_SOURCE = "def plan():\r    return 1\r\r\rdef widen():\r    return 2\r"
+
+
+@pytest.mark.parametrize("code_aware", [True, False])
+async def test_a_file_written_with_carriage_returns_is_remembered_and_recalled(code_aware):
+    """Old Mac line endings are lines to Python's parser, and must be lines
+    here too, whether or not the source is cut at its declarations."""
+    memory = await engine(code_aware=code_aware)
+    await memory.remember("alpha", CR_SOURCE, kind="file", source="legacy/cr.py")
+    result = await memory.recall("alpha", "widen")
+    [item] = [i for i in result.items if "def widen" in i.text]
+    assert item.first_line >= 1 and item.last_line >= item.first_line
+    assert CR_SOURCE.encode()[item.start : item.end].decode() == item.text
+
+
+async def test_lines_are_counted_the_way_the_file_is_written():
+    memory = await engine()
+    await memory.remember("alpha", CR_SOURCE, kind="file", source="legacy/cr.py")
+    result = await memory.recall("alpha", "widen")
+    [item] = result.items
+    assert (item.first_line, item.last_line) == (1, 6), (item.first_line, item.last_line)
