@@ -137,3 +137,40 @@ async def test_prose_is_not_reclassified_by_a_code_predicate():
     # A phrase is not a code symbol, whatever the predicate says.
     said = classify_object("a quorum of three members", "defines", context)
     assert said.object_class == "literal", said
+
+
+async def test_a_source_path_with_a_space_still_yields_its_symbols():
+    """A path may legally contain a space, and `my module.py:leaf` is an
+    ordinary qualified symbol. My first rule was "one token", which
+    refused it -- so the same `def leaf()` was in the graph from
+    `module.py` and absent from `my module.py`.
+
+    The rule is shape, not word count: one token, or qualified by a
+    separator a sentence does not use inside itself.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        # Distinct bodies: identical content deduplicates, and a
+        # deduplicated episode records no claims -- which made my first
+        # version of this fixture look like the defect it was testing for.
+        for name, value in (("module.py", 1), ("my module.py", 2)):
+            await engine.remember("default", f"def leaf():\n    return {value}\n", source=name)
+        labels, relations = await projected(engine)
+    finally:
+        await engine.close()
+    assert "module.py:leaf" in labels, labels
+    assert "my module.py:leaf" in labels, labels
+    assert "my module.py defines my module.py:leaf" in relations, relations
+
+
+def test_a_phrase_is_still_a_literal_however_it_is_punctuated():
+    """The guard against the shortcut Codex warned about: a code
+    predicate must not turn every description into an entity."""
+    from scone_memory.entities.classify import ClassificationContext, classify_object
+
+    context = ClassificationContext()
+    for phrase in ("a quorum of three members", "the second of May",
+                   "roughly twelve working days"):
+        said = classify_object(phrase, "defines", context)
+        assert said.object_class == "literal", (phrase, said)
