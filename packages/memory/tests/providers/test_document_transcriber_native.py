@@ -142,3 +142,49 @@ async def test_standard_configuration_binds_jobs_across_restart_and_model_change
                     assert len(requests)==1,'reopen, reads and changed config must not retranscribe'
             finally:await engine.close()
         assert requests[0][1]['model']==b'chosen-local'
+
+
+async def test_configured_windows_keep_original_times_and_full_checked_playback(tmp_path):
+    from scone_memory.runtime.document_media import load_document_media
+
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg is None:
+        pytest.skip('local ffmpeg required')
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(48000)
+        wav.writeframes(b'\0' * 192000 * 3)
+    with transcription_service() as (endpoint, requests):
+        path = tmp_path / 'media.json'
+        path.write_text(json.dumps({'schema_version': 1, 'base_url': endpoint,
+            'model': 'window-model', 'model_revision': 'weights-v1',
+            'ffmpeg_executable': ffmpeg, 'chunk_seconds': 1}))
+        path.chmod(0o600)
+        media = load_document_media(str(path))
+        identity = None
+        for first in (True, False):
+            engine = await MemoryEngine(SqliteDocumentStore(tmp_path / 'db'),
+                SqliteVectorIndex(tmp_path / 'db'), HashEmbedder(),
+                blobs=FileBlobStore(tmp_path / 'blobs')).open()
+            try:
+                if first:
+                    saved = await ingest_document(engine, 'alpha', output.getvalue(),
+                        filename='meeting.wav', parser=media.parser())
+                    identity = saved.added.episode_id
+                app = create_app(engine, {'reader': 'alpha'}, roles={'reader': 'read'}, document_media=media)
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://fixture',
+                    headers={'authorization': 'Bearer reader'}) as client:
+                    evidence = await client.get(f'/v1/episodes/{identity}/document')
+                    assert evidence.status_code == 200, evidence.text
+                    assert [segment['metadata']['start_seconds'] for segment in evidence.json()['segments']] == ['0.1', '1.1', '2.1']
+                    playback = await client.get(f'/v1/episodes/{identity}/document/audio')
+                    assert playback.status_code == 200, playback.text
+                    assert len(playback.content) == 96044
+                    assert playback.content[44:] == b''.join(fields['file'][44:] for _, fields, _ in requests)
+                assert len(requests) == 3, 'read and restart do not invoke inference'
+            finally:
+                await engine.close()
+        assert all(fields['model'] == b'window-model' for _, fields, _ in requests)
+        assert all(len(fields['file']) == 32044 for _, fields, _ in requests)

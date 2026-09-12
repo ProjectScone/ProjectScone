@@ -19,20 +19,29 @@ async def run():
         SqliteVectorIndex(state / 'memory.db'), HashEmbedder(),
         blobs=FileBlobStore(state / 'blobs')).open()
 
+    chunked = len(sys.argv) > 4 and sys.argv[4] == 'chunked'
+    call_count = 0
+
     async def transcribe(audio):
+        nonlocal call_count
+        call_count += 1
         with (state / 'model-calls').open('a') as calls:
             calls.write(phase + '\n')
+        if chunked and phase == 'hold' and call_count == 2:
+            (state / 'window-entered').write_text('ready')
+            await asyncio.Event().wait()
         return (TranscriptionSegment(text='Checkpointed Café survives process death.',
                                      start_seconds=0.0, end_seconds=0.05),)
 
-    config = DocumentMedia(MediaDocumentParser(transcribe, ffmpeg_executable=executable),
+    config = DocumentMedia(MediaDocumentParser(transcribe, ffmpeg_executable=executable,
+                               chunk_seconds=1 if chunked else None),
                            revision='scripted-local-v1')
     job = DocumentIngestionWorkflow(memory, state / 'journal.db', key=b'r' * 32,
         parser=config.parser(), parser_revision='media-worker-v1', automatic_retries=False)
     try:
         original = await memory.attach('alpha', (state / 'input.wav').read_bytes(),
                                        'audio/wav', filename='input.wav')
-        if phase == 'hold':
+        if phase == 'hold' and not chunked:
             attach = memory.attach
 
             async def pause(space, raw, media_type, **kwargs):
@@ -47,6 +56,7 @@ async def run():
         (state / 'result.json').write_text(json.dumps({
             'episode_id': result.results['index']['episode_id'],
             'text': evidence.segments[0].text,
+            'starts': [segment.metadata['start_seconds'] for segment in evidence.segments],
             'audio_sha256': evidence.metadata['audio_wav_sha256'],
         }))
     finally:

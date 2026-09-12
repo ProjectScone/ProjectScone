@@ -26,6 +26,7 @@ class DocumentMediaConfig(BaseModel):
     api_key_env: str | None = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z_][A-Za-z0-9_]*$')
     timeout_seconds: float = Field(default=120.0, gt=0, le=600, allow_inf_nan=False)
     max_duration_seconds: float = Field(default=60.0, gt=0, le=600, allow_inf_nan=False)
+    chunk_seconds: int | None = Field(default=None, ge=1, le=120)
     max_response_bytes: int = Field(default=4_000_000, ge=1024, le=12_000_000)
     max_segments: int = Field(default=10000, ge=1, le=10000)
 
@@ -115,12 +116,17 @@ def load_document_media(path: str) -> DocumentMedia:
     try:
         provider = LocalDocumentTranscriber(base_url=config.base_url, model=config.model, api_key=key,
             timeout=config.timeout_seconds, max_response_bytes=config.max_response_bytes,
-            max_segments=config.max_segments)
+            max_segments=config.max_segments, allow_empty=config.chunk_seconds is not None)
         parser = MediaDocumentParser(provider, ffmpeg_executable=config.ffmpeg_executable,
-                                     max_duration_seconds=config.max_duration_seconds)
+                                     max_duration_seconds=config.max_duration_seconds, chunk_seconds=config.chunk_seconds)
     except (OSError, ValueError, InvalidInput, RecursionError):
         raise ValueError('Document media provider settings, decoder path or credential are invalid') from None
     settings = config.model_dump(exclude={'api_key_env'})
+    if config.chunk_seconds is None:
+        settings.pop('chunk_seconds')  # Preserve existing whole-file extraction identities.
+    else:
+        from ..ingestion.formats.media_windows import WINDOW_IMPLEMENTATION
+        settings['window_implementation'] = WINDOW_IMPLEMENTATION
     binding = json.dumps({'implementation': 'local-document-media-v2', 'settings': settings,
                           'decoder_sha256': _decoder_digest(config.ffmpeg_executable)},
                          sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
