@@ -145,7 +145,7 @@ async def test_completed_receipt_changes_refuse_before_any_more_ocr(video, damag
             value['result']['regions'][0]['text'] = 'Altered observation'
         receipts.values['video-ocr-frame-000'] = json.dumps(value).encode()
     elif damage == 'duplicate':
-        receipts.values[key] = receipts.values[key].replace(b'"schema_version":1', b'"schema_version":1,"schema_version":1')
+        receipts.values[key] = receipts.values[key].replace(b'"schema_version":2', b'"schema_version":2,"schema_version":2')
     elif damage == 'header':
         receipts.values['video-ocr-header'] += b' '
     else:
@@ -343,3 +343,43 @@ async def test_total_region_budget_is_shared_across_frames(video):
     assert budgets == [10_000, 10_000, 5000]
     assert 'video-ocr-frame-002' not in receipts.values
     assert 'video-ocr-complete' not in receipts.values
+
+
+async def test_identical_pixel_frames_cannot_exchange_partial_receipts(video, tmp_path):
+    _, decoder = video
+    path = tmp_path / 'static.mp4'
+    subprocess.run([decoder.ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x32:r=1:d=3',
+                    '-an', '-c:v', 'libx264', str(path)], check=True)
+    data = path.read_bytes()
+    sampled = await decoder.sample(data, 'slides.mp4', policy=VideoFramePolicy(interval_seconds=1))
+    assert len({frame.sha256 for frame in sampled.frames}) == 1
+    receipts, ocr = Receipts(), ScriptedOcr(fail_at=2)
+    parser = VideoDocumentParser(decoder, ocr, model_revision='fixture', policy=VideoFramePolicy(interval_seconds=1))
+    with pytest.raises(RuntimeError):
+        await parser.parse_checkpointed(data, 'slides.mp4', DocumentLimits(), receipts)
+    one, two = 'video-ocr-frame-000', 'video-ocr-frame-001'
+    receipts.values[one], receipts.values[two] = receipts.values[two], receipts.values[one]
+    ocr.fail_at = None
+    with pytest.raises(InvalidInput, match='receipt'):
+        await parser.parse_checkpointed(data, 'slides.mp4', DocumentLimits(), receipts)
+    assert len(ocr.calls) == 3
+
+
+async def test_final_receipt_write_cannot_report_success_after_deadline(video, monkeypatch):
+    import time
+    data, decoder = video
+    sampled = await decoder.sample(data, 'slides.mp4')
+
+    async def sample(*args, **kwargs):
+        return sampled
+
+    class SlowReceipts(Receipts):
+        def put(self, key, value):
+            if key == 'video-ocr-complete':
+                time.sleep(0.09)
+            super().put(key, value)
+
+    monkeypatch.setattr(decoder, 'sample', sample)
+    with pytest.raises(InvalidInput, match='wall time'):
+        await VideoDocumentParser(decoder, ScriptedOcr(), model_revision='fixture').parse_checkpointed(
+            data, 'slides.mp4', DocumentLimits(timeout_seconds=0.05), SlowReceipts())
