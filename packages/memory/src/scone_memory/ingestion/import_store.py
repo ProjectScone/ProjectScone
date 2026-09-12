@@ -16,6 +16,7 @@ from ..agents.catalog import Identifier
 from ..agents.workflow import WorkflowError, _integer, _name
 from ..core.validation import check_space
 from .document_ocr import PdfOcrSelection
+from .document_video import VIDEO_DOCUMENT_EXTENSIONS
 from .formats.registry import extension
 from .formats.types import DocumentLimits
 
@@ -32,6 +33,7 @@ class DocumentImportSpec(BaseModel):
     parser_revision: Identifier
     limits: DocumentLimits = Field(default_factory=DocumentLimits)
     pdf_ocr: PdfOcrSelection | None = None
+    video_ocr: bool = False
     deadline_s: float = Field(default=120.0, gt=0, le=300, allow_inf_nan=False)
     max_attempts: int = Field(default=3, ge=1, le=4)
 
@@ -42,6 +44,8 @@ class DocumentImportSpec(BaseModel):
         self.filename.encode('utf-8')
         if self.pdf_ocr is not None and extension(self.filename) != '.pdf':
             raise ValueError('PDF OCR requires a PDF extraction filename')
+        if self.video_ocr and (self.pdf_ocr is not None or extension(self.filename) not in VIDEO_DOCUMENT_EXTENSIONS):
+            raise ValueError('video OCR requires a video filename and cannot be combined with PDF OCR')
         extension(self.filename)
         return self
 

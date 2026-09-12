@@ -67,6 +67,7 @@ class DocumentImportService:
     """
     def __init__(self, directory: str | Path, *, key: bytes, memory: MemoryEngine,
                  parser_for: Callable[[PdfOcrSelection | None], ImportParserBinding],
+                 video_parser_for: Callable[[], ImportParserBinding] | None = None,
                  limits: DocumentLimits = DocumentLimits(), max_active: int = 2,
                  max_imports: int = 4096, deadline_s: float = 120.0, max_attempts: int = 3) -> None:
         _integer(max_active, 1, 16)
@@ -86,6 +87,9 @@ class DocumentImportService:
         self._limits = DocumentLimits.model_validate(limits.model_dump())
         self._directory, self._key, self._memory = target, key, memory
         self._parser_for, self._maximum, self._deadline = parser_for, max_active, deadline_s
+        if video_parser_for is not None and not callable(video_parser_for):
+            raise ValueError('host video parser factory required')
+        self._video_parser_for = video_parser_for
         self._imports = DocumentImportStore(target / 'requests.sqlite', key=key, max_imports=max_imports)
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._workflows: dict[tuple[str, str], DocumentIngestionWorkflow] = {}
@@ -126,8 +130,17 @@ class DocumentImportService:
             os.close(descriptor)
             raise
 
+    def _binding(self, pdf_ocr: PdfOcrSelection | None, video_ocr: bool) -> ImportParserBinding:
+        if type(video_ocr) is not bool or (video_ocr and pdf_ocr is not None):
+            raise WorkflowError('invalid_document_extraction_choice')
+        if not video_ocr:
+            return self._parser_for(pdf_ocr)
+        if self._video_parser_for is None:
+            raise WorkflowError('invalid_video_ocr_unconfigured')
+        return self._video_parser_for()
+
     def _open(self, request: DocumentImportRequest) -> DocumentIngestionWorkflow:
-        binding = self._parser_for(request.spec.pdf_ocr)
+        binding = self._binding(request.spec.pdf_ocr, request.spec.video_ocr)
         if binding.revision != request.spec.parser_revision or request.spec.limits != self._limits:
             raise WorkflowError('import_parser_changed')
         return DocumentIngestionWorkflow(self._memory, self._path(request), key=self._key,
@@ -185,11 +198,12 @@ class DocumentImportService:
 
     async def start(self, space: str, import_id: str, *, attachment_id: str, filename: str,
                     pdf_ocr: PdfOcrSelection | None = None,
+                    video_ocr: bool = False,
                     admission_guard: Callable[[], None] | None = None) -> DocumentImportStatus:
         await self._space(space)
-        binding = self._parser_for(pdf_ocr)
+        binding = self._binding(pdf_ocr, video_ocr)
         spec = DocumentImportSpec(attachment_id=attachment_id, filename=filename,
-            pdf_ocr=pdf_ocr, parser_revision=binding.revision, limits=self._limits,
+            pdf_ocr=pdf_ocr, video_ocr=video_ocr, parser_revision=binding.revision, limits=self._limits,
             deadline_s=float(self._deadline), max_attempts=self._attempts)
         prior = self._imports.get(space, import_id)
         if prior is not None:

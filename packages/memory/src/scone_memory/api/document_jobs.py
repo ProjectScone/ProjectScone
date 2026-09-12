@@ -19,6 +19,7 @@ class StartDocumentImport(BaseModel):
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
     pdf_ocr: PdfOcrSelection | None = None
+    video_ocr: bool = False
 
 
 class ControlDocumentImport(BaseModel):
@@ -69,7 +70,7 @@ def mount_document_job_routes(app: FastAPI, service: DocumentImportService,
             body = StartDocumentImport.model_validate_json(await _body(request))
             assert_current_space(request, space)
             result = await service.start(space, body.import_id, attachment_id=body.attachment_id,
-                filename=body.filename, pdf_ocr=body.pdf_ocr,
+                filename=body.filename, pdf_ocr=body.pdf_ocr, video_ocr=body.video_ocr,
                 admission_guard=lambda: assert_current_space(request, space))
             assert_current_space(request, space)
             return _response(asdict(result), 202)
@@ -113,6 +114,7 @@ def mount_document_job_routes(app: FastAPI, service: DocumentImportService,
             if result is None or saved is None:
                 return _response({'error': 'import_not_found'}, 404)
             return _response({'space': space, 'import_id': import_id, **asdict(result),
+                **({'video_ocr': True} if saved.spec.video_ocr else {}),
                 **({'pdf_ocr': saved.spec.pdf_ocr.model_dump()} if saved.spec.pdf_ocr else {})})
         except (WorkflowError, ValueError) as error:
             return _failure(error)
