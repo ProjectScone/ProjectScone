@@ -135,6 +135,26 @@ async def test_invalid_completed_coverage_is_refused_without_model_calls(ffmpeg,
     assert len(observer.calls) == 3
 
 
+@pytest.mark.parametrize('change', ['empty_count', 'missing_window', 'window_text'])
+async def test_completed_coverage_must_match_the_retained_window_observations(ffmpeg, change):
+    receipts, observer = Receipts(), Observer()
+    config = parser(ffmpeg, observer)
+    await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    if change == 'empty_count':
+        raw = json.loads(receipts.values['media-transcript'])
+        raw['coverage']['empty_windows'] = 2
+        receipts.values['media-transcript'] = json.dumps(raw).encode()
+    elif change == 'missing_window':
+        del receipts.values['media-window-0001']
+    else:
+        raw = json.loads(receipts.values['media-window-0001'])
+        raw['segments'][0]['text'] = 'Changed observations'
+        receipts.values['media-window-0001'] = json.dumps(raw).encode()
+    with pytest.raises(InvalidInput, match='checkpoint'):
+        await config.parse_checkpointed(recording(), 'speech.wav', DocumentLimits(), receipts)
+    assert len(observer.calls) == 3
+
+
 @pytest.mark.parametrize('change', ['policy', 'disable', 'host', 'source', 'receipt', 'hole'])
 async def test_partial_window_receipts_fail_closed_before_more_model_calls(ffmpeg, change):
     observer, receipts = Observer(interrupt=3), Receipts()

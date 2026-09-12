@@ -103,8 +103,11 @@ def _validate(segments: tuple[TranscriptionSegment, ...], duration: float, diges
 
 async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
                              transcribe: TranscriptionCallback, limits: DocumentLimits,
-                             deadline: float, checkpoints: ExtractionCheckpoints | None
+                             deadline: float, checkpoints: ExtractionCheckpoints | None,
+                             require_complete: bool = False
                              ) -> tuple[tuple[TranscriptionSegment, ...], TranscriptionCoverage]:
+    if require_complete and checkpoints is None:
+        raise InvalidInput('completed media window checkpoints are required')
     pcm = audio[44:]  # The decoder emits canonical mono 16 kHz signed 16-bit WAV.
     ranges = window_ranges(pcm, seconds)
     marker = json.dumps({'binding': binding, 'audio_sha256': hashlib.sha256(audio).hexdigest()},
@@ -130,6 +133,8 @@ async def transcribe_windows(audio: bytes, *, seconds: int, binding: str,
             else:
                 missing = True
             saved.append(receipt)
+        if require_complete and (missing or previous is None):
+            raise InvalidInput('completed media window checkpoints are missing')
         if previous is None:
             checkpoints.put(WINDOW_BINDING_KEY, marker)
     else:

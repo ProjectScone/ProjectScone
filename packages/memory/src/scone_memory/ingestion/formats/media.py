@@ -186,7 +186,7 @@ class MediaDocumentParser:
         # Deferred because the receipt schema uses the public segment type above.
         from .media_checkpoint import CompletedTranscription, read_transcription, save_transcription, transcription_binding
 
-        from .media_windows import WINDOW_BINDING_KEY, transcribe_windows, window_ranges
+        from .media_windows import WINDOW_BINDING_KEY, transcribe_windows
 
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds
@@ -202,9 +202,17 @@ class MediaDocumentParser:
             if (saved.audio_sha256 != audio_hash or saved.audio_bytes != len(audio_wav)
                     or saved.duration_seconds != duration):
                 raise InvalidInput('media transcription checkpoint does not match the decoded audio')
-            if coverage is not None and (self._chunk_seconds is None
-                    or coverage.windows != len(window_ranges(audio_wav[44:], self._chunk_seconds))):
-                raise InvalidInput('media transcription checkpoint coverage does not match the audio windows')
+            if coverage is not None:
+                if self._chunk_seconds is None:
+                    raise InvalidInput('media transcription checkpoint coverage requires audio windows')
+                try:
+                    retained, measured = await transcribe_windows(audio_wav, seconds=self._chunk_seconds,
+                        binding=binding, transcribe=self._transcribe, limits=limits, deadline=deadline,
+                        checkpoints=checkpoints, require_complete=True)
+                except InvalidInput:
+                    raise InvalidInput('media transcription checkpoint window observations are invalid') from None
+                if measured != coverage or retained != saved.segments:
+                    raise InvalidInput('media transcription checkpoint coverage contradicts its window observations')
             transcript = saved.segments
         elif self._chunk_seconds is not None:
             transcript, coverage = await transcribe_windows(audio_wav, seconds=self._chunk_seconds, binding=binding,
