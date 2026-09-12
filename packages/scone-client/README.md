@@ -35,6 +35,29 @@ or `None` when the request never reached a server) and `.message` (the
 server's `{"error": ...}` text, or the plain-text body axum's own extractor
 rejections use).
 
+## Response limits
+
+`Scone(..., max_response_bytes=16 * 1024 * 1024)` bounds decoded response bytes
+before JSON parsing, including error bodies. Set a larger positive integer when
+a known document or agent result needs it. An oversized response raises
+`SconeError` with its HTTP status and no retained body. Receiving that error does
+not tell you whether a preceding write completed; inspect the durable resource
+before deciding to resume or retry it. The client adds no automatic retries.
+
+The transport streams encoded bytes into a bounded buffer and advertises only
+`gzip, deflate`. It accepts identity, gzip (up to 1024 members), and wrapped or raw
+deflate; other encodings, truncated compressed bodies, and invalid trailers are
+refused. Compressed wire bytes are capped at twice `max_response_bytes` plus
+64 KiB, and decompression has its own output cap. These are byte limits, not a
+limit on the Python objects subsequently created by JSON parsing. The configured
+`timeout` still controls connection and idle read timeouts, not a total deadline.
+
+Each response is closed, including failed reads. An injected `requests.Session`
+remains caller-owned. If a custom adapter or response hook already buffers or
+decodes the body, its earlier allocation is outside these bounds; the cached
+body is checked before the client parses it. Custom session retry policies are
+also caller-controlled.
+
 ## Server behavior worth knowing
 
 - **Source and event time are supported.** `add(..., source=..., created_at=...)`
