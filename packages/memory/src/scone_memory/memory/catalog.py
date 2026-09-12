@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, TypedDict
+from typing import TYPE_CHECKING, Optional, TypedDict, cast
 
 from ..core.affirmations import affirmation_store
 from ..core.errors import InvalidInput
@@ -55,6 +55,10 @@ class Profile:
 MAX_PROFILE_FACTS = 20_000
 #: Claims whose restatements are counted before the profile is cut.
 MAX_PROFILE_CANDIDATES = 200
+#: How many times a profile is read again when the ledger moves under it.
+#: Two, because a ledger that moves twice is a busy one, not a slow read,
+#: and waiting longer would answer later without answering better.
+ATTEMPTS = 2
 
 
 def _predicates(names: object, what: str) -> frozenset[str]:
@@ -129,14 +133,37 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
 
     Which predicates count is the policy's to say. The read behind it is
     bounded and disclosed: a profile of what was read is not a profile of
-    everything, and it does not pretend to be."""
-    from ..entities.read import read_ledger
-
+    everything, and it does not pretend to be. It is also one revision's
+    profile. A profile is several reads — the claims, how often each was
+    said again, what happened lately — and a ledger that moves between
+    them would answer with a claim from before a write beside a count
+    from after it. That answer was never true at any moment, so it is
+    read again; a ledger that will not hold still is said rather than
+    passed off as a settled one."""
     check_space(space)
     limit = max(1, min(limit, 50))
+    kept = policy or ProfilePolicy()
+    answer = None
+    for _ in range(ATTEMPTS):
+        answer, settled = await _one_revision(engine, space, limit, kept)
+        if settled:
+            return answer
+    said = cast(list[str], answer.coverage["reasons"]) if answer else []
+    return Profile(static_facts=answer.static_facts if answer else [],
+                   dynamic=answer.dynamic if answer else [],
+                   recent=answer.recent if answer else [],
+                   coverage={**(answer.coverage if answer else {}),
+                             "reasons": [*said, "ledger_moved_during_read"]})
+
+
+async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
+                        kept: ProfilePolicy) -> tuple[Profile, bool]:
+    """One profile, and whether the ledger held still while it was made."""
+    from ..entities.read import read_ledger
+
     documents = engine.documents
     now = engine.clock()
-    kept = policy or ProfilePolicy()
+    began = await documents.revision(space)
     read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS)
     active = [fact for fact in read.facts
               if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)]
@@ -155,15 +182,18 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
     shown = ranked[:limit]
     recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
               for e in await documents.recent_episodes(space, limit)]
-    return Profile(
-        static_facts=shown,
-        dynamic=[r.excerpt for r in recent],
-        recent=recent,
-        coverage={"facts_read": len(read.facts), "reasons": list(read.reasons), "policy": kept.record(),
-                  "restatements": {str(fact.fact_id): said[fact.fact_id] for fact in shown},
-                  "candidates": min(len(active), MAX_PROFILE_CANDIDATES)},
+    ended = await documents.revision(space)
+    return (
+        Profile(
+            static_facts=shown,
+            dynamic=[r.excerpt for r in recent],
+            recent=recent,
+            coverage={"facts_read": len(read.facts), "reasons": list(read.reasons), "policy": kept.record(),
+                      "restatements": {str(fact.fact_id): said[fact.fact_id] for fact in shown},
+                      "candidates": min(len(active), MAX_PROFILE_CANDIDATES), "revision": began},
+        ),
+        began == ended,
     )
-
 
 
 async def tags(documents: DocumentStore, space: str) -> dict[str, int]:

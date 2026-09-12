@@ -134,3 +134,50 @@ async def test_the_newest_claims_are_the_ones_whose_restatements_are_counted(mon
     profile = await memory.profile(SPACE)
     assert [fact.predicate for fact in profile.static_facts] == ["uses"]
     assert profile.coverage["candidates"] == 1
+
+
+class _Moving(InMemoryDocumentStore):
+    """A store whose ledger moves under the reader: every time the recent
+    activity is asked for, something else has been written."""
+
+    def __init__(self, times: int = 99) -> None:
+        super().__init__()
+        self.times, self.moved = times, 0
+
+    async def recent_episodes(self, space: str, limit: int):
+        if self.moved < self.times:
+            self.moved += 1
+            await self.bump_revision(space)
+        return await super().recent_episodes(space, limit)
+
+
+async def moving_engine(times: int) -> MemoryEngine:
+    memory = await MemoryEngine(_Moving(times), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z")).open()
+    await memory.assert_fact(SPACE, "mark", "prefers", "dark mode", valid_from="2021-01-01T00:00:00Z")
+    await memory.assert_fact(SPACE, "mark", "uses", "vim", valid_from="2024-01-01T00:00:00Z")
+    return memory
+
+
+async def test_a_profile_is_read_at_one_revision_and_says_which():
+    memory = await engine()
+    await memory.assert_fact(SPACE, "mark", "prefers", "dark mode", valid_from="2021-01-01T00:00:00Z")
+    profile = await memory.profile(SPACE)
+    assert profile.coverage["revision"] == await memory.documents.revision(SPACE)
+    assert profile.coverage["reasons"] == []
+
+
+async def test_a_ledger_that_moves_once_is_read_again():
+    """A claim excluded between two of a profile's reads must not come back
+    beside a count taken after it went."""
+    memory = await moving_engine(times=1)
+    profile = await memory.profile(SPACE)
+    assert "ledger_moved_during_read" not in profile.coverage["reasons"]
+    assert profile.coverage["revision"] == await memory.documents.revision(SPACE)
+
+
+async def test_a_ledger_that_keeps_moving_is_answered_and_said():
+    memory = await moving_engine(times=99)
+    profile = await memory.profile(SPACE)
+    assert "ledger_moved_during_read" in profile.coverage["reasons"]
+    assert [fact.object for fact in profile.static_facts] == ["vim", "dark mode"], "newest first"
