@@ -250,6 +250,8 @@ class FeedbackBody(BaseModel):
 from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
 from ..ingestion.import_service import DocumentImportService
+from ..ingestion.directory_service import DirectorySyncService
+from ._lifecycle import finish_host_cleanup
 
 
 def create_app(
@@ -266,6 +268,7 @@ def create_app(
     agent_run_service: AgentRunService | None = None,
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
+    directory_sync_service: DirectorySyncService | None = None,
     filesystem=None,
     document_media: DocumentMedia | None = None,
 ) -> FastAPI:
@@ -294,23 +297,32 @@ def create_app(
     if document_import_service is not None:
         document_import_service.require_host(engine)
 
+    if directory_sync_service is not None:
+        directory_sync_service.require_host(engine)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if worker is not None:
-            worker.start()
         try:
+            if worker is not None:
+                worker.start()
             yield
         finally:
-            try:
-                if agent_run_service is not None:
-                    await agent_run_service.aclose()
-            finally:
+            async def cleanup() -> None:
                 try:
-                    if document_import_service is not None:
-                        await document_import_service.aclose()
+                    if agent_run_service is not None:
+                        await agent_run_service.aclose()
                 finally:
-                    if worker is not None:
-                        await worker.stop()
+                    try:
+                        if document_import_service is not None:
+                            await document_import_service.aclose()
+                    finally:
+                        try:
+                            if directory_sync_service is not None:
+                                await directory_sync_service.aclose()
+                        finally:
+                            if worker is not None:
+                                await worker.stop()
+            await finish_host_cleanup(cleanup())
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
                   default_response_class=LedgerJSONResponse)
@@ -318,6 +330,7 @@ def create_app(
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
     app.state.document_import_service = document_import_service
+    app.state.directory_sync_service = directory_sync_service
     app.state.roles = dict(roles or {})
     app.state.ingest_lane_width = ingest_concurrency
     ingest_lane = asyncio.Semaphore(ingest_concurrency)
@@ -447,6 +460,7 @@ def create_app(
             features["agents.runs"] = True
             features["agents.inputs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
+        features["documents.sync"] = directory_sync_service is not None
         if document_import_service is not None:
             features["documents.jobs"] = True
         if conversations:
@@ -477,6 +491,9 @@ def create_app(
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
+    if directory_sync_service is not None:
+        from .directory_sync import mount_directory_sync_routes
+        mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for)
     from .filesystem_routes import mount_filesystem_routes

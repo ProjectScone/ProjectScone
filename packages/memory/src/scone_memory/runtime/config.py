@@ -195,6 +195,7 @@ class Settings:
     # as `serve-conversations --model-factory`, absent meaning history-only.
     agents_config: Optional[str] = None
     document_jobs_config: Optional[str] = None
+    directory_sync_config: Optional[str] = None
     document_media_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
@@ -409,6 +410,7 @@ class Settings:
             retention=parse_retention(env.get("SCONE_RETAIN", "")),
             agents_config=env.get("SCONE_AGENTS_CONFIG") or None,
             document_jobs_config=env.get("SCONE_DOCUMENT_JOBS_CONFIG") or None,
+            directory_sync_config=env.get("SCONE_DIRECTORY_SYNC_CONFIG") or None,
             document_media_config=env.get("SCONE_DOCUMENT_MEDIA_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
