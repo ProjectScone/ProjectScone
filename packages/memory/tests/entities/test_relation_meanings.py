@@ -529,3 +529,25 @@ async def test_the_packet_says_when_the_walk_that_found_implications_stopped(mon
     packet = await graph_context(memory, SPACE, names=["Box 0"])
     assert "implied_capped" in packet.text, packet.text
     assert "coverage: limited" in packet.text
+
+
+def test_a_chain_that_has_already_lost_the_thread_is_not_followed_further(monkeypatch):
+    """Once two claims share no moment, nothing further along can share one
+    either, because a shared stretch only ever shrinks. Walking on costs
+    claims for an answer that cannot exist, and on a budget that is the
+    difference between finishing and stopping short."""
+    from scone_memory.entities import project as projecting
+
+    # A → B holds in 2020 only; the rest of the chain holds from 2024, so
+    # nothing follows from A at all, however long the chain is.
+    facts = [spanning(1, "A", "part_of", "B", "2020-01-01", "2021-01-01")]
+    facts += [spanning(n + 2, chr(ord("B") + n), "part_of", chr(ord("C") + n), "2024-01-01")
+              for n in range(3)]
+    # Following the dead chain to its end costs six claims; stopping at the
+    # first step that shares nothing costs four. Five tells them apart.
+    monkeypatch.setattr(projecting, "MAX_WALKED", 5)
+    graph = projected(facts, RelationMeanings(transitive=["part_of"]))
+    assert graph.implied, "the rest of the chain still follows"
+    assert not [item for item in graph.implied if 1 in item.fact_ids], \
+        "nothing follows through the claim that shares no moment"
+    assert graph.implied_capped is False, "the walk did not spend its budget on a dead chain"

@@ -343,15 +343,12 @@ def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple
     walked = 0
 
     def keep(subject: str, predicate: str, other: str, follows: str,
-             path: tuple[Relation, ...]) -> bool:
+             path: tuple[Relation, ...], shared: tuple[tuple[str, str | None], ...]) -> bool:
         """Record one implied relation, when its claims ever held together.
         False when there is no room left for another."""
         nonlocal capped
         key = (subject, predicate, other)
-        if subject == other or key in said or key in found:
-            return True
-        shared = _shared(spans, path)
-        if not shared:
+        if subject == other or key in said or key in found or not shared:
             return True
         if len(found) >= MAX_IMPLIED:
             capped = True
@@ -371,7 +368,8 @@ def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple
         other_side = meanings.opposite(item.predicate)
         if other_side is not None and not keep(item.object_id, other_side, item.subject_id,
                                                "symmetric" if meanings.reads_both_ways(item.predicate)
-                                               else "inverse", (item,)):
+                                               else "inverse", (item,),
+                                               spans.get(item.relation_id, ())):
             break
     onward: dict[tuple[str, str], list[Relation]] = defaultdict(list)
     for item in relations:
@@ -398,9 +396,15 @@ def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple
                         continue
                     reached.add(edge.object_id)
                     step = (*path, edge)
-                    if not keep(item.subject_id, item.predicate, edge.object_id, "transitive", step):
+                    shared = _shared(spans, step)
+                    if not keep(item.subject_id, item.predicate, edge.object_id, "transitive", step, shared):
                         return sorted(found.values(), key=lambda r: r.relation_id), capped
-                    beyond.append((edge.object_id, step))
+                    # A stretch shared by every claim so far only ever
+                    # shrinks, so a chain that already shares nothing can
+                    # never share anything further along. Walking on would
+                    # spend claims looking for an answer that cannot exist.
+                    if shared:
+                        beyond.append((edge.object_id, step))
             frontier = beyond
             if not frontier:
                 break
