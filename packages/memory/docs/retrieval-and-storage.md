@@ -265,6 +265,16 @@ tenth (14 right, 4 wrong). What the planner refuses to read is counted
 apart, because leaving a question to ordinary recall is not the same as
 answering it wrongly.
 
+### How long a claim held
+
+"How long did Alice work at Acme?" is answered from the claim's own valid
+time, and a claim that held twice is two spells, not one long one: the
+answer counts the spells and says how many there were, because a claim
+made of two stretches with a gap between them did not hold during the
+gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
+`periods` (every stretch, half-open); the working names each stretch. A
+claim that still holds is counted up to the moment asked and says so.
+
 ## Code: cut where the declarations are
 
 A source file stored under a name that says which language it is in

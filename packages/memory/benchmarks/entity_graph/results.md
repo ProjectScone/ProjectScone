@@ -62,12 +62,17 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 8,774, 5,509, 684 | recorded |
+| View bytes (knowledge, report, context) | 8,847, 5,509, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `daceac5828f47ea9d3a875a761fb75c8f1b086896cef192c96075df9ae497d2f`. The scores
-match the first recording (`44ceae91…`). The hash moved when the
-missing-evidence and out-of-view counts joined the report.
+Artefact: `4e0302775af9d87655a8bfd29a13bc1efb0d75e698312c463d0266f59f0954e4`. The scores
+match the first recording (`44ceae91…`). The hash moved twice since: when
+the missing-evidence and out-of-view counts joined the report
+(`daceac58…`), and now that the knowledge view carries what follows from a
+space's vocabulary. This fixture configures no vocabulary, so nothing
+follows and no score changes; the view is 73 bytes longer because it says
+so rather than leaving a reader to assume it (`implied: []`,
+`meanings: null`, and the two counts).
 
 ## What the numbers say
 

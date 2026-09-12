@@ -291,7 +291,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
     for (subject_id, predicate, object_id), members in relation_facts.items():
         in_ledger = [fact for fact in members if fact.in_ledger]
         ends = [fact.valid_until for fact in in_ledger]
-        spans[relation_id(space, subject_id, predicate, object_id)] = _merged(
+        spans[relation_id(space, subject_id, predicate, object_id)] = merged_periods(
             [(_moment(fact.valid_from), _moment(fact.valid_until) if fact.valid_until else None)
              for fact in in_ledger])
         relations.append(Relation(
@@ -407,7 +407,7 @@ def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple
     return sorted(found.values(), key=lambda r: r.relation_id), capped
 
 
-def _merged(periods: Iterable[tuple[str, str | None]]) -> tuple[tuple[str, str | None], ...]:
+def merged_periods(periods: Iterable[tuple[str, str | None]]) -> tuple[tuple[str, str | None], ...]:
     """One stretch of time per spell, overlapping and touching spells
     joined, in order. An open end swallows everything after it."""
     ordered = sorted(periods, key=lambda period: (period[0], period[1] is None, period[1] or ""))

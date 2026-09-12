@@ -231,7 +231,8 @@ async def test_when_a_claim_began_and_ended_are_both_named():
     answer = await temporal_answer(await ledger(), "alpha", "When did Alice work at Acme Robotics?", now=NOW)
     assert answer.status == "computed"
     assert answer.value == {"from": "2021-03-01", "until": "2023-06-30", "holds": False,
-                            "days": 851, "months": 27, "years": 2}
+                            "days": 851, "months": 27, "years": 2, "spells": 1,
+                            "periods": [["2021-03-01", "2023-06-30"]]}
     assert "answer: from 2021-03-01 until 2023-06-30" in answer.text
 
 
@@ -267,3 +268,41 @@ async def test_a_ledger_answer_says_when_the_read_was_capped(monkeypatch):
     answer = await temporal_answer(engine, "alpha", "How long did Alice work at Acme Robotics?", now=NOW)
     assert "coverage: limited: " in answer.text and "fact_limit" in answer.text
     assert answer.coverage["read"]["truncated"] is True
+
+
+async def twice() -> MemoryEngine:
+    """Alice worked at Acme, left, and came back: two spells with a gap."""
+    from scone_memory.testing import Clock
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2020-01-01T00:00:00.000Z")).open()
+    first = await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics",
+                                     valid_from="2019-01-01T00:00:00Z")
+    await engine.close_fact("alpha", first.fact_id, "left for Globex")
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics",
+                             valid_from="2022-01-01T00:00:00Z")
+    return engine
+
+
+async def test_two_spells_with_a_gap_are_not_counted_as_one_long_one():
+    """She was not at Acme during the years between. The length is the
+    spells themselves, and the answer says there were two."""
+    engine = await twice()
+    answer = await temporal_answer(engine, "alpha", "How long did Alice work at Acme Robotics?", now=NOW)
+    assert answer.status == "computed"
+    import datetime as when
+
+    spells = [(when.date(2019, 1, 1), when.date(2020, 1, 1)),
+              (when.date(2022, 1, 1), when.date(2023, 4, 20))]
+    assert answer.value["days"] == sum((b - a).days for a, b in spells)
+    assert answer.value["spells"] == 2
+    assert "two spells" in answer.text
+    assert answer.anchors[0]["periods"] and len(answer.anchors[0]["periods"]) == 2
+
+
+async def test_when_a_claim_held_names_each_spell_rather_than_the_first_and_last():
+    answer = await temporal_answer(await twice(), "alpha", "When did Alice work at Acme Robotics?", now=NOW)
+    assert answer.status == "computed"
+    assert answer.value["holds"] is True, "the later spell has not ended"
+    assert len(answer.value["periods"]) == 2
+    assert answer.value["periods"][0][0] == "2019-01-01" and answer.value["periods"][1][1] is None
