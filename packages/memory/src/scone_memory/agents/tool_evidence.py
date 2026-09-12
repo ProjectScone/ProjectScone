@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import json
 import math
+import sqlite3
 import time
 
 from ..core.models import Episode, Fact
@@ -29,7 +30,7 @@ class PreparedToolEvidence:
 
 async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallScope,
                                 excluded_session: str | None, result: dict[str, object],
-                                timeout_s: float) -> PreparedToolEvidence:
+                                timeout_s: float, *, raise_unavailable: bool = False) -> PreparedToolEvidence:
     # The serialized result is detached from mutable store/provider models.
     payload = _json(result)
     if len(payload.encode()) > 64000:
@@ -145,6 +146,10 @@ async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallS
             return await bounded_capture() == original
         except asyncio.CancelledError:
             raise
+        except (OSError, sqlite3.OperationalError):
+            if raise_unavailable:
+                raise
+            return False
         except Exception:
             return False
 

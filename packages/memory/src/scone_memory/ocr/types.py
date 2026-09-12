@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer, model_validator
 
 
 class OcrRegion(BaseModel):
@@ -31,6 +31,26 @@ class OcrResult(BaseModel):
     width: int = Field(ge=1, le=100_000)
     height: int = Field(ge=1, le=100_000)
     regions: tuple[OcrRegion, ...] = Field(max_length=50_000)
+
+
+class OrderedOcrRegion(OcrRegion):
+    """Optional inferred column membership and original provider position."""
+    provider_index: int | None = Field(default=None, ge=0, lt=50_000)
+    reading_column: int | None = Field(default=None, ge=0, le=8)
+
+    @model_validator(mode='after')
+    def paired_order(self) -> OrderedOcrRegion:
+        if (self.provider_index is None) != (self.reading_column is None):
+            raise ValueError('OCR reading order requires both provider index and column')
+        return self
+
+    @model_serializer(mode='wrap')
+    def preserve_legacy(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.provider_index is None:
+            value.pop('provider_index', None)
+            value.pop('reading_column', None)
+        return value
 
 
 class OcrEngine(Protocol):

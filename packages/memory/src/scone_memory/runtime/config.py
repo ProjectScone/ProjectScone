@@ -193,6 +193,11 @@ class Settings:
     # Naming a journal composes the conversation service onto the memory
     # origin under `serve`; the factory is the same trusted module:callable
     # as `serve-conversations --model-factory`, absent meaning history-only.
+    agents_config: Optional[str] = None
+    document_ocr_executable: Optional[str] = None
+    document_ocr_language: str = 'eng'
+    document_ocr_psm: int = 3
+    document_ocr_dpi: int = 150
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     # A persona catalog (JSON array of Persona documents) needs a registry
@@ -400,6 +405,11 @@ class Settings:
             port=int(env.get("SCONE_PORT", "7437")),
             ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
             retention=parse_retention(env.get("SCONE_RETAIN", "")),
+            agents_config=env.get("SCONE_AGENTS_CONFIG") or None,
+            document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
+            document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
+            document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
+            document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,

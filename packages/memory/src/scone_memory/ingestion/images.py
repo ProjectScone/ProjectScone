@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import sys
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -13,7 +12,7 @@ from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import Added, Attachment, RecallResult
 from ..core.validation import check_space
 from ..providers.vision import SUPPORTED_IMAGE_TYPES
-from ..ocr.process import run_bounded
+from ..ocr.process import python_worker, run_bounded
 from .image_context import ImageAttribute, ImageContext, ImageEntity, context_text
 
 __all__ = ['ImageAttribute', 'ImageContext', 'ImageEntity', 'ImageIngested', 'ImageProvenance',
@@ -94,7 +93,7 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     if media_type not in SUPPORTED_IMAGE_TYPES:
         raise InvalidInput('image context supports still PNG, JPEG and WebP images')
     context = ImageContext.model_validate_json(context.model_dump_json())
-    output = await run_bounded([sys.executable, '-m', 'scone_memory.ingestion._image_worker', media_type],
+    output = await run_bounded(python_worker('scone_memory.ingestion._image_worker', media_type),
         data, timeout=15., max_output=4096)
     dimensions = json.loads(output)
     if 'error' in dimensions:

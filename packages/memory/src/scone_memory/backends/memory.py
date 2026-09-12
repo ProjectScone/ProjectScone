@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from itertools import count
-from bisect import bisect_left, insort
+from bisect import bisect_left, bisect_right, insort
 from typing import Mapping, Optional, Sequence
 
 from ..retrieval.lexical import Bm25
@@ -23,6 +23,9 @@ from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
+from ..core.retirement import (
+    Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
+)
 from ..core.affirmations import Affirmation, NewAffirmation
 
 
@@ -30,6 +33,8 @@ class InMemoryDocumentStore:
     name = "memory"
 
     def __init__(self) -> None:
+        self._retirements: dict[RetirementCursor, str] = {}
+        self._retirement_keys: list[RetirementCursor] = []
         self._episodes: dict[int, Episode] = {}
         self._chunks: dict[int, Chunk] = {}
         self._chunks_by_episode: dict[tuple[str, int], list[tuple[int, int]]] = defaultdict(list)
@@ -110,6 +115,8 @@ class InMemoryDocumentStore:
             gone = self._affirmations.pop(affirmation_id)
             self._affirmation_keys.pop((gone.space, gone.fact_id, gone.valid_from), None)
         self._inflight = {mark for mark in self._inflight if mark[0] != space}
+        for retirement in [key for key in self._retirement_keys if key[0] == space]:
+            await self.clear_retirement(*retirement)
         for job_key in [key for key in self._jobs if key[0] == space]:
             del self._jobs[job_key]
             self._job_seq.pop(job_key, None)
@@ -183,14 +190,13 @@ class InMemoryDocumentStore:
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         episode = await self.get_episode(space, episode_id)
-        if episode is None:
-            return []
-        del self._episodes[episode_id]
-        removed = [c.chunk_id for c in self._chunks.values() if c.episode_id == episode_id]
+        removed = [c.chunk_id for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
         for chunk_id in removed:
-            del self._chunks[chunk_id]
             self._bm25[space].remove(chunk_id)
+            del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
+        if episode is not None:
+            del self._episodes[episode_id]
         return removed
 
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
@@ -378,6 +384,28 @@ class InMemoryDocumentStore:
 
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         return self._tombstones.setdefault((new.space, new.episode_id), Tombstone(**new.__dict__))
+
+    async def record_retirement(self, record: Retirement) -> Retirement:
+        payload = encode_retirement(record)
+        key = record.space, record.episode_id
+        if key not in self._retirements:
+            self._retirements[key] = payload
+            insort(self._retirement_keys, key)
+        return decode_retirement(self._retirements[key], key)
+
+    async def retirement(self, space: str, episode_id: int) -> Retirement | None:
+        payload = self._retirements.get(retirement_key(space, episode_id))
+        return decode_retirement(payload, (space, episode_id)) if payload is not None else None
+
+    async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]:
+        retirement_page(after, limit)
+        start = 0 if after is None else bisect_right(self._retirement_keys, after)
+        return [decode_retirement(self._retirements[key], key) for key in self._retirement_keys[start:start + limit]]
+
+    async def clear_retirement(self, space: str, episode_id: int) -> None:
+        key = retirement_key(space, episode_id)
+        if self._retirements.pop(key, None) is not None:
+            self._retirement_keys.pop(bisect_left(self._retirement_keys, key))
 
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         return self._tombstones.get((space, episode_id))

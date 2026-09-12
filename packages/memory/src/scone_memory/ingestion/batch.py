@@ -7,17 +7,73 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+import hashlib
+import json
+import math
 from typing import cast
 
 from ..core.errors import InvalidInput, SconeError
 from ..core.models import Added, MAX_CONTENT_BYTES
-from ..core.ports import DocumentStore, Embedder, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
+from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
 from .code import code_language, code_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
 
 EMBED_BATCH = 64
+
+
+def _validated_vectors(response: object, count: int, dimension: int) -> list[list[float]]:
+    if not isinstance(response, list) or len(response) != count:
+        raise ValueError('embedding response must contain one vector per input text')
+    vectors: list[list[float]] = []
+    for vector in response:
+        if not isinstance(vector, list) or len(vector) != dimension:
+            raise ValueError('embedding vector does not match the configured dimension')
+        try:
+            valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                        and math.isfinite(value) for value in vector)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError('embedding vector must contain finite numeric values')
+        # Providers may reuse their response buffers on the next call.
+        vectors.append(list(vector))
+    return vectors
+
+
+async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
+                        checkpoint: EmbeddingCheckpoint | None = None,
+                        binding: str = '') -> list[list[float]]:
+    """Persist only complete validated batches, and validate receipts on reuse."""
+    identifier, dimension = embedder.id, embedder.dim
+    prefix = ''
+    if checkpoint is not None:
+        digest = hashlib.sha256(json.dumps(['embedding-batch-v1', identifier, dimension, EMBED_BATCH, binding]).encode())
+        for text in texts:
+            encoded = text.encode('utf-8')
+            digest.update(len(encoded).to_bytes(8, 'big'))
+            digest.update(encoded)
+        prefix = digest.hexdigest()
+    vectors: list[list[float]] = []
+    for offset in range(0, len(texts), EMBED_BATCH):
+        batch = texts[offset:offset + EMBED_BATCH]
+        key = f'{prefix}:{offset}'
+        saved = checkpoint.get(key) if checkpoint is not None else None
+        if saved is None:
+            response: object = await embedder.embed(batch)
+        else:
+            try:
+                response = json.loads(saved)
+            except (ValueError, UnicodeError, RecursionError):
+                raise ValueError('embedding checkpoint is invalid') from None
+        if embedder.id != identifier or embedder.dim != dimension:
+            raise ValueError('embedding identity changed during indexing')
+        validated = _validated_vectors(response, len(batch), dimension)
+        if saved is None and checkpoint is not None:
+            checkpoint.put(key, json.dumps(validated, allow_nan=False, separators=(',', ':')).encode())
+        vectors.extend(validated)
+    return vectors
 
 
 @dataclass(frozen=True)
@@ -31,9 +87,51 @@ class IngestionRuntime:
     chunk_target: int
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
+    embedding_checkpoint: EmbeddingCheckpoint | None = None
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
+
+
+def validated_record(space: str, record: Record, when: str) -> NewEpisode:
+    """Validate and snapshot caller input before any source can be removed."""
+    content = record.content
+    if not isinstance(content, str) or not content.strip():
+        raise InvalidInput("content must not be empty")
+    if len(content.encode()) > MAX_CONTENT_BYTES:
+        raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
+    kind = record.kind
+    if kind not in KINDS:
+        raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
+    if record.source is not None and not isinstance(record.source, str):
+        raise InvalidInput("source must be a string or None")
+    clean_tags = normalise_tags(record.tags)
+    clean_meta = normalise_metadata(record.metadata or {})
+    try:
+        for value in (record.source or '', *clean_tags, *clean_meta.values()):
+            value.encode('utf-8')
+    except UnicodeError as error:
+        raise InvalidInput("record source, tags and metadata must be valid UTF-8") from error
+    happened = normalise_time(record.created_at) if record.created_at else when
+    digest = record.content_hash or content_hash(space, content, record.dedup_key)
+    if not digest or len(digest) > 128:
+        raise InvalidInput("content_hash must be 1..=128 chars")
+    return NewEpisode(space=space, kind=kind, content=content, content_hash=digest,
+                      created_at=happened, ingested_at=when, source=record.source,
+                      tags=clean_tags, metadata=clean_meta)
+
+
+def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
+    spans = spans_for(runtime, new.content, new.source)
+    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
+                    spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
+
+
+async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
+    texts = [runtime.embed_text(p.new, text) for p in fresh for text in p.texts]
+    binding = '' if runtime.embedding_checkpoint is None else json.dumps(
+        [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
+    return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
 
 
 async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
@@ -48,7 +146,7 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
     answers: list[Added | None] = []
     for record in records:
         try:
-            _check(space, record)
+            validated_record(space, record, runtime.clock())
         except SconeError as wrong:
             answers.append(Added(episode_id=-1, outcome="failed", reason=str(wrong)))
             continue
@@ -62,25 +160,6 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
                                                     reason="nothing was stored for it")
             for answer in answers]
 
-
-def _check(space: str, record: Record) -> None:
-    """Everything a record must be before anything is written for it. The
-    batch checks these as it goes; a partial batch asks first, so that a
-    record that cannot be stored is answered rather than raised."""
-    content = record.content
-    if not isinstance(content, str) or not content.strip():
-        raise InvalidInput("content must not be empty")
-    if len(content.encode()) > MAX_CONTENT_BYTES:
-        raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-    if record.kind not in KINDS:
-        raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
-    normalise_tags(record.tags)
-    normalise_metadata(record.metadata or {})
-    if record.created_at:
-        normalise_time(record.created_at)
-    digest = record.content_hash or content_hash(space, content, record.dedup_key)
-    if not digest or len(digest) > 128:
-        raise InvalidInput("content_hash must be 1..=128 chars")
 
 
 def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
@@ -108,20 +187,8 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
     for record in records:
-        content = record.content
-        if not isinstance(content, str) or not content.strip():
-            raise InvalidInput("content must not be empty")
-        if len(content.encode()) > MAX_CONTENT_BYTES:
-            raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
-        kind = record.kind
-        if kind not in KINDS:
-            raise InvalidInput(f"kind must be one of {KINDS}, got {record.kind!r}")
-        clean_tags = normalise_tags(record.tags)
-        clean_meta = normalise_metadata(record.metadata or {})
-        happened = normalise_time(record.created_at) if record.created_at else when
-        digest = record.content_hash or content_hash(space, content, record.dedup_key)
-        if not digest or len(digest) > 128:
-            raise InvalidInput("content_hash must be 1..=128 chars")
+        new = validated_record(space, record, when)
+        digest = new.content_hash
         if digest in seen:
             results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
             fresh_or_dup = seen[digest]
@@ -134,31 +201,10 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             continue
         seen[digest] = len(results)
         results.append(None)
-        spans = spans_for(runtime, content, record.source)
-        fresh.append(
-            _Pending(
-                slot=len(results) - 1,
-                texts=[content[sp.start : sp.end] for sp in spans],
-                new=NewEpisode(
-                    space=space,
-                    kind=kind,
-                    content=content,
-                    content_hash=digest,
-                    created_at=happened,
-                    ingested_at=when,
-                    source=record.source,
-                    tags=clean_tags,
-                    metadata=clean_meta,
-                ),
-                spans=[(sp.start, sp.end) for sp in byte_spans(content, spans)],
-            )
-        )
+        fresh.append(chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
-        texts = [runtime.embed_text(p.new, t) for p in fresh for t in p.texts]
-        vectors: list[list[float]] = []
-        for i in range(0, len(texts), EMBED_BATCH):
-            vectors.extend(await runtime.embedder.embed(texts[i : i + EMBED_BATCH]))
+        vectors = await embed_pending(runtime, space, fresh)
         await write_batch(runtime, space, fresh, vectors, results)
         await runtime.documents.bump_revision(space)
 
@@ -266,9 +312,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 tags=episode.tags, metadata=episode.metadata,
             )
             texts = [runtime.embed_text(as_new, c.text) for c in chunks]
-            vectors: list[list[float]] = []
-            for i in range(0, len(texts), EMBED_BATCH):
-                vectors.extend(await runtime.embedder.embed(texts[i : i + EMBED_BATCH]))
+            vectors = await _embed_chunks(runtime.embedder, texts)
             await runtime.vectors.upsert(
                 [
                     VectorPoint(

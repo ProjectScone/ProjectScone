@@ -16,6 +16,14 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
 
+class EmbeddingCheckpoint(Protocol):
+    """Caller-owned, source-scoped work receipts; implementations encrypt at rest."""
+
+    def get(self, key: str) -> bytes | None: ...
+
+    def put(self, key: str, value: bytes) -> None: ...
+
+
 @dataclass(frozen=True)
 class NewEpisode:
     space: str
@@ -180,7 +188,8 @@ class DocumentStore(Protocol):
     async def get_episode(self, space: str, episode_id: int) -> Optional[Episode]: ...
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
         """Remove an episode and its chunks; return the chunk ids removed
-        so the vector index can follow."""
+        so the vector index can follow. Retry must remove remaining scoped
+        chunks even when the episode row is already gone."""
         ...
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]: ...

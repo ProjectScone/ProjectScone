@@ -13,3 +13,31 @@ __all__ += ["ImageAttribute", "ImageContext", "ImageEntity", "ImageIngested", "I
 
 from .image_html import HtmlImageContext, image_contexts_from_html
 __all__ += ["HtmlImageContext", "image_contexts_from_html"]
+
+from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
+from .document_source import DocumentSource
+from .formats.registry import BuiltinDocumentParser, DocumentParser
+from .formats.types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument
+from .formats.table_types import DocumentTableCell, DocumentTableHeader, DocumentTableContext
+
+__all__ += ['DocumentIngested', 'DocumentProvenance', 'DocumentSource', 'document_provenance', 'ingest_document',
+            'BuiltinDocumentParser', 'DocumentParser', 'DocumentLimits', 'DocumentSegment', 'DocumentTextRegion', 'ParsedDocument',
+            'DocumentIngestionWorkflow', 'PdfOcrWorkflow', 'PdfOcrIngested', 'DocumentTableCell', 'DocumentTableHeader', 'DocumentTableContext']
+
+__all__ += ['DirectorySync', 'DirectorySyncResult', 'SourceReceipt', 'ScanLimits']
+
+
+def __getattr__(name: str) -> object:
+    if name in {'DirectorySync', 'DirectorySyncResult', 'SourceReceipt'}:
+        from .directory_sync import DirectorySync, DirectorySyncResult, SourceReceipt
+        return {'DirectorySync': DirectorySync, 'DirectorySyncResult': DirectorySyncResult, 'SourceReceipt': SourceReceipt}[name]
+    if name == 'ScanLimits':
+        from .source_scan import ScanLimits
+        return ScanLimits
+    if name == 'DocumentIngestionWorkflow':
+        from .file_workflow import DocumentIngestionWorkflow
+        return DocumentIngestionWorkflow
+    if name in {'PdfOcrWorkflow', 'PdfOcrIngested'}:
+        from .pdf_ocr_workflow import PdfOcrIngested, PdfOcrWorkflow
+        return PdfOcrWorkflow if name == 'PdfOcrWorkflow' else PdfOcrIngested
+    raise AttributeError(name)

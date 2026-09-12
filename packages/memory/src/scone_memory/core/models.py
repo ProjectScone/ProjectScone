@@ -275,6 +275,20 @@ class ForgetReceipt(BaseModel):
     forgotten_at: Optional[str] = None
 
 
+class ForgetStatus(BaseModel):
+    """Observed cleanup state. A completed tombstone has no full receipt.
+
+    A pending intent takes precedence even if a tombstone already exists.
+    Reading this result never starts or resumes removal.
+    """
+
+    episode_id: int
+    state: Literal["present", "pending", "forgotten"]
+    requested_at: Optional[str] = None
+    forgotten_at: Optional[str] = None
+    impact: Optional[ForgetReceipt] = None
+
+
 class DoctorReport(BaseModel):
     """What references what across a space's stores, read only. A list is
     the ids found dangling; None means that store could not be walked and
