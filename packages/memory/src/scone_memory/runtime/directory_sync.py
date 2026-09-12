@@ -18,6 +18,7 @@ from ..core.validation import check_space
 from ..core.errors import InvalidInput
 from ..ingestion.directory_service import DirectoryCollection, DirectorySyncService
 from ..ingestion.directory_sync import DirectorySync
+from ..ingestion.document_video import DocumentVideo, VIDEO_DOCUMENT_EXTENSIONS
 from ..ingestion.document_media import DocumentMedia, MEDIA_DOCUMENT_EXTENSIONS
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection
 from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
@@ -39,6 +40,7 @@ class CollectionConfig(BaseModel):
     scan_limits: ScanLimits = Field(default_factory=ScanLimits)
     extensions: frozenset[str] | None = Field(default=None, min_length=1, max_length=256)
     pdf_ocr: PdfOcrSelection | None = None
+    video_ocr: bool = False
 
     @field_validator('space')
     @classmethod
@@ -102,10 +104,15 @@ def _resolve(value: str, parent: Path) -> Path:
 
 
 def _parser(config: CollectionConfig, document_ocr: DocumentOcr | None,
-            ocr_identity: str, document_media: DocumentMedia | None) -> ImportParserBinding:
+            ocr_identity: str, document_media: DocumentMedia | None,
+            document_video: DocumentVideo | None = None) -> ImportParserBinding:
     selected: dict[str, DocumentParser] = {}
     if document_media is not None:
         selected.update({suffix: document_media for suffix in MEDIA_DOCUMENT_EXTENSIONS})
+    if config.video_ocr:
+        if document_video is None:
+            raise ValueError('collection video OCR requires configured host video OCR')
+        selected.update({suffix: document_video.parser for suffix in VIDEO_DOCUMENT_EXTENSIONS})
     if config.pdf_ocr is not None:
         if document_ocr is None:
             raise ValueError('collection PDF OCR requires configured host OCR')
@@ -123,12 +130,15 @@ def _parser(config: CollectionConfig, document_ocr: DocumentOcr | None,
         'ocr_dpi': document_ocr.dpi if config.pdf_ocr and document_ocr else None,
         'media_revision': document_media.revision if document_media else None,
     }
+    if config.video_ocr and document_video is not None:
+        fingerprint['video_revision'] = document_video.revision
     revision = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return ImportParserBinding(revision, BuiltinDocumentParser(parsers=selected))
 
 
 def load_directory_sync(path: str, memory: MemoryEngine, *, document_ocr: DocumentOcr | None = None,
-                        ocr_identity: str = '', document_media: DocumentMedia | None = None) -> DirectorySyncService:
+                        ocr_identity: str = '', document_media: DocumentMedia | None = None,
+                        document_video: DocumentVideo | None = None) -> DirectorySyncService:
     """Load collections without scans, parser calls, model downloads or admission.
 
     The operator revision must change with OCR binaries/trained data or custom
@@ -151,6 +161,8 @@ def load_directory_sync(path: str, memory: MemoryEngine, *, document_ocr: Docume
             extensions = collection.extensions
             if extensions is None:
                 extensions = default_extensions() | (MEDIA_DOCUMENT_EXTENSIONS if document_media else frozenset())
+                if collection.video_ocr:
+                    extensions |= VIDEO_DOCUMENT_EXTENSIONS
             scanner = DirectoryScanner(_resolve(collection.root, config_path.parent),
                                        limits=collection.scan_limits, extensions=extensions)
             info = scanner.root.stat()
@@ -162,7 +174,7 @@ def load_directory_sync(path: str, memory: MemoryEngine, *, document_ocr: Docume
                 raise ValueError('directory sync state must be outside every source root')
             identities.add(identity)
             roots.add(root)
-            prepared.append((collection, scanner, _parser(collection, document_ocr, ocr_identity, document_media)))
+            prepared.append((collection, scanner, _parser(collection, document_ocr, ocr_identity, document_media, document_video)))
         target.mkdir(mode=0o700, exist_ok=True)
         info = target.stat(follow_symlinks=False)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:

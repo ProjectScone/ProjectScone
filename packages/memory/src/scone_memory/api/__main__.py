@@ -10,6 +10,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..runtime.agent_runtime import AgentRuntime
+    from ..ingestion.document_video import DocumentVideo
     from ..ingestion.document_media import DocumentMedia
     from ..ingestion.document_ocr import DocumentOcr
     from ..ingestion.import_service import DocumentImportService
@@ -23,7 +24,7 @@ from ..agents.workflow import WorkflowError
 from .app import create_app
 
 
-def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None):
+def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
     from ..runtime.agent_runtime import load_agent_runtime
     from ..runtime.document_jobs import load_document_imports
     from ..runtime.directory_sync import load_directory_sync
@@ -36,16 +37,19 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
         if document_media is None and settings.document_media_config:
             from ..runtime.document_media import load_document_media
             document_media = load_document_media(settings.document_media_config)
+        if document_video is None and settings.document_video_config:
+            from ..runtime.document_video import load_document_video
+            document_video = load_document_video(settings.document_video_config)
         ocr = build_document_ocr(settings)
         if settings.document_jobs_config:
-            imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media,
+            imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media, document_video=document_video,
                 ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
         if settings.directory_sync_config:
             directory_sync = load_directory_sync(settings.directory_sync_config, engine,
-                document_ocr=ocr, document_media=document_media,
+                document_ocr=ocr, document_media=document_media, document_video=document_video,
                 ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
         app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports,
-                         document_media=document_media, directory_sync_service=directory_sync)
+                         document_media=document_media, document_video=document_video, directory_sync_service=directory_sync)
         return agents.own(app) if agents is not None else app
     except BaseException:
         try:
@@ -65,7 +69,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                document_ocr: DocumentOcr | None = None,
                document_import_service: DocumentImportService | None = None,
                directory_sync_service: DirectorySyncService | None = None,
-               document_media: DocumentMedia | None = None):
+               document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
     """The app ``serve`` runs: the memory API alone, or the conversation
     service composed over it on the same origin when the settings name a
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
@@ -104,7 +108,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
 
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
-                          document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media,
+                          document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                           directory_sync_service=directory_sync_service,
                           agent_catalog=agents.catalog if agents else None,
                           agent_plan_store=agents.plans if agents else None,
@@ -155,7 +159,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
-                                   document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media,
+                                   document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                                    directory_sync_service=directory_sync_service,
                                    agent_catalog=agents.catalog if agents else None,
                                    agent_plan_store=agents.plans if agents else None,
