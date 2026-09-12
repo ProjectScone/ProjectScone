@@ -828,7 +828,10 @@ def create_app(
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
-                                          description="Byte budget per enabled expansion stage."),
+                                          description="Byte budget per enabled expansion stage, "
+                                                      "code context included. `window` is not "
+                                                      "bounded by it: its own size in bytes is "
+                                                      "the budget the caller already set."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
         space: str = Depends(space_for),
@@ -896,20 +899,6 @@ def create_app(
                 "history": list(kept.facts[len(result.facts):]),
                 # The bytes handed back changed, so the count must too.
                 "returned_bytes": sum(len(i.text.encode()) for i in kept.items)})
-        inside = None
-        if code_context:
-            from ..retrieval.code_context import code_context as read_code_context
-
-            # **Last**, after every stage that re-reads a source. It
-            # quotes the file itself, so a stage running after it could
-            # find that source deleted and leave the answer correctly
-            # empty while the quoted signature still printed.
-            inside = await read_code_context(engine, space, result.items)
-            # A source this stage finds gone leaves the answer too, not
-            # only the context.
-            result = result.model_copy(update={
-                "items": list(inside.items),
-                "returned_bytes": sum(len(one.text.encode()) for one in inside.items)})
         response: dict[str, object] = {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
@@ -935,8 +924,6 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
-        if inside is not None:
-            response["code_context"] = staged(inside.record())
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if graph_boost:
@@ -993,6 +980,31 @@ def create_app(
                     response["multi_hop"] = expanded.model_dump(mode="json")
                 except Exception as error:
                     response["multi_hop"] = {"status": "unavailable", "error": type(error).__name__}
+        if code_context:
+            from ..retrieval.code_context import code_context as read_code_context
+
+            # **Last**, and last means after the expansions below the
+            # response dictionary too -- not merely last in the order the
+            # stages were written. Code context quotes the file itself, a
+            # second copy of the source that no amount of tidying
+            # receipts removes, so any stage running after it can find
+            # that source deleted while the quoted signature still
+            # prints. Putting this beside the dictionary and calling it
+            # last is exactly the mistake: the evidence graph, structural
+            # context and multi-hop are all awaited after that point.
+            # The same budget the other expansions are given. Its own
+            # description calls it the budget per enabled expansion
+            # stage, and this stage quoted 2,208 bytes against a request
+            # for 512 while reporting `beyond_budget: 0` -- a bound that
+            # read as a fact inside the receipt meant to disclose it.
+            inside = await read_code_context(engine, space, result.items,
+                                             max_bytes=expansion_max_bytes)
+            # A source this stage finds gone leaves the answer too, not
+            # only the context -- so the response is rewritten, not just
+            # appended to.
+            response["items"] = [item_json(one) for one in inside.items]
+            response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
+            response["code_context"] = staged(inside.record())
         return response
 
     @app.get("/v1/facts")
