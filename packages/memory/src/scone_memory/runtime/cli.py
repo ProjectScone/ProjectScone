@@ -310,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--until", help="RFC 3339 moment to compare to (default: now)")
     g.add_argument("--limit", type=int, default=50, help="changes to list (1 to 500)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("affected", help="what rests on this symbol, module or file, nearest "
+                                          "first: what a change to it reaches")
+    g.add_argument("name", help="the symbol, module or file to start from")
+    g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
+    g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
+    g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
@@ -1142,6 +1148,22 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
               else found_pairs.text, file=out)
         return 0
+    if command == "affected":
+        from ..entities.affected import affected
+
+        blast = await affected(engine, space, args.name, max_hops=args.max_hops,
+                               limit=args.limit, max_bytes=args.max_bytes)
+        if args.json:
+            print(json.dumps(blast.record()), file=out)
+            return 0 if blast.status in ("found", "nothing") else 1
+        print(blast.why, file=out)
+        for one in blast.reached:
+            print(f"  {one.depth}  {one.label}  ({one.through} {one.depends_on})", file=out)
+        if blast.by_depth:
+            shape = ", ".join(f"{count} at {depth} hop(s)"
+                              for depth, count in sorted(blast.by_depth.items()))
+            print(f"reached: {shape}", file=out)
+        return 0 if blast.status in ("found", "nothing") else 1
     if command == "changes":
         from ..entities.changes import ChangesError, graph_changes
 

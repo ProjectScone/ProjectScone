@@ -183,6 +183,26 @@ def _prose(text: str) -> bool:
     return False
 
 
+def _code_shaped(text: str) -> bool:
+    """Whether a code predicate's object looks like a code symbol.
+
+    Not "one token", which was the first rule and was wrong: a source
+    path may legally contain a space, so `my module.py:leaf` is an
+    ordinary qualified symbol and was refused. And not "anything a code
+    predicate points at", which would make `defines` turn every
+    description into an entity.
+
+    So: one token, or **qualified** by a separator a sentence does not
+    use in the middle of itself -- a path or a declaration inside one.
+    "a quorum of three members" has neither and stays a literal.
+    """
+    if not text:
+        return False
+    if len(text.split()) == 1:
+        return True
+    return ":" in text or "/" in text
+
+
 def _uncased_name(text: str) -> bool:
     letters = [character for character in text if character.isalpha()]
     return (bool(letters) and len(text) <= 12 and len(text.split()) <= 3
@@ -233,12 +253,10 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification(decided[0], None if decided[0] == "entity" else "value", "decision", str(decided[1]))
     if key in context.identity_keys:
         return ObjectClassification("entity", None, "identity_decision")
-    if predicate_key.replace(" ", "_") in CODE_PREDICATES and len(stripped.split()) == 1:
+    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
         # Before the shape tests, not after: a module called `2024` or a
         # path holding a version would otherwise be read as a date or a
-        # measurement. One token, because a code symbol is one token and
-        # "a quorum of three members" is not a symbol whatever the
-        # predicate says.
+        # measurement.
         return ObjectClassification("entity", None, "code_symbol")
     if _quoted(stripped):
         return ObjectClassification("literal", "text", "quoted_text")
