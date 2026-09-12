@@ -89,7 +89,11 @@ class ReembedReport:
 
 
 def writer_of(engine: "MemoryEngine") -> str:
-    return f"{engine.embedder.id};contextual={int(engine.contextual_embeddings)}"
+    writer = f"{engine.embedder.id};contextual={int(engine.contextual_embeddings)}"
+    if engine.table_context_embeddings:
+        from ..ingestion.table_context import TABLE_CONTEXT_VERSION
+        writer += ';tables=' + TABLE_CONTEXT_VERSION
+    return writer
 
 
 def recording(vectors: object) -> RecordsVectorWriter | None:
@@ -202,6 +206,8 @@ async def rebuild(engine: "MemoryEngine") -> ReembedReport:
     if not callable(page_episodes):
         raise InvalidInput(f"the {engine.documents.name} document store cannot list episodes, "
                            "so its chunks cannot be re-embedded")
+    from ..ingestion.batch import embedding_inputs
+    runtime = engine._ingestion_runtime()
     writer = writer_of(engine)
     marker = rebuilding_token(writer, uuid4().hex)
     while not await index.swap_writer(await index.written_by(), marker):
@@ -218,9 +224,11 @@ async def rebuild(engine: "MemoryEngine") -> ReembedReport:
                                  content_hash=episode.content_hash, created_at=episode.created_at,
                                  ingested_at=episode.ingested_at, source=episode.source,
                                  tags=episode.tags, metadata=episode.metadata)
+                inputs = await embedding_inputs(runtime, new, [(c.start, c.end) for c in stored],
+                                                [c.text for c in stored])
                 for start in range(0, len(stored), _EMBED_BATCH):
                     batch = stored[start:start + _EMBED_BATCH]
-                    embedded = await engine.embedder.embed([engine._embed_text(new, chunk.text) for chunk in batch])
+                    embedded = await engine.embedder.embed(inputs[start:start + _EMBED_BATCH])
                     if len(embedded) != len(batch):
                         # zip would pair the survivors with the wrong chunks.
                         raise ValueError(f"embedder returned {len(embedded)} vectors for {len(batch)} texts")

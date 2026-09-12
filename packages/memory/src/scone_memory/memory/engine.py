@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
 from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
@@ -169,7 +170,11 @@ class MemoryEngine:
         relation_meanings: "RelationMeanings | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
+        table_context_embeddings: bool = False,
     ) -> None:
+        if type(table_context_embeddings) is not bool:
+            raise InvalidInput('table_context_embeddings must be a boolean')
+        self._table_context_embeddings = table_context_embeddings
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -533,10 +538,20 @@ class MemoryEngine:
         })
         return resolved
 
+    @property
+    def table_context_embeddings(self) -> bool:
+        """Source-table context policy; select it when constructing the engine."""
+        return self._table_context_embeddings
+
     def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
+        context_inputs = None
+        if self.table_context_embeddings:
+            from ..ingestion.table_context import embedding_inputs
+            context_inputs = partial(embedding_inputs, blobs=self.blobs)
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            context_inputs=context_inputs,
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record], *,

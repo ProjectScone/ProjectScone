@@ -133,3 +133,20 @@ async def test_many_valued_predicates_are_configured_by_name_and_reach_every_eng
     assert Settings.from_env({}).many_valued == () and (await build_engine(Settings.from_env({}))).many_valued == frozenset()
     assert "many_valued" in ENGINE_SETTINGS
     assert (await build_in_process_engine(settings, HashEmbedder())).many_valued == frozenset({"knows", "owns"})
+
+
+async def test_table_context_embedding_policy_reaches_standard_and_in_process_engines():
+    from scone_memory.runtime.config import build_in_process_engine
+    settings = Settings.from_env({'SCONE_TABLE_CONTEXT_EMBEDDINGS': '1'})
+    assert settings.table_context_embeddings is True
+    assert Settings.from_env({}).table_context_embeddings is False
+    engine = await build_engine(settings)
+    try:
+        assert engine.table_context_embeddings is True
+    finally:
+        await engine.close()
+    local = await build_in_process_engine(settings, HashEmbedder())
+    try:
+        assert local.table_context_embeddings is True
+    finally:
+        await local.close()
