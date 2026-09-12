@@ -257,3 +257,85 @@ def test_a_numbered_line_inside_a_fenced_block_is_not_a_clause():
     holding = [c for c in text_of(content, structured_spans(content).spans)
                if "first run the migration" in c]
     assert len(holding) == 1 and "then restart the workers" in holding[0], holding
+
+
+def test_prose_after_a_table_is_not_dropped():
+    """A table's unit ended at the table, and the next unit began at the
+    next heading, so everything between them belonged to no chunk at all
+    and was silently unretrievable.
+
+    The invariant test above should have caught this and did not: it
+    asserted that the gaps between spans are whitespace, but its fixture
+    never put prose between a table and the next heading. A corpus that
+    does not produce the awkward shape proves nothing about it, so this
+    fixture is the shape, built by hand.
+    """
+    content = ("# Inventory\n\n| Item | Count |\n| --- | --- |\n| A | 3 |\n\n"
+               "The warehouse closes Friday.\n\n# Notes\n\nKeep this note.\n")
+    found = structured_spans(content, 50)
+    covered = "".join(content[s.start:s.end] for s in found.spans)
+    assert "The warehouse closes Friday." in covered, found.record()
+    assert "Keep this note." in covered, found.record()
+    assert "| A | 3 |" in covered, found.record()
+
+
+def test_every_non_whitespace_byte_of_a_mixed_document_is_in_some_chunk():
+    """The invariant, on a document that actually has every awkward
+    junction in it: prose before the first unit, a table between two
+    headings, prose after a table, a clause, a pair, and a trailing
+    paragraph with no heading of its own."""
+    content = (
+        "Opening remarks with no heading at all.\n\n"
+        "# Inventory\n\n"
+        "| Item | Count |\n| --- | --- |\n| A | 3 |\n| B | 4 |\n\n"
+        "The warehouse closes Friday.\n\n"
+        "## Detail\n\n2.1 The clause\n\n" + PROSE + "\n\n"
+        "Q: And a question?\n\nA: An answer.\n\n"
+        "| Second | Table |\n| --- | --- |\n| x | y |\n\n"
+        "Closing prose after the last table.\n")
+    for target in (50, 200, DEFAULT_TARGET):
+        found = structured_spans(content, target)
+        end = 0
+        for span in found.spans:
+            assert span.start >= end, (target, span, end)
+            assert content[end:span.start].strip() == "", (target, repr(content[end:span.start]))
+            end = span.end
+        assert content[end:].strip() == "", (target, repr(content[end:]))
+
+
+async def test_what_the_engine_actually_stored_covers_the_document():
+    """Spans covering the text is not the same claim as the stored chunks
+    covering it: the spans are code points, the store keeps UTF-8 byte
+    offsets, and retaining the original episode does not make omitted
+    prose retrievable. So this asserts on what came back out of the
+    store, in bytes, including a multi-byte character to make the two
+    coordinate systems disagree if the conversion is wrong.
+    """
+    from scone_memory import (HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex,
+                              MemoryEngine)
+
+    content = (
+        "Opening remarks with no heading, about a café.\n\n"
+        "# Inventory\n\n| Item | Count |\n| --- | --- |\n| A | 3 |\n\n"
+        "The warehouse closes Friday, the naïve assumption being that nobody minds.\n\n"
+        "## Detail\n\n2.1 The clause\n\n" + PROSE + "\n\n"
+        "| Second | Table |\n| --- | --- |\n| x | y |\n\n"
+        "Closing prose after the last table.\n")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=120, structure_aware=True).open()
+    try:
+        added = await engine.remember("default", content, source="mixed.md")
+        stored = await engine.documents.chunks_of("default", added.episode_id)
+        raw = content.encode()
+        for chunk in stored:
+            assert raw[chunk.start:chunk.end] == chunk.text.encode(), (chunk.start, chunk.end)
+        end = 0
+        for chunk in sorted(stored, key=lambda c: c.start):
+            assert chunk.start >= end, (chunk.start, end)
+            assert raw[end:chunk.start].decode().strip() == "", repr(raw[end:chunk.start])
+            end = chunk.end
+        assert raw[end:].decode().strip() == "", repr(raw[end:])
+    finally:
+        await engine.close()
+    for phrase in ("café", "| A | 3 |", "naïve assumption", "The clause", "Closing prose"):
+        assert any(phrase in chunk.text for chunk in stored), phrase

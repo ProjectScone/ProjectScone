@@ -91,7 +91,9 @@ class Unit:
     end: int
     kind: str
     #: The marker or heading line, verbatim -- never normalised, so it can
-    #: be checked against the source.
+    #: be checked against the source. Empty for kind ``text``, which is
+    #: not something the document labelled: it is the interval between a
+    #: table's last row and whatever follows, which belongs to neither.
     label: str
 
 
@@ -209,15 +211,29 @@ def units(content: str, limit: int = MAX_SECTIONS) -> tuple[Unit, ...]:
         byte += len(line.encode())
 
     ends = {start: tables[start] for start, _, _ in found if start in tables}
-    wanted = {start for start, _, _ in found} | set(ends.values()) | {len(content.encode())}
+    wanted = ({start for start, _, _ in found} | set(ends.values())
+              | {len(content.encode())})
     at = _points(content, wanted)
     starts = [start for start, _, _ in found]
     out: list[Unit] = []
     for position, (start, kind, label) in enumerate(found):
         after = starts[position + 1] if position + 1 < len(starts) else len(content.encode())
-        end = min(ends.get(start, after), after) if start in ends else after
-        out.append(Unit(at[start], at[end] if end in at else len(content), kind, label))
+        end = min(ends[start], after) if start in ends else after
+        out.append(Unit(at[start], _point(at, end, content), kind, label))
+        if end < after:
+            # A table ends where its rows end, not where the next unit
+            # begins, so the prose between the two belongs to neither.
+            # Until this it belonged to no chunk at all and was silently
+            # unretrievable -- the only unit boundary that does not
+            # abut the next one.
+            between = Unit(_point(at, end, content), _point(at, after, content), "text", "")
+            if content[between.start:between.end].strip():
+                out.append(between)
     return tuple(out)
+
+
+def _point(at: dict[int, int], byte: int, content: str) -> int:
+    return at[byte] if byte in at else len(content)
 
 
 def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
@@ -294,8 +310,9 @@ def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
         # is whitespace.
         spans[-1] = Span(spans[-1].start, len(content))
 
-    why = (f"{at_boundary} chunk(s) begin at one of {len(read)} structural boundary(ies)"
-           if at_boundary else f"{len(read)} structural boundary(ies) found, none usable as a "
+    labelled = sum(1 for unit in read if unit.kind != "text")
+    why = (f"{at_boundary} chunk(s) begin at one of {labelled} structural boundary(ies)"
+           if at_boundary else f"{labelled} structural boundary(ies) found, none usable as a "
                                f"chunk start")
     if by_size:
         why += (f"; {by_size} begin where the byte target fell, inside a unit longer than "
@@ -308,6 +325,6 @@ def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
     if capped:
         why += (f"; the document holds more than {units_max} structural units and this read "
                 f"{units_max} of them, not all of them -- the rest was split by size")
-    return Structured(spans=tuple(spans), units=len(read), at_boundary=at_boundary,
+    return Structured(spans=tuple(spans), units=labelled, at_boundary=at_boundary,
                       by_size=by_size, tables=kept_tables, over_target=over, capped=capped,
                       why=why)
