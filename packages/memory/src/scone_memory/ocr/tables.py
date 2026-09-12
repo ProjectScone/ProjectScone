@@ -97,7 +97,8 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
     """Propose aligned grids, retaining every region as assigned or unassigned.
 
     Three consecutive separated rows and persistent vertical gutters are needed.
-    Pages with more than 5,000 regions or 2 MB of text are explicitly refused.
+    Pages with more than 5,000 regions or 2 MB of text (including inserted cell
+    separators), 64 tables, or 1,000 rows in a table are explicitly refused.
     Multi-line/merged cells, rotations beyond displayed rectangles and semantic
     header recognition are outside this geometric strategy.
     """
@@ -123,10 +124,14 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
     assigned: set[int] = set()
 
     def emit() -> None:
+        nonlocal text_bytes
         if len(group) < 3:
             return
         if len(group) > 1000 or len(tables) >= 64:
             raise InvalidInput('OCR table analysis exceeds its table or row limit')
+        text_bytes += sum(len(indices) - 1 for band in group for indices in band.cells)
+        if text_bytes > 2_000_000:
+            raise InvalidInput('OCR table analysis exceeds its text limit')
         cells = tuple(TableCell(row=row, column=column,
             text=' '.join(regions[i].text for i in indices), box=_box(regions, indices), regions=indices)
             for row, band in enumerate(group) for column, indices in enumerate(band.cells))
