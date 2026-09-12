@@ -16,7 +16,9 @@ import tempfile
 from time import monotonic
 import zlib
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
+
+from .video_evidence import VideoFramePolicy as VideoFramePolicy
 
 from ..core.errors import InvalidInput
 from ..ocr.process import python_worker, run_bounded
@@ -28,16 +30,6 @@ _DEMUXERS = 'mov,matroska,webm,avi,mpeg,mpegts'
 _MAX_INVENTORY_BYTES = 16_000_000
 _MAX_DECODED_FRAMES = 100_000
 _PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
-
-
-class VideoFramePolicy(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    interval_seconds: int = Field(default=5, ge=1, le=120)
-    max_frames: int = Field(default=64, ge=1, le=256)
-    max_duration_seconds: int = Field(default=600, ge=1, le=600)
-    max_pixels: int = Field(default=20_000_000, ge=1, le=20_000_000)
-    max_frame_bytes: int = Field(default=10_000_000, ge=1, le=10_000_000)
-    max_total_bytes: int = Field(default=32_000_000, ge=1, le=64_000_000)
 
 
 @dataclass(frozen=True)
