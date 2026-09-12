@@ -536,9 +536,21 @@ route that would hold over a stretch the shortest does not is not
 searched for. `coverage.meanings` names the vocabulary and all three
 bounds, and `coverage.implied_capped` says when a walk stopped early.
 
+A structured question can be asked over it too. `graph match --follows`
+(HTTP `follows=true`, tool parameter `follows`) matches what follows as
+well as what was claimed, so `?who employs ?whom` answers from "Alice
+works at Acme". It is off by default, because a question about the graph
+is a question about what was said unless it says otherwise; a row that
+used one says which meaning it followed, and cites the claims underneath,
+which are re-read like any others. A chain needs **every** link: if one
+claim under it stops counting between the match and the answer, the row
+goes rather than standing on the link that survived, and a chain is
+joined to other patterns only over the time its own legs shared.
+
 Where to see it: `implied` in the knowledge view, `follows` on an
-entity's page, and `follows:` lines in the packet `graph context` writes
-for a model, each naming what it followed from. `scone graph meanings`
+entity's page, `follows:` lines in the packet `graph context` writes
+for a model, and `follows` on a matched row, each naming what it
+followed from. `scone graph meanings`
 prints the vocabulary this process is running with, and the bounds it
 keeps; it says "as this process is configured", because a vocabulary is
 an engine option and two processes reading one store can disagree about

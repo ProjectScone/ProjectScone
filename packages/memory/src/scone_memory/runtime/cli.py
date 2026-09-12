@@ -244,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--status", default="current", choices=["current", "history", "proposed", "all"])
     g.add_argument("--as-of")
     g.add_argument("--apart", action="store_true", help="join facts across time, not only those that held at one moment")
+    g.add_argument("--follows", action="store_true",
+                   help="also match what follows from the claims under the space's vocabulary, marked in each row")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
     g = graph.add_parser("overview", help="each community digested with cited facts, for a question about the whole")
     g.add_argument("--question")
@@ -730,12 +732,12 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
             when = as_of or engine.clock()
             matched = await graph_match(engine, space, patterns, returns=args.returns, limit=args.limit,
                                         status=args.status, as_of=when, together=not args.apart,
-                                        max_bytes=args.max_bytes)
+                                        follows=args.follows, max_bytes=args.max_bytes)
         except MatchQueryError as refused:
             raise InvalidInput(str(refused)) from None
         if getattr(args, "json", False):
             print(_ledger_json(matched.record(space, status=args.status, as_of=when, together=not args.apart,
-                                              limit=args.limit)), file=out)
+                                              limit=args.limit, follows=args.follows)), file=out)
         else:
             print(matched.text, file=out)
         return 0 if matched.status == "matched" else 1

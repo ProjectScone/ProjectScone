@@ -246,8 +246,8 @@ async def test_a_value_carried_between_patterns_is_found_without_scanning_its_ki
             scanned.append(len(self))
             return super().__iter__()
 
-    def counted(self, projection):
-        real(self, projection)
+    def counted(self, projection, follows=False):
+        real(self, projection, follows)
         self.by_value = {key: Counted(edges) for key, edges in self.by_value.items()}
 
     monkeypatch.setattr(match_module._Graph, "__init__", counted)
@@ -444,9 +444,9 @@ async def test_an_unchanged_graph_is_indexed_once(monkeypatch):
     built = []
     real = match_module._Graph.__init__
 
-    def counted(self, projection):
+    def counted(self, projection, follows=False):
         built.append(projection.digest)
-        real(self, projection)
+        real(self, projection, follows)
 
     monkeypatch.setattr(match_module._Graph, "__init__", counted)
     monkeypatch.setattr(match_module, "_GRAPHS", type(match_module._GRAPHS)())
@@ -457,3 +457,137 @@ async def test_an_unchanged_graph_is_indexed_once(monkeypatch):
     await engine.assert_fact("alpha", "zed", "works_at", "Acme Robotics", valid_from=DAY)
     await graph_match(engine, "alpha", where("?who | works_at | ?org"))
     assert len(built) == 2, "a changed graph is indexed again"
+
+
+async def meant(**options) -> MemoryEngine:
+    """A space that says what two of its predicates mean."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z"),
+                                relation_meanings=RelationMeanings(inverse={"works_at": "employs"},
+                                                                   transitive=["part_of"]),
+                                **options).open()
+    note = await engine.remember("alpha", "Dr. Alice Chen joined Acme Robotics.")
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", source_episode_id=note.episode_id,
+                             quote="Dr. Alice Chen joined Acme Robotics", valid_from=DAY)
+    return engine
+
+
+async def test_a_pattern_matches_only_claims_unless_what_follows_is_asked_for():
+    """Nobody wrote that Acme employs anyone. Asking for employers finds
+    nothing until the question says it will take what follows."""
+    engine = await meant()
+    said = await graph_match(engine, "alpha", where("?who | employs | ?whom"))
+    assert said.status == "not_found", said.text
+    assert 'not found: predicate "employs"' in said.text, "no claim uses that word"
+    followed = await graph_match(engine, "alpha", where("?who | employs | ?whom"), follows=True)
+    assert followed.status == "matched", followed.text
+    assert keys(followed, "?who") == ["acme robotics"] and keys(followed, "?whom") == ["alice chen"]
+
+
+async def test_a_row_that_rests_on_what_follows_says_so():
+    engine = await meant()
+    followed = await graph_match(engine, "alpha", where("?who | employs | ?whom"), follows=True)
+    [row] = followed.rows
+    assert row["follows"] == ["inverse"], row
+    assert row["fact_ids"] == [1], "it rests on the claim it follows from"
+    assert "follows: inverse" in followed.text, followed.text
+
+
+async def test_a_row_of_claims_says_nothing_about_what_follows():
+    engine = await meant()
+    said = await graph_match(engine, "alpha", where("?who | works_at | ?where"), follows=True)
+    [row] = said.rows
+    assert row.get("follows") in (None, []), row
+
+
+async def test_a_chain_is_matched_only_where_its_legs_held_together():
+    """Two claims that never held at once imply nothing, so a pattern over
+    what follows must not match them either."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                               clock=Clock("2025-06-01T00:00:00.000Z"),
+                               relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    first = await engine.assert_fact("alpha", "Shelf A", "part_of", "Aisle 3", valid_from="2020-01-01T00:00:00Z")
+    await engine.close_fact("alpha", first.fact_id, "moved")
+    await engine.assert_fact("alpha", "Aisle 3", "part_of", "Warehouse 7", valid_from="2026-01-01T00:00:00Z")
+    found = await graph_match(engine, "alpha", where("Shelf A | part_of | Warehouse 7"),
+                              follows=True, status="all")
+    assert found.status == "none", found.text
+
+
+async def test_a_row_through_a_chain_goes_when_a_leg_stops_counting():
+    """A chain needs every leg. Excluding one claim must take the row with
+    it, not leave it standing on the leg that survived."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                               clock=Clock("2025-06-01T00:00:00.000Z"),
+                               relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    await engine.assert_fact("alpha", "Shelf A", "part_of", "Aisle 3", valid_from=DAY)
+    middle = await engine.assert_fact("alpha", "Aisle 3", "part_of", "Warehouse 7", valid_from=DAY)
+    # The warehouse is spoken of by another claim, so it stays in the graph
+    # when the middle claim goes: what must go is the chain through it.
+    await engine.assert_fact("alpha", "Warehouse 7", "based_in", "Lisbon", valid_from=DAY)
+    before = await graph_match(engine, "alpha", where("Shelf A | part_of | Warehouse 7"), follows=True)
+    assert before.status == "matched", before.text
+    await engine.exclude("alpha", middle.fact_id, "the aisle was renumbered")
+    after = await graph_match(engine, "alpha", where("Shelf A | part_of | Warehouse 7"), follows=True)
+    assert after.status == "none", after.text
+
+
+async def test_a_chain_goes_when_a_leg_is_withdrawn_while_the_answer_is_read():
+    """The claims were there when the chain was worked out; one was taken
+    back before the row was shown. A chain needs every leg, so the row goes
+    rather than standing on the leg that survived."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    store = Changing()
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2025-06-01T00:00:00.000Z"),
+                                relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    await engine.assert_fact("alpha", "Shelf A", "part_of", "Aisle 3", valid_from=DAY)
+    middle = await engine.assert_fact("alpha", "Aisle 3", "part_of", "Warehouse 7", valid_from=DAY)
+    await engine.assert_fact("alpha", "Warehouse 7", "based_in", "Lisbon", valid_from=DAY)
+
+    async def withdraw(fact_id):
+        await engine.exclude("alpha", fact_id, "withdrawn")
+
+    store.targets, store.action = {middle.fact_id}, withdraw
+    found = await graph_match(engine, "alpha", where("Shelf A | part_of | Warehouse 7"), follows=True)
+    assert found.rows == () and "stale_evidence 1" in found.coverage["reasons"], found.text
+
+
+async def test_a_chain_is_joined_only_over_the_time_its_own_legs_shared():
+    """The aisle was part of the warehouse for one year, from 2021 to 2022,
+    and the shelf has been in that aisle since 2020, so the shelf was in
+    the warehouse for that one year and no longer. The warehouse moved to
+    Lisbon in 2023, after that year ended, so the join never held at one
+    moment — however open-ended one of the legs looks on its own."""
+    from scone_memory.entities.meanings import RelationMeanings
+
+    # The clock stamps the close, so it is set to the day the shelf moved.
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=Clock("2022-01-01T00:00:00.000Z"),
+                                relation_meanings=RelationMeanings(transitive=["part_of"])).open()
+    # The shelf never left the aisle; it is the aisle that left the
+    # warehouse, so the first claim in the chain is the open-ended one and
+    # only a real intersection gives the year the chain held.
+    await engine.assert_fact("alpha", "Shelf A", "part_of", "Aisle 3", valid_from="2020-01-01T00:00:00Z")
+    aisle = await engine.assert_fact("alpha", "Aisle 3", "part_of", "Warehouse 7",
+                                     valid_from="2021-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "Warehouse 7", "based_in", "Lisbon", valid_from="2023-01-01T00:00:00Z")
+    await engine.close_fact("alpha", aisle.fact_id, "the aisle was renumbered")
+
+    asked = where("Shelf A | part_of | ?where", "?where | based_in | Lisbon")
+    later = "2026-01-01T00:00:00Z"
+    together = await graph_match(engine, "alpha", asked, follows=True, status="history", as_of=later)
+    assert together.status == "none", together.text
+    # And it says why in the right words: the join never held at one
+    # moment, which is a different thing from evidence that has gone.
+    assert "joins across times that never met" in together.text, together.text
+    apart = await graph_match(engine, "alpha", asked, follows=True, status="history", as_of=later,
+                              together=False)
+    assert apart.status == "matched", "asked for joins across time, it is there"

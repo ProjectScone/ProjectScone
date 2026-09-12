@@ -444,3 +444,20 @@ async def test_graph_meanings_says_plainly_when_nothing_is_configured():
     code = await run(build_parser().parse_args(["graph", "meanings"]), memory, io.StringIO(""), out)
     assert code == 0 and "nothing is configured" in out.getvalue()
     assert "only what was said" in out.getvalue()
+
+
+async def test_graph_match_takes_what_follows_only_when_asked():
+    from scone_memory.entities.meanings import RelationMeanings
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(inverse={"works_at": "employs"})).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    args = ["graph", "match", "--pattern", "?who", "employs", "?whom"]
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(args), memory, io.StringIO(""), out)
+    assert code == 1 and "not found: predicate" in out.getvalue()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args([*args, "--follows"]), memory, io.StringIO(""), out)
+    said = out.getvalue()
+    assert code == 0, said
+    assert "Acme Robotics" in said and "follows: inverse" in said, said

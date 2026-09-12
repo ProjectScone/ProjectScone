@@ -792,7 +792,8 @@ def test_a_structured_question_is_answered_with_its_rows_and_facts(seeded):
     body = found.json()
     assert body["status"] == "matched" and body["variables"] == ["?who"]
     assert body["rows"][0]["bindings"]["?who"]["key"] == "alice chen" and works.fact_id in body["rows"][0]["fact_ids"]
-    assert body["filters"] == {"status": "current", "as_of": body["filters"]["as_of"], "together": True, "limit": 20}
+    assert body["filters"] == {"status": "current", "as_of": body["filters"]["as_of"], "together": True,
+                               "limit": 20, "follows": False}
     assert "row: ?who = " in body["text"] and body["coverage"]["reasons"] == []
     other = client.get("/v1/graph/match", params={"where": where}, headers=auth("key-b")).json()
     assert other["status"] == "not_found", "another space's graph answers nothing about this one"
@@ -1000,3 +1001,15 @@ def test_an_entity_page_says_the_vocabulary_and_when_the_walk_stopped(chained, m
     assert page["coverage"]["meanings"]["transitive"] == ["part_of"]
     assert page["coverage"]["implied_capped"] is True
     assert page["coverage"]["truncated"] is True and "implied_capped" in page["coverage"]["reasons"]
+
+
+def test_a_structured_question_can_ask_for_what_follows_over_http(meant):
+    """Off by default, on when asked, and the row says which meaning it
+    followed rather than reading as a claim."""
+    where = '[{"subject": "?who", "predicate": "employs", "object": "?whom"}]'
+    plain = meant.get("/v1/graph/match", params={"where": where}, headers=auth()).json()
+    assert plain["status"] == "not_found" and plain["filters"]["follows"] is False
+    found = meant.get("/v1/graph/match", params={"where": where, "follows": "true"}, headers=auth()).json()
+    assert found["status"] == "matched" and found["filters"]["follows"] is True
+    [row] = found["rows"]
+    assert row["follows"] == ["inverse"] and row["fact_ids"] == [1]

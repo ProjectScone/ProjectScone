@@ -100,10 +100,12 @@ class MatchResult:
     not_found: tuple[dict[str, str], ...] = ()
     coverage: dict[str, object] = field(default_factory=dict)
 
-    def record(self, space: str, *, status: str, as_of: str, together: bool, limit: int) -> dict[str, object]:
+    def record(self, space: str, *, status: str, as_of: str, together: bool, limit: int,
+               follows: bool = False) -> dict[str, object]:
         """The answer as JSON, as the HTTP route and the CLI give it."""
         return {"schema_version": 1, "space": space,
-                "filters": {"status": status, "as_of": as_of, "together": together, "limit": limit},
+                "filters": {"status": status, "as_of": as_of, "together": together, "limit": limit,
+                            "follows": follows},
                 "status": self.status, "variables": list(self.variables), "rows": list(self.rows),
                 "candidates": list(self.candidates), "not_found": list(self.not_found), "text": self.text,
                 "coverage": self.coverage}
@@ -152,7 +154,15 @@ def parse_query(patterns: object, returns: Sequence[str] | None, limit: int,
 
 @dataclass(frozen=True)
 class _Edge:
-    """A relation, or a value an entity has, with the facts behind it."""
+    """A relation, a value an entity has, or something that follows from
+    claims, with the facts behind it.
+
+    ``legs`` is one group of fact ids per claim the edge rests on: one for
+    anything stated, and one per link for something worked out from a
+    chain. An edge holds while each of its legs has a fact that still
+    counts, and it holds when all of its legs held at once — which for a
+    claim is exactly the old rule, and for a chain is the only honest
+    one."""
 
     subject_id: str
     predicate: str
@@ -160,6 +170,19 @@ class _Edge:
     value: str | None
     literal_kind: str | None
     fact_ids: tuple[int, ...]
+    #: What it follows from, when nobody claimed it: "inverse",
+    #: "symmetric" or "transitive". None for a claim.
+    follows: str | None = None
+    legs: tuple[tuple[int, ...], ...] = ()
+
+    def claims(self) -> tuple[tuple[int, ...], ...]:
+        """The groups of facts this edge needs, one per claim under it.
+
+        Its stretches are kept under its facts, which is enough to tell
+        every edge apart: a fact backs one claim, so two edges share a set
+        of facts only when they are the two sides of one claim, and those
+        hold over the same stretches anyway."""
+        return self.legs or (self.fact_ids,)
 
 
 #: What a variable is bound to: ("entity", id), ("value", text) or ("predicate", name).
@@ -202,11 +225,20 @@ def _overlap(left: list[_Stretch], right: list[_Stretch]) -> list[_Stretch]:
 class _Graph:
     """The projection indexed for matching."""
 
-    def __init__(self, projection: EntityProjection) -> None:
+    def __init__(self, projection: EntityProjection, follows: bool = False) -> None:
         self.entities = {entity.entity_id: entity for entity in projection.entities}
         edges = [_Edge(r.subject_id, r.predicate, r.object_id, None, None, r.fact_ids) for r in projection.relations]
         edges += [_Edge(a.entity_id, a.predicate, None, a.value, a.literal_kind, a.fact_ids)
                   for a in projection.attributes]
+        if follows:
+            # What nobody claimed, kept beside the claims and never merged
+            # into them: every edge remembers which it is, and a chain
+            # remembers each claim it rests on.
+            relations = {relation.relation_id: relation for relation in projection.relations}
+            edges += [_Edge(item.subject_id, item.predicate, item.object_id, None, None, item.fact_ids,
+                            item.follows,
+                            tuple(relations[rid].fact_ids for rid in item.follows_from if rid in relations))
+                      for item in projection.implied]
         self.edges = edges
         self.by_subject: dict[str, list[_Edge]] = defaultdict(list)
         self.by_object: dict[str, list[_Edge]] = defaultdict(list)
@@ -226,8 +258,15 @@ class _Graph:
         roles = {role.fact_id: role for role in projection.roles}
         self.stretches: dict[tuple[int, ...], list[_Stretch]] = {}
         for edge in edges:
-            if edge.fact_ids not in self.stretches:
-                self.stretches[edge.fact_ids] = _merged([_stretch(roles[f]) for f in edge.fact_ids if f in roles])
+            if edge.fact_ids in self.stretches:
+                continue
+            # A claim holds over the union of its facts; a chain holds only
+            # where every claim under it held at once.
+            spells = [_merged([_stretch(roles[f]) for f in leg if f in roles]) for leg in edge.claims()]
+            during = spells[0] if spells else []
+            for other in spells[1:]:
+                during = _overlap(during, other)
+            self.stretches[edge.fact_ids] = during
 
 
 def _stretch(role: FactRole) -> _Stretch:
@@ -261,14 +300,17 @@ class _Budget:
 #: Indexes kept by projection digest: one is the same for an unchanged
 #: graph, and building it is most of a warm match's work.
 _KEPT = 8
-_GRAPHS: "OrderedDict[str, _Graph]" = OrderedDict()
+_GRAPHS: "OrderedDict[tuple[str, bool], _Graph]" = OrderedDict()
 
 
-def _graph_of(projection: EntityProjection) -> _Graph:
-    if projection.digest in _GRAPHS:
-        _GRAPHS.move_to_end(projection.digest)
-        return _GRAPHS[projection.digest]
-    graph = _GRAPHS[projection.digest] = _Graph(projection)
+def _graph_of(projection: EntityProjection, follows: bool = False) -> _Graph:
+    # Kept under whether what follows is in it: the same projection indexed
+    # two ways is two indexes, not one that sometimes has more in it.
+    kept = (projection.digest, follows)
+    if kept in _GRAPHS:
+        _GRAPHS.move_to_end(kept)
+        return _GRAPHS[kept]
+    graph = _GRAPHS[kept] = _Graph(projection, follows)
     while len(_GRAPHS) > _KEPT:
         _GRAPHS.popitem(last=False)
     return graph
@@ -406,16 +448,24 @@ def _sort_key(graph: _Graph, bound: _Bound) -> tuple[str, str]:
 
 async def graph_match(engine: "MemoryEngine", space: str, patterns: object, *, returns: Sequence[str] | None = None,
                       limit: int = DEFAULT_ROWS, status: "StatusMode" = "current", as_of: str | None = None,
-                      together: bool = True, max_bytes: int = MAX_BYTES) -> MatchResult:
+                      together: bool = True, follows: bool = False,
+                      max_bytes: int = MAX_BYTES) -> MatchResult:
     """Every way the patterns hold together in the space's graph, as rows
-    over ``returns`` (every variable by default), at most ``limit``."""
+    over ``returns`` (every variable by default), at most ``limit``.
+
+    ``follows`` also matches what follows from the claims under the space's
+    vocabulary — that Acme employs Alice because Alice works at Acme. It is
+    off by default, because a question about the graph is a question about
+    what was said unless it says otherwise; a row that rests on something
+    worked out says which meaning it followed, and still cites the claims
+    underneath, which are re-read like any others."""
     parsed, variables = parse_query(patterns, returns, limit, max_bytes)
     when = as_of if as_of is not None else engine.clock()
     moment = parse_rfc3339(when)
     projection, read = await load_projection(engine, space, mode=status, as_of=when)
     complete, read_answer = read_record(read)
     reasons = _reasons(read)
-    graph = _graph_of(projection)
+    graph = _graph_of(projection, follows)
     constants = _constants(graph, projection, parsed)
     header = [f"match: space {one_line(space)}, {status} facts as of {when}, "
               f"projection {projection.digest[:12]} at revision {projection.revision}"]
@@ -500,7 +550,10 @@ async def graph_match(engine: "MemoryEngine", space: str, patterns: object, *, r
         cited: set[int] = set()
         held: list[_Stretch] = []
         for used in found:
-            kept = [[fact_id for fact_id in edge.fact_ids if evidence.holds(fact_id) is not False] for edge in used]
+            # One group of facts per claim an edge rests on: a chain needs
+            # every link, not just one surviving fact among them all.
+            kept = [[fact_id for fact_id in leg if evidence.holds(fact_id) is not False]
+                    for edge in used for leg in edge.claims()]
             if not all(kept):
                 continue
             during = budget.overlap([_merged([now(fact_id) for fact_id in facts]) for facts in kept])
@@ -514,15 +567,18 @@ async def graph_match(engine: "MemoryEngine", space: str, patterns: object, *, r
         facts_cited = sorted(cited)
         unverified += any(evidence.holds(fact_id) is None for fact_id in facts_cited)
         quote = next((q for fact_id in facts_cited if evidence.holds(fact_id) and (q := evidence.quote(fact_id))), None)
+        followed = sorted({edge.follows for used in found for edge in used if edge.follows})
         shown.append({"bindings": {variable: _shown(graph, bound) for variable, bound in zip(variables, key)},
-                      "fact_ids": facts_cited, "during": [{"from": s[2], "until": s[3]} for s in held]})
+                      "fact_ids": facts_cited, "during": [{"from": s[2], "until": s[3]} for s in held],
+                      **({"follows": followed} if followed else {})})
         bindings = "; ".join(f"{variable} = {_bound_line(graph, bound)}" for variable, bound in zip(variables, key))
         when_held = ""
         if status != "current":
             when_held = " held " + ", ".join(f"from {s[2]}" + (f" until {s[3]}" if s[3] else "") for s in held) \
                 if held else " never held together"
         row_lines.append(f"row: {bindings or 'holds'} [{_cited(facts_cited)}"
-                         + (f'; quote verified: "{one_line(quote)}"' if quote else "") + f"]{when_held}")
+                         + (f'; quote verified: "{one_line(quote)}"' if quote else "") + f"]{when_held}"
+                         + (f"; follows: {', '.join(followed)}" if followed else ""))
     if budget.cut and "search_cut" not in reasons:
         reasons.append("search_cut")
     if stale:

@@ -71,7 +71,11 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   `/v1/graph/match` JSON: one row per answer, each citing its facts
   re-read now. Constants name entities exactly, and near misses come back
   as candidates. With `status: "history"`, only facts that held at one
-  moment are joined unless `together` is false. `returns`, `limit`
+  moment are joined unless `together` is false. With `follows: true`, it
+  also matches what follows from the claims under the space's vocabulary
+  — that an employer employs whoever works there — and a row that used
+  one says which meaning it followed while still citing the claims
+  underneath; without it, only claims are matched. `returns`, `limit`
   (1 to 100), `as_of` and `max_bytes` bound it, as the route does.
 - `graph_overview` answers a question about the whole graph: each
   community's size, kinds, predicates, central entities and up to `facts`

@@ -144,7 +144,8 @@ async def test_graph_match_answers_a_structured_question_with_the_routes_rows(bo
     result = await box.run("graph_match", {"where": WHERE, "returns": ["?who"]})
     assert result["ok"] is True and result["status"] == "matched" and result["space"] == "alpha"
     assert result["rows"][0]["bindings"]["?who"]["key"] == "alice chen" and result["variables"] == ["?who"]
-    assert result["filters"] == {"status": "current", "as_of": NOW, "together": True, "limit": 20}
+    assert result["filters"] == {"status": "current", "as_of": NOW, "together": True, "limit": 20,
+                                 "follows": False}, "a question is about what was said unless it says otherwise"
     history = await box.run("graph_match", {"where": WHERE, "status": "history", "together": False, "limit": 5})
     assert history["ok"] is True and history["filters"]["status"] == "history" and history["filters"]["limit"] == 5
 

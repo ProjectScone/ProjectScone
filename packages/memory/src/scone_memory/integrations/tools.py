@@ -175,6 +175,11 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
             "as_of": {"type": "string", "description": "RFC 3339 instant to ask at. Defaults to now."},
             "together": {"type": "boolean",
                          "description": "Join only facts that held at one moment (default true)."},
+            "follows": {"type": "boolean",
+                        "description": ("Also match what follows from the claims under this space's vocabulary "
+                                        "(default false): that an employer employs whoever works there, and so "
+                                        "on. A row that used one says which meaning it followed, and still "
+                                        "cites the claims underneath.")},
             "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
                           "description": "Byte budget for the answer text, 512 to 64000. Defaults to 8000."},
         }, ["where"]),
@@ -398,10 +403,12 @@ class ToolBox:
             try:
                 found = await graph_match(self.engine, self.space, list(arguments["where"]),
                                           returns=arguments.get("returns"), limit=limit, status=status, as_of=moment,
-                                          together=together, max_bytes=arguments.get("max_bytes", MAX_BYTES))
+                                          together=together, follows=bool(arguments.get("follows", False)),
+                                          max_bytes=arguments.get("max_bytes", MAX_BYTES))
             except MatchQueryError as refused:
                 raise InvalidInput(str(refused)) from None
-            return found.record(self.space, status=status, as_of=moment, together=together, limit=limit)
+            return found.record(self.space, status=status, as_of=moment, together=together, limit=limit,
+                                follows=bool(arguments.get("follows", False)))
         if name == "graph_health":
             from ..entities.health import DEFAULT_EXAMPLES, MAX_BYTES as HEALTH_BYTES, graph_health
 

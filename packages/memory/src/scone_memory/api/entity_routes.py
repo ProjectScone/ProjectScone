@@ -463,7 +463,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         where: str = Query(min_length=2, max_length=MAX_WHERE),
         returns: Optional[list[str]] = Query(default=None),
         limit: int = Query(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS),
-        together: bool = True, max_bytes: int = Query(default=MATCH_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        together: bool = True, follows: bool = False,
+        max_bytes: int = Query(default=MATCH_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
         status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
     ) -> dict[str, object]:
         """A structured question: ``where`` is a JSON array of 1 to 6 triple
@@ -472,7 +473,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         together, as rows over the variables returned (every one by default), each
         citing its facts re-read now; in history, only facts that held at
         one moment are joined unless ``together`` is false. ``returns``
-        names the variables to answer with."""
+        names the variables to answer with. With ``follows``, what follows
+        from the claims under the space's vocabulary is matched too, and a
+        row that used one says which meaning it followed; without it, only
+        claims are matched."""
         try:
             patterns = json.loads(where)
         except ValueError:
@@ -480,10 +484,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         when = _moment(engine, as_of)
         try:
             result = await graph_match(engine, space, patterns, returns=returns, limit=limit, status=status,
-                                       as_of=when, together=together, max_bytes=max_bytes)
+                                       as_of=when, together=together, follows=follows, max_bytes=max_bytes)
         except MatchQueryError as refused:
             raise InvalidInput(str(refused)) from None
-        return result.record(space, status=status, as_of=when, together=together, limit=limit)
+        return result.record(space, status=status, as_of=when, together=together, limit=limit, follows=follows)
 
     @app.get("/v1/graph/overview")
     async def get_overview(
