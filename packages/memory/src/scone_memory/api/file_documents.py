@@ -10,7 +10,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document
+from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document, digest
+from ..ocr.tables import infer_tables
 from ..core.errors import InvalidInput
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection, ocr_choices
 from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
@@ -28,7 +29,8 @@ class _FileBody(BaseModel):
 def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
                                space_for: Callable[..., object],
                                ingest_slot: Callable[[int], AsyncContextManager[None]],
-                               document_ocr: DocumentOcr | None = None) -> None:
+                               document_ocr: DocumentOcr | None = None, *,
+                               assert_current_space: Callable[[Request, str], None]) -> None:
     @app.get('/v1/documents/formats')
     async def formats(_space: str = Depends(space_for)) -> dict[str, object]:
         from ..ingestion.formats.capabilities import document_formats
@@ -60,9 +62,39 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             **({'pdf_ocr': body.pdf_ocr.model_dump()} if body.pdf_ocr is not None else {})}))
 
     @app.get('/v1/episodes/{episode_id}/document')
-    async def evidence(episode_id: int = Path(ge=1, le=2**63 - 1),
+    async def evidence(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
                        chunk_id: int | None = Query(default=None, ge=1, le=2**63 - 1),
                        space: str = Depends(space_for)) -> JSONResponse:
         result = await document_provenance(engine, space, episode_id, chunk_id=chunk_id)
+        assert_current_space(request, space)
         return JSONResponse(jsonable_encoder({**asdict(result),
             'download_path': f'/v1/attachments/{result.original.attachment_id}'}))
+
+
+    @app.get('/v1/episodes/{episode_id}/document/ocr-tables')
+    async def ocr_tables(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
+                         page: int = Query(ge=1, le=1000),
+                         space: str = Depends(space_for)) -> JSONResponse:
+        result = await document_provenance(engine, space, episode_id)
+        selected = [segment for segment in result.segments
+                    if segment.locator == f'page:{page}' and segment.metadata.get('page') == str(page)]
+        if (result.format != 'pdf' or len(selected) != 1
+                or selected[0].metadata.get('extraction') != 'ocr'
+                or not selected[0].regions
+                or any(r.coordinate_space != 'normalized_displayed_page_top_left' for r in selected[0].regions)):
+            raise InvalidInput('table analysis requires a retained PDF page with OCR regions')
+        segment = selected[0]
+        layout = infer_tables(segment.regions)
+        current = await engine.episode(space, episode_id)
+        linked = {attachment.attachment_id for attachment in current.attachments}
+        if (current.metadata.get('document_original') != result.original.attachment_id
+                or current.metadata.get('document_manifest') != result.manifest.attachment_id
+                or not {result.original.attachment_id, result.manifest.attachment_id} <= linked
+                or current.content != '\n\n'.join(s.text for s in result.segments)):
+            raise InvalidInput('document changed during OCR table analysis')
+        assert_current_space(request, space)
+        return JSONResponse({'space': space, 'episode_id': episode_id, 'page': page,
+            'original_sha256': result.original.attachment_id,
+            'manifest_sha256': result.manifest.attachment_id,
+            'page_text_sha256': digest(segment.text.encode('utf-8')),
+            'layout': layout.model_dump(mode='json')})
