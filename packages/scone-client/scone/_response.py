@@ -90,7 +90,7 @@ def read_response(response: requests.Response, limit: int) -> bytes:
     that allocation is outside this reader's control. It is still checked here.
     """
     status = response.status_code
-    if response.raw is None or response._content_consumed:
+    if response.raw is None or getattr(response, "_content_consumed", False) is True:
         try:
             body = response.content
         except RuntimeError as exc:
