@@ -1,7 +1,7 @@
 """Retained originals and source locators for every document parser."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import hashlib
 from typing import TYPE_CHECKING, Literal, Self
@@ -93,6 +93,7 @@ class DocumentProvenance:
     format: str
     parser: str
     segments: tuple[DocumentSegment, ...]
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 def digest(data: bytes) -> str:
@@ -215,4 +216,4 @@ async def document_provenance(memory: MemoryEngine, space: str, episode_id: int,
             selected.append(segment.model_copy(update={'regions': regions, 'table_cells': cells}))
         offset = stop + 2
     return DocumentProvenance(original, retained, manifest.filename, manifest.parsed.format,
-                              manifest.parsed.parser, tuple(selected))
+                              manifest.parsed.parser, tuple(selected), dict(manifest.parsed.metadata))

@@ -529,3 +529,63 @@ Source removal leaves citing claims, links and their stored quotes in the ledger
 Shared attachments remain where another source in the space carries them.
 Downloaded copies and backups are outside this action; this is not a promise of
 complete erasure from every storage location.
+
+## Select local OCR when importing PDFs
+
+The ordinary `POST /v1/documents` route extracts embedded PDF text by default.
+An operator can enable the existing local OCR parser in both `scone serve`
+compositions by configuring an installed Tesseract executable:
+
+```sh
+export SCONE_DOCUMENT_OCR_EXECUTABLE=/absolute/path/to/tesseract
+export SCONE_DOCUMENT_OCR_LANGUAGE=eng
+export SCONE_DOCUMENT_OCR_PSM=3
+export SCONE_DOCUMENT_OCR_DPI=150
+scone serve
+```
+
+The `pdf-ocr` Python extra and the selected Tesseract language data must already
+be installed. No model, language pack or executable is downloaded or started at
+server startup. The executable must be an absolute path to an executable file.
+Language defaults to `eng`; PSM defaults to 3 and accepts 3, 6, 11 or 12; DPI
+defaults to 150 and is bounded to 72–300. Unsupported settings or missing PDF
+rendering dependencies refuse startup. Installed dependencies and configuration
+do not promise that language data, a particular file or recognition will work.
+
+Authenticated `GET /v1/documents/formats` includes `pdf_ocr.available`, `modes`
+and `reading_orders`. A native host may instead supply
+`document_ocr=DocumentOcr(my_recognizer, dpi=150)` to `create_app` or
+`create_conversation_app`, using `scone_memory.ingestion.document_ocr.DocumentOcr`
+and an existing `OcrEngine` implementation. The caller owns that recognizer.
+
+After uploading the original, select OCR explicitly in the indexing request:
+
+```json
+{
+  "attachment_id": "<original SHA-256>",
+  "filename": "scan.pdf",
+  "pdf_ocr": {"mode": "missing_text", "reading_order": "columns_ltr"}
+}
+```
+
+`missing_text` preserves readable embedded text and recognizes pages lacking it
+or whose text extraction fails. `all_pages` recognizes every page, including
+those with embedded text. Reading order is `provider`, `columns_ltr` or
+`columns_rtl`; the latter two infer columns geometrically, not semantically.
+The browser Documents import queue exposes these choices per PDF when available.
+
+The response echoes the selected `pdf_ocr`; the retained manifest records mode,
+reading order and actual DPI in `parsed.metadata.pdf_ocr`. Verified document
+provenance exposes that same metadata beside actual page extraction methods,
+recognizer names, region geometry and UTF-8 spans. Different selections have
+distinct manifest identities even if the resulting text is identical. Existing
+imports that omit OCR keep their original content identities. OCR does not
+establish the correctness of recognized text; inspect source evidence.
+
+Selecting OCR on another file type or on an unconfigured server fails before
+extraction. Recognition errors do not fall back to another provider or silently
+accept a partial extraction. The existing bounded ingestion lane, 30-second
+extraction deadline, pixel/region limits and original-backed indexing apply.
+These HTTP imports remain synchronous: after an uncertain write, inspect the
+source library instead of automatically repeating the import. Native per-page
+checkpoint recovery remains the separate `PdfOcrWorkflow` interface.

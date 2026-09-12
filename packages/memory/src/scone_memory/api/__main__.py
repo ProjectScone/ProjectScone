@@ -38,7 +38,9 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
     or model factory the operator got wrong, before anything is served."""
     from ..runtime.diagnostics import install_http_diagnostics
+    from ..runtime.document_ocr import build_document_ocr
 
+    document_ocr = build_document_ocr(settings)
     store = None
     model_management = False
     vision_available = None
@@ -72,6 +74,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
 
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
+                          document_ocr=document_ocr,
                           agent_catalog=agents.catalog if agents else None,
                           agent_plan_store=agents.plans if agents else None,
                           agent_run_service=agents.service if agents else None,
@@ -121,6 +124,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
+                                   document_ocr=document_ocr,
                                    agent_catalog=agents.catalog if agents else None,
                                    agent_plan_store=agents.plans if agents else None,
                                    agent_run_service=agents.service if agents else None,

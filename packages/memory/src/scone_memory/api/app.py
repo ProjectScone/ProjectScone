@@ -206,6 +206,9 @@ class FeedbackBody(BaseModel):
 
 
 
+from ..ingestion.document_ocr import DocumentOcr
+
+
 def create_app(
     engine: MemoryEngine,
     keys: Mapping[str, str],
@@ -218,6 +221,7 @@ def create_app(
     agent_catalog: AgentCatalog | None = None,
     agent_plan_store: AgentPlanStore | None = None,
     agent_run_service: AgentRunService | None = None,
+    document_ocr: DocumentOcr | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -399,7 +403,7 @@ def create_app(
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
-    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot)
+    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr)
 
     @app.post("/v1/attachments")
     async def post_attachment(request: Request, space: str = Depends(space_for)) -> dict:
