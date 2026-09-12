@@ -18,6 +18,7 @@ from ._response import DEFAULT_MAX_RESPONSE_BYTES, read_response
 from ._wire import Capabilities
 from .agents import AgentClient
 from .document_jobs import DocumentJobs
+from .directory_sync import DirectorySyncRuns
 from .errors import SconeError
 from .models import Added, Fact, Profile, Recall, Status, Tag
 
@@ -113,6 +114,10 @@ class Scone:
     def document_jobs(self, *, expected_space: str) -> DocumentJobs:
         """Create a typed client for explicit durable document operations."""
         return DocumentJobs(self, expected_space=expected_space)
+
+    def directory_sync(self, *, expected_space: str) -> DirectorySyncRuns:
+        """Create a typed client for configured local collection scans."""
+        return DirectorySyncRuns(self, expected_space=expected_space)
 
     def add(
         self,

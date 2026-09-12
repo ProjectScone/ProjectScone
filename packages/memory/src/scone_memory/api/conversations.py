@@ -41,6 +41,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, build_query_evidence_graph
 from ..retrieval.evidence_records import canonical_evidence, fingerprint, restrict_graph
 from .app import create_app, episode_json, permitted
+from ._lifecycle import finish_host_cleanup
 from ..realtime.catalog import PersonaCatalog
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -103,7 +104,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
-                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None):
+                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None,
+                            directory_sync_service=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -188,18 +190,19 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     async def lifespan(_app):
         nonlocal journal, shutting_down
         shutting_down = False
+        descriptor: int | None = None
         try:
-            import fcntl
-        except ImportError as exc:
-            raise RuntimeError("conversation service journal ownership requires Linux or macOS") from exc
-        path = Path(journal_path).resolve()
-        if path.exists() and path.stat().st_nlink != 1:
-            raise InvalidInput("hard-linked conversation journals are not supported")
-        # macOS can make flock on the database conflict with SQLite's locks.
-        # Never unlink the sidecar: another owner might still hold its inode.
-        lock_path = str(path) + ".owner.lock"
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-        try:
+            try:
+                import fcntl
+            except ImportError as exc:
+                raise RuntimeError("conversation service journal ownership requires Linux or macOS") from exc
+            path = Path(journal_path).resolve()
+            if path.exists() and path.stat().st_nlink != 1:
+                raise InvalidInput("hard-linked conversation journals are not supported")
+            # macOS can make flock on the database conflict with SQLite's locks.
+            # Never unlink the sidecar: another owner might still hold its inode.
+            lock_path = str(path) + ".owner.lock"
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise InvalidInput("journal ownership lock must be a regular file")
             try:
@@ -230,51 +233,64 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             yield
         finally:
             begin_shutdown()
-            cleanup_errors = []
-            if agent_run_service is not None:
+            async def cleanup() -> None:
+                nonlocal journal
+                cleanup_errors: list[BaseException] = []
+                if agent_run_service is not None:
+                    try:
+                        await agent_run_service.aclose()
+                    except (Exception, asyncio.CancelledError) as error:
+                        cleanup_errors.append(error)
+                if document_import_service is not None:
+                    try:
+                        await document_import_service.aclose()
+                    except (Exception, asyncio.CancelledError) as error:
+                        cleanup_errors.append(error)
+                if directory_sync_service is not None:
+                    try:
+                        await directory_sync_service.aclose()
+                    except (Exception, asyncio.CancelledError) as error:
+                        cleanup_errors.append(error)
+                if worker is not None:
+                    try:
+                        await worker.stop()
+                    except (Exception, asyncio.CancelledError) as error:
+                        cleanup_errors.append(error)
                 try:
-                    await agent_run_service.aclose()
-                except Exception as error:
-                    cleanup_errors.append(error)
-            if document_import_service is not None:
-                try:
-                    await document_import_service.aclose()
-                except Exception as error:
-                    cleanup_errors.append(error)
-            if worker is not None:
-                try:
-                    await worker.stop()
-                except Exception as error:
-                    cleanup_errors.append(error)
-            try:
-                if journal is not None:
-                    for (space, sid), entry in owned.items():
-                        if entry.cleanup_task is not None:
+                    if journal is not None:
+                        for (space, sid), entry in owned.items():
+                            if entry.cleanup_task is not None:
+                                try:
+                                    if not await asyncio.shield(entry.cleanup_task):
+                                        cleanup_errors.append(RuntimeError("runtime cleanup failed"))
+                                except (Exception, asyncio.CancelledError) as error:
+                                    cleanup_errors.append(error)
+                                continue
                             try:
-                                if not await asyncio.shield(entry.cleanup_task):
-                                    cleanup_errors.append(RuntimeError("runtime cleanup failed"))
-                            except Exception as error:
+                                session = journal.get(space, sid)
+                                if session["state"] in {"created", "running", "stopping"}:
+                                    journal.transition(space, sid, "shutdown:" + uuid4().hex, "interrupt", session["revision"])
+                            except (Exception, asyncio.CancelledError) as error:
                                 cleanup_errors.append(error)
-                            continue
-                        try:
-                            session = journal.get(space, sid)
-                            if session["state"] in {"created", "running", "stopping"}:
-                                journal.transition(space, sid, "shutdown:" + uuid4().hex, "interrupt", session["revision"])
-                        except Exception as error:
-                            cleanup_errors.append(error)
-                        try:
-                            await asyncio.wait_for(close_owned(entry), 5)
-                        except Exception as error:
-                            cleanup_errors.append(error)
-            finally:
-                if journal is not None:
-                    journal.close()
-                    journal = None
-                owned.clear()
-                creates.clear()
-                os.close(descriptor)
-            if cleanup_errors:
-                raise RuntimeError("conversation service cleanup failed") from None
+                            try:
+                                await asyncio.wait_for(close_owned(entry), 5)
+                            except (Exception, asyncio.CancelledError) as error:
+                                cleanup_errors.append(error)
+                finally:
+                    try:
+                        if journal is not None:
+                            journal.close()
+                    finally:
+                        journal = None
+                        owned.clear()
+                        creates.clear()
+                        if descriptor is not None:
+                            os.close(descriptor)
+                if any(isinstance(error, asyncio.CancelledError) for error in cleanup_errors):
+                    raise asyncio.CancelledError
+                if cleanup_errors:
+                    raise RuntimeError("conversation service cleanup failed") from None
+            await finish_host_cleanup(cleanup())
 
     app = FastAPI(title="scone-conversations", docs_url=None, redoc_url=None, lifespan=lifespan)
     # Hosts must notify before draining HTTP tasks, not only at lifespan end:
@@ -1048,6 +1064,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             agent_catalog=agent_catalog, agent_plan_store=agent_plan_store,
                             agent_run_service=agent_run_service, document_ocr=document_ocr, document_media=document_media,
                             document_import_service=document_import_service,
+                            directory_sync_service=directory_sync_service,
                             ingest_concurrency=ingest_concurrency, roles=roles,
                             model_connections_available=model_connections_available, vision_available=vision_available)
     app.state.memory_app = memory_app
