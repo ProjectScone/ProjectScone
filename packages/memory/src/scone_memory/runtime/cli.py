@@ -341,7 +341,11 @@ def fact_line(f) -> str:
     reason = f"  ({f.closed_reason})" if f.closed_reason else ""
     origin = "" if f.origin == "stated" else f" [{f.origin}]"
     excluded = f"  excluded: {f.excluded_reason}" if f.excluded_reason else ""
-    return f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  since {f.valid_from[:10]}{until}{reason}{excluded}"
+    # Where a claim came from belongs beside it: a claim with no episode
+    # rests on whoever wrote it, and that is worth seeing in a list.
+    came = f"  from episode {f.source_episode_id}" if f.source_episode_id else ""
+    return (f"#{f.fact_id} [{f.status}]{origin} {f.subject} {f.predicate} {f.object}  "
+            f"since {f.valid_from[:10]}{until}{reason}{came}{excluded}")
 
 
 def graph_bench_command(args: argparse.Namespace, out) -> int:

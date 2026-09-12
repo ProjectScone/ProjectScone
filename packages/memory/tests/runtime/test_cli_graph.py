@@ -365,3 +365,18 @@ def test_bench_temporal_scores_a_file_of_dated_questions(tmp_path):
     out = io.StringIO()
     code = cli.main(["bench-temporal", str(path)], env={}, stdin=io.StringIO(""), out=out)
     assert code == 0 and "temporal: 5 questions; computed 1 of 5" in out.getvalue(), out.getvalue()
+
+
+async def test_a_listed_fact_says_which_episode_it_came_from():
+    """A claim with no episode rests on whoever wrote it, and a list is
+    where that difference shows."""
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    said = await memory.remember("default", "Alice Chen works at Acme Robotics.")
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY,
+                             source_episode_id=said.episode_id, quote="Alice Chen works at Acme Robotics.")
+    await memory.assert_fact("default", "bob stone", "works_at", "Globex", valid_from=DAY)
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["facts"]), memory, io.StringIO(""), out)
+    lines = sorted(line for line in out.getvalue().splitlines() if line.startswith("#"))
+    assert code == 0 and f"from episode {said.episode_id}" in lines[0]
+    assert "from episode" not in lines[1], "nothing cites a source for this one"
