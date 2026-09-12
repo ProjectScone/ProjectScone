@@ -25,6 +25,7 @@ from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..core.validation import entity_key
 from .classify import CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, reference_flag
 from .ids import attribute_id, key_id, relation_id
+from .meanings import MAX_IMPLIED, MAX_STEPS, RelationMeanings
 from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, hint, infer_kind
 
 PROJECTION_VERSION = "scone.entities/1"
@@ -100,6 +101,29 @@ class Relation:
 
 
 @dataclass(frozen=True, slots=True)
+class Implied:
+    """A relation nobody stated, which follows from ones they did.
+
+    Its own type, so that no view, count or export can mistake it for a
+    claim. It rests on the same facts as the relations it follows from,
+    holds only while all of them do, and is no better supported than the
+    weakest of them."""
+
+    relation_id: str
+    subject_id: str
+    predicate: str
+    object_id: str
+    fact_ids: tuple[int, ...]
+    support: Support
+    first_valid_from: str
+    last_valid_until: str | None
+    #: "inverse", "symmetric" or "transitive".
+    follows: str
+    #: The stated relations it was worked out from, in order.
+    follows_from: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Attribute:
     attribute_id: str
     entity_id: str
@@ -120,6 +144,12 @@ class EntityProjection:
     roles: tuple[FactRole, ...]
     digest: str
     version: str = PROJECTION_VERSION
+    #: What follows from the stated relations under the space's vocabulary,
+    #: kept apart from them so that what was said is never confused with
+    #: what was worked out. Empty when no meanings are configured.
+    implied: tuple[Implied, ...] = ()
+    #: Whether more followed than a projection will hold.
+    implied_capped: bool = False
 
     def components(self) -> list[frozenset[str]]:
         """Groups of entities connected by relations in either direction."""
@@ -196,7 +226,8 @@ def _canonical(value: object) -> bytes:
                       default=list).encode("utf-8", "surrogatepass")
 
 
-def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> EntityProjection:
+def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
+                     meanings: RelationMeanings | None = None) -> EntityProjection:
     rows = sorted(facts, key=lambda fact: fact.fact_id)
     for fact in rows:
         if fact.space != space:
@@ -264,12 +295,87 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int) -> Ent
     entities.sort(key=lambda entity: entity.entity_id)
     relations.sort(key=lambda relation: relation.relation_id)
     attributes.sort(key=lambda attribute: attribute.attribute_id)
+    implied, capped = _implied(space, relations, meanings)
     digest = hashlib.sha256(_canonical({
         "version": [PROJECTION_VERSION, CLASSIFIER_VERSION, KIND_HINTS_VERSION], "space": space,
         "entities": [_plain(item) for item in entities], "relations": [_plain(item) for item in relations],
         "attributes": [_plain(item) for item in attributes], "roles": [_plain(item) for item in roles],
+        **({"meanings": meanings.record(), "implied": [_plain(item) for item in implied]}
+           if meanings else {}),
     })).hexdigest()
-    return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles), digest)
+    return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles),
+                            digest, implied=tuple(implied), implied_capped=capped)
+
+
+def _implied(space: str, relations: list[Relation],
+             meanings: RelationMeanings | None) -> tuple[list[Implied], bool]:
+    """What follows from the stated relations under the space's vocabulary.
+
+    Nothing already said is implied, nothing is implied twice, and nothing
+    is implied about a thing and itself. A relation that carries through is
+    followed the short way first, so a claim that is reachable by two paths
+    keeps the shorter one, and the walk stops after MAX_STEPS claims."""
+    if not meanings or not relations:
+        return [], False
+    said = {(item.subject_id, item.predicate, item.object_id) for item in relations}
+    found: dict[tuple[str, str, str], Implied] = {}
+    capped = False
+
+    def keep(subject: str, predicate: str, other: str, follows: str,
+             path: tuple[Relation, ...]) -> bool:
+        """Record one implied relation; False when there is no room left."""
+        nonlocal capped
+        key = (subject, predicate, other)
+        if subject == other or key in said or key in found:
+            return True
+        if len(found) >= MAX_IMPLIED:
+            capped = True
+            return False
+        # It is no better grounded than its least grounded claim: a chain
+        # with one unsourced link is an unsourced chain, whatever the rest
+        # of it was quoted from. And it holds only while every claim it
+        # rests on does, so it begins at the latest beginning and ends at
+        # the earliest ending.
+        weakest = min(path, key=lambda item: (item.support.quoted, item.support.unquoted,
+                                              item.support.facts, item.relation_id))
+        ends = [item.last_valid_until for item in path]
+        found[key] = Implied(
+            relation_id(space, subject, predicate, other), subject, predicate, other,
+            tuple(sorted({fact for item in path for fact in item.fact_ids})), weakest.support,
+            max(item.first_valid_from for item in path),
+            None if all(end is None for end in ends) else min(end for end in ends if end),
+            follows, tuple(item.relation_id for item in path))
+        return True
+
+    for item in relations:
+        other_side = meanings.opposite(item.predicate)
+        if other_side is not None and not keep(item.object_id, other_side, item.subject_id,
+                                               "symmetric" if meanings.reads_both_ways(item.predicate)
+                                               else "inverse", (item,)):
+            break
+    onward: dict[tuple[str, str], list[Relation]] = defaultdict(list)
+    for item in relations:
+        if meanings.carries_through(item.predicate):
+            onward[(item.predicate, item.subject_id)].append(item)
+    for item in relations:
+        if not meanings.carries_through(item.predicate) or capped:
+            continue
+        frontier: list[tuple[str, tuple[Relation, ...]]] = [(item.object_id, (item,))]
+        for _ in range(MAX_STEPS - 1):
+            beyond: list[tuple[str, tuple[Relation, ...]]] = []
+            for reached, path in frontier:
+                walked = {step.relation_id for step in path}
+                for edge in onward.get((item.predicate, reached), ()):
+                    if edge.relation_id in walked:
+                        continue
+                    step = (*path, edge)
+                    if not keep(item.subject_id, item.predicate, edge.object_id, "transitive", step):
+                        return sorted(found.values(), key=lambda r: r.relation_id), capped
+                    beyond.append((edge.object_id, step))
+            frontier = beyond
+            if not frontier:
+                break
+    return sorted(found.values(), key=lambda r: r.relation_id), capped
 
 
 _SCALARS = frozenset({str, int, float, bool, type(None)})
