@@ -131,17 +131,23 @@ def chosen_setting(rows: Sequence[Measured]) -> tuple[Optional[Setting], str]:
         return None, "nothing was measured"
     best = max(row.recall_any for row in rows)
     tied = [row for row in rows if row.recall_any == best]
+    asked = max(row.questions for row in rows)
     default = next((row for row in tied if row.setting == DEFAULT_SETTINGS), None)
     if default is not None:
         lowest = min(row.recall_any for row in rows)
         return DEFAULT_SETTINGS, (f"nothing measured better than the defaults ({best:.3f} against "
-                                  f"{lowest:.3f} at worst)")
+                                  f"{lowest:.3f} at worst, over {asked} question(s))")
     # A row nobody timed is not a quick row: it goes last among equals.
     quickest = min(tied, key=lambda row: (row.recall_ms_p50 if row.recall_ms_p50 is not None else float("inf"),
                                           row.setting.text()))
     was = next((row.recall_any for row in rows if row.setting == DEFAULT_SETTINGS), None)
-    why = f"{quickest.recall_any:.3f} against {was:.3f} by the defaults" if was is not None \
-        else f"{quickest.recall_any:.3f}, the most any setting found"
+    # A rate hides how few questions are behind it: 0.900 against 0.833
+    # over thirty questions is two questions, and two questions is how a
+    # default gets changed on noise.
+    apart = round((quickest.recall_any - was) * quickest.questions) if was is not None else 0
+    why = (f"{quickest.recall_any:.3f} against {was:.3f} by the defaults, which is {apart} more "
+           f"question(s) of {quickest.questions}" if was is not None
+           else f"{quickest.recall_any:.3f}, the most any setting found over {quickest.questions} question(s)")
     if len(tied) > 1:
         why += f"; the quicker of {len(tied)} settings that tied"
     return quickest.setting, why

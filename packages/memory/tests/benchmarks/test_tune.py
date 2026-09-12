@@ -109,3 +109,24 @@ async def test_every_setting_really_runs_under_itself(tmp_path):
     defaults, narrowed = report.rows
     assert defaults.recall_all == 1.0 and narrowed.recall_all == 0.5
     assert report.chosen == DEFAULT_SETTINGS
+
+
+def test_a_difference_is_said_in_questions_as_well_as_in_rate():
+    """0.900 against 0.833 over 30 questions is two questions. A rate on its
+    own reads as though it were more than that, and a sweep this small is
+    exactly where somebody changes a default they should not."""
+    rows = [measured(DEFAULT_SETTINGS, 0.833), measured(Setting(candidate_limit=100), 0.900)]
+    rows = [Measured(setting=row.setting, questions=30, recall_any=row.recall_any,
+                     recall_all=row.recall_all, recall_ms_p50=row.recall_ms_p50, errors=0)
+            for row in rows]
+    _, why = chosen_setting(rows)
+    assert "2 more question" in why, why
+
+
+def test_a_default_that_stands_says_how_few_questions_were_behind_it():
+    rows = [Measured(setting=DEFAULT_SETTINGS, questions=60, recall_any=0.9, recall_all=0.6,
+                     recall_ms_p50=20.0, errors=0),
+            Measured(setting=Setting(candidate_limit=100), questions=60, recall_any=0.85,
+                     recall_all=0.58, recall_ms_p50=20.0, errors=0)]
+    _, why = chosen_setting(rows)
+    assert "nothing measured better" in why and "60 question" in why

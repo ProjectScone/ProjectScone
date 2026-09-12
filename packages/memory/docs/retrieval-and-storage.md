@@ -357,7 +357,14 @@ settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only
 matches the default is no change at all, so the default stands and the
-answer says "nothing measured better than the defaults". What comes out
+answer says "nothing measured better than the defaults". Every
+difference is given in questions as well as in rate, because a rate
+hides how few questions are behind it — and that is not hypothetical.
+On 30 questions of `longmemeval_s`, a candidate limit of 100 measured
+0.900 against the defaults' 0.833 and was taken; on 60 questions of the
+same file the same setting measured **below** the defaults. The
+difference the first sweep took was two questions.
+[The run is recorded](../../../bench-runs/retrieval-tuning-2026-09-11/results.md). What comes out
 is a recommendation with its measurement attached and the environment
 lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
