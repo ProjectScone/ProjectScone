@@ -288,6 +288,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("map", help="remember every source file under a directory, and optionally what each says")
+    p.add_argument("directory")
+    p.add_argument("--graph", action="store_true",
+                   help="also record what each file defines, imports and calls, as claims quoted from the line")
+    p.add_argument("--limit", type=int, default=5_000, help="files to read at most (default 5000)")
+    p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
+
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
     t = tree.add_parser("ls", help="what is under a path")
@@ -494,6 +501,83 @@ async def tune_command(args: argparse.Namespace, settings: Settings, out) -> int
     tuned = await tune(args.dataset, settings=swept, k=args.k, sample=args.sample, seed=args.seed,
                        base=settings)
     print(json.dumps(tuned.record()) if args.json else tuned.text(), file=out)
+    return 0
+
+
+def _parses(text: str) -> bool:
+    """Whether Python reads it at all, which is a different question from
+    whether it had anything to say."""
+    import ast
+
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    return True
+
+
+async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+    """Remember every source file under a directory, stored under the path
+    it was read from. With --graph, also record what each file says about
+    itself. What was read and what was not is said: a map that quietly
+    skipped half a repository is worse than no map."""
+    from ..ingestion.code import PYTHON_SUFFIXES, code_language, declarations
+    from ..ingestion.code_graph import record_claims
+
+    root = pathlib.Path(args.directory)
+    if not root.is_dir():
+        raise InvalidInput(f"{args.directory} is not a directory to map")
+    if not 1 <= args.limit <= 100_000:
+        raise InvalidInput("--limit must be from 1 to 100000 files")
+    if not 1 <= args.max_bytes <= 50_000_000:
+        raise InvalidInput("--max-bytes must be from 1 to 50000000")
+    found = [path for path in sorted(root.rglob("*"))
+             if path.is_file() and path.suffix in PYTHON_SUFFIXES
+             and not any(part.startswith(".") or part == "__pycache__" for part in path.parts)]
+    read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
+    for path in found[: args.limit]:
+        raw = path.read_bytes()
+        cut += len(raw) > args.max_bytes
+        text = raw[: args.max_bytes].decode("utf-8", errors="replace")
+        if not text.strip():
+            continue
+        where = str(path.relative_to(root))
+        added = await engine.remember(args.space, text, kind="file", source=where)
+        if added.deduplicated:
+            again += 1
+            continue
+        read += 1
+        if args.graph:
+            said = await record_claims(engine, args.space, episode_id=added.episode_id,
+                                       content=text, path=where, when=engine.clock())
+            claims += said
+            # A file with nothing to say and a file this cannot read are
+            # different things, and a count that adds them together tells
+            # a reader neither.
+            if said == 0 and code_language(where) is not None:
+                if declarations(text, language=code_language(where)) or _parses(text):
+                    quiet += 1
+                else:
+                    unread += 1
+    parts = [f"{read} file(s) read"]
+    if again:
+        parts.append(f"{again} already here")
+    if args.graph:
+        parts.append(f"{claims} claim(s)")
+        if quiet:
+            parts.append(f"{quiet} had nothing to say")
+        if unread:
+            parts.append(f"{unread} could not be read")
+    if len(found) > args.limit:
+        parts.append(f"{len(found) - args.limit} left unread of {len(found)}")
+    if cut:
+        parts.append(f"{cut} read only to {args.max_bytes} bytes")
+    if getattr(args, "json", False):
+        print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
+                            "unread": unread, "found": len(found), "limit": args.limit,
+                            "cut": cut}), file=out)
+    else:
+        print("map: " + ", ".join(parts), file=out)
     return 0
 
 
@@ -1110,6 +1194,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
         return 0
 
+    if args.command == "map":
+        return await map_command(args, engine, out)
     if args.command == "fs":
         return await filesystem_command(args, engine, stdin, out)
     if args.command == "doctor":

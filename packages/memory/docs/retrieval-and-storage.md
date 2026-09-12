@@ -284,6 +284,18 @@ Every claim is quoted from the line it was read on, cited to the episode
 the file was stored as, and marked `extracted` rather than `stated`,
 because nobody said it: it was read.
 
+```bash
+scone map src/scone_memory --graph
+# map: 278 file(s) read, 8869 claim(s), 23 had nothing to say
+```
+
+`map` walks a directory, remembers every source file under the path it
+was read from, and with `--graph` records what each says. What it read
+and what it did not is said: files already here, files with nothing to
+say, files it could not read, files left unread past the limit, and files
+read only as far as the byte budget. A map that quietly skipped half a
+repository is worse than no map.
+
 **It will not guess.** A call to something the file cannot see — another
 module's function, a method on a value whose type nobody stated — is
 left out rather than pointed at a name that might mean anything. A graph

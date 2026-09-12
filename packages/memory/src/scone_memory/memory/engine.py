@@ -473,18 +473,13 @@ class MemoryEngine:
         A file already in the space is not read again: its claims are
         already here, and asserting them again would say the same thing
         twice for no reason."""
-        from ..ingestion.code import code_language
-        from ..ingestion.code_graph import code_claims
+        from ..ingestion.code_graph import record_claims
 
         for record, outcome in zip(records, added):
             if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
                 continue
-            language = code_language(record.source)
-            when = record.created_at or self.clock()
-            for claim in code_claims(record.content, record.source, language=language):
-                await self.assert_fact(space, claim.subject, claim.predicate, claim.object,
-                                       valid_from=when, source_episode_id=outcome.episode_id,
-                                       quote=claim.quote, origin="extracted")
+            await record_claims(self, space, episode_id=outcome.episode_id, content=record.content,
+                                path=record.source, when=record.created_at or self.clock())
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""

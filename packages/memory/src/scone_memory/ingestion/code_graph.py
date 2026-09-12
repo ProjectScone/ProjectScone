@@ -148,3 +148,20 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str]) -> Opti
         within = inside.split(".")[0] if inside else None
         return named.get(f"{within}.{func.attr}") if within else None
     return None
+
+
+async def record_claims(engine, space: str, *, episode_id: int, content: str, path: str,
+                        when: str) -> int:
+    """Record what a file says about itself, and say how many claims that
+    was. One place decides how these are written — quoted from the line,
+    cited to the episode, extracted rather than stated — so the engine and
+    the command line cannot come to differ about it."""
+    from .code import code_language
+
+    said = 0
+    for claim in code_claims(content, path, language=code_language(path)):
+        await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
+                                 valid_from=when, source_episode_id=episode_id,
+                                 quote=claim.quote, origin="extracted")
+        said += 1
+    return said
