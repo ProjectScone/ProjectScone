@@ -19,6 +19,7 @@ import json
 import re
 
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -42,6 +43,7 @@ from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
+    from ..providers.vision import VisionModel
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
     from ..agents.run_service import AgentRunService
@@ -252,6 +254,8 @@ class FeedbackBody(BaseModel):
 from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
 from ..ingestion.import_service import DocumentImportService
+from ..ingestion.directory_service import DirectorySyncService
+from ._lifecycle import finish_host_cleanup
 
 
 def create_app(
@@ -268,8 +272,10 @@ def create_app(
     agent_run_service: AgentRunService | None = None,
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
+    directory_sync_service: DirectorySyncService | None = None,
     filesystem=None,
     document_media: DocumentMedia | None = None,
+    vision_factory: Callable[[], VisionModel | None] | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -296,23 +302,32 @@ def create_app(
     if document_import_service is not None:
         document_import_service.require_host(engine)
 
+    if directory_sync_service is not None:
+        directory_sync_service.require_host(engine)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if worker is not None:
-            worker.start()
         try:
+            if worker is not None:
+                worker.start()
             yield
         finally:
-            try:
-                if agent_run_service is not None:
-                    await agent_run_service.aclose()
-            finally:
+            async def cleanup() -> None:
                 try:
-                    if document_import_service is not None:
-                        await document_import_service.aclose()
+                    if agent_run_service is not None:
+                        await agent_run_service.aclose()
                 finally:
-                    if worker is not None:
-                        await worker.stop()
+                    try:
+                        if document_import_service is not None:
+                            await document_import_service.aclose()
+                    finally:
+                        try:
+                            if directory_sync_service is not None:
+                                await directory_sync_service.aclose()
+                        finally:
+                            if worker is not None:
+                                await worker.stop()
+            await finish_host_cleanup(cleanup())
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
                   default_response_class=LedgerJSONResponse)
@@ -320,6 +335,7 @@ def create_app(
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
     app.state.document_import_service = document_import_service
+    app.state.directory_sync_service = directory_sync_service
     app.state.roles = dict(roles or {})
     app.state.ingest_lane_width = ingest_concurrency
     ingest_lane = asyncio.Semaphore(ingest_concurrency)
@@ -367,6 +383,12 @@ def create_app(
         if when is not None:
             raise NotFound(f"space {space!r} was deleted at {when}")
         return space
+
+    if vision_factory is not None:
+        from .image_understanding import mount_image_understanding_routes
+
+        mount_image_understanding_routes(app, engine, space_for, vision_factory,
+                                         assert_current_space=assert_current_space)
 
     def actor_for(request: Request) -> str:
         """Who judged: a fingerprint of the bearer key (never the key) plus an
@@ -453,6 +475,7 @@ def create_app(
             features["agents.runs"] = True
             features["agents.inputs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
+        features["documents.sync"] = directory_sync_service is not None
         if document_import_service is not None:
             features["documents.jobs"] = True
         if conversations:
@@ -483,6 +506,9 @@ def create_app(
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
+    if directory_sync_service is not None:
+        from .directory_sync import mount_directory_sync_routes
+        mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for)
     from .filesystem_routes import mount_filesystem_routes
