@@ -109,8 +109,11 @@ class Imported:
 
     line: int
     text: str
-    #: Whether the import ran past the line bound and was quoted to it.
+    #: Whether the import was quoted to a bound.
     clipped: bool = False
+    #: Which bound cut it -- "lines", "bytes", or both. A single very long
+    #: line was described as "running past 12 lines", which it was not.
+    why: str = ""
 
 
 @dataclass(frozen=True)
@@ -173,8 +176,8 @@ class CodeContext:
                     "language": value.language, "more_imports": value.more_imports,
                     "holders": [{"name": s.name, "line": s.line, "text": s.text,
                                  "clipped": s.clipped} for s in value.holders],
-                    "imports": [{"line": i.line, "text": i.text, "clipped": i.clipped}
-                                for i in value.imports],
+                    "imports": [{"line": i.line, "text": i.text, "clipped": i.clipped,
+                                 "why": i.why} for i in value.imports],
                 } for key, value in self.by_chunk.items()}}
 
 
@@ -334,7 +337,22 @@ def _line_starts(content: str) -> list[int]:
     return at
 
 
-def _quoted(content: str, start: int, end: int) -> tuple[str, bool]:
+def _column(lines: list[str], row: int, byte_column: Optional[int]) -> int:
+    """A parser's byte column on a line, as a count of characters.
+
+    ``ast`` measures a column in UTF-8 bytes of that line; everything
+    else here measures in characters, because that is what slicing a
+    ``str`` uses. The two agree on ASCII and diverge by one per
+    non-ASCII character before the column, which is exactly how an
+    import span came to quote the wrong nine characters.
+    """
+    if byte_column is None:
+        return 0
+    line = lines[row - 1] if 0 < row <= len(lines) else ""
+    return len(line.encode()[:byte_column].decode("utf-8", errors="ignore"))
+
+
+def _quoted(content: str, start: int, end: int) -> tuple[str, str]:
     """A construct's own characters, bounded in lines **and** in bytes.
 
     One helper for every quotation here, because writing the bound twice
@@ -351,7 +369,7 @@ def _quoted(content: str, start: int, end: int) -> tuple[str, bool]:
     """
     text = content[start:end]
     lines = text.split("\n")
-    clipped = len(lines) > MAX_QUOTED_LINES
+    why = "lines" if len(lines) > MAX_QUOTED_LINES else ""
     text = "\n".join(lines[:MAX_QUOTED_LINES])
     if len(text.encode()) > MAX_QUOTED_BYTES:
         total, cut = 0, len(text)
@@ -361,11 +379,26 @@ def _quoted(content: str, start: int, end: int) -> tuple[str, bool]:
                 cut = index
                 break
             total += size
-        text, clipped = text[:cut], True
-    return text, clipped
+        text, why = text[:cut], "bytes" if not why else "lines and bytes"
+    return text, why
 
 
-def _looks_like_a_header(text: str, language: str) -> bool:
+def _looks_like_a_header(text: str, language: str, clipped: str = "") -> bool:
+    """Whether a quoted span is plausibly the header it claims to be.
+
+    Never asked of a span that was **clipped**: a header cut at a bound
+    legitimately lacks its own terminator, so judging it would always
+    fail -- and the fallback then quoted the entire source line,
+    bypassing the very bound that truncated it. Two of my own mechanisms
+    working against each other, and the safety net causing the unbounded
+    quote it was added to prevent.
+    """
+    if clipped:
+        return True
+    return _terminated(text, language)
+
+
+def _terminated(text: str, language: str) -> bool:
     """Whether a quoted span is plausibly the header it claims to be.
 
     A post-condition rather than trust in the arithmetic. Every
@@ -378,9 +411,28 @@ def _looks_like_a_header(text: str, language: str) -> bool:
     if not said:
         return False
     if language == "python":
-        return said.endswith(":") and said.split("(")[0].split()[0] in (
-            "def", "class", "async") or said.startswith(("def ", "class ", "async "))
+        # Both halves, not either. Written first as `A and B or C`, which
+        # binds as `(A and B) or C` -- so anything merely *starting* with
+        # `def ` passed, and the check was weaker than its own docstring
+        # claimed. A header that opens with the keyword and does not
+        # reach its colon is exactly the case this exists to catch.
+        return said.endswith(":") and said.startswith(("def ", "class ", "async "))
     return said.endswith(("{", ";"))
+
+
+def _declaring_line(content: str, starts: list[int], lines: list[str], row: int,
+                    declaration: Declaration) -> Signature:
+    """The declaring line, quoted through the same bound as everything else.
+
+    The fallback used to slice ``lines`` directly, which is unbounded --
+    so a fifty-thousand-byte line came back whole, carrying its body,
+    from the branch that exists to keep a doubtful quote small.
+    """
+    begin = starts[row - 1] if 0 < row <= len(starts) else 0
+    end = starts[row] if row < len(starts) else len(content)
+    text, _ = _quoted(content, begin, end)
+    return Signature(name=declaration.name, kind=declaration.kind, line=row,
+                     text=text.rstrip("\r\n"), clipped=True)
 
 
 def _signature(content: str, lines: list[str], blank: list[str], starts: list[int],
@@ -393,30 +445,22 @@ def _signature(content: str, lines: list[str], blank: list[str], starts: list[in
             # The header's end could not be established, so the declaring
             # line is all that can honestly be quoted -- and `clipped`
             # is the field that says a header is incomplete.
-            return Signature(name=declaration.name, kind=declaration.kind,
-                             line=declaration.first_line,
-                             text=lines[declaration.first_line - 1].rstrip("\r"),
-                             clipped=True)
-        text, clipped = _quoted(content, span[0], span[1])
+            return _declaring_line(content, starts, lines, declaration.first_line, declaration)
+        text, cut = _quoted(content, span[0], span[1])
         text = "\n".join(line.rstrip("\r") for line in text.split("\n"))
-        if not _looks_like_a_header(text, language):
-            return Signature(name=declaration.name, kind=declaration.kind,
-                             line=declaration.first_line,
-                             text=lines[declaration.first_line - 1].rstrip("\r"),
-                             clipped=True)
+        if not _looks_like_a_header(text, language, cut):
+            return _declaring_line(content, starts, lines, declaration.first_line, declaration)
         return Signature(name=declaration.name, kind=declaration.kind,
                          line=content[:span[0]].count("\n") + 1,
-                         text=text, clipped=clipped)
+                         text=text, clipped=bool(cut))
     start = declaration.first_line
     at, over = _brace_header(blank, starts, start)
     text, cut = _quoted(content, starts[start - 1], at)
-    text, clipped = text.strip("\n"), over or cut
-    if not _looks_like_a_header(text, language):
-        return Signature(name=declaration.name, kind=declaration.kind, line=start,
-                         text=(lines[start - 1].rstrip("\r") if start - 1 < len(lines)
-                               else ""), clipped=True)
+    text = text.strip("\n")
+    if not _looks_like_a_header(text, language, cut):
+        return _declaring_line(content, starts, lines, start, declaration)
     return Signature(name=declaration.name, kind=declaration.kind, line=start,
-                     text=text, clipped=clipped)
+                     text=text, clipped=over or bool(cut))
 
 
 def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, ...], bool]:
@@ -444,16 +488,23 @@ def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, .
                 # reported `import os; secret = "..."` as an import, and
                 # `def f(): import os; return secret` likewise -- a
                 # statement that is not an import, labelled as one.
-                begin = starts[node.lineno - 1] + node.col_offset
-                stop = (starts[(node.end_lineno or node.lineno) - 1]
-                        + (node.end_col_offset if node.end_col_offset is not None
-                           else len(content)))
+                #
+                # `ast` reports a column as a **UTF-8 byte** offset into
+                # its line, and these are character offsets. Adding one
+                # to the other put the slice adrift by one per non-ASCII
+                # character earlier on the line -- the fourth
+                # coordinate-system fault in this work, and the reason
+                # `_column` exists rather than a bare addition.
+                begin = starts[node.lineno - 1] + _column(lines, node.lineno, node.col_offset)
+                last = (node.end_lineno or node.lineno)
+                stop = (starts[last - 1] + _column(lines, last, node.end_col_offset)
+                        if node.end_col_offset is not None else len(content))
                 at.append((node.lineno, begin, stop))
         for first, begin, stop in sorted(at):
             if len(found) >= limit:
                 return tuple(found), True
-            text, clipped = _quoted(content, begin, stop)
-            found.append(Imported(line=first, text=text, clipped=clipped))
+            text, cut = _quoted(content, begin, stop)
+            found.append(Imported(line=first, text=text, clipped=bool(cut), why=cut))
         return tuple(found), False
     starts = _line_starts(content)
     blank = masked(content, prose=False).split("\n")
@@ -466,18 +517,18 @@ def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, .
             # `import fs from "fs"; const secret = "..."` is two
             # statements and only the first is an import.
             quiet = blank[number - 1] if number - 1 < len(blank) else line
-            depth, cut = 0, len(line)
+            depth, ends = 0, len(line)
             for column, char in enumerate(quiet):
                 if char in "([{":
                     depth += 1
                 elif char in ")]}":
                     depth = max(0, depth - 1)
                 elif char == ";" and depth == 0:
-                    cut = column + 1
+                    ends = column + 1
                     break
             begin = starts[number - 1]
-            text, clipped = _quoted(content, begin, begin + cut)
-            found.append(Imported(line=number, text=text, clipped=clipped))
+            text, cut = _quoted(content, begin, begin + ends)
+            found.append(Imported(line=number, text=text, clipped=bool(cut), why=cut))
     return tuple(found), False
 
 
@@ -502,6 +553,7 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
     unavailable: set[int] = set()
     not_code = vanished = unread = unbudgeted = capped = shortened = lengthy = 0
     spent = beyond = 0
+    reasons: set[str] = set()
     for item in items:
         language = code_language(item.source)
         if language is None:
@@ -570,6 +622,7 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
             shortened += 1
         if any(brought_in.clipped for brought_in in brought):
             lengthy += 1
+            reasons.update(brought_in.why for brought_in in brought if brought_in.why)
         found[item.chunk_id] = ChunkContext(
             chunk_id=item.chunk_id, language=language, holders=signatures,
             imports=brought, more_imports=more)
@@ -603,8 +656,12 @@ async def code_context(engine: "MemoryEngine", space: str, items: Sequence[Recal
         why += (f"; {shortened} signature(s) run past {MAX_SIGNATURE_LINES} lines and were "
                 f"quoted to there, so those headers are incomplete")
     if lengthy:
-        why += (f"; {lengthy} chunk(s) have an import running past {MAX_IMPORT_LINES} lines, "
-                f"quoted to there, so those import lines are incomplete")
+        # Which bound bit, rather than naming the line bound for a single
+        # line cut by the byte one -- which is what it used to say.
+        by = ", ".join(sorted(reasons)) or "a bound"
+        why += (f"; {lengthy} chunk(s) have an import quoted to {by} "
+                f"({MAX_QUOTED_LINES} lines, {MAX_QUOTED_BYTES} bytes), so those import "
+                f"lines are incomplete")
     if beyond:
         why += (f"; {beyond} chunk(s) have no context here because the budget of {max_bytes} "
                 f"byte(s) was spent -- their passages are still in the answer, and a larger "

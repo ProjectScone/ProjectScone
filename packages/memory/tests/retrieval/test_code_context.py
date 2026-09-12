@@ -21,7 +21,8 @@ import pytest
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
 from scone_memory.retrieval.code_context import (MAX_IMPORT_LINES, MAX_IMPORTS,
-                                                  MAX_QUOTED_BYTES, code_context)
+                                                  MAX_QUOTED_BYTES, MAX_QUOTED_LINES,
+                                                  code_context)
 
 pytestmark = pytest.mark.asyncio
 
@@ -266,6 +267,14 @@ async def test_a_signature_longer_than_the_bound_says_it_was_cut():
         await engine.close()
     holders = [h for one in context.by_chunk.values() for h in one.holders]
     assert holders and any(h.clipped for h in holders), context.record()
+    # A clipped header keeps the header it had, cut to the bound -- not
+    # the declaring line alone. Without the clipped short-circuit in
+    # `_looks_like_a_header` the post-condition judges a truncated header
+    # (which legitimately lacks its colon) to be no header, and the
+    # fallback replaces twelve lines of real signature with one.
+    cut = next(h for h in holders if h.clipped)
+    assert cut.text.count("\n") + 1 > 1, repr(cut.text)
+    assert "argument_0" in cut.text, repr(cut.text[:80])
     assert context.shortened >= 1, context.record()
     assert "incomplete" in context.why, context.why
     # The receipt has to carry it, not only the object.
@@ -772,6 +781,10 @@ async def test_one_very_long_import_line_is_bounded_in_bytes_too():
     assert len(big[0].text.encode()) <= MAX_QUOTED_BYTES, len(big[0].text.encode())
     assert big[0].clipped is True, big[0].clipped
     assert context.long_imports >= 1, context.record()
+    # And the reason names the bound that actually cut it: one very long
+    # line was previously described as "running past 12 lines".
+    assert big[0].why == "bytes", big[0].why
+    assert "bytes" in context.why and "past 12 lines" not in context.why, context.why
 
 
 async def test_the_byte_budget_has_no_exemption_for_the_first_chunk():
@@ -811,3 +824,58 @@ async def test_the_byte_budget_has_no_exemption_for_the_first_chunk():
     assert quoted == 0, quoted
     # The passages themselves are untouched: only their context is absent.
     assert len(tiny.items) == len(found.items), (len(tiny.items), len(found.items))
+
+
+async def test_a_non_ascii_line_does_not_shift_an_import_span():
+    """`ast` reports columns as UTF-8 **byte** offsets and I added them to
+    character offsets, so anything non-ASCII earlier on the line shifted
+    the slice -- the fourth coordinate-system fault in this work, and the
+    one my header post-condition cannot catch because it guards
+    signatures and not imports."""
+    accents = "\u00e9" * 10
+    source = (accents + ' = 1; import os; payload = "SENTINEL"\n'
+              'import json\n\n\ndef work() -> str:\n'
+              '    return json.dumps({}) + os.sep + " a body long enough to be a chunk"\n')
+    engine = await memory(source, source="accented.py", target=70)
+    try:
+        found = await engine.recall("default", "work json dumps sep body chunk", limit=6)
+        context = await code_context(engine, "default", found.items)
+    finally:
+        await engine.close()
+    one = next(iter(context.by_chunk.values()), None)
+    assert one is not None, context.record()
+    brought = [i.text for i in one.imports]
+    assert "import os" in brought, brought
+    for text in brought:
+        assert "SENTINEL" not in text, text
+        assert text in source, ("quoted, never assembled", text)
+
+
+async def test_a_clipped_signature_is_not_replaced_by_its_whole_line():
+    """Two of my own mechanisms working against each other.
+
+    `_quoted` truncates a very long header; the truncated text no longer
+    ends at its colon or brace; `_looks_like_a_header` therefore judges it
+    not a header; and the fallback quotes the **entire source line** --
+    bypassing the bound it was truncated by. So a fifty-thousand-byte
+    line came back whole, carrying its body, with `clipped=True` beside
+    it. The safety net caused the unbounded quote it was added to prevent.
+    """
+    filler = "x" * 50_000
+    source = ('function visible(value="' + filler + '") { return "SENTINEL"; }\n'
+              '\nfunction other(tag) {\n'
+              '  return tag + " a body long enough that the chunk is not the header";\n}\n')
+    engine = await memory(source, source="wide.ts", target=60)
+    try:
+        found = await engine.recall("default", "visible other tag body header chunk", limit=8)
+        context = await code_context(engine, "default", found.items)
+    finally:
+        await engine.close()
+    holders = [h for one in context.by_chunk.values() for h in one.holders]
+    assert holders, context.record()
+    for holder in holders:
+        assert len(holder.text.encode()) <= MAX_QUOTED_BYTES, \
+            (holder.name, len(holder.text.encode()))
+        assert "SENTINEL" not in holder.text, holder.name
+        assert holder.text in source, (holder.name, "quoted, never assembled")
+
