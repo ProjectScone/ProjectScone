@@ -112,3 +112,19 @@ async def test_reading_changes_nothing():
     await list_path(engine, SPACE, "/episodes")
     await read_file(engine, SPACE, "/episodes/1.md")
     assert await engine.documents.revision(SPACE) == before
+
+
+async def test_a_space_with_more_episodes_than_the_tree_reads_says_so(monkeypatch):
+    """The listing reads a bounded number of episodes. It must not then
+    report that bound as though it were how many there are: a reader who
+    pages to the end would think they had seen everything."""
+    from scone_memory import filesystem as tree
+
+    monkeypatch.setattr(tree, "MAX_LISTED", 3)
+    engine = await memory()
+    for n in range(7):
+        await engine.remember(SPACE, f"note number {n}")
+    listing = await list_path(engine, SPACE, "/episodes", limit=10)
+    assert listing.total == 7, "how many there are, not how many were read"
+    assert len(listing.entries) == 3 and listing.truncated
+    assert listing.capped == 3, "and how many the tree would read"

@@ -93,15 +93,21 @@ class Listing:
 
     path: str
     entries: tuple[Entry, ...]
+    #: How many there are, which is not how many were read: a listing
+    #: reads a bounded number and says so rather than reporting its own
+    #: bound as the answer.
     total: int
     truncated: bool = False
     next_offset: Optional[int] = None
     revision: int = 0
+    #: How many the tree read, when that is fewer than there are. None
+    #: when everything was read.
+    capped: Optional[int] = None
 
     def record(self) -> dict[str, object]:
         return {"path": self.path, "entries": [entry.record() for entry in self.entries],
                 "total": self.total, "truncated": self.truncated,
-                "next_offset": self.next_offset, "revision": self.revision}
+                "next_offset": self.next_offset, "revision": self.revision, "capped": self.capped}
 
 
 @dataclass(frozen=True)
@@ -202,9 +208,11 @@ async def list_path(engine: "MemoryEngine", space: str, path: str, *, limit: int
     revision = await engine.documents.revision(space)
     if where.kind == "file":
         raise PathRefused("that is a file; read it rather than listing it")
+    held: Optional[int] = None
     if where.kind == "root":
         entries = [Entry(f"/{name}", "directory", name) for name in DIRECTORIES]
     elif where.directory == "episodes":
+        held = (await engine.documents.counts(space)).episodes
         entries = [Entry(f"/episodes/{episode.episode_id}.md", "file", "episode",
                          len(episode.content.encode()), episode.ingested_at)
                    for episode in await _episodes(engine, space)]
@@ -218,9 +226,12 @@ async def list_path(engine: "MemoryEngine", space: str, path: str, *, limit: int
         entries = [Entry(f"/entities/{encode(key)}.md", "file", "entity", None, None)
                    for key in await _entities(engine, space)]
     shown = entries[offset : offset + limit]
+    total = max(held or 0, len(entries))
     more = offset + limit < len(entries)
-    return Listing(path, tuple(shown), len(entries), truncated=more or offset > 0 and bool(entries),
-                   next_offset=offset + limit if more else None, revision=revision)
+    return Listing(path, tuple(shown), total,
+                   truncated=more or total > len(entries) or (offset > 0 and bool(entries)),
+                   next_offset=offset + limit if more else None, revision=revision,
+                   capped=len(entries) if total > len(entries) else None)
 
 
 async def read_file(engine: "MemoryEngine", space: str, path: str, *,

@@ -408,6 +408,10 @@ things are true.
 - **`search`** answers a query in paths, using the engine's ordinary
   recall underneath: a passage written as a note is answered at its note
   path, and a matching claim at the page of its subject.
+- **A listing says how many there are, not how many it read.** The tree
+  reads a bounded number of episodes; past that a listing reports the
+  real total and says in `capped` how many it looked at, so a reader who
+  pages to the end is not left thinking they saw everything.
 - **At the command line**: `scone fs ls /`, `scone fs cat
   /episodes/1.md`, `scone fs find "desks"`, and `scone fs write
   /notes/plan.md --writable` reading the note from stdin. Writing needs
