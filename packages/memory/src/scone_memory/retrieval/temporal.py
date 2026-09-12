@@ -192,13 +192,16 @@ def _claimed(text: str) -> Optional[Plan]:
     events or from now."""
     if " ago " in text:
         return None
-    asks = " how long " in text and "held" or (text.startswith(" when ") and "when")
-    if not asks:
+    if " how long " in text:
+        asks: Operator = "held"
+    elif text.startswith(" when "):
+        asks = "when"
+    else:
         return None
     for carries in _CARRIES:
         rest = _after(text, carries)
         if rest is not None and _named(_tidy(rest)):
-            return Plan(cast(Operator, asks), (_tidy(rest),))
+            return Plan(asks, (_tidy(rest),))
     return None
 
 
