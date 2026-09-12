@@ -121,6 +121,7 @@ class IngestionRuntime:
     #: offsets are part of the shared specification, so this is a
     #: caller's choice and not ours to make for an existing space.
     structure_aware: bool = False
+    context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
 
 
 def validated_record(space: str, record: Record, when: str) -> NewEpisode:
@@ -157,8 +158,29 @@ def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -
                     spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
 
 
+async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Sequence[tuple[int, int]],
+                           texts: Sequence[str]) -> list[str]:
+    if runtime.context_inputs is not None:
+        content = new.content.encode()
+        previous = 0
+        if len(spans) != len(texts):
+            raise InvalidInput('document embedding chunk does not match its source span')
+        for (start, end), text in zip(spans, texts):
+            if (type(start) is not int or type(end) is not int
+                    or not previous <= start < end <= len(content)
+                    or content[start:end] != text.encode()):
+                raise InvalidInput('document embedding chunk does not match its source span')
+            previous = end
+    contextual = await runtime.context_inputs(new, spans) if runtime.context_inputs is not None else texts
+    if len(contextual) != len(texts):
+        raise InvalidInput('embedding context must preserve the chunk count')
+    return [runtime.embed_text(new, text) for text in contextual]
+
+
 async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
-    texts = [runtime.embed_text(p.new, text) for p in fresh for text in p.texts]
+    texts = []
+    for pending in fresh:
+        texts.extend(await embedding_inputs(runtime, pending.new, pending.spans, pending.texts))
     binding = '' if runtime.embedding_checkpoint is None else json.dumps(
         [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
     return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
@@ -346,7 +368,8 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
                 tags=episode.tags, metadata=episode.metadata,
             )
-            texts = [runtime.embed_text(as_new, c.text) for c in chunks]
+            texts = await embedding_inputs(runtime, as_new, [(c.start, c.end) for c in chunks],
+                                           [c.text for c in chunks])
             vectors = await _embed_chunks(runtime.embedder, texts)
             await runtime.vectors.upsert(
                 [

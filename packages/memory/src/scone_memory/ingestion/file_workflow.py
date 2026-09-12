@@ -32,10 +32,12 @@ class DocumentIngestionWorkflow:
         self._memory = memory
         self._parser = parser or BuiltinDocumentParser()
         self._limits = limits
+        from .table_context import TABLE_CONTEXT_VERSION
+        index_revision = 'document-v1' + (':' + TABLE_CONTEXT_VERSION if memory.table_context_embeddings else '')
         self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
             deadline=deadline, max_retries=max_retries, automatic_retries=automatic_retries, steps=(
                 WorkflowStep('extract', parser_revision, self._extract, idempotent=True, retryable=True),
-                WorkflowStep('index', 'document-v1', self._index, idempotent=True, retryable=True)))
+                WorkflowStep('index', index_revision, self._index, idempotent=True, retryable=True)))
 
     def close(self) -> None:
         self._runner.close()

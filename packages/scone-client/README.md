@@ -234,3 +234,38 @@ restarts a workflow. The server verifies current source access, retained content
 and native entity-classification rules; client-side packet checks establish wire
 consistency and do not independently prove that a model's answer is true. A deleted
 or unavailable source is an error, rather than a fallback to an old result.
+
+### Configured local directory scans
+
+A native host with `SCONE_DIRECTORY_SYNC_CONFIG` advertises `documents.sync`.
+The standalone client discovers only collections available to its key; it cannot
+supply an arbitrary filesystem root. All methods perform one explicit operation.
+Reads, reconnects and repeated starts with the same ID do not resume work.
+
+```python
+from scone import Scone
+
+with Scone(api_key="local-space-key") as memory:
+    sync = memory.directory_sync(expected_space="alpha")
+    collection = next(item for item in sync.collections() if item.collection_id == "notes")
+    run = sync.start("notes-scan-001", collection=collection, delete_missing=False)
+    # Keep this run ID if admission is not confirmed. Check before retrying.
+    current = sync.status(run.record.run_id)
+    print(current.status, current.active_elsewhere, current.outcome_unknown)
+```
+
+Start includes the discovered configuration digest; the host refuses stale
+configuration before execution. `sync.list(limit=20, after=cursor)` reads a bounded
+history page, and `sync.request(run_id)` reads the immutable intent and current
+revision. Resume with a freshly read `SyncStatus` using `sync.resume(status)`;
+`sync.cancel(status)` requests cancellation with the same revision guard. An
+acknowledgement validates the actual transition, not merely a successful HTTP code.
+Refresh status until the worker is idle before resuming after cancellation.
+Completed and partial scans require a new run ID for another scan.
+
+`sync.results(run_id, limit=20, after=index)` returns typed source receipts and
+scan issues with a numeric next cursor. Results bind the expected space/run and
+validate counts and ordering. They describe the completed scan; they do not assert
+that an episode is still retained. Python preserves full 64-bit episode identities
+and marks escaped filesystem diagnostics separately from source paths. No method
+automatically follows pages, retries a write, downloads a model, or resumes a run.

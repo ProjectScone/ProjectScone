@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...core.errors import InvalidInput
 from ..extraction_checkpoint import ExtractionCheckpoints
@@ -16,6 +16,18 @@ _MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 TRANSCRIPTION_CHECKPOINT_KEY = 'media-transcript'
 
 
+class TranscriptionCoverage(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
+    windows: int = Field(ge=1, le=1000)
+    empty_windows: int = Field(ge=0, lt=1000)
+
+    @model_validator(mode='after')
+    def has_observations(self) -> Self:
+        if self.empty_windows >= self.windows:
+            raise ValueError('completed transcription requires a window with observations')
+        return self
+
+
 class CompletedTranscription(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
     schema_version: Literal[1] = 1
@@ -24,6 +36,7 @@ class CompletedTranscription(BaseModel):
     audio_bytes: int = Field(ge=46, le=19_200_044)
     duration_seconds: float = Field(gt=0, le=600, allow_inf_nan=False)
     segments: tuple[TranscriptionSegment, ...] = Field(min_length=1, max_length=20_000)
+    coverage: TranscriptionCoverage | None = None
 
     @field_validator('schema_version', mode='before')
     @classmethod
@@ -71,7 +84,7 @@ def read_transcription(checkpoints: ExtractionCheckpoints, binding: str) -> Comp
 
 
 def save_transcription(checkpoints: ExtractionCheckpoints, receipt: CompletedTranscription) -> None:
-    raw = receipt.model_dump_json().encode()
+    raw = receipt.model_dump_json(exclude_none=True).encode()
     if len(raw) > _MAX_RECEIPT_BYTES:
         raise InvalidInput('media transcription checkpoint exceeds its byte limit')
     checkpoints.put(TRANSCRIPTION_CHECKPOINT_KEY, raw)

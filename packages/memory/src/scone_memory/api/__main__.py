@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ..ingestion.document_media import DocumentMedia
     from ..ingestion.document_ocr import DocumentOcr
     from ..ingestion.import_service import DocumentImportService
+    from ..ingestion.directory_service import DirectorySyncService
     from ..realtime.catalog import PersonaCatalog
     from ..runtime.model_runtime import DynamicLocalCatalog
 
@@ -25,10 +26,12 @@ from .app import create_app
 def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None):
     from ..runtime.agent_runtime import load_agent_runtime
     from ..runtime.document_jobs import load_document_imports
+    from ..runtime.directory_sync import load_directory_sync
     from ..runtime.document_ocr import build_document_ocr
 
     agents = load_agent_runtime(settings.agents_config, engine) if settings.agents_config else None
     imports = None
+    directory_sync = None
     try:
         if document_media is None and settings.document_media_config:
             from ..runtime.document_media import load_document_media
@@ -37,19 +40,31 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
         if settings.document_jobs_config:
             imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media,
                 ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
-        app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports, document_media=document_media)
+        if settings.directory_sync_config:
+            directory_sync = load_directory_sync(settings.directory_sync_config, engine,
+                document_ocr=ocr, document_media=document_media,
+                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+        app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports,
+                         document_media=document_media, directory_sync_service=directory_sync)
         return agents.own(app) if agents is not None else app
     except BaseException:
-        if imports is not None:
-            imports.close_idle()
-        if agents is not None:
-            agents.close_idle()
+        try:
+            if directory_sync is not None:
+                directory_sync.close_idle()
+        finally:
+            try:
+                if imports is not None:
+                    imports.close_idle()
+            finally:
+                if agents is not None:
+                    agents.close_idle()
         raise
 
 
 def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *,
                document_ocr: DocumentOcr | None = None,
                document_import_service: DocumentImportService | None = None,
+               directory_sync_service: DirectorySyncService | None = None,
                document_media: DocumentMedia | None = None):
     """The app ``serve`` runs: the memory API alone, or the conversation
     service composed over it on the same origin when the settings name a
@@ -59,6 +74,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     store = None
     model_management = False
     vision_available = None
+    vision_factory = None
     if settings.model_connections:
         from ..runtime.model_connections import ModelConnectionStore
         from ..runtime.model_runtime import LocalModelWorker, connection_defaults, local_admin_enabled
@@ -67,6 +83,9 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         worker = LocalModelWorker(engine, settings, store)
         model_management = local_admin_enabled(settings)
         vision_available = lambda: store.get('vision') is not None
+        from ..runtime.model_runtime import local_vision_factory
+
+        vision_factory = local_vision_factory(store)
     else:
         worker = build_worker(engine, settings, settings.keys.values())
 
@@ -79,22 +98,18 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
             target = getattr(app.state, 'memory_app', app)
             target.state.model_connections = store
             mount_model_connection_routes(target, store, authorize_local_admin(settings), on_change=worker.refresh)
-            from .image_understanding import mount_image_understanding_routes
-            from ..runtime.model_runtime import authorize_image_write, local_vision_factory
-
-            mount_image_understanding_routes(target, engine, authorize_image_write(settings, engine),
-                                             local_vision_factory(store))
         install_http_diagnostics(app)
         return app
 
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
                           document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media,
+                          directory_sync_service=directory_sync_service,
                           agent_catalog=agents.catalog if agents else None,
                           agent_plan_store=agents.plans if agents else None,
                           agent_run_service=agents.service if agents else None,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
-                          model_connections_available=model_management, vision_available=vision_available))
+                          model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory))
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
@@ -140,12 +155,13 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
                                    document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media,
+                                   directory_sync_service=directory_sync_service,
                                    agent_catalog=agents.catalog if agents else None,
                                    agent_plan_store=agents.plans if agents else None,
                                    agent_run_service=agents.service if agents else None,
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    runtime_available=runtime_available,
-                                   model_connections_available=model_management, vision_available=vision_available,
+                                   model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
                                    tool_retrieval=conversation_tools))
 
@@ -219,7 +235,13 @@ def main(settings: Optional[Settings] = None) -> None:
                     if imports is not None:
                         await imports.aclose()
                 finally:
-                    await engine.close()
+                    try:
+                        target = getattr(getattr(app, 'state', None), 'memory_app', app)
+                        directory_sync = getattr(getattr(target, 'state', None), 'directory_sync_service', None)
+                        if directory_sync is not None:
+                            await directory_sync.aclose()
+                    finally:
+                        await engine.close()
 
     from ._signals import termination_unwinds
     with termination_unwinds():
