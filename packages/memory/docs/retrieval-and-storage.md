@@ -297,7 +297,26 @@ ends a part, while a `;` or an "and" splits only on evidence:
 | `How many days passed between the day I cancelled ... and the day I did ...` | whole | "between … and …" *is* the question |
 | `... the 'To Adapt or Not to Adapt? Real-Time Adaptation' submission?` | whole | the `?` is inside a quoted title |
 
-The last three rows were not foreseen. An earlier version required only
+### The languages we claim, and what they actually gave
+
+Being on a supported list is a claim, and four of ours were not true. Each
+was found by running the extractor over five lines of the language rather
+than by reading the list:
+
+| language | what it gave | what it gives now |
+| --- | --- | --- |
+| Rust | **no inheritance at all**, and `impl Shelf` counted as a second definition of Shelf | `impl Store for Shelf` → `Shelf inherits Store`; an inherent `impl` is neither an edge nor a definition |
+| Go | **no definition for `type Shelf struct`** — Go types were invisible | `type … struct` and `type … interface` define |
+| Kotlin | `inherits Base()` — the call kept, so `Base()` and `Base` were two entities | `inherits Base` |
+| Scala | **nothing**: `extends Base(3) with Store` defeated the clause pattern on both the parens and the `with` | both bases, with `with` read as a clause |
+
+A graph holding both `Base()` and `Base` cannot answer a question about
+either, and a Rust graph without `impl … for …` is missing the language's
+most important relation. Fixing what the list already promised was worth
+more than adding a twentieth language: tree-sitter would bring ~40, and
+that is a dependency and a grammar per language rather than a patch.
+
+The last three rows of the earlier table were not foreseen. An earlier version required only
 an asking word on each side, and on real LongMemEval questions it split
 "how many hours of jogging and yoga did I do last week" at the "and",
 because "did" satisfied the test; it also split a paper's title at the

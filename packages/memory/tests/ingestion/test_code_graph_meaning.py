@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from scone_memory.ingestion.code_graph import CITES, FLAGS, INHERITS, NOTES, code_claims
+from scone_memory.ingestion.code_graph import (CITES, DEFINES, FLAGS, INHERITS, NOTES,
+                                               code_claims)
 
 MODULE = '''"""Storage shelves."""
 
@@ -270,3 +271,53 @@ def test_a_note_in_a_comment_beside_commented_out_code_is_still_read():
     assert any(c.predicate == NOTES and "kept for reference" in c.object for c in found), found
     assert any(c.predicate == CITES and c.object == "ADR-9" for c in found), found
     assert [c.object for c in found if c.predicate == INHERITS] == []
+
+
+# Languages this framework already advertises, tested because a claimed
+# capability that does not work is worse than an absent one. Each of these
+# was broken when the list said the language was supported.
+
+def test_rust_impl_for_is_an_inheritance_edge():
+    """`impl Store for Shelf` is the most important relation in Rust code
+    and produced nothing at all."""
+    source = ("pub struct Shelf { size: u32 }\n"
+              "impl Store for Shelf {\n    fn open(&self) {}\n}\n"
+              "trait Store { fn open(&self); }\n")
+    found = code_claims(source, "a.rs", language="braces")
+    edges = [(c.subject, c.object) for c in found if c.predicate == INHERITS]
+    # The trait is declared in this file, so it resolves to its path --
+    # which is the better answer than the bare name this test first
+    # expected, and the reason to assert the resolved form.
+    assert ("a.rs:Shelf", "a.rs:Store") in edges, edges
+
+
+def test_a_rust_inherent_impl_is_not_a_second_definition():
+    """`struct Shelf` then `impl Shelf` is one type, not two."""
+    source = "pub struct Shelf { size: u32 }\nimpl Shelf {\n    fn open(&self) {}\n}\n"
+    found = code_claims(source, "a.rs", language="braces")
+    defined = [c.object for c in found if c.predicate == DEFINES and c.object.endswith(":Shelf")]
+    assert len(defined) == 1, defined
+    assert not [c for c in found if c.predicate == INHERITS], "an inherent impl inherits nothing"
+
+
+def test_a_go_type_is_defined():
+    """`type Shelf struct` produced nothing, so Go types were invisible
+    while Go was on the supported list."""
+    source = ("type Shelf struct {\n    size int\n}\n"
+              "func (s *Shelf) Open() {}\n"
+              "type Store interface {\n    Open()\n}\n")
+    found = code_claims(source, "a.go", language="braces")
+    defined = {c.object.split(":")[-1] for c in found if c.predicate == DEFINES}
+    assert {"Shelf", "Store"} <= defined, defined
+
+
+def test_a_base_class_is_not_named_after_its_constructor_call():
+    """Kotlin and Scala write `class Shelf : Base(), Store`. Keeping the
+    parentheses makes `Base()` and `Base` two different entities, which is
+    a graph that cannot answer a question about Base."""
+    for source, path in (("class Shelf : Base(), Store {\n    fun open() {}\n}\n", "a.kt"),
+                         ("class Shelf extends Base(3) with Store {\n}\n", "a.scala")):
+        found = code_claims(source, path, language="braces")
+        bases = [c.object for c in found if c.predicate == INHERITS]
+        assert all("(" not in one and ")" not in one for one in bases), (path, bases)
+        assert "Base" in bases, (path, bases)
