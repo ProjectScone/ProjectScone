@@ -284,7 +284,8 @@ class DirectorySyncService:
             raise WorkflowError('sync_configuration_changed')
         return self._admit(space, run_id, collection, record.spec, expected_revision, admission_guard)
 
-    async def cancel(self, space: str, run_id: str, *, expected_revision: int) -> SyncServiceStatus:
+    async def cancel(self, space: str, run_id: str, *, expected_revision: int,
+                     admission_guard: Callable[[], None] | None = None) -> SyncServiceStatus:
         _integer(expected_revision, 0, 2**31 - 1)
         record = await self.request(space, run_id)
         if record is None:
@@ -299,6 +300,8 @@ class DirectorySyncService:
                     raise WorkflowError('sync_owned_elsewhere') from None
                 raise
         try:
+            if admission_guard is not None:
+                admission_guard()
             task = self._tasks.get(identity)
             try:
                 record = self._runs.request_cancel(space, run_id, expected_revision=expected_revision)

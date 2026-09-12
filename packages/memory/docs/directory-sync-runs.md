@@ -109,5 +109,35 @@ A stale control revision never cancels a newer attempt. Storage failure cannot
 manufacture a successful result: an unpublished attempt remains recoverable and
 is reported as interrupted once ownership ends.
 
-This native interface does not yet add standard-host configuration, HTTP routes,
-Documents controls, scheduling, remote connectors or distributed workers.
+Hosts can inject the service through `create_app(directory_sync_service=service)`
+or `create_conversation_app(..., directory_sync_service=service)`. Both advertise
+`documents.sync` and own service shutdown. Without the service, the capability is
+false and the routes are absent. Cleanup drains before propagating cancellation;
+a worker startup failure also closes the registry.
+
+The authenticated HTTP interface exposes:
+
+| Method | Route | Behavior |
+| --- | --- | --- |
+| GET | `/v1/sync-collections` | Configured collection catalog in `items` |
+| POST | `/v1/sync-runs` | Admit `{run_id, collection_id, delete_missing?}` |
+| GET | `/v1/sync-runs` | Status history with `limit` and opaque `after` cursor |
+| GET | `/v1/sync-runs/{run_id}` | Status and immutable request in `record` |
+| GET | `/v1/sync-runs/{run_id}/request` | Durable request and control record |
+| GET | `/v1/sync-runs/{run_id}/result` | Historical outcomes with `limit` and integer `after` |
+| POST | `/v1/sync-runs/{run_id}/resume` | Explicit resume with `{expected_revision}` |
+| POST | `/v1/sync-runs/{run_id}/cancel` | Cancellation intent with `{expected_revision}` |
+
+Responses carry `Cache-Control: no-store`. Reads require read permission and
+controls require write permission. The host rechecks credential scope after
+asynchronous reads and before durable admission. Requests are strict JSON objects
+of at most 8 KiB; duplicate keys, unknown fields, arbitrary paths and supplied
+spaces are refused. Busy admission returns 429 with `Retry-After: 1`; stale
+revisions, foreign ownership and unavailable results return 409. Missing runs or
+collections return 404. POST success returns 202: cancellation acknowledges the
+intent, so poll status for worker completion and its updated revision before
+resuming. A historical episode identifier still needs current source authorization
+and may now return Gone.
+
+Standard-host environment configuration, Documents controls, scheduling, remote
+connectors and distributed workers remain separate work.
