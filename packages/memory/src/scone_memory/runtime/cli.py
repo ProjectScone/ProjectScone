@@ -956,25 +956,13 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
 def _staged(record: dict) -> dict:
     """A stage's receipt without its own copy of the passages.
 
-    Every stage replaces the answer's items with its output -- widening,
-    withholding, code context and merging all do -- so a receipt's copy
-    of the text is always redundant with `items`, and always older than
-    it. Emitting one hands back what a later stage removed: text a
-    withholding policy took out, or a passage whose source a later stage
-    found deleted.
-
-    So the copy is dropped from every stage, unconditionally. Dropping it
-    only when some flag is set treats one symptom of the class -- it was
-    written that way first, conditioned on a withholding policy, and the
-    deletion case walked straight through the gap. The counts are the
-    useful part of a receipt and they stay.
+    The rule and the reasoning live in `retrieval/receipts.py`, because
+    the HTTP route stages the same pipeline and the first version of this
+    existed here only.
     """
-    kept = {key: value for key, value in record.items() if key != "items"}
-    if "items" in record:
-        kept["items_not_repeated"] = (
-            "the passages this answer returns are in `items`; this receipt described them at "
-            "an earlier stage and its copy is not returned")
-    return kept
+    from ..retrieval.receipts import staged
+
+    return staged(record)
 
 
 def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:

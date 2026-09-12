@@ -35,6 +35,8 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
+from ..retrieval.receipts import staged
+from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
@@ -419,6 +421,9 @@ def create_app(
             "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
             "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
             "recall.structural_context": True,
+            # Both of these were reachable from the CLI only, which made
+            # them features the HTTP consumer did not have.
+            "recall.window": True, "recall.code_context": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -812,6 +817,13 @@ def create_app(
                         "(email,phone,ip,card,secret). A net of patterns, never a guarantee: "
                         "nothing withheld is not a finding that there is nothing to find."),
         rerank: bool = True,
+        window: int = Query(default=0, ge=0, le=MAX_WINDOW,
+                            description="Widen every returned passage by this many bytes either "
+                                        "side, read from the episode. 0 leaves them as indexed."),
+        code_context: bool = Query(default=False,
+                                   description="Quote the declaration's signature and the file's "
+                                               "imports beside a code passage, with their line "
+                                               "numbers. Never spliced into the passage."),
         structural_context: bool = False,
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
@@ -844,12 +856,34 @@ def create_app(
                     f"withhold does not reach {', '.join(uncovered)}, and a report that named "
                     f"only the items would read as covering the whole answer; ask for one or "
                     f"the other")
+            # A sharper refusal than the one above, and a different
+            # reason. Code context does not merely go unscanned: it reads
+            # the file again *after* withholding and quotes a signature
+            # and import lines out of it, so it hands back what was just
+            # withheld. `window` is absent from both lists on purpose --
+            # it widens before withholding, so what it opens is scanned.
+            if code_context:
+                raise InvalidInput(
+                    "withhold cannot be combined with code_context: code context quotes the "
+                    "file again after withholding, which would hand back what was withheld; "
+                    "ask for one or the other")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
+        opened = None
+        if window:
+            from ..retrieval.window import widen
+
+            # Before withholding, so the bytes it opens are scanned like
+            # any other. After it, a window would be an unscanned surface
+            # holding exactly the text the policy was asked to remove.
+            opened = await widen(engine, space, result.items, before=window, after=window)
+            result = result.model_copy(update={
+                "items": list(opened.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
         kept = None
         if policy:
             from ..retrieval.withhold import withhold
@@ -862,6 +896,20 @@ def create_app(
                 "history": list(kept.facts[len(result.facts):]),
                 # The bytes handed back changed, so the count must too.
                 "returned_bytes": sum(len(i.text.encode()) for i in kept.items)})
+        inside = None
+        if code_context:
+            from ..retrieval.code_context import code_context as read_code_context
+
+            # **Last**, after every stage that re-reads a source. It
+            # quotes the file itself, so a stage running after it could
+            # find that source deleted and leave the answer correctly
+            # empty while the quoted signature still printed.
+            inside = await read_code_context(engine, space, result.items)
+            # A source this stage finds gone leaves the answer too, not
+            # only the context.
+            result = result.model_copy(update={
+                "items": list(inside.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in inside.items)})
         response: dict[str, object] = {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
@@ -885,6 +933,10 @@ def create_app(
                                     # what was scanned is the half that
                                     # stops it reading as coverage.
                                     "surfaces": list(kept.surfaces), "why": kept.why}
+        if opened is not None:
+            response["widened"] = staged(opened.record())
+        if inside is not None:
+            response["code_context"] = staged(inside.record())
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if graph_boost:
