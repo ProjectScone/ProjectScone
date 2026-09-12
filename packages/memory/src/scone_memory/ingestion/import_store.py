@@ -40,7 +40,7 @@ class DocumentImportSpec(BaseModel):
     @model_serializer(mode='wrap')
     def serialize_selection(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         result: dict[str, object] = handler(self)
-        if not self.video_ocr:
+        if self.video_ocr is False:
             result.pop('video_ocr', None)
         return result
 

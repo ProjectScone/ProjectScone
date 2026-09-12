@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 import re
 
 from .formats.media import VIDEO_EXTENSIONS
@@ -21,6 +22,8 @@ class DocumentVideo:
             raise ValueError('document video requires a configured VideoDocumentParser')
         if not isinstance(self.revision, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', self.revision) is None:
             raise ValueError('document video requires a bounded operator revision')
+        if find_spec('PIL') is None:
+            raise ValueError('document video requires the installed scone-memory[images] extra')
 
 
 def video_choices(config: DocumentVideo | None) -> dict[str, object]:

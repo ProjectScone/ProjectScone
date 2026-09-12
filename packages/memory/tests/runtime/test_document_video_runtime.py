@@ -109,3 +109,23 @@ def test_default_import_choice_preserves_legacy_serialization():
     assert DocumentImportSpec.model_validate_json(spec.model_dump_json()) == spec
     selected = DocumentImportSpec(attachment_id='a' * 64, filename='slides.mp4', parser_revision='v1', video_ocr=True)
     assert selected.model_dump()['video_ocr'] is True
+
+
+def test_missing_image_dependency_refuses_configured_video(tmp_path, monkeypatch):
+    import scone_memory.ingestion.document_video as module
+    monkeypatch.setattr(module, 'find_spec', lambda name: None, raising=False)
+    with pytest.raises(ValueError, match='images'):
+        load_document_video(str(configuration(tmp_path)))
+
+
+@pytest.mark.parametrize('value', [None, 0, '', []])
+def test_copied_invalid_video_choice_cannot_disappear_before_validation(tmp_path, value):
+    from scone_memory.ingestion.import_store import DocumentImportSpec, DocumentImportStore
+    spec = DocumentImportSpec(attachment_id='a' * 64, filename='notes.txt', parser_revision='v1')
+    store = DocumentImportStore(tmp_path / 'requests.sqlite', key=b'x' * 32)
+    try:
+        with pytest.raises(ValueError):
+            store.register('alpha', 'invalid', spec.model_copy(update={'video_ocr': value}))
+        assert store.get('alpha', 'invalid') is None
+    finally:
+        store.close()
