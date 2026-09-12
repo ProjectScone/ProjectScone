@@ -182,6 +182,31 @@ rather than chosen: a rule that cannot be overridden is a rule somebody
 will work around, and then the framework learns nothing from being
 wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
 
+### Checking the rule instead of asserting it
+
+A routing rule written down is only better than one a model invents if
+somebody checks it, so the check is part of the framework rather than a
+scratch script:
+
+```bash
+scone bench-route bench-data/temporal-40.json
+# routing: 40 question(s) of …: temporal 12, graph 0, recall 28; of 12 computed,
+# 9 agree with the file. This does not say whether a question sent to search
+# would have been answered better another way: the file has one answer, not one
+# per route.
+```
+
+Each question gets its own memory, so the configured store is neither
+read nor written, and the computed answers are scored against the file's
+own answers — read from the file, because the bench loader keeps only the
+fields retrieval is scored on.
+
+What this **cannot** say is the more interesting half: whether a question
+the rule sent to search would have been answered better by computing it.
+That needs a known answer for every question under every route, which
+these files do not have. The report says so in its own output rather than
+reading as though the rule had been vindicated.
+
 ## Questions about dates, answered by computation
 
 Much of what people ask memory is arithmetic over dates: how long between

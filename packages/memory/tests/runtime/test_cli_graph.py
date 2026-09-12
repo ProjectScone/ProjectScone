@@ -461,3 +461,28 @@ async def test_graph_match_takes_what_follows_only_when_asked():
     said = out.getvalue()
     assert code == 0, said
     assert "Acme Robotics" in said and "follows: inverse" in said, said
+
+
+def test_bench_route_says_where_a_file_of_questions_went(tmp_path):
+    """A measurement only anyone can run is one the CLI can run."""
+    from tests.benchmarks.test_bench_route import DATASET
+
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(DATASET), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench-route", str(path)], env={}, stdin=io.StringIO(""), out=out)
+    assert code == 0, out.getvalue()
+    assert "routing: 2 question(s)" in out.getvalue(), out.getvalue()
+    assert "1 agree with the file" in out.getvalue(), out.getvalue()
+
+
+def test_bench_route_reports_as_json_when_asked(tmp_path):
+    from tests.benchmarks.test_bench_route import DATASET
+
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(DATASET), encoding="utf-8")
+    out = io.StringIO()
+    code = cli.main(["bench-route", str(path), "--limit", "1", "--json"],
+                    env={}, stdin=io.StringIO(""), out=out)
+    assert code == 0, out.getvalue()
+    assert json.loads(out.getvalue())["questions"] == 1

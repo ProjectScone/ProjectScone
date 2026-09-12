@@ -300,6 +300,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("bench-route",
+                       help="score the rule that chooses a route, on a file of questions (no model called)")
+    p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
+    p.add_argument("--limit", type=int, help="only the first N questions")
+
     p = sub.add_parser("answer", help="answer a question with whichever machinery suits it, and say which")
     p.add_argument("question")
     p.add_argument("--route", choices=("temporal", "graph", "recall"),
@@ -493,6 +498,17 @@ async def temporal_command(args: argparse.Namespace, settings: Settings, out) ->
     from ..bench.temporal import run_temporal
 
     scored = await run_temporal(args.dataset, limit=args.limit)
+    print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def route_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Score where the routing rule sends each question. Each question gets
+    its own memory, so the configured store is not read or written, and the
+    report says plainly what the file cannot tell us."""
+    from ..bench.route import run_route_bench
+
+    scored = await run_route_bench(args.dataset, limit=args.limit)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
     return 0
 
@@ -1506,10 +1522,12 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "calibrate", "tune"):
+    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
+                        "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
-                   "calibrate": calibrate_command, "tune": tune_command}[args.command]
+                   "bench-route": route_command, "calibrate": calibrate_command,
+                   "tune": tune_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
         except SconeError as e:
