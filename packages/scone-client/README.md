@@ -178,3 +178,32 @@ checking the host's `formats.pdf_ocr_available` and advertised choices. Users se
 OCR behavior; the host owns the parser implementation, revision, and processing limits.
 Upload and job admission are separate explicit writes. Uploaded bytes must fit the
 host's advertised input limit and the client's 25 MiB ceiling.
+
+Completed agent outputs are typed and checked against the saved execution request:
+
+```python
+from scone import TaskResult, HandoffResult, ModelOutput, HumanOutput
+
+result = agents.result("run-1")
+if isinstance(result, TaskResult):
+    for output in result.results.values():
+        if isinstance(output, ModelOutput):
+            print(output.model_id, output.text, output.evidence_ids)
+        elif isinstance(output, HumanOutput):
+            print("Human reply", output.text, output.activation_id)
+elif isinstance(result, HandoffResult):
+    print(result.status, result.final.text if result.final else None)
+```
+
+Model receipts retain the selected model, binding, dependency IDs, call counts,
+and immutable evidence packets. Packet identifiers and path references must agree
+with the returned records; nested packet data is read-only. A human output must
+match a freshly read activated reply and cannot carry model/evidence fields.
+A handoff-limit result preserves actual hops and has no final answer.
+
+`result()` performs only reads. For interactive runs it reads input receipts first,
+then requests the source-verified result last. It never runs another model or
+restarts a workflow. The server verifies current source access, retained content,
+and native entity-classification rules; client-side packet checks establish wire
+consistency and do not independently prove that a model's answer is true. A deleted
+or unavailable source is an error, rather than a fallback to an old result.
