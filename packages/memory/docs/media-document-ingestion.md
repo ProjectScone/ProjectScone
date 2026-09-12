@@ -123,3 +123,55 @@ additional native model adapters, and video-frame analysis remain separate
 capabilities from this HTTP surface. The loopback integration test runs a real
 multipart HTTP service with scripted segments, normalizes stereo audio, and checks
 retained evidence after reopening SQLite without another transcription request.
+
+## Configure the standard server
+
+The standard `scone-memory serve` launcher can enable media without a custom Python
+host. Create an owned regular file with mode `0600`, for example
+`/absolute/path/to/document-media.json`:
+
+```json
+{
+  "schema_version": 1,
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "operator-selected-timestamp-model",
+  "model_revision": "local-weights-v1",
+  "ffmpeg_executable": "/absolute/path/to/ffmpeg",
+  "max_duration_seconds": 60,
+  "timeout_seconds": 120
+}
+```
+
+Set `SCONE_DOCUMENT_MEDIA_CONFIG` to this path alongside the normal server settings.
+The same configuration applies to the memory-only host, the composed conversation
+host and durable document jobs. An explicit `build_app(..., document_media=...)`
+argument takes precedence over the file for custom host composition.
+
+The endpoint must be loopback or `localhost`, and ffmpeg must already exist and be
+executable. If the service requires authentication, add `"api_key_env":
+"LOCAL_TRANSCRIPTION_KEY"` and supply that environment variable privately. Do not
+put the credential value in JSON. Missing credentials, unknown fields, duplicate
+keys and invalid or nonprivate files refuse startup. Loading config does not
+contact the endpoint, start a model, or resume an interrupted import.
+
+The derived transcriber revision binds the nonsecret settings, the explicit
+`model_revision` and the SHA-256 of the decoder executable's contents. Loading the
+configuration reads the decoder in bounded blocks without executing it; empty,
+nonregular, changing or larger-than-512-MiB executables refuse startup. Installer
+symlinks are supported and bind the target's contents. Changing the model, endpoint,
+decoder bytes, decoder path or limits changes that identity and prevents a saved
+job from resuming or returning a result under the new configuration.
+
+Restart the host after changing the decoder; its fingerprint is captured at config
+load, not monitored continuously. The hash covers the executable itself, not dynamic
+libraries or programs called by a wrapper. Bump `model_revision` when changing those
+dependencies, model weights or server behavior at unchanged paths. Credential
+rotation alone preserves extraction identity. Startup errors identify file,
+configuration-content, provider/credential or decoder-fingerprint failures without
+printing configuration values or secrets.
+
+Provider timeouts are ceilings, not an extension of extraction budgets. Synchronous
+imports and checked audio decoding each use the default 30-second document budget.
+Durable imports use their job configuration's `limits.timeout_seconds` (up to 120
+seconds); a slower successful import may still exceed the separate playback read
+budget. A decode timeout returns a time-limit error before any audio digest check.
