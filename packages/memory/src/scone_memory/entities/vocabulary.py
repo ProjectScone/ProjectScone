@@ -79,23 +79,77 @@ class Vocabulary:
                 "meanings": None if self.meanings is None else self.meanings.record()}
 
 
-def _identity(source: str, meanings: Optional[RelationMeanings]) -> str:
-    """A short digest of what is in force, for a cache key."""
-    said = json.dumps({"source": source,
+def _identity(source: str, meanings: Optional[RelationMeanings],
+              at: Optional[str] = None) -> str:
+    """A short digest of what is in force, for a cache key. ``at`` carries
+    the saved revision, so a view built under one revision is never served
+    for another even if the meanings happen to look alike."""
+    said = json.dumps({"source": source, "at": at,
                        "meanings": None if meanings is None else meanings.record()},
                       sort_keys=True, default=str)
     return hashlib.sha256(said.encode()).hexdigest()[:16]
 
 
+async def resolve_vocabulary(engine: "MemoryEngine", space: str) -> "Vocabulary":
+    """Read the space's vocabulary from the store and hold it.
+
+    Called when an engine opens, on the thread that owns the store's
+    connection. A store of this kind is bound to its creating thread, so
+    a request served on another thread must not reach it -- and a cache
+    that could go stale without saying so would be worse than one read at
+    a known moment.
+
+    **The contract, stated rather than implied: a vocabulary saved after
+    an engine opened takes effect when that engine is reopened.** That is
+    how configuration usually behaves, it costs nothing per request, and
+    it still fixes the thing that was broken -- two processes reading one
+    space now agree, instead of each applying whatever it was told.
+    """
+    held = await _read(engine, space)
+    kept = getattr(engine, "_vocabulary_read", None)
+    if kept is None:
+        kept = {}
+        setattr(engine, "_vocabulary_read", kept)
+    kept[space] = held
+    return held
+
+
 async def read_vocabulary(engine: "MemoryEngine", space: str) -> Vocabulary:
     """The meanings in force for this space, and where they came from.
 
-    Reads nothing from any store: the answer is this process's
-    configuration, which is the honest answer while a space cannot hold
-    one of its own.
+    Returns what :func:`resolve_vocabulary` settled for this space if it
+    has been resolved, so a request never reaches a thread-bound store.
     """
     check_space(space)
     process = engine.relation_meanings
+    resolved = getattr(engine, "_vocabulary_read", None)
+    if resolved is not None and space in resolved:
+        return resolved[space]
+    return await _read(engine, space)
+
+
+async def _read(engine: "MemoryEngine", space: str) -> Vocabulary:
+    """Work out what is in force, reading the store if one is attached."""
+    process = engine.relation_meanings
+    kept = getattr(engine, "vocabulary", None)
+    if kept is not None:
+        saved = kept.get(space)
+        if saved is not None and not saved.cleared:
+            held = saved.meanings
+            return Vocabulary(
+                meanings=held, source="space",
+                why=f"the space holds this vocabulary, saved at {saved.saved_at.isoformat()} "
+                    f"(revision {saved.revision}); every reader of the space applies it, "
+                    f"whatever each process was configured with",
+                identity=_identity("space", held, f"{space}:{saved.revision}"))
+        if saved is not None:
+            return Vocabulary(
+                meanings=process, source="process" if process else "none",
+                why=(f"the space's vocabulary was cleared at {saved.saved_at.isoformat()}, so "
+                     + ("this process's configuration applies" if process
+                        else "the graph holds only what was said")),
+                identity=_identity("process" if process else "none", process,
+                                   f"{space}:cleared:{saved.revision}"))
     if process is None:
         return Vocabulary(
             meanings=None, source="none",

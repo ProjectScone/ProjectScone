@@ -226,14 +226,17 @@ class EntityService:
         self._projecting.pop(slot, None)
 
     async def _project(self, space: str, facts: list[Fact], revision: int,
-                       meanings: "RelationMeanings | None" = None) -> tuple[EntityProjection, int]:
+                       meanings: "RelationMeanings | None" = None,
+                       source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
         if len(facts) <= INLINE_FACTS:
-            return project_entities(space, facts, revision=revision,
-                                    meanings=meanings), len(facts)
+            return project_entities(space, facts, revision=revision, meanings=meanings,
+                                    vocabulary_source=source,
+                                    vocabulary_why=why), len(facts)
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="scone-projection")
         worker = self._executor.submit(partial(project_entities, space, facts, revision=revision,
-                                               meanings=meanings))
+                                               meanings=meanings, vocabulary_source=source,
+                                               vocabulary_why=why))
         self._workers.add(worker)
         worker.add_done_callback(self._workers.discard)
         return await asyncio.wrap_future(worker), len(facts)
@@ -252,9 +255,10 @@ class EntityService:
             self._slots.release()
 
     async def _admitted(self, space: str, facts: list[Fact], revision: int,
-                        meanings: "RelationMeanings | None" = None) -> tuple[EntityProjection, int]:
+                        meanings: "RelationMeanings | None" = None,
+                        source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
         try:
-            return await self._project(space, facts, revision, meanings)
+            return await self._project(space, facts, revision, meanings, source, why)
         finally:
             self._free()
 
@@ -284,7 +288,8 @@ class EntityService:
                     self._free()
                 else:
                     pending = asyncio.ensure_future(
-                        self._admitted(space, facts, held.ledger.revision, vocabulary.meanings))
+                        self._admitted(space, facts, held.ledger.revision, vocabulary.meanings,
+                                       vocabulary.source, vocabulary.why))
                     self._projecting[slot] = pending
                     pending.add_done_callback(partial(self._projected, slot))
             found = await asyncio.shield(pending)

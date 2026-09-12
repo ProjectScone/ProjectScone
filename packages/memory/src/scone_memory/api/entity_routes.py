@@ -25,6 +25,7 @@ from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..entities.analysis import GraphAnalysis, analyze_projection
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_context
 from ..entities.sources import sources_view
+from ..entities.vocabulary import read_vocabulary
 from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, timeline_view
 from ..entities.grounding import checked_facts
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
@@ -160,6 +161,17 @@ class ImpliedOut(BaseModel):
     last_valid_until: Optional[str] = None
 
 
+def _provenance(held) -> dict[str, object]:
+    """Where the vocabulary in force came from, for a coverage block.
+
+    On the wire and not only in process: a reader who cannot see this
+    cannot tell why two answers about one space differ, and a claim that
+    every answer says where its vocabulary came from is not true of an
+    answer that does not carry it.
+    """
+    return {"vocabulary_source": held.source, "vocabulary_why": held.why}
+
+
 class Coverage(BaseModel):
     facts_read: int
     #: Facts that count in this view's status mode and moment; the view is
@@ -176,8 +188,19 @@ class Coverage(BaseModel):
     attributes_shown: Optional[int] = None
     #: The vocabulary the implications were worked out under, with the
     #: bounds it applied (max_steps, max_implied, max_walked). None when
-    #: the space configures no meanings and the graph holds only claims.
+    #: no meanings are in force and the graph holds only claims; an empty
+    #: object when the vocabulary in force says there are none, which is a
+    #: different answer.
     meanings: Optional[dict[str, object]] = None
+    #: Where that vocabulary came from: ``space`` when the space holds its
+    #: own, ``process`` when it is this process's configuration, ``none``
+    #: when there is none. Two readers of one space that disagree can only
+    #: discover it if the answer says which.
+    vocabulary_source: Optional[str] = None
+    #: Why, in words -- including the saved revision when the space holds
+    #: one, so two answers built under different revisions are tellable
+    #: apart.
+    vocabulary_why: Optional[str] = None
     implied_total: Optional[int] = None
     implied_shown: Optional[int] = None
     #: Present only when the walk stopped before it had followed
@@ -730,6 +753,12 @@ async def _entity_page(engine: MemoryEngine, space: str, projection: EntityProje
             "coverage": {**read, "relations_total": found.relations_total,
                          "relations_shown": len(found.outgoing) + len(found.incoming),
                          "follows_total": found.follows_total, "follows_shown": len(found.follows),
-                         "meanings": projection.meanings.record() if projection.meanings else None,
+                         # `is None`, never truthiness: RelationMeanings() is
+                         # falsy, so an explicitly empty vocabulary serialised
+                         # as null and a reader could not tell "there are none"
+                         # from "nothing was said".
+                         "meanings": (None if projection.meanings is None
+                                      else projection.meanings.record()),
+                         **_provenance(await read_vocabulary(engine, space)),
                          **({"implied_capped": True} if projection.implied_capped else {}),
                          "truncated": bool(reasons), "reasons": reasons}}

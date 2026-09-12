@@ -29,6 +29,7 @@ from ..ingestion.records import (
 )
 from ..retrieval import fact_recall
 from ..entities.meanings import RelationMeanings
+from ..entities.vocabulary_store import VocabularyStore
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -167,6 +168,11 @@ class MemoryEngine:
         rerank_timeout: float = 1.0,
         many_valued: Iterable[str] = (),
         relation_meanings: "RelationMeanings | None" = None,
+        #: A store holding each space's own relation vocabulary. When one
+        #: is attached, what a space holds beats what this process was
+        #: configured with, so two processes read one space alike.
+        vocabulary: "VocabularyStore | None" = None,
+        vocabulary_spaces: "Sequence[str] | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
     ) -> None:
@@ -178,6 +184,11 @@ class MemoryEngine:
         #: opposites, which read the same both ways, which carry through.
         #: None means the graph holds only what was said.
         self.relation_meanings = relation_meanings
+        self.vocabulary = vocabulary
+        #: Spaces whose vocabulary is read when this engine opens. A space
+        #: not named here falls back to process configuration and says so,
+        #: rather than reaching a thread-bound store from a request.
+        self.vocabulary_spaces: tuple[str, ...] = tuple(vocabulary_spaces or ("default",))
         #: Whether a source stored under a name that says it is code is cut
         #: at its declarations. Names say it, never the content: a note that
         #: quotes code is prose.
@@ -265,6 +276,16 @@ class MemoryEngine:
 
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
+        if self.vocabulary is not None:
+            # Read on this thread, which owns the store's connection, and
+            # held for the life of the engine. A vocabulary saved later
+            # takes effect when the engine is reopened; that contract is
+            # stated in entities/vocabulary.py rather than left to be
+            # discovered.
+            from ..entities.vocabulary import resolve_vocabulary
+
+            for space in self.vocabulary_spaces:
+                await resolve_vocabulary(self, space)
         self.vector_identity = await vector_identity.settle(self)
         report = await self.recover()
         if report.retirements_pending:

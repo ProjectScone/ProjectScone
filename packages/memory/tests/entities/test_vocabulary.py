@@ -132,3 +132,111 @@ async def test_a_process_with_no_vocabulary_implies_nothing():
         assert not found.implied, [one.predicate for one in found.implied]
     finally:
         await engine.close()
+
+
+async def test_a_space_with_a_saved_vocabulary_beats_the_process(tmp_path):
+    """The capability, end to end: what the space holds is what every
+    reader applies, whatever each process was configured with."""
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("default", RelationMeanings(symmetric=["married_to"]), expected_revision=0)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=EMPLOYS, vocabulary=kept).open()
+    try:
+        held = await read_vocabulary(engine, "default")
+        assert held.source == "space", held.why
+        assert held.meanings is not None and held.meanings.reads_both_ways("married_to")
+        assert held.meanings.opposite("works_at") is None, \
+            "the process's configuration must not leak past the space's"
+        assert "saved at" in held.why, held.why
+    finally:
+        await engine.close()
+        kept.close()
+
+
+async def test_a_cleared_space_falls_back_and_says_it_was_cleared(tmp_path):
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("default", RelationMeanings(symmetric=["married_to"]), expected_revision=0)
+    kept.clear("default", expected_revision=1)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=EMPLOYS, vocabulary=kept).open()
+    try:
+        held = await read_vocabulary(engine, "default")
+        assert held.source == "process" and "cleared" in held.why, held.why
+        assert held.meanings is not None and held.meanings.opposite("works_at") == "employs"
+    finally:
+        await engine.close()
+        kept.close()
+
+
+async def test_a_saved_vocabulary_reaches_the_projection(tmp_path):
+    """A store nothing reads would be a receipt, not a capability."""
+    from scone_memory.entities.read import load_projection
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("default", EMPLOYS, expected_revision=0)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                vocabulary=kept).open()
+    try:
+        said = await engine.remember("default", "Ana Alves works at Meridian Health.")
+        await engine.assert_fact("default", "ana alves", "works_at", "Meridian Health",
+                                 valid_from="2024-01-01T00:00:00Z",
+                                 source_episode_id=said.episode_id,
+                                 quote="Ana Alves works at Meridian Health.")
+        found, _ = await load_projection(engine, "default", mode="current")
+        assert any(one.predicate == "employs" for one in found.implied), \
+            "a process configured with nothing still reads the space's vocabulary"
+    finally:
+        await engine.close()
+        kept.close()
+
+
+def test_the_wire_carries_the_vocabulary_provenance(tmp_path):
+    """In process is not on the wire. A caller who cannot see where the
+    vocabulary came from cannot tell why two answers about one space
+    differ, and a claim that every answer says so is untrue of an answer
+    that does not carry it."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from scone_memory.api import create_app
+    from scone_memory.entities.vocabulary_store import VocabularyStore
+
+    kept = VocabularyStore(tmp_path / "v.db", key=b"k" * 32)
+    kept.save("default", EMPLOYS, expected_revision=0)
+
+    async def built():
+        engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                    HashEmbedder(), vocabulary=kept).open()
+        said = await engine.remember("default", "Ana Alves works at Meridian Health.")
+        await engine.assert_fact("default", "ana alves", "works_at", "Meridian Health",
+                                 valid_from="2024-01-01T00:00:00Z",
+                                 source_episode_id=said.episode_id,
+                                 quote="Ana Alves works at Meridian Health.")
+        return engine
+
+    engine = asyncio.run(built())
+    try:
+        with TestClient(create_app(engine, {"k": "default"})) as client:
+            listed = client.get("/v1/entities", headers={"authorization": "Bearer k"})
+            assert listed.status_code == 200, listed.text
+            entities = listed.json()["entities"]
+            assert entities, listed.text
+            found = client.get(f"/v1/entities/{entities[0]['id']}",
+                               headers={"authorization": "Bearer k"})
+            assert found.status_code == 200, found.text
+            # Both the listing and the detail view carry the provenance,
+            # because the claim is about every answer built from a
+            # projection rather than one route.
+            for block in (listed.json()["coverage"], found.json()["coverage"]):
+                assert block["vocabulary_source"] == "space", block
+                assert "saved at" in block["vocabulary_why"], block["vocabulary_why"]
+                assert "revision 1" in block["vocabulary_why"], block["vocabulary_why"]
+    finally:
+        asyncio.run(engine.close())
+        kept.close()
