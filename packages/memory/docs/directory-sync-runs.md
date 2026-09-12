@@ -46,3 +46,68 @@ bounds run capacity, individual records and result pages; it never evicts histor
 implicitly. Wrong keys, substituted rows and missing outcome sequences fail
 explicitly. Close the registry when the owning host has stopped its work; the
 memory engine has its own lifetime.
+
+`DirectorySyncService` adds opt-in local execution around configured
+`DirectoryCollection` instances. The host supplies an already-open engine,
+private state directory, 32-byte key and a tuple of collections. Each collection
+supplies its existing `DirectorySync`, a public identifier and label, and an
+explicit `allow_delete_missing` policy. The service owns its workers and run
+registry; the host retains ownership of the engine.
+
+```python
+from scone_memory.ingestion.directory_service import (
+    DirectoryCollection, DirectorySyncService,
+)
+
+service = DirectorySyncService(
+    private_state_directory, key=local_key, memory=memory,
+    collections=(DirectoryCollection("notes", "Team notes", sync),),
+)
+try:
+    admitted = await service.start("team", "scan-2026-09-12", collection_id="notes")
+    # Admission returns before the scan finishes. Poll status; reads never replay.
+    status = await service.status("team", admitted.record.run_id)
+finally:
+    await service.aclose()
+```
+
+The configured `sync.space` must match the requested space (`team` above).
+`catalog(space)` exposes collection labels, policy and configuration digests;
+absolute source and state paths are not included. `request`, `status` and `list`
+read durable run state. `result` pages historical outcomes after completed or
+partial scans. These methods refuse access to deleted spaces.
+
+`start` is idempotent for the same run identifier and immutable request. It never
+restarts an interrupted attempt. `resume` requires the current record revision,
+original configuration and remaining attempt budget. It reconciles unfinished
+source transitions and scans the **current** directory. Completed and partial
+results require a new run identifier for another scan. `cancel` also requires the
+current revision. Cancellation does not undo previously accepted source changes;
+`outcome_unknown` identifies inactive unfinished attempts whose source effects
+need reconciliation. A deadline is persisted as a failure without automatic retry.
+
+All cooperating service instances must use the same private service directory
+and key. Per-run locks prevent overlapping attempts; per-collection locks prevent
+simultaneous runs against a source root. `max_active` limits workers per service
+instance, not across a distributed fleet. An active owner in another process is
+reported with `active_elsewhere`; cancellation from this process is refused.
+SourceJournal separately guards direct CLI access. Host configuration must remain
+stable while the service is open; changing engine, space, parser, scanner, journal
+or bound settings requires a new service. Each admitted execution pins its
+coordinator, scanner and journal fields; a later host mutation cannot redirect
+that execution to a different space. A final configuration check also refuses
+result publication after a detected change. Parser revisions remain the host's
+contract for changes inside provider or parser implementations.
+
+Shutdown cancels and joins owned workers before closing the registry. If its
+caller is cancelled, shutdown finishes draining and then propagates cancellation.
+This includes provider cancellation cleanup; providers must cooperate with
+cancellation. Blocking filesystem reads already dispatched to threads can finish
+independently, but cannot publish a successful run result. If recording a cancel
+intent fails, the owned worker is still signalled and the storage error is raised.
+A stale control revision never cancels a newer attempt. Storage failure cannot
+manufacture a successful result: an unpublished attempt remains recoverable and
+is reported as interrupted once ownership ends.
+
+This native interface does not yet add standard-host configuration, HTTP routes,
+Documents controls, scheduling, remote connectors or distributed workers.
