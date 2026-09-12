@@ -45,10 +45,12 @@ class LocalDocumentTranscriber:
     replies are refused. Construction performs no I/O; each call owns and closes
     its HTTP client, so cancellation cannot leave a persistent response behind.
     The host owns the service/model lifecycle. No retries or fallbacks occur.
+    allow_empty accepts an explicit empty text and segment list for silent
+    windows; text without observed timestamps remains invalid.
     """
     def __init__(self, *, base_url: str, model: str, api_key: str | None = None,
                  timeout: float = 120, max_response_bytes: int = 4_000_000,
-                 max_segments: int = 10000,
+                 max_segments: int = 10000, allow_empty: bool = False,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         endpoint = validate_self_hosted_endpoint(base_url)
         host = urlsplit(endpoint).hostname
@@ -74,6 +76,9 @@ class LocalDocumentTranscriber:
             raise ValueError('transcription response limit must be in 1024..12000000')
         if type(max_segments) is not int or not 1 <= max_segments <= 10000:
             raise ValueError('transcription segment limit must be in 1..10000')
+        if type(allow_empty) is not bool:
+            raise ValueError('allow_empty must be a boolean')
+        self._allow_empty = allow_empty
         self._url, self._key = endpoint + 'audio/transcriptions', api_key
         self._timeout, self._max_response = timeout, max_response_bytes
         self._max_segments, self._transport = max_segments, transport
@@ -126,6 +131,10 @@ class LocalDocumentTranscriber:
         except (ValueError, RecursionError):
             raise InvalidInput('local document transcription returned invalid JSON') from None
         values = payload.get('segments') if isinstance(payload, dict) else None
+        if self._allow_empty and values == [] and isinstance(payload, dict):
+            text = payload.get('text')
+            if isinstance(text, str) and not text.strip():
+                return ()
         if not isinstance(values, list) or not 1 <= len(values) <= self._max_segments:
             raise InvalidInput('local document transcription requires bounded observed segments')
         segments: list[TranscriptionSegment] = []

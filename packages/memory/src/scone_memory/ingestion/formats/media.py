@@ -151,11 +151,15 @@ class MediaDocumentParser:
     duration limit is rejected rather than silently truncated.
     """
     def __init__(self, transcriber: MediaTranscriber | TranscriptionCallback, *,
-                 ffmpeg_executable: str, max_duration_seconds: float = 60.0) -> None:
+                 ffmpeg_executable: str, max_duration_seconds: float = 60.0,
+                 chunk_seconds: int | None = None) -> None:
         if (not Path(ffmpeg_executable).is_absolute() or not Path(ffmpeg_executable).is_file()
                 or not os.access(ffmpeg_executable, os.X_OK)
                 or not math.isfinite(max_duration_seconds) or not 0 < max_duration_seconds <= 600):
             raise InvalidInput('configure an existing absolute ffmpeg path and duration in (0, 600]')
+        if chunk_seconds is not None and (type(chunk_seconds) is not int or not 1 <= chunk_seconds <= 120):
+            raise InvalidInput('media chunk_seconds must be an integer in 1..120 or None')
+        self._chunk_seconds = chunk_seconds
         self._transcribe = transcriber if callable(transcriber) else transcriber.transcribe
         self._ffmpeg = ffmpeg_executable
         self._max_duration = max_duration_seconds
@@ -182,10 +186,14 @@ class MediaDocumentParser:
         # Deferred because the receipt schema uses the public segment type above.
         from .media_checkpoint import CompletedTranscription, read_transcription, save_transcription, transcription_binding
 
+        from .media_windows import WINDOW_BINDING_KEY, transcribe_windows
+
         suffix = _input(data, filename, limits, AUDIO_EXTENSIONS | VIDEO_EXTENSIONS)
         deadline = monotonic() + limits.timeout_seconds
-        binding = (transcription_binding(data, filename, limits, self._ffmpeg, self._max_duration)
+        binding = (transcription_binding(data, filename, limits, self._ffmpeg, self._max_duration, self._chunk_seconds)
                    if checkpoints is not None else '')
+        if checkpoints is not None and self._chunk_seconds is None and checkpoints.get(WINDOW_BINDING_KEY) is not None:
+            raise InvalidInput('media window checkpoints cannot resume with chunking disabled')
         saved = read_transcription(checkpoints, binding) if checkpoints is not None else None
         audio_wav, duration = await self._decode_audio(data, limits, deadline)
         audio_hash = hashlib.sha256(audio_wav).hexdigest()
@@ -194,6 +202,9 @@ class MediaDocumentParser:
                     or saved.duration_seconds != duration):
                 raise InvalidInput('media transcription checkpoint does not match the decoded audio')
             transcript = saved.segments
+        elif self._chunk_seconds is not None:
+            transcript, _ = await transcribe_windows(audio_wav, seconds=self._chunk_seconds, binding=binding,
+                transcribe=self._transcribe, limits=limits, deadline=deadline, checkpoints=checkpoints)
         else:
             remaining = _remaining(deadline)
             transcript = await asyncio.wait_for(self._transcribe(audio_wav), remaining)
@@ -208,6 +219,11 @@ class MediaDocumentParser:
             save_transcription(checkpoints, CompletedTranscription(binding=binding, audio_sha256=audio_hash,
                 audio_bytes=len(audio_wav), duration_seconds=duration, segments=validated))
         _remaining(deadline)
+        if self._chunk_seconds is not None:
+            from .media_windows import WINDOW_IMPLEMENTATION
+            parsed = ParsedDocument.model_validate({**parsed.model_dump(), 'metadata': {
+                **parsed.metadata, 'transcription_windows': WINDOW_IMPLEMENTATION,
+                'chunk_seconds': str(self._chunk_seconds)}})
         return parsed
 
     async def decode_audio(self, data: bytes, filename: str,

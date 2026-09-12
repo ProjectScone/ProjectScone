@@ -91,8 +91,8 @@ journal. This supports the native parser's existing text and segment budgets.
 The recovery guarantee begins when the receipt write commits. A crash during the
 model call, or between its response and that commit, can still require another
 call on explicit resume. A failed receipt write fails extraction rather than
-claiming completed work. This is recovery of a completed response, not recovery
-inside an unfinished transcription or segmented-audio processing. Custom parsers
+claiming completed work. With whole-file transcription this recovers a completed response. Opt-in audio
+windows, described below, preserve progress between smaller model calls. Custom parsers
 that override `parse` keep their ordinary behavior unless they also opt into
 `parse_checkpointed`; standalone callers must bind model revisions and memory
 scope through the checkpoint-owner contract.
@@ -128,7 +128,7 @@ transcription is checked again before storage. Forgetting the episode removes it
 readable provenance; evidence reads never re-run recognition.
 
 For checked playback, `GET /v1/episodes/{episode_id}/document/audio` returns the
-same mono 16 kHz PCM WAV bytes passed to the transcriber. It decodes the retained
+full normalized mono 16 kHz PCM WAV used as the transcription source. It decodes the retained
 original again without calling the transcription model, checks the current host
 revision and recorded WAV digest/length, and rechecks source and caller scope
 before returning `audio/wav`. Decoder work shares the document ingestion slot
@@ -198,3 +198,44 @@ imports and checked audio decoding each use the default 30-second document budge
 Durable imports use their job configuration's `limits.timeout_seconds` (up to 120
 seconds); a slower successful import may still exceed the separate playback read
 budget. A decode timeout returns a time-limit error before any audio digest check.
+
+## Recover completed audio windows
+
+Set `"chunk_seconds": 30` in the private media configuration, or pass
+`chunk_seconds=30` to `MediaDocumentParser`, to transcribe bounded windows.
+The integer maximum is configurable from 1 to 120 seconds. Omission or `null`
+keeps whole-recording transcription and its existing extraction identity.
+Enabling or changing chunking changes the host revision; use a new import after
+changing that configuration. Custom injected hosts must also change their revision.
+
+The decoder still prepares the complete normalized audio within the existing
+source-byte and duration limits. Windows cover its samples exactly once. Near
+an interior boundary, Scone searches the final 20% (at most two seconds) for at
+least 160 ms of quiet audio and can cut inside that pause. Otherwise it uses the
+maximum window length. This deterministic heuristic does not identify speech,
+skip silence, overlap audio, deduplicate text, or establish transcription accuracy.
+A model can still misrecognize speech at a boundary; evaluate window length against
+your local model and recordings before selecting it.
+
+Each provider receives a mono 16 kHz PCM WAV window and returns times relative to
+that window. Scone validates those times before translating them into the original
+recording's timeline. An explicit empty tuple means the provider observed no text
+in that window. With the standard local adapter, chunking enables `allow_empty`:
+an empty `segments` list is accepted only alongside an empty string `text`.
+Text without observed timestamps is still refused. An entirely empty transcription
+cannot become a document.
+
+Durable extraction commits each validated window to its encrypted journal before
+starting the next model call. After interruption, explicit resume re-decodes and
+checks the whole audio, validates the completed prefix, then processes unfinished
+windows. A partially executed model call must run again; completed windows do not.
+Corrupt receipts, holes in the prefix, changed inputs/settings, and changed decoder
+output fail without silently replacing saved observations. Total text and segment
+budgets apply across windows, and all work shares the original extraction deadline.
+Decoded audio remains outside the journal.
+
+Evidence keeps source-global timestamps and the full normalized audio digest.
+Checked playback serves that full recording, so citations retain their original
+positions even though inference used smaller WAV inputs. The manifest records the
+window implementation and configured maximum. Completed receipt replay preserves
+the same manifest as uninterrupted extraction with the same model observations.

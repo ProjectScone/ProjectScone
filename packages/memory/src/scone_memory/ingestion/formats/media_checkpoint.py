@@ -34,10 +34,13 @@ class CompletedTranscription(BaseModel):
 
 
 def transcription_binding(data: bytes, filename: str, limits: DocumentLimits,
-                          decoder: str, duration: float) -> str:
+                          decoder: str, duration: float, chunk_seconds: int | None = None) -> str:
     settings = {'implementation': 'media-transcription-receipt-v1',
                 'source': hashlib.sha256(data).hexdigest(), 'filename': filename,
                 'limits': limits.model_dump(), 'decoder': decoder, 'max_duration': duration}
+    if chunk_seconds is not None:
+        from .media_windows import WINDOW_IMPLEMENTATION
+        settings.update(chunk_seconds=chunk_seconds, window_implementation=WINDOW_IMPLEMENTATION)
     raw = json.dumps(settings, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
     return hashlib.sha256(raw).hexdigest()
 
