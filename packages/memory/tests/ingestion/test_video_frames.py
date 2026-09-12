@@ -199,3 +199,27 @@ async def test_video_sampler_does_not_take_typescript_or_other_formats(native_to
     ffmpeg, ffprobe = native_tools
     with pytest.raises(InvalidInput, match='extension'):
         await VideoFrameDecoder(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe).sample(b'not video', name)
+
+
+@pytest.mark.parametrize('changes', [{'max_frames': 257}, {'interval_seconds': 0}, {'max_pixels': 20_000_001}])
+def test_copied_policy_cannot_bypass_public_planner_limits(changes):
+    copied = VideoFramePolicy().model_copy(update=changes)
+    with pytest.raises(InvalidInput, match='policy'):
+        plan_frames(inventory(range(257), time_base='1/1', duration=300), copied)
+
+
+@pytest.mark.parametrize('configuration', ['policy', 'limits'])
+async def test_copied_settings_are_refused_before_decoder_processes(native_tools, monkeypatch, configuration):
+    from scone_memory.ingestion import video_frames
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    ffmpeg, ffprobe = native_tools
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail('invalid settings must be refused before subprocess creation')
+
+    monkeypatch.setattr(video_frames, 'run_bounded', forbidden)
+    policy = VideoFramePolicy().model_copy(update={'max_frames': 257}) if configuration == 'policy' else None
+    limits = DocumentLimits().model_copy(update={'timeout_seconds': float('nan')}) if configuration == 'limits' else None
+    with pytest.raises(InvalidInput, match='policy|limits'):
+        await video_frames.VideoFrameDecoder(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe).sample(
+            b'bounded input', 'source.mp4', policy=policy, limits=limits)
