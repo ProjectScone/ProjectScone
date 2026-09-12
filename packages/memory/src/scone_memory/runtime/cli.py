@@ -224,6 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--min-similarity", type=float, help="keep out resembling entities below this cosine similarity")
     g = graph.add_parser("entity", help="one entity: its relations both ways and its values")
     g.add_argument("name")
+    graph.add_parser("meanings", help="what this process takes the space's predicates to mean to each other")
     g = graph.add_parser("timeline", help="one entity's facts in valid time")
     g.add_argument("name")
     g.add_argument("--as-of")
@@ -750,6 +751,29 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
             raise InvalidInput(str(refused)) from None
         print(_ledger_json(found_health.record(space, status="current", as_of=when))
               if getattr(args, "json", False) else found_health.text, file=out)
+        return 0
+
+    if command == "meanings":
+        meanings = engine.relation_meanings
+        if getattr(args, "json", False):
+            print(_ledger_json({"space": space, "meanings": meanings.record() if meanings else None}), file=out)
+            return 0
+        if meanings is None:
+            print(f"meanings: space {space} — nothing is configured, so the graph holds only what was said",
+                  file=out)
+            return 0
+        from ..entities.meanings import MAX_IMPLIED, MAX_STEPS, MAX_WALKED
+
+        pairs = sorted({tuple(sorted((one, other))) for one, other in meanings.inverse.items()})
+        said = [f"meanings: space {space}, as this process is configured"]
+        said += [f"  opposites: {one} ↔ {other}" for one, other in pairs]
+        said += [f"  reads both ways: {name}" for name in meanings.symmetric]
+        said += [f"  carries through: {name}" for name in meanings.transitive]
+        said.append(f"  bounds: a chain is followed {MAX_STEPS} claims at most, a projection holds "
+                    f"{MAX_IMPLIED} implications, and a walk examines {MAX_WALKED} claims")
+        said.append("  what follows is never a claim: it is kept apart, carries the claims under it, "
+                    "and its id begins imp:")
+        print("\n".join(said), file=out)
         return 0
 
     if command == "duplicates":

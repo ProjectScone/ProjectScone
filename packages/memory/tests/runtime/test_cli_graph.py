@@ -420,3 +420,27 @@ def test_tune_refuses_a_candidate_limit_that_is_not_a_number(tmp_path):
     code = cli.main(["tune", str(tmp_path / "nothing.json"), "--candidates", "many"], env={},
                     stdin=io.StringIO(""), out=out)
     assert code == 2
+
+
+async def test_graph_meanings_says_what_the_predicates_are_taken_to_mean():
+    from scone_memory.entities.meanings import RelationMeanings
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                relation_meanings=RelationMeanings(inverse={"works_at": "employs"},
+                                                                   symmetric=["married_to"],
+                                                                   transitive=["part_of"])).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["graph", "meanings"]), memory, io.StringIO(""), out)
+    said = out.getvalue()
+    assert code == 0
+    assert "employs ↔ works_at" in said, "a pair reads the same either way round, so it is shown in one order"
+    assert "reads both ways: married_to" in said and "carries through: part_of" in said
+    assert "4 claims" in said and "200000" in said.replace(",", "")
+
+
+async def test_graph_meanings_says_plainly_when_nothing_is_configured():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["graph", "meanings"]), memory, io.StringIO(""), out)
+    assert code == 0 and "nothing is configured" in out.getvalue()
+    assert "only what was said" in out.getvalue()
