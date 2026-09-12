@@ -443,6 +443,7 @@ def create_app(
             features["agents.handoffs"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.inputs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         if document_import_service is not None:
             features["documents.jobs"] = True

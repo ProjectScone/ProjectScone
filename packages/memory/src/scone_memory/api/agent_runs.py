@@ -9,12 +9,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..agents.catalog import Identifier
 from ..agents.handoff_workflow import HandoffResult
+from ..agents.input_store import AgentInputRecord
 from ..agents.run_service import AgentRunService
 from ..agents.workflow import WorkflowError
 
 
 class _CancelRun(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
+
+
+class _InputResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
+    response: str = Field(min_length=1, max_length=4000)
+    expected_revision: int = Field(ge=1, le=3)
+
+
+class _ContinueRun(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
+    continuation_id: Identifier
+    responses: dict[Identifier, int] = Field(min_length=1, max_length=32)
 
 
 class _StartRun(BaseModel):
@@ -55,9 +68,11 @@ def _failure(error: WorkflowError | ValueError) -> JSONResponse:
         status = 429
     elif code in {'run_request_conflict', 'plan_revision_conflict', 'plan_configuration_changed',
                   'run_scope_changed', 'outcome_unknown', 'run_cancelled', 'sources_invalid',
-                  'not_completed', 'run_not_owned', 'binding_mismatch'}:
+                  'not_completed', 'run_not_owned', 'binding_mismatch', 'input_request_conflict',
+                  'input_revision_conflict', 'input_response_conflict', 'input_activation_conflict',
+                  'input_not_answered', 'input_not_ready', 'interactive_plan_required'}:
         status = 409
-    elif code in {'agent_plan_not_found', 'space_deleted'}:
+    elif code in {'agent_plan_not_found', 'space_deleted', 'run_not_found', 'input_not_found', 'input_task_not_found'}:
         status = 404
     elif code == 'run_request_limit':
         status = 413
@@ -67,6 +82,10 @@ def _failure(error: WorkflowError | ValueError) -> JSONResponse:
     if status == 429:
         response.headers['Retry-After'] = '1'
     return response
+
+
+def _input(record: AgentInputRecord) -> dict[str, object]:
+    return record.model_dump(mode='json', exclude={'invocation_digest'})
 
 
 def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
@@ -146,5 +165,39 @@ def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
                 admission_guard=lambda: assert_current_space(request, space))
             assert_current_space(request, space)
             return _response(asdict(progress)) if progress else _response({'error': 'agent_run_not_found'}, 404)
+        except (WorkflowError, ValueError) as error:
+            return _failure(error)
+
+    @app.get('/v1/agent-runs/{run_id}/inputs')
+    async def inputs(run_id: str, request: Request, space: str = Depends(space_for)) -> JSONResponse:
+        try:
+            records = await service.inputs(space, run_id,
+                admission_guard=lambda: assert_current_space(request, space))
+            assert_current_space(request, space)
+            return _response({'space': space, 'run_id': run_id, 'items': [_input(record) for record in records]})
+        except (WorkflowError, ValueError) as error:
+            return _failure(error)
+
+    @app.post('/v1/agent-runs/{run_id}/inputs/{task_id}/response')
+    async def respond(run_id: str, task_id: str, request: Request, space: str = Depends(space_for)) -> JSONResponse:
+        try:
+            body = _InputResponse.model_validate_json(await _body(request))
+            assert_current_space(request, space)
+            record = await service.respond(space, run_id, task_id, response=body.response,
+                expected_revision=body.expected_revision, admission_guard=lambda: assert_current_space(request, space))
+            assert_current_space(request, space)
+            return _response(_input(record))
+        except (WorkflowError, ValueError) as error:
+            return _failure(error)
+
+    @app.post('/v1/agent-runs/{run_id}/continue')
+    async def continue_run(run_id: str, request: Request, space: str = Depends(space_for)) -> JSONResponse:
+        try:
+            body = _ContinueRun.model_validate_json(await _body(request))
+            assert_current_space(request, space)
+            result = await service.continue_run(space, run_id, continuation_id=body.continuation_id,
+                responses=body.responses, admission_guard=lambda: assert_current_space(request, space))
+            assert_current_space(request, space)
+            return _response(asdict(result), 202)
         except (WorkflowError, ValueError) as error:
             return _failure(error)

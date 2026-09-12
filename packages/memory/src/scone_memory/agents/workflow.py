@@ -64,6 +64,24 @@ class WorkflowStep:
 
 
 @dataclass(frozen=True)
+class WorkflowInputValue:
+    """A value authorized for consumption by the host's continuation policy."""
+    value: JSONValue
+
+
+@dataclass(frozen=True)
+class WorkflowInputStep:
+    """Idempotent request reconciliation; None means a durable request is pending.
+
+    Poll callbacks must not wait for a human. The host owns response storage and
+    activation authorization; the scheduler only consumes returned values.
+    """
+    step_id: str
+    version: str
+    poll: Callable[[StepContext], Awaitable[WorkflowInputValue | None]]
+
+
+@dataclass(frozen=True)
 class WorkflowCompletion:
     """Pure synchronous completion policy, revision-bound like a step.
 
@@ -97,6 +115,7 @@ class WorkflowStatus:
     error_class: str | None
     checkpoint_count: int = 0
     inflight_steps: tuple[str, ...] = ()
+    waiting_steps: tuple[str, ...] = ()
 
 
 def _name(value: str) -> None:
@@ -171,7 +190,7 @@ def _private_file(path: Path) -> int:
     return fd
 
 
-def _dependencies(steps: Sequence[WorkflowStep], values: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
+def _dependencies(steps: Sequence[WorkflowStep | WorkflowInputStep], values: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
     if not isinstance(values, Mapping) or set(values) != {step.step_id for step in steps}:
         raise WorkflowError('invalid_dependencies')
     result: dict[str, tuple[str, ...]] = {}
@@ -204,7 +223,7 @@ class WorkflowRunner:
     max_retries still bounds attempts across all runs and journal reopenings.
     """
     def __init__(
-        self, path: str | Path, *, key: bytes, steps: Sequence[WorkflowStep],
+        self, path: str | Path, *, key: bytes, steps: Sequence[WorkflowStep | WorkflowInputStep],
         source_verifier: Callable[[StepContext], Awaitable[bool]],
         max_payload_bytes: int = 256000, deadline: float = 30.0, max_retries: int = 1,
         verify_before_step: bool = False, automatic_retries: bool = True,
@@ -224,22 +243,28 @@ class WorkflowRunner:
         if type(deadline) not in (float, int) or not math.isfinite(deadline) or not 0 < deadline <= 300:
             raise WorkflowError('invalid_budget')
         if (not isinstance(steps, Sequence) or not 1 <= len(steps) <= 32
-                or any(not isinstance(step, WorkflowStep) for step in steps)
+                or any(not isinstance(step, (WorkflowStep, WorkflowInputStep)) for step in steps)
                 or len({s.step_id for s in steps}) != len(steps)):
             raise WorkflowError('invalid_steps')
         for step in steps:
             _name(step.step_id)
             _name(step.version)
+            if isinstance(step, WorkflowInputStep):
+                if not inspect.iscoroutinefunction(step.poll):
+                    raise WorkflowError('invalid_input_step')
+                continue
             if (type(step.idempotent) is not bool or type(step.retryable) is not bool
                     or (step.retryable and not step.idempotent) or not inspect.iscoroutinefunction(step.run)):
                 raise WorkflowError('invalid_step')
         if not inspect.iscoroutinefunction(source_verifier):
             raise WorkflowError('invalid_verifier')
         _integer(max_parallel, 1, 8)
+        if dependencies is None and any(isinstance(step, WorkflowInputStep) for step in steps):
+            raise WorkflowError('input_dependencies_required')
         if dependencies is None and max_parallel != 1:
             raise WorkflowError('parallel_dependencies_required')
         self._dependencies = _dependencies(steps, dependencies) if dependencies is not None else None
-        if dependencies is not None and any(step.retryable for step in steps):
+        if dependencies is not None and any(isinstance(step, WorkflowStep) and step.retryable for step in steps):
             raise WorkflowError('parallel_retries_unsupported')
         if completion is not None and (not isinstance(completion, WorkflowCompletion) or dependencies is not None):
             raise WorkflowError('invalid_completion')
@@ -255,7 +280,10 @@ class WorkflowRunner:
         self._running = False
         self._closed = False
         self._checkpoint_attempts: dict[str, object] = {}
-        revision: JSONValue = [{'id': s.step_id, 'version': s.version, 'idempotent': s.idempotent, 'retryable': s.retryable} for s in steps]
+        revision: JSONValue = [
+            {'id': s.step_id, 'version': s.version, 'kind': 'input'} if isinstance(s, WorkflowInputStep)
+            else {'id': s.step_id, 'version': s.version, 'idempotent': s.idempotent, 'retryable': s.retryable}
+            for s in steps]
         if not automatic_retries:
             revision = {'steps': revision, 'automatic_retries': False, 'max_retries': max_retries}
         if verify_before_step:
@@ -406,7 +434,62 @@ class WorkflowRunner:
         return WorkflowStatus(str(state['status']), tuple(s.step_id for s in self._steps if s.step_id in results),
                               cast(str | None, state['inflight']), dict(cast(dict[str, int], state['attempts'])),
                               cast(str | None, state['error_class']), self._checkpoint_count(token),
-                              tuple(cast(list[str], state.get('inflight_steps', [state['inflight']] if state['inflight'] else []))))
+                              tuple(cast(list[str], state.get('inflight_steps', [state['inflight']] if state['inflight'] else []))),
+                              tuple(cast(list[str], state.get('waiting_steps', []))))
+
+    async def inspect_completed(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue],
+                                inputs: JSONValue) -> dict[str, JSONValue]:
+        """Verify a committed snapshot without executing, locking or changing it.
+
+        An active sibling may publish additional results during verification;
+        this read returns only its original snapshot. Neither verifier failures
+        nor cancellation alter the executing owner's journal or checkpoint leases.
+        """
+        _name(run_id)
+        _name(space)
+        if self._closed:
+            raise WorkflowError('closed')
+        if not isinstance(scope, Mapping):
+            raise WorkflowError('invalid_payload')
+        clean_scope = cast(dict[str, JSONValue], _copy(dict(scope), self._maximum))
+        clean_input = _copy(inputs, self._maximum)
+        signature = hashlib.sha256(_encode({'space': space, 'scope': clean_scope,
+            'inputs': clean_input, 'revision': self._revision}, self._maximum)).hexdigest()
+        token = hmac.new(self._key, run_id.encode(), hashlib.sha256).hexdigest()
+
+        def snapshot() -> dict[str, JSONValue] | None:
+            if self._closed:
+                raise WorkflowError('closed')
+            try:
+                row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (token,)).fetchone()
+            except sqlite3.Error:
+                raise WorkflowError('journal_unavailable') from None
+            if row is None:
+                return None
+            state = cast(dict[str, JSONValue], json.loads(self._unseal(token, row[0])))
+            if state['binding'] != signature:
+                raise WorkflowError('binding_mismatch')
+            if state['status'] == 'sources_invalid':
+                raise WorkflowError('sources_invalid')
+            return state
+
+        state = snapshot()
+        if state is None:
+            return {}
+        try:
+            valid = await asyncio.wait_for(self._verifier(
+                self._context(run_id, space, clean_scope, clean_input, state)), self._deadline)
+        except FileNotFoundError:
+            valid = False
+        except (OSError, sqlite3.OperationalError):
+            raise WorkflowError('verification_unavailable') from None
+        except Exception:
+            valid = False
+        if valid is not True:
+            raise WorkflowError('sources_invalid')
+        if snapshot() is None:
+            raise WorkflowError('journal_unavailable')
+        return cast(dict[str, JSONValue], _copy(state['results'], self._maximum))
 
     async def read_result(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue],
                           inputs: JSONValue) -> WorkflowResult | None:
@@ -554,6 +637,7 @@ class WorkflowRunner:
         attempts = cast(dict[str, JSONValue], state['attempts'])
         reused = tuple(step.step_id for step in self._steps if step.step_id in results)
         for step in self._steps:
+            assert isinstance(step, WorkflowStep)  # Input nodes require the dependency scheduler.
             if step.step_id in results:
                 continue
             try:
@@ -627,18 +711,59 @@ class WorkflowRunner:
             self._save(token, state)
             raise WorkflowError('outcome_unknown')
         active: dict[str, asyncio.Task[JSONValue]] = {}
+        polled: set[str] = set()
+        waiting = set(cast(list[str], state.get('waiting_steps', [])))
+        has_inputs = any(isinstance(step, WorkflowInputStep) for step in self._steps)
+
+        def waiting_fields(names: set[str]) -> dict[str, JSONValue]:
+            return {'waiting_steps': [step.step_id for step in self._steps if step.step_id in names]} if has_inputs else {}
 
         def publish(name: str, value: JSONValue) -> None:
             completed = {**results, name: value}
             _encode({'scope': scope, 'inputs': inputs, 'completed': completed}, self._maximum)
             pending = [step.step_id for step in self._steps if step.step_id in active and step.step_id != name]
             candidate = {**state, 'results': cast(JSONValue, completed),
-                         'inflight_steps': cast(JSONValue, pending), 'inflight': pending[0] if pending else None}
+                         'inflight_steps': cast(JSONValue, pending), 'inflight': pending[0] if pending else None,
+                         **waiting_fields(waiting - {name})}
             self._save(token, candidate)
             results[name] = value
             state.update(candidate)
             state['results'] = results
-            active.pop(name)
+            waiting.discard(name)
+            active.pop(name, None)
+
+        async def poll_input(step: WorkflowInputStep) -> None:
+            try:
+                value = await step.poll(self._context(run_id, space, scope, inputs, state))
+                if value is not None and type(value) is not WorkflowInputValue:
+                    if inspect.iscoroutine(value):
+                        value.close()
+                    raise WorkflowError('invalid_input_value')
+                clean = _copy(value.value, self._maximum) if value is not None else None
+            except (OSError, sqlite3.OperationalError) as exc:
+                state.update(status='verification_unavailable', error_class=type(exc).__name__[:80])
+                self._save(token, state)
+                raise WorkflowError('verification_unavailable') from None
+            except Exception as exc:
+                state.update(status='failed', error_class=type(exc).__name__[:80])
+                self._save(token, state)
+                raise WorkflowError(exc.code if isinstance(exc, WorkflowError) else 'input_poll_failed') from None
+            # Polling may await storage. Revalidate before acknowledging waiting
+            # or committing consumption, just as before admitting a model.
+            await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
+            if value is None:
+                candidate = {**state, **waiting_fields(waiting | {step.step_id})}
+                self._save(token, candidate)
+                waiting.add(step.step_id)
+                state.update(candidate)
+            else:
+                try:
+                    publish(step.step_id, clean)
+                except WorkflowError:
+                    state.update(status='failed', error_class='InvalidPayload')
+                    self._save(token, state)
+                    raise
+            polled.add(step.step_id)
 
         async def invoke(step: WorkflowStep, context: StepContext) -> JSONValue:
             try:
@@ -648,10 +773,20 @@ class WorkflowRunner:
 
         try:
             while len(results) < len(self._steps):
+                completed_before = len(results)
                 for step in self._steps:
-                    if len(active) >= self._parallel or any(task.done() for task in active.values()):
+                    if any(task.done() for task in active.values()):
                         break
                     if step.step_id in results or step.step_id in active or not set(dependencies[step.step_id]) <= results.keys():
+                        continue
+                    if isinstance(step, WorkflowInputStep):
+                        if step.step_id not in polled:
+                            await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
+                            if any(task.done() for task in active.values()):
+                                break
+                            await poll_input(step)
+                        continue
+                    if len(active) >= self._parallel:
                         continue
                     await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
                     if any(task.done() for task in active.values()):
@@ -664,6 +799,15 @@ class WorkflowRunner:
                     self._save(token, state)
                     active[step.step_id] = asyncio.create_task(invoke(step, context))
                 if not active:
+                    if len(results) > completed_before:
+                        # Input values can unlock a node earlier in declaration order.
+                        continue
+                    if waiting:
+                        await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
+                        state.update(status='awaiting_input', inflight=None, inflight_steps=[], error_class=None)
+                        self._save(token, state)
+                        return WorkflowResult(run_id, 'awaiting_input', cast(dict[str, JSONValue],
+                            _copy(results, self._maximum)), reused)
                     raise WorkflowError('invalid_dependencies')
                 done, _ = await asyncio.wait(active.values(), return_when=asyncio.FIRST_COMPLETED)
                 failure: str | None = None
