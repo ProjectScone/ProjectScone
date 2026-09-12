@@ -295,22 +295,18 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
         if relation.predicate in DEPENDS_ON and relation.subject_id != relation.object_id:
             rests_on[relation.object_id].append((relation.subject_id, relation.predicate))
 
-    # `target` and `why` are in the answer too, and `max_bytes` bounded
-    # neither -- so a 512-byte budget returned five kilobytes and the
-    # bound read as a fact. Charge the framing first, at its widest, so
-    # what the walk may list is what the budget has left rather than the
-    # whole of it. Widest, because the prose grows with the clauses the
-    # walk turns out to need and the charge is made before the walk.
+    # The walk bounds how many it may hold and nothing else. A byte
+    # bound here as well would be a second bound spending the same budget
+    # in a different unit -- and the earlier, cruder one would decide
+    # membership before the exact one ever ran, which is how a larger
+    # budget came to return fewer dependants and a later, cheaper entry
+    # came to be kept over an earlier one. One budget, one bound, and it
+    # is the one measured on what the caller receives.
     shown = label.get(target, name)
-    framing = len(shown.encode()) + len(
-        _why(shown, said, limit, limit, True, max_hops, limit).encode())
-    room = max_bytes - framing
-    framing_spent = room <= 0
 
     seen = {target}
     counted: dict[int, int] = {}
     listed: list[Reached] = []
-    spent = 0
     not_listed = 0
     queue: deque[tuple[str, int]] = deque([(target, 0)])
     deepest = 0
@@ -332,12 +328,10 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
             counted[step] = counted.get(step, 0) + 1
             one = Reached(entity_id=dependant, label=label.get(dependant, dependant),
                           depth=step, through=predicate, depends_on=label.get(node, node))
-            size = len(one.label.encode()) + len(one.depends_on.encode()) + len(predicate)
-            if len(listed) >= limit or spent + size > room:
+            if len(listed) >= limit:
                 not_listed += 1
             else:
                 listed.append(one)
-                spent += size
             queue.append((dependant, step))
     if not listed and not not_listed:
         return _within(Blast(target=shown, status="nothing", by_depth=counted, graph_moved=moved,
