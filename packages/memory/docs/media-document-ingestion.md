@@ -30,6 +30,38 @@ mono 16 kHz signed 16-bit PCM WAV and returns a nonempty bounded tuple of
 Configure a locally managed implementation with a timestamp-producing model.
 A text-only speech response is insufficient: do not invent word or segment times.
 
+For an already running local service that returns observed segment timestamps,
+Scone includes `LocalDocumentTranscriber`:
+
+```python
+from scone_memory.providers.transcription import LocalDocumentTranscriber
+
+transcriber = LocalDocumentTranscriber(
+    base_url="http://127.0.0.1:8000/v1",
+    model="operator-selected-timestamp-model",
+    timeout=120,
+)
+app = media_app(settings, engine, transcriber, ffmpeg_path)
+```
+
+Replace the model identifier with the exact model served locally. The adapter
+accepts loopback addresses or `localhost`, with an optional explicit `api_key`;
+it does not select a service, download weights or start inference at construction.
+The service must support multipart `audio/transcriptions` with
+`response_format=verbose_json` and `timestamp_granularities[]=segment`, returning
+numeric `start`, `end` and `text` for every observed segment. This contract is
+documented by [vLLM's transcription protocol](https://docs.vllm.ai/en/stable/api/vllm/entrypoints/speech_to_text/transcription/protocol/);
+support depends on the served model. A text-only response is explicitly refused.
+The adapter retains segment text and times; it does not infer timing from the
+top-level transcript, and it makes no speaker-identification claim.
+
+Each call owns its HTTP client and closes it on success, failure or cancellation.
+It disables redirects and environment proxies, rejects encoded responses, bounds
+the entire request as well as response bytes and segment count, and never retries
+an uncertain transcription. The media parser's remaining extraction deadline
+still applies, even when shorter than the provider timeout. Change the host
+revision when changing the selected model or its configuration.
+
 `build_app` forwards the same media configuration to the memory API, the composed
 conversation host, and durable imports when `SCONE_DOCUMENT_JOBS_CONFIG` is set.
 For a custom host, `create_app(..., document_media=media)` and
@@ -86,5 +118,7 @@ source or revoked access refuses playback instead of serving unverified audio.
 The included integration tests use locally generated audio/video and a scripted
 transcript to verify decoding, timestamps, authentication, retention and restart
 behavior. They do not measure transcription accuracy. Browser timeline controls,
-built-in model adapters for timestamped document transcription, and video-frame
-analysis remain separate capabilities from this HTTP surface.
+additional native model adapters, and video-frame analysis remain separate
+capabilities from this HTTP surface. The loopback integration test runs a real
+multipart HTTP service with scripted segments, normalizes stereo audio, and checks
+retained evidence after reopening SQLite without another transcription request.
