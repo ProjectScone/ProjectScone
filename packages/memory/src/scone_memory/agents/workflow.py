@@ -168,9 +168,13 @@ class WorkflowRunner:
         self, path: str | Path, *, key: bytes, steps: Sequence[WorkflowStep],
         source_verifier: Callable[[StepContext], Awaitable[bool]],
         max_payload_bytes: int = 256000, deadline: float = 30.0, max_retries: int = 1,
+        verify_before_step: bool = False,
     ):
         if type(key) is not bytes or len(key) != 32:
             raise WorkflowError('key_must_be_32_bytes')
+        if type(verify_before_step) is not bool:
+            raise WorkflowError('invalid_verification_policy')
+        self._verify_before_step = verify_before_step
         _integer(max_payload_bytes, 512, 1000000)
         _integer(max_retries, 0, 3)
         if type(deadline) not in (float, int) or not math.isfinite(deadline) or not 0 < deadline <= 300:
@@ -198,6 +202,8 @@ class WorkflowRunner:
         self._closed = False
         self._checkpoint_attempt: object | None = None
         revision: JSONValue = [{'id': s.step_id, 'version': s.version, 'idempotent': s.idempotent, 'retryable': s.retryable} for s in steps]
+        if verify_before_step:
+            revision = {'steps': revision, 'verify_before_step': True}
         self._revision = hashlib.sha256(_encode(revision, 32768)).hexdigest()
         self._lock_fd = -1
         self._db: sqlite3.Connection
@@ -418,6 +424,8 @@ class WorkflowRunner:
         for step in self._steps:
             if step.step_id in results:
                 continue
+            if self._verify_before_step:
+                await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
             previous = cast(int, attempts.get(step.step_id, 0))
             if previous and not (step.idempotent and step.retryable):
                 code = 'outcome_unknown' if not step.idempotent else 'retry_not_allowed'

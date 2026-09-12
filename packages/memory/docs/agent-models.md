@@ -96,6 +96,55 @@ Workflow callbacks, tool binding and evidence policy still need their own versio
 when changed. Model calls are not assumed idempotent: an interrupted step with an
 unknown outcome is not automatically replayed.
 
+## Execute a declared task graph
+
+`AgentWorkflow` composes named agents into a sequential, checkpointed task graph.
+Each task selects an allowed model and declares which predecessor outputs it
+receives. Unrelated outputs never enter its model context. For example, using
+`agents`, `memory`, and a host-managed encryption key:
+
+```python
+from scone_memory.agents.task_workflow import AgentTask, AgentTaskPlan, AgentWorkflow
+
+plan = AgentTaskPlan(workflow_id="research-report", tasks=(
+    AgentTask(task_id="find", agent_id="research", model_id="fast",
+              prompt="Find the relevant decisions."),
+    AgentTask(task_id="summarize", agent_id="research", model_id="careful",
+              prompt="Summarize the decisions and identify uncertainty.",
+              depends_on=("find",)),
+))
+workflow = AgentWorkflow("report.sqlite", key=key, catalog=agents, plan=plan,
+    memory=memory, space="team-space", scope=RecallScope.validated(
+        where={"project": "approved-project"}))
+try:
+    result = await workflow.run("request-1", "What should our team do next?")
+    status = workflow.status("request-1", "What should our team do next?")
+finally:
+    workflow.close()
+```
+
+A repeated run with identical input, plan, model bindings and scope reuses
+completed task receipts only after rechecking their retained evidence. Evidence
+is checked again before each task starts and before results are published.
+Confirmed missing or changed evidence invalidates saved outputs. A temporary
+storage outage pauses verification and preserves completed work. Cancellation
+or interruption during a model call leaves an uncertain outcome that cannot be
+automatically replayed; use a new run ID for an intentional new execution.
+`status` returns progress metadata, not revalidated answer content.
+
+Handoffs are bounded JSON in a separate user message marked as untrusted data.
+They cannot change system instructions, model selection or the fixed tool scope.
+A receipt's `source_status` describes its own tool evidence, not independent
+verification of its prose or inherited conclusions. Follow `depends_on` to trace
+which prior agent outputs a task consumed. Prompt injection remains possible in
+model-generated text; read-only scoped tools bound its available actions.
+
+Plans allow 1–32 tasks, reject unknown dependencies and cycles, and run in stable
+topological order. Task prompts are limited to 2,000 UTF-8 bytes, the run question
+to 4,000 bytes, and each handoff to 32,000 bytes. Oversized handoffs fail before the
+receiving model is constructed. Journals retain at most 128 evidence packets
+within the configured encrypted payload budget.
+
 ## Current boundary
 
 The catalog supports up to 32 agents, 64 models and 64 allowed models per agent.
@@ -104,7 +153,7 @@ the tool-loop budgets bound model rounds, tool calls and retained transcript dat
 Factories should be quick synchronous constructors; asynchronous model work
 belongs in `complete`, where cancellation is enforced cooperatively.
 
-Multi-agent handoffs, parallel workflow scheduling, persisted catalog editing,
-HTTP run management and a browser model selector for these named agents remain
-separate work. Existing conversational model connections and workflow checkpoints
-are foundations, not a claim that those agent orchestration features are complete.
+Declared dependency handoffs and sequential recovery are implemented natively.
+Parallel workflow scheduling, dynamic handoffs, persisted plan editing, HTTP run
+management and a browser model selector remain separate work. Catalog factories
+remain host-managed application code.

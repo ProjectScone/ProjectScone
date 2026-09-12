@@ -421,3 +421,19 @@ async def test_non_mapping_scope_is_rejected(tmp_path):
     with pytest.raises(WorkflowError, match='invalid_payload'):
         await r.run('r', space='s', scope=None, inputs=None)
     r.close()
+
+
+async def test_before_step_verification_outage_does_not_start_an_uncertain_attempt(tmp_path):
+    calls=[];checks=0
+    async def verify(context):
+        nonlocal checks
+        checks+=1
+        if checks==2:raise ConnectionError('temporary outage before any step')
+        return True
+    async def execute(context):calls.append(1);return 'ok'
+    job=runner(tmp_path/'before.db',[WorkflowStep('work','1',execute)],source_verifier=verify,verify_before_step=True)
+    with pytest.raises(WorkflowError,match='verification_unavailable'):await job.run('r',space='alpha',scope={},inputs='q')
+    assert job.status('r',space='alpha',scope={},inputs='q').attempts=={} and calls==[]
+    assert (await job.run('r',space='alpha',scope={},inputs='q')).status=='completed'
+    assert calls==[1]
+    job.close()
