@@ -222,7 +222,8 @@ async def test_how_long_a_claim_held_is_the_length_of_its_valid_time():
 async def test_a_claim_that_still_holds_is_counted_up_to_the_moment_asked():
     answer = await temporal_answer(await ledger(), "alpha", "How long has the Lisbon office been open?", now=NOW)
     assert answer.status == "computed" and answer.value["holds"] is True
-    assert "so far" in answer.text and answer.value["days"] == (
+    assert "months) so far, and it still holds" in answer.text, "the length, then that it has not ended"
+    assert answer.value["days"] == (
         __import__("datetime").date(2023, 4, 20) - __import__("datetime").date(2022, 1, 15)).days
 
 

@@ -426,8 +426,8 @@ async def _ledger(engine: "MemoryEngine", space: str, asked: Plan, now: str,
                     + (f"until {ends}" if ends is not None else "onwards; it still holds"))
     else:
         said.append(f"answer: {counts['days']} days"
-                    + (f" so far, and it still holds" if ends is None else "")
-                    + (f" ({months} months)" if months else ""))
+                    + (f" ({months} months)" if months else "")
+                    + (" so far, and it still holds" if ends is None else ""))
     said.append(f"working: {began} → {ended}" + (" (the moment asked)" if ends is None else ""))
     return TemporalAnswer("computed", _fit(said, max_bytes), asked, (anchor,), value,
                           {"now": now, "reasons": reasons, "read": read_answer})
