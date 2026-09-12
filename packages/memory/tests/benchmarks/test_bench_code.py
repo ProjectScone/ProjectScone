@@ -76,9 +76,30 @@ async def test_the_ordinary_chunker_can_be_measured_beside_it(corpus):
 async def test_a_corpus_with_nothing_to_ask_about_scores_nothing(tmp_path):
     (tmp_path / "empty.py").write_text("x = 1\n", encoding="utf-8")
     score = await run_code_bench(tmp_path, k=5)
-    assert score == CodeScore(files=1, k=5, asked="docstring", code_aware=True)
+    assert score == CodeScore(files=1, files_total=1, k=5, asked="docstring", code_aware=True)
 
 
 async def test_a_question_limit_is_honoured(corpus):
     score = await run_code_bench(corpus, k=5, limit=2)
     assert score.questions == 2
+
+
+async def test_a_corpus_larger_than_the_bench_reads_says_how_much_it_left(corpus, monkeypatch):
+    """A bench that reads 5,000 files of a 12,000-file repository and then
+    reports 5,000 has told you the size of its own bound."""
+    from scone_memory.bench import code as bench
+
+    monkeypatch.setattr(bench, "MAX_FILES", 1)
+    score = await run_code_bench(corpus, k=5)
+    assert score.files == 1 and score.files_total == 2
+    assert score.record()["files_total"] == 2
+    assert "1 file(s) of 2" in score.text(), score.text()
+
+
+async def test_a_file_too_long_to_read_whole_is_counted(corpus, monkeypatch):
+    from scone_memory.bench import code as bench
+
+    monkeypatch.setattr(bench, "MAX_FILE_BYTES", 40)
+    score = await run_code_bench(corpus, k=5)
+    assert score.files_cut == 2, "both were longer than that"
+    assert "cut" in score.text()

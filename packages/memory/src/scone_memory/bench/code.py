@@ -46,7 +46,13 @@ MAX_FILE_BYTES = 400_000
 class CodeScore:
     """What a run found, and what it was asked."""
 
+    #: Files the run read. Not how many there are: see files_total.
     files: int = 0
+    #: How many are there, when the corpus is larger than the bench reads.
+    files_total: int = 0
+    #: Files longer than MAX_FILE_BYTES, which were read only as far as
+    #: that. Their questions come from what was read.
+    files_cut: int = 0
     questions: int = 0
     #: Questions whose own definition came back in the top k.
     found: int = 0
@@ -62,16 +68,21 @@ class CodeScore:
     chunk_target: int = DEFAULT_TARGET
 
     def record(self) -> dict[str, object]:
-        return {"files": self.files, "questions": self.questions, "found": self.found,
+        return {"files": self.files, "files_total": self.files_total, "files_cut": self.files_cut,
+                "questions": self.questions, "found": self.found,
                 "same_file": self.same_file, "whole": self.whole, "k": self.k,
                 "asked": self.asked, "code_aware": self.code_aware,
                 "chunk_target": self.chunk_target}
 
     def text(self) -> str:
         """One line for a person: what came back, out of how many."""
+        counted = (f"{self.files} file(s) of {self.files_total}" if self.files_total > self.files
+                   else f"{self.files} file(s)")
+        if self.files_cut:
+            counted += f" ({self.files_cut} cut at {MAX_FILE_BYTES} bytes)"
         if not self.questions:
-            return f"{self.files} file(s), no documented function to ask about"
-        return (f"{self.questions} question(s) over {self.files} file(s), asked by {self.asked}, "
+            return f"{counted}, no documented function to ask about"
+        return (f"{self.questions} question(s) over {counted}, asked by {self.asked}, "
                 f"{'cut at declarations' if self.code_aware else 'cut by length'}: "
                 f"own definition in top {self.k} {self.found} ({self.found / self.questions:.0%}), "
                 f"own file {self.same_file} ({self.same_file / self.questions:.0%}), "
@@ -85,16 +96,20 @@ class _Asked:
     source: str
 
 
-def sources(root: str | Path, suffixes: Sequence[str] = PYTHON_SUFFIXES) -> list[Path]:
-    """Every source file under a root, in a settled order."""
+def sources(root: str | Path, suffixes: Sequence[str] = PYTHON_SUFFIXES) -> tuple[list[Path], int]:
+    """Every source file under a root, in a settled order, and how many
+    there are — which is not the same number when the corpus is larger
+    than the bench reads."""
     found: list[Path] = []
+    total = 0
     for path in sorted(Path(root).rglob("*")):
-        if (path.is_file() and path.suffix in suffixes
+        if not (path.is_file() and path.suffix in suffixes
                 and not any(part.startswith(".") or part == "__pycache__" for part in path.parts)):
+            continue
+        total += 1
+        if len(found) < MAX_FILES:
             found.append(path)
-        if len(found) >= MAX_FILES:
-            break
-    return found
+    return found, total
 
 
 def questions(root: str | Path, files: Sequence[Path], *, asked: str = "docstring") -> Iterator[_Asked]:
@@ -129,12 +144,14 @@ async def run_code_bench(root: str | Path, *, k: int = 5, limit: Optional[int] =
         raise ValueError("k must be at least 1")
     if asked not in ("docstring", "name"):
         raise ValueError("asked must be 'docstring' or 'name'")
-    files = sources(root, suffixes)
+    files, total = sources(root, suffixes)
+    cut = 0
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                 code_aware=code_aware, chunk_target=chunk_target).open()
     try:
         for path in files:
             text = _read(path)
+            cut += len(path.read_bytes()) > MAX_FILE_BYTES
             if text.strip():
                 await engine.remember("code", text, kind="file", source=str(path.relative_to(root)))
         found = same_file = whole = counted = 0
@@ -145,7 +162,8 @@ async def run_code_bench(root: str | Path, *, k: int = 5, limit: Optional[int] =
             found += bool(hit)
             same_file += any((item.source or "") == question.source for item in items)
             whole += any(_is_one_declaration(item.text) for item in hit)
-        return CodeScore(files=len(files), questions=counted, found=found, same_file=same_file,
+        return CodeScore(files=len(files), files_total=total, files_cut=cut,
+                         questions=counted, found=found, same_file=same_file,
                          whole=whole, k=k, asked=asked, code_aware=code_aware,
                          chunk_target=chunk_target)
     finally:
