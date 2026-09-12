@@ -30,7 +30,9 @@ import pytest
 from scone_memory.ingestion.chunker import DEFAULT_TARGET, chunk_spans
 from scone_memory.ingestion.structure_chunks import MAX_SECTIONS, structured_spans, units
 
-pytestmark = pytest.mark.asyncio
+# No `pytestmark = pytest.mark.asyncio`: `asyncio_mode = "auto"` already
+# handles the async tests, and marking the synchronous ones warned once
+# per test for the whole suite.
 
 PROSE = (
     "The survey of the harbour crane was booked for the third of May. "
