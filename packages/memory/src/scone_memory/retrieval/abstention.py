@@ -19,8 +19,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, cast
 
 SCHEMA_VERSION = 1
 #: A policy is a few hundred bytes; a larger file is not one.
@@ -39,19 +40,46 @@ def choose_floor(sweep: Mapping[str, object], *, target_false_abstain: float) ->
     withheld = sweep.get("false_abstain_rate")
     if not isinstance(withheld, Mapping) or not withheld:
         raise PolicyError("the sweep has no measured false_abstain_rate to choose by")
-    affordable = [float(floor) for floor, cost in withheld.items()
-                  if cost is not None and float(cost) <= target_false_abstain]
+    # The rates in a sweep are rounded for reading, so the counts decide
+    # when they are there: one answer withheld of 21 is 0.047619…, and a
+    # target of 0.0476 must not take a floor that cost more than it.
+    counted, answerable = sweep.get("false_abstain_n"), sweep.get("evidence_n")
+    exact: Optional[Mapping[object, object]] = (
+        counted if isinstance(counted, Mapping) and isinstance(answerable, int) and answerable > 0 else None)
+    answered = answerable if isinstance(answerable, int) else 0
+
+    def costs(floor: object, rate: object) -> float:
+        """What that floor withheld: the count when the sweep carries it."""
+        if exact is not None and floor in exact:
+            return float(cast(float, exact[floor])) / answered
+        return float(cast(float, rate))
+
+    affordable = [float(cast(float, floor)) for floor, rate in withheld.items()
+                  if rate is not None and costs(floor, rate) <= target_false_abstain]
     return max(affordable) if affordable else None
 
 
 @dataclass(frozen=True)
 class AbstentionPolicy:
-    """A floor, the embedder it was measured with, and what it cost."""
+    """A floor, the embedder it was measured with, and what it cost.
+
+    Checked wherever it is built, not only when read from a file: an
+    engine takes a policy's floor over its own, so a floor that is not a
+    similarity would pass every check the engine makes on its own."""
 
     floor: float
     embedder_id: str
     dim: int
     measured: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (isinstance(self.floor, bool) or not isinstance(self.floor, (int, float))
+                or not math.isfinite(self.floor) or not -1.0 <= float(self.floor) <= 1.0):
+            raise PolicyError(f"floor must be a cosine similarity in [-1, 1], got {self.floor!r}")
+        if not isinstance(self.embedder_id, str) or not self.embedder_id.strip():
+            raise PolicyError("a policy must name the embedder it was measured with")
+        if isinstance(self.dim, bool) or not isinstance(self.dim, int) or self.dim < 1:
+            raise PolicyError(f"dim must be the embedder's width, a positive whole number, got {self.dim!r}")
 
     def record(self) -> dict[str, object]:
         return {"schema_version": SCHEMA_VERSION, "floor": self.floor, "embedder_id": self.embedder_id,
@@ -68,7 +96,11 @@ class AbstentionPolicy:
                 f"withholds {cost if cost is not None else 'unmeasured'} of the answerable")
 
     def fits(self, embedder_id: str, dim: int) -> bool:
-        return self.embedder_id == embedder_id and self.dim == dim
+        """Whether this policy may be used by that embedder. A width of 0
+        is one the embedder has not learned yet (a remote one learns it
+        from its first answer), and is not a mismatch; it is checked
+        again where the floor is used."""
+        return self.embedder_id == embedder_id and dim in (0, self.dim)
 
     @classmethod
     def read(cls, path: str | Path) -> "AbstentionPolicy":
@@ -99,4 +131,7 @@ class AbstentionPolicy:
         if not isinstance(dim, int) or isinstance(dim, bool) or dim < 1:
             raise PolicyError("dim must be the embedder's width, a positive whole number")
         measured = written.get("measured")
-        return cls(float(floor), embedder_id, dim, dict(measured) if isinstance(measured, dict) else {})
+        try:
+            return cls(float(floor), embedder_id, dim, dict(measured) if isinstance(measured, dict) else {})
+        except PolicyError as refused:  # a floor of NaN reads as a float and is not one
+            raise PolicyError(f"the policy could not be used: {refused}") from None

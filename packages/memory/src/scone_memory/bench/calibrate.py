@@ -34,13 +34,26 @@ async def calibrate(make_engine: Callable[[], object], items: Sequence[BenchItem
     inside the budget; the report it was measured from comes back too."""
     import inspect
 
-    probe = make_engine()
-    engine = cast("MemoryEngine", await probe if inspect.isawaitable(probe) else probe)
+    async def built() -> "MemoryEngine":
+        made = make_engine()
+        return cast("MemoryEngine", await made if inspect.isawaitable(made) else made)
+
+    engine = await built()
     embedder_id, dim = engine.embedder.id, engine.embedder.dim
     await engine.close()
-    report = await run(make_engine, items, ks=tuple(ks), dataset=dataset, cross_queries=True)  # type: ignore[arg-type]
-    if report.embedder and report.embedder != embedder_id:
-        raise PolicyError(f"the run embedded with {report.embedder}, not the {embedder_id} this measured")
+
+    async def watched() -> "MemoryEngine":
+        """Every engine the run builds, checked: a floor belongs to the
+        numbers that were measured, and a provider's name can stay the
+        same while its width changes."""
+        made = await built()
+        if (made.embedder.id, made.embedder.dim) != (embedder_id, dim):
+            await made.close()
+            raise PolicyError(f"the run embedded with {made.embedder.id} ({made.embedder.dim}-d), not the "
+                              f"{embedder_id} ({dim}-d) this measured")
+        return made
+
+    report = await run(watched, items, ks=tuple(ks), dataset=dataset, cross_queries=True)  # type: ignore[arg-type]
     sweep = report.abstention
     if not sweep:
         return None, report

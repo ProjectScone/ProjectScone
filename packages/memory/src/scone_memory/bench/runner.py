@@ -183,6 +183,11 @@ def abstention_sweep(results: Sequence["ItemResult"], floors: Sequence[float] = 
         "evidence_n": len(with_ev),
         "abstain_rate": {f: round(sum(flagged(r.top_similarity, f) for r in without) / len(without), 4) for f in floors},
         "false_abstain_rate": {f: (round(sum(flagged(r.top_similarity, f) for r in with_ev) / len(with_ev), 4) if with_ev else None) for f in floors},
+        # The rates are rounded for reading; the counts are what a floor is
+        # chosen by, since one withheld answer of 21 rounds to 0.0476 and a
+        # target of 0.0476 must not take a floor that cost more than that.
+        "false_abstain_n": {f: sum(flagged(r.top_similarity, f) for r in with_ev) for f in floors},
+        "abstain_n": {f: sum(flagged(r.top_similarity, f) for r in without) for f in floors},
     }
 
 

@@ -377,15 +377,26 @@ async def calibrate_command(args: argparse.Namespace, settings: Settings, out) -
     memory, so the configured store is not read or written."""
     from ..bench.calibrate import DEFAULT_TARGET, calibrate, write_policy
     from ..bench.runner import load_items, stratified_sample
+    from ..retrieval.abstention import PolicyError
     from .config import build_embedder, build_in_process_engine
 
+    # Refused before anything is measured: a sample of none and a target
+    # outside 0 to 1 are questions nobody can answer, and finding that out
+    # after the work is done helps no one.
+    target = DEFAULT_TARGET if args.target_false_abstain is None else args.target_false_abstain
+    if not 0.0 <= target <= 1.0:
+        raise InvalidInput("--target-false-abstain must be the share of answers a floor may withhold, from 0 to 1")
+    if args.sample is not None and args.sample < 1:
+        raise InvalidInput("--sample must be at least 1 question")
     items = load_items(args.dataset)
     if args.sample:
         items = stratified_sample(items, args.sample)
     embedder = build_embedder(settings)
-    target = DEFAULT_TARGET if args.target_false_abstain is None else args.target_false_abstain
-    policy, report = await calibrate(lambda: build_in_process_engine(settings, embedder), items,
-                                     target_false_abstain=target, dataset=str(args.dataset))
+    try:
+        policy, report = await calibrate(lambda: build_in_process_engine(settings, embedder), items,
+                                         target_false_abstain=target, dataset=str(args.dataset))
+    except PolicyError as refused:
+        raise InvalidInput(str(refused)) from None
     if policy is None:
         said = {"policy": None, "reason": "no floor withholds few enough answers to take",
                 "sweep": report.abstention}

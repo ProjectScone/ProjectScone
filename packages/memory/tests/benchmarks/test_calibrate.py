@@ -41,6 +41,11 @@ async def test_a_floor_is_measured_with_the_embedder_that_will_use_it(tmp_path):
     assert policy.measured["questions"] == 4 and policy.measured["dataset"] == "garden"
     assert policy.measured["false_abstain_rate"] <= 0.5
     assert policy.measured["unanswerable"] and policy.measured["answerable"]
+    # The sweep carries counts, not only rounded rates, because that is
+    # what a floor is chosen by.
+    sweep = report.abstention
+    assert set(sweep["false_abstain_n"]) == set(sweep["floors"]) == set(sweep["abstain_n"])
+    assert all(isinstance(n, int) and 0 <= n <= sweep["evidence_n"] for n in sweep["false_abstain_n"].values())
 
     path = write_policy(policy, tmp_path / "policy.json")
     assert AbstentionPolicy.read(path) == policy
@@ -150,3 +155,62 @@ async def test_a_run_that_embedded_differently_than_it_measured_is_refused():
 
     with pytest.raises(PolicyError, match="embedded with"):
         await calibrate(changing, ITEMS, target_false_abstain=0.5)
+
+
+async def test_an_engine_that_measured_with_another_width_is_refused():
+    """A provider's name can stay the same while its width changes, and a
+    floor belongs to the numbers that were measured, so every engine the
+    run builds is checked, not only the first."""
+    from scone_memory.retrieval.abstention import PolicyError
+
+    widths: list[int] = []
+
+    async def widening():
+        widths.append(128 if not widths else 256)
+        embedder = HashEmbedder(widths[-1])
+        embedder.id = "same-provider-model"
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+
+    with pytest.raises(PolicyError, match="width|embedded with"):
+        await calibrate(widening, ITEMS[:2], target_false_abstain=1.0)
+
+
+async def test_an_engine_in_the_middle_of_a_run_that_differs_is_refused():
+    from scone_memory.retrieval.abstention import PolicyError
+
+    made: list[int] = []
+
+    async def changing():
+        made.append(1)
+        embedder = HashEmbedder(128 if len(made) == 2 else 256)
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+
+    with pytest.raises(PolicyError, match="width|embedded with"):
+        await calibrate(changing, ITEMS[:2], target_false_abstain=1.0)
+
+
+def test_a_sample_of_none_and_a_target_outside_zero_to_one_are_refused_before_any_work(tmp_path, capsys):
+    """Both are questions nobody can answer, and finding that out after the
+    measurement helps no one. The reason goes where refusals go."""
+    import io
+
+    from scone_memory.runtime import cli
+
+    dataset = _dataset(tmp_path)
+    for arguments, said in ((["--sample", "0"], "--sample"), (["--target-false-abstain", "2"], "--target")):
+        out = io.StringIO()
+        code = cli.main(["calibrate", str(dataset), *arguments], env={}, stdin=io.StringIO(""), out=out)
+        assert code != 0 and out.getvalue() == "", arguments
+        assert said in capsys.readouterr().err, arguments
+
+
+def test_a_floor_is_chosen_by_what_it_cost_exactly_not_by_a_rounded_rate():
+    """One answer withheld of 21 is 0.047619…, which rounds to 0.0476. A
+    target of 0.0476 must not take a floor that costs more than it."""
+    sweep = {"floors": [0.3, 0.4], "evidence_n": 21, "no_evidence_n": 21,
+             "abstain_rate": {0.3: 0.5, 0.4: 0.9}, "false_abstain_rate": {0.3: 0.0, 0.4: 0.0476},
+             "false_abstain_n": {0.3: 0, 0.4: 1}}
+    from scone_memory.retrieval.abstention import choose_floor
+
+    assert choose_floor(sweep, target_false_abstain=0.0476) == 0.3
+    assert choose_floor(sweep, target_false_abstain=0.05) == 0.4

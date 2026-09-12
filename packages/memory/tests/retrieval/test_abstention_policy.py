@@ -97,3 +97,49 @@ def test_a_policy_file_too_large_to_be_one_is_refused(tmp_path):
     path.write_text("{\"schema_version\": 1, \"pad\": \"" + "x" * (MAX_POLICY_BYTES + 1) + "\"}", encoding="utf-8")
     with pytest.raises(PolicyError, match="too large"):
         AbstentionPolicy.read(path)
+
+
+@pytest.mark.parametrize("floor", [float("nan"), 2.0, float("inf")])
+def test_a_floor_that_is_not_a_similarity_is_refused_wherever_it_is_built(floor):
+    """A policy read from a file was checked and one built in code was not,
+    and the engine took the policy's floor over its own checked one, so a
+    floor of NaN made nothing ever read as low confidence."""
+    with pytest.raises(PolicyError, match="floor"):
+        AbstentionPolicy(floor=floor, embedder_id="hash-256", dim=256)
+
+
+@pytest.mark.parametrize("embedder_id, dim", [("", 256), ("   ", 256), ("hash-256", 0), ("hash-256", -1)])
+def test_a_policy_must_name_the_embedder_and_its_width(embedder_id, dim):
+    with pytest.raises(PolicyError, match="embedder|width"):
+        AbstentionPolicy(floor=0.4, embedder_id=embedder_id, dim=dim)
+
+
+async def test_an_embedder_whose_width_is_not_known_yet_is_not_refused():
+    """A remote embedder learns its width from its first answer. Refusing a
+    policy before it has spoken rejects a matching one for a width nobody
+    asked it for yet."""
+    class NotYet(HashEmbedder):
+        """Embeds as the hash embedder does, but says nothing of its width
+        until it has embedded once, as a remote one does."""
+
+        def __init__(self) -> None:
+            super().__init__(256)
+            self.id, self.dim = "remote:some-model", 0
+
+        async def embed(self, texts):
+            vectors = await super().embed(texts)
+            self.dim = 256
+            return vectors
+
+    policy = AbstentionPolicy(floor=0.4, embedder_id="remote:some-model", dim=256, measured={})
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), NotYet(),
+                                abstention=policy).open()
+    assert engine.similarity_floor == 0.4
+
+
+async def test_a_policy_whose_width_is_known_to_differ_is_still_refused():
+    """Unknown is not the same as different: an embedder that says 256
+    cannot use a floor measured at 384."""
+    policy = AbstentionPolicy(floor=0.4, embedder_id=HashEmbedder().id, dim=384, measured={})
+    with pytest.raises(InvalidInput, match="384-d"):
+        MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), abstention=policy)
