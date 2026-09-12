@@ -28,6 +28,9 @@ from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, Ne
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
+from ..core.retirement import (
+    Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -116,6 +119,20 @@ def connect(path: str | Path) -> sqlite3.Connection:
     enable_wal(conn)
     conn.executescript(SCHEMA)
     check_schema(conn, path)
+    # Capture a legacy catalog's high-water mark before any caller can delete
+    # its last old row. Seeding only on insert loses that history.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS retirements (space TEXT NOT NULL, episode_id INTEGER NOT NULL,"
+                     " payload TEXT NOT NULL, PRIMARY KEY (space, episode_id))")
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)",
+                     (str(_next_chunk_id(conn)),))
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        conn.close()
+        raise
     # Derived retrieval indices follow schema validation/migration: adding them
     # before check_schema would change the historical backup or failed upgrade.
     conn.executescript("""BEGIN;
@@ -151,6 +168,15 @@ COMMIT;""")
     initialize_fact_search(conn)
     keep_affirmation_links(conn)
     return conn
+
+
+def _next_chunk_id(conn: sqlite3.Connection) -> int:
+    """Read the allocation floor while the caller holds a write transaction."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'next_chunk_id'").fetchone()
+    highest = conn.execute("SELECT MAX("
+        "(SELECT COALESCE(MAX(id), 0) FROM chunks),"
+        "(SELECT COALESCE(MAX(chunk_id), 0) FROM vectors))").fetchone()[0]
+    return max(int(row["value"]) if row else 1, highest + 1)
 
 
 def keep_affirmation_links(conn: sqlite3.Connection) -> None:
@@ -396,20 +422,35 @@ class SqliteDocumentStore:
         removed = [
             r["id"] for r in self.conn.execute("SELECT id FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
         ]
-        self.conn.execute("DELETE FROM episodes WHERE id = ? AND space = ?", (episode_id, space))
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("DELETE FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
+            self.conn.execute("DELETE FROM episodes WHERE id = ? AND space = ?", (episode_id, space))
         return removed
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
-        out = []
-        for n in new:
-            cur = self.conn.execute(
-                'INSERT INTO chunks (episode_id, space, ordinal, start, "end", text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
-            )
-            assert cur.lastrowid is not None
-            out.append(Chunk(chunk_id=cur.lastrowid, **n.__dict__))
-        self.conn.commit()
+        if not new:
+            return []
+        out: list[Chunk] = []
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Cleanup can retry after a row disappears. Reusing that row's ID
+            # would let the retry remove an unrelated source's vector. Keep
+            # the high-water mark even when every chunk has been deleted.
+            next_id = _next_chunk_id(self.conn)
+            for n in new:
+                self.conn.execute(
+                    'INSERT INTO chunks (id, episode_id, space, ordinal, start, "end", text, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (next_id, n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
+                )
+                out.append(Chunk(chunk_id=next_id, **n.__dict__))
+                next_id += 1
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)", (str(next_id),))
+            self.conn.execute("COMMIT")
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
+            raise
         return out
 
     async def get_chunks(self, space: str, chunk_ids: Sequence[int]) -> list[Chunk]:
@@ -633,6 +674,34 @@ class SqliteDocumentStore:
         self.conn.commit()
         return _tombstone(self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (new.space, new.episode_id)).fetchone())
 
+    async def record_retirement(self, record: Retirement) -> Retirement:
+        payload = encode_retirement(record)
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO retirements VALUES (?, ?, ?)",
+                              (record.space, record.episode_id, payload))
+            row = self.conn.execute("SELECT space, episode_id, payload FROM retirements WHERE space = ? AND episode_id = ?",
+                                    (record.space, record.episode_id)).fetchone()
+        return decode_retirement(row["payload"], (record.space, record.episode_id))
+
+    async def retirement(self, space: str, episode_id: int) -> Retirement | None:
+        row = self.conn.execute("SELECT space, episode_id, payload FROM retirements WHERE space = ? AND episode_id = ?",
+                                retirement_key(space, episode_id)).fetchone()
+        return decode_retirement(row["payload"], (space, episode_id)) if row is not None else None
+
+    async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]:
+        retirement_page(after, limit)
+        if after is None:
+            rows = self.conn.execute("SELECT space, episode_id, payload FROM retirements ORDER BY space, episode_id LIMIT ?", (limit,))
+        else:
+            rows = self.conn.execute("SELECT space, episode_id, payload FROM retirements WHERE (space, episode_id) > (?, ?)"
+                                     " ORDER BY space, episode_id LIMIT ?", (*after, limit))
+        return [decode_retirement(row["payload"], (row["space"], row["episode_id"])) for row in rows]
+
+    async def clear_retirement(self, space: str, episode_id: int) -> None:
+        key = retirement_key(space, episode_id)
+        with self.conn:
+            self.conn.execute("DELETE FROM retirements WHERE space = ? AND episode_id = ?", key)
+
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         row = self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (space, episode_id)).fetchone()
         return _tombstone(row) if row else None
@@ -658,7 +727,7 @@ class SqliteDocumentStore:
             gone = DeletedSpace(chunk_ids=chunk_ids, episodes=count("episodes"), facts=count("facts"),
                                 links=count("fact_links"), tombstones=count("tombstones"))
             for table in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight",
-                          "revisions", "ingest_items", "ingest_jobs"):
+                          "revisions", "ingest_items", "ingest_jobs", "retirements"):
                 conn.execute(f"DELETE FROM {table} WHERE space = ?", (space,))
             conn.execute("INSERT OR REPLACE INTO erased_spaces (space, erased_at) VALUES (?, ?)", (space, erased_at))
             conn.commit()

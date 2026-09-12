@@ -236,8 +236,6 @@ class FileBlobStore:
     async def unlink(self, space: str, episode_id: int) -> list[str]:
         released = await self.released_by(space, episode_id)
         path = self._links(space, episode_id)
-        if path.exists():
-            path.unlink()
         for attachment_id in released:
             held = self._held(space, attachment_id)
             if held.exists():
@@ -248,6 +246,11 @@ class FileBlobStore:
                 blob = self._blob(attachment_id)
                 if blob.exists():
                     blob.unlink()
+        # Keep the cleanup targets until every hold and byte deletion succeeds.
+        # If a filesystem operation fails, a new process can retry this same
+        # list even after some attachment metadata has already disappeared.
+        if path.exists():
+            path.unlink()
         return released
 
 

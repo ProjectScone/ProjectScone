@@ -9,6 +9,8 @@ the engine's error type maps to.
 
 from __future__ import annotations
 
+from ..core.retirement import supports_retirement
+
 from dataclasses import asdict
 
 import asyncio
@@ -16,7 +18,7 @@ import json
 
 import re
 
-from typing import Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Literal, Mapping, Optional
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -34,8 +36,13 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..core.models import Attachment, Fact, RecallItem
-from . import pdf_documents
+from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
+
+if TYPE_CHECKING:
+    from ..agents.catalog import AgentCatalog
+    from ..agents.plan_store import AgentPlanStore
+    from ..agents.run_service import AgentRunService
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -224,6 +231,9 @@ class FeedbackBody(BaseModel):
 
 
 
+from ..ingestion.document_ocr import DocumentOcr
+
+
 def create_app(
     engine: MemoryEngine,
     keys: Mapping[str, str],
@@ -233,6 +243,10 @@ def create_app(
     roles: Optional[Mapping[str, str]] = None,
     model_connections_available: bool = False,
     vision_available=None,
+    agent_catalog: AgentCatalog | None = None,
+    agent_plan_store: AgentPlanStore | None = None,
+    agent_run_service: AgentRunService | None = None,
+    document_ocr: DocumentOcr | None = None,
     filesystem=None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
@@ -250,13 +264,26 @@ def create_app(
 
     tree_policy = filesystem or FilesystemPolicy()
 
+    if (agent_catalog is None) != (agent_plan_store is None):
+        raise ValueError("Agent catalog and plan store must be configured together")
+    if agent_run_service is not None:
+        if agent_catalog is None or agent_plan_store is None:
+            raise ValueError("Agent run service requires the host catalog and plan store")
+        agent_run_service.require_host(engine, agent_plan_store, agent_catalog)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if worker is not None:
             worker.start()
-        yield
-        if worker is not None:
-            await worker.stop()
+        try:
+            yield
+        finally:
+            try:
+                if agent_run_service is not None:
+                    await agent_run_service.aclose()
+            finally:
+                if worker is not None:
+                    await worker.stop()
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
                   default_response_class=LedgerJSONResponse)
@@ -285,7 +312,7 @@ def create_app(
     app.state.keys = dict(keys)
     app.state.worker = worker
 
-    async def space_for(request: Request) -> str:
+    def current_space_for(request: Request) -> str:
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         if scheme.lower() != "bearer" or not token.strip():
@@ -296,9 +323,17 @@ def create_app(
         role = app.state.roles.get(token.strip(), "full")
         if not permitted(role, request.method, request.url.path):
             raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
-        # A deleted space's key answers 404 on every route: the space is
-        # gone, and a key left in config must not bring it back.
+        return space
+
+    def assert_current_space(request: Request, space: str) -> None:
+        if current_space_for(request) != space:
+            raise Unauthorized("key scope changed during request")
+
+    async def space_for(request: Request) -> str:
+        space = current_space_for(request)
+        # The storage read can yield while host keys or roles are updated.
         when = await engine.space_deleted(space)
+        assert_current_space(request, space)
         if when is not None:
             raise NotFound(f"space {space!r} was deleted at {when}")
         return space
@@ -363,15 +398,25 @@ def create_app(
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
+            "documents.files": True, "documents.provenance": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
+            "episodes.forget": supports_retirement(engine.documents),
+            "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
+        if agent_catalog is not None and agent_plan_store is not None:
+            features["agents.catalog"] = True
+            features["agents.plans"] = True
+            features["agents.handoffs"] = True
+        if agent_run_service is not None:
+            features["agents.runs"] = True
+            features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
@@ -385,9 +430,17 @@ def create_app(
         return {"schema_version": 1, "implementation": "python", "features": features}
 
 
+    if agent_catalog is not None and agent_plan_store is not None:
+        from .agent_plans import mount_agent_plan_routes
+        mount_agent_plan_routes(app, agent_catalog, agent_plan_store, space_for)
+    if agent_run_service is not None:
+        from .agent_runs import mount_agent_run_routes
+        mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
+
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
+    file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for)
     from .filesystem_routes import mount_filesystem_routes
@@ -555,8 +608,18 @@ def create_app(
         return {"items": [{"episode_id": e.episode_id, "kind": e.kind, "source": e.source,
                            "created_at": e.created_at, "byte_count": len(e.content.encode("utf-8")),
                            "preview": e.content[:500], "preview_truncated": len(e.content) > 500,
+                           **({'document_filename': e.metadata['document_filename']}
+                              if e.kind == 'file' and 'document_filename' in e.metadata
+                              and 0 < len(e.metadata['document_filename'].encode('utf-8')) <= 1024
+                              and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
+                              else {}),
                            **status_of(e.episode_id)}
                           for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+
+    @app.get("/v1/episodes/by-key")
+    async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
+                                 space: str = Depends(space_for)) -> dict:
+        return episode_json(await engine.episode_by_key(space, dedup_key))
 
     @app.get("/v1/episodes/{episode_id}")
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
@@ -566,6 +629,11 @@ def create_app(
     async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
         """What forgetting would take and leave; removes nothing."""
         return (await engine.impact(space, episode_id)).model_dump()
+
+    @app.get("/v1/episodes/{episode_id}/forget-status")
+    async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """Read removal progress, including interrupted cleanup, without writes."""
+        return (await engine.forget_status(space, episode_id)).model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:

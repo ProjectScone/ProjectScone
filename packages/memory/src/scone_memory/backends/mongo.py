@@ -14,6 +14,9 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.retirement import (
+    Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
+)
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter
@@ -105,6 +108,7 @@ class MongoDocumentStore:
         self.revisions = self.db["revisions"]
         self.meta = self.db["meta"]
         self.inflight_marks = self.db["inflight"]
+        self._retirements = self.db["retirements"]
 
     async def open(self) -> "MongoDocumentStore":
         await self.episodes.create_index([("space", 1), ("content_hash", 1)], unique=True)
@@ -125,6 +129,7 @@ class MongoDocumentStore:
         await self.tombstones.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.tombstones.create_index([("space", 1), ("content_hash", 1)])
         await self.inflight_marks.create_index([("space", 1), ("content_hash", 1)], unique=True)
+        await self._retirements.create_index([("space", 1), ("episode_id", 1)], unique=True)
         await self.check_schema()
         return self
 
@@ -194,7 +199,7 @@ class MongoDocumentStore:
             tombstones=await self.tombstones.count_documents({"space": space}),
         )
         for collection in (self.chunks, self.episodes, self._fact_links, self._affirmations, self.facts, self.tombstones,
-                           self.inflight_marks):
+                           self.inflight_marks, self._retirements):
             await collection.delete_many({"space": space})
         await self.revisions.delete_one({"_id": space})
         await self.db["erased_spaces"].replace_one({"_id": space}, {"_id": space, "erased_at": erased_at}, upsert=True)
@@ -205,11 +210,10 @@ class MongoDocumentStore:
         return doc["erased_at"] if doc else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
-        if await self.episodes.find_one({"_id": episode_id, "space": space}) is None:
-            return []
-        removed = [doc["_id"] async for doc in self.chunks.find({"episode_id": episode_id}, {"_id": 1})]
-        await self.chunks.delete_many({"episode_id": episode_id})
-        await self.episodes.delete_one({"_id": episode_id})
+        query = {"episode_id": episode_id, "space": space}
+        removed = [doc["_id"] async for doc in self.chunks.find(query, {"_id": 1})]
+        await self.chunks.delete_many(query)
+        await self.episodes.delete_one({"_id": episode_id, "space": space})
         return removed
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
@@ -433,6 +437,37 @@ class MongoDocumentStore:
 
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         return [_tombstone(doc) async for doc in self.tombstones.find({"space": space}).sort("episode_id", 1)]
+
+    async def record_retirement(self, record: Retirement) -> Retirement:
+        from pymongo.errors import DuplicateKeyError
+
+        payload = encode_retirement(record)
+        key = {"space": record.space, "episode_id": record.episode_id}
+        try:
+            await self._retirements.insert_one({**key, "payload": payload})
+        except DuplicateKeyError:
+            pass
+        doc = await self._retirements.find_one(key)
+        if doc is None:
+            raise RuntimeError("retirement disappeared after its write")
+        return decode_retirement(doc["payload"], (record.space, record.episode_id))
+
+    async def retirement(self, space: str, episode_id: int) -> Retirement | None:
+        retirement_key(space, episode_id)
+        doc = await self._retirements.find_one({"space": space, "episode_id": episode_id})
+        return decode_retirement(doc["payload"], (space, episode_id)) if doc is not None else None
+
+    async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]:
+        retirement_page(after, limit)
+        query = {} if after is None else {"$or": [
+            {"space": {"$gt": after[0]}}, {"space": after[0], "episode_id": {"$gt": after[1]}},
+        ]}
+        cursor = self._retirements.find(query).sort([("space", 1), ("episode_id", 1)]).limit(limit)
+        return [decode_retirement(doc["payload"], (doc["space"], doc["episode_id"])) async for doc in cursor]
+
+    async def clear_retirement(self, space: str, episode_id: int) -> None:
+        retirement_key(space, episode_id)
+        await self._retirements.delete_one({"space": space, "episode_id": episode_id})
 
     async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
         from pymongo.errors import DuplicateKeyError

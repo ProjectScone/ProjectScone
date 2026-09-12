@@ -27,6 +27,9 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.retirement import (
+    Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
+)
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
@@ -222,6 +225,9 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
+        await self.shared.ensure_index("retirements", {"properties": {
+            "space": KEYWORD, "episode_id": {"type": "long"}, "payload": {"type": "text", "index": False},
+        }})
         await self.check_schema()
         return self
 
@@ -245,7 +251,7 @@ class ElasticsearchDocumentStore:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
         names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "fact_affirmations", "tombstones",
-                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces")]
+                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces", "retirements")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -287,11 +293,13 @@ class ElasticsearchDocumentStore:
     #: single page at index.max_result_window (10,000 by default).
     PAGE = 10_000
 
-    async def _chunk_ids(self, episode_id: int) -> list[int]:
+    async def _chunk_ids(self, space: str, episode_id: int) -> list[int]:
         ids: list[int] = []
         after: Optional[list] = None
         while True:
-            kwargs: dict = {"query": {"term": {"episode_id": episode_id}}, "size": self.PAGE, "sort": [{"chunk_id": "asc"}], "source": ["chunk_id"]}
+            kwargs: dict = {"query": {"bool": {"filter": [
+                {"term": {"space": space}}, {"term": {"episode_id": episode_id}},
+            ]}}, "size": self.PAGE, "sort": [{"chunk_id": "asc"}], "source": ["chunk_id"]}
             if after is not None:
                 kwargs["search_after"] = after
             response = await self.client.search(index=self._idx("chunks"), **kwargs)
@@ -311,7 +319,7 @@ class ElasticsearchDocumentStore:
 
         gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
                             links=await count("fact_links"), tombstones=await count("tombstones"))
-        for name in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight"):
+        for name in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight", "retirements"):
             await self.client.delete_by_query(index=self._idx(name), query=term, refresh=True)
         await self.client.delete(index=self._idx("counters"), id=f"revision:{space}", ignore=[404])
         await self.client.index(index=self._idx("erased_spaces"), id=space, document={"space": space, "erased_at": erased_at},
@@ -324,10 +332,13 @@ class ElasticsearchDocumentStore:
         return (await self.client.get(index=self._idx("erased_spaces"), id=space))["_source"]["erased_at"]
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
-        if await self.get_episode(space, episode_id) is None:
-            return []
-        removed = await self._chunk_ids(episode_id)
-        await self.client.delete_by_query(index=self._idx("chunks"), query={"term": {"episode_id": episode_id}}, refresh=True)
+        episode = await self.get_episode(space, episode_id)
+        removed = await self._chunk_ids(space, episode_id)
+        await self.client.delete_by_query(index=self._idx("chunks"), query={"bool": {"filter": [
+            {"term": {"space": space}}, {"term": {"episode_id": episode_id}},
+        ]}}, refresh=True)
+        if episode is None:
+            return removed
         from elasticsearch import NotFoundError
 
         try:
@@ -530,6 +541,42 @@ class ElasticsearchDocumentStore:
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self._doc("tombstones", f"{space}|{episode_id}")
         return _tombstone(doc) if doc is not None else None
+
+    async def record_retirement(self, record: Retirement) -> Retirement:
+        from elasticsearch import ConflictError
+
+        payload = encode_retirement(record)
+        key = f"{record.space}|{record.episode_id}"
+        try:
+            await self.client.index(index=self._idx("retirements"), id=key, op_type="create", refresh=True,
+                                    document={"space": record.space, "episode_id": record.episode_id, "payload": payload})
+        except ConflictError:
+            pass
+        doc = await self._doc("retirements", key)
+        if doc is None:
+            raise RuntimeError("retirement disappeared after its write")
+        return decode_retirement(doc["payload"], (record.space, record.episode_id))
+
+    async def retirement(self, space: str, episode_id: int) -> Retirement | None:
+        retirement_key(space, episode_id)
+        doc = await self._doc("retirements", f"{space}|{episode_id}")
+        return decode_retirement(doc["payload"], (space, episode_id)) if doc is not None else None
+
+    async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]:
+        retirement_page(after, limit)
+        options = {} if after is None else {"search_after": list(after)}
+        hits = await self._search("retirements", query={"match_all": {}}, size=limit,
+                                  sort=[{"space": "asc"}, {"episode_id": "asc"}], **options)
+        return [decode_retirement(hit["payload"], (hit["space"], hit["episode_id"])) for hit in hits]
+
+    async def clear_retirement(self, space: str, episode_id: int) -> None:
+        from elasticsearch import NotFoundError
+
+        retirement_key(space, episode_id)
+        try:
+            await self.client.delete(index=self._idx("retirements"), id=f"{space}|{episode_id}", refresh=True)
+        except NotFoundError:
+            pass
 
     async def tombstone_by_hash(self, space: str, content_hash: str) -> Optional[Tombstone]:
         query = {"bool": {"filter": [{"term": {"space": space}}, {"term": {"content_hash": content_hash}}]}}

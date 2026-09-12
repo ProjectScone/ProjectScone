@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, vector_identity
+from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
 from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
@@ -71,6 +71,7 @@ from ..core.models import (
     DoctorReport,
     ExpiryReport,
     ForgetReceipt,
+    ForgetStatus,
     IngestJob,
     SpaceReceipt,
     Tombstone,
@@ -84,6 +85,7 @@ from ..core.ports import (
     DocumentStore,
     DuplicateEvent,
     Embedder,
+    EmbeddingCheckpoint,
     Event,
     EventLog,
     NewEpisode,
@@ -107,6 +109,15 @@ ATTACHMENT_TYPES = (
     "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
     "application/pdf", "application/json", "text/plain", "text/markdown", "text/csv",
     "audio/mpeg", "audio/wav", "audio/webm", "video/mp4", "video/webm",
+    "application/octet-stream", "text/html", "application/xml", "text/xml", "application/x-ndjson",
+    "text/tab-separated-values", "message/rfc822", "application/rtf", "application/vnd.ms-outlook",
+    "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation", "application/epub+zip",
 )
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -255,7 +266,9 @@ class MemoryEngine:
     async def open(self) -> "MemoryEngine":
         await self.vectors.ensure(self.embedder.dim)
         self.vector_identity = await vector_identity.settle(self)
-        await self.recover()
+        report = await self.recover()
+        if report.retirements_pending:
+            raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
         return self
 
     @property
@@ -317,8 +330,13 @@ class MemoryEngine:
         if first is not None:
             raise first
 
-    async def recover(self) -> RecoveryReport:
-        """Finish or forget what a crash interrupted. A remember marks its
+    async def recover(self, *, retirement_limit: int = 100) -> RecoveryReport:
+        """Finish interrupted deletions before repairing interrupted ingestion.
+
+        At most ``retirement_limit`` source cleanups (1..1000, default 100) run
+        per call. A remaining backlog is disclosed and ingestion repair waits
+        for a later call. A failing store leaves its intent and raises; callers
+        serialize this operation with source writes. A remember marks its
         episode identity in the document store before writing and clears
         the mark once the rows and the vectors are all durable. Anything
         still marked here was cut off somewhere in between: an episode row
@@ -328,7 +346,12 @@ class MemoryEngine:
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
 
-        return await ingestion_batch.recover(self._ingestion_runtime())
+        retired, pending = await retention.recover_forgets(self._retention_runtime(), retirement_limit)
+        if pending:
+            return RecoveryReport(retired=retired, retirements_pending=True)
+        report = await ingestion_batch.recover(self._ingestion_runtime())
+        report.retired = retired
+        return report
 
     # -- episodes ---------------------------------------------------------
 
@@ -344,16 +367,19 @@ class MemoryEngine:
         attachment_ids: Sequence[str] = (),
         dedup_key: Optional[str] = None,
         replace: bool = False,
+        *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate."""
         await self._living(space)
+        if replace and embedding_checkpoint is not None:
+            raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
         if replace:
             added = (await self.replace(space, record)).added
         else:
-            [added] = await self.remember_many(space, [record])
+            [added] = await self.remember_many(space, [record], embedding_checkpoint=embedding_checkpoint)
         for attachment_id in dict.fromkeys(attachment_ids):
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
@@ -363,30 +389,75 @@ class MemoryEngine:
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
         the key named is forgotten (its receipt returned; the claims that
-        cited it stand) and the new one stored. The forget lands before
-        the store, so a failure between them leaves the key empty rather
-        than pointing at stale text; the error says so."""
+        cited it stand) and the new one stored. Validation, chunking and
+        embedding finish before forgetting, so preparation failure leaves
+        the old source available. The subsequent forget/store is not an
+        atomic swap: a storage failure between them can leave the key empty,
+        and its error reports the removed source. Competing writers still
+        need caller serialization across the commit phase."""
         await self._living(space)
         check_space(space)
         if not record.dedup_key:
             raise InvalidInput("replace needs a dedup_key: it is the key that names what is being replaced")
-        digest = content_hash(space, record.content, record.dedup_key)
-        existing = await self.documents.episode_by_hash(space, digest)
-        if existing is not None and existing.content == record.content:
-            added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
-            return Replaced(added=added, outcome="duplicate", replaced=None)
+        if record.content_hash is not None:
+            raise InvalidInput("replace derives its identity from dedup_key; content_hash is only for import")
+        started = time.perf_counter()
+        runtime = self._ingestion_runtime()
+        configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
+                         self.code_aware, self.code_graph)
+        try:
+            new = ingestion_batch.validated_record(space, record, self.clock())
+            digest = new.content_hash
+            prior_tombstone = await self.documents.tombstone_by_hash(space, digest)
+            existing = await self.documents.episode_by_hash(space, digest)
+            if existing is not None and existing.content == new.content:
+                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+                return Replaced(added=added, outcome="duplicate", replaced=None)
+            pending = ingestion_batch.chunk_record(runtime, new)
+            vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
+            # Embedding can yield for a long time. Never revoke a different source
+            # or recreate one that the user forgot during preparation.
+            await self._living(space)
+            if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
+                    or self.vectors is not runtime.vectors
+                    or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
+                        self.code_aware, self.code_graph) != configuration):
+                raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
+            current = await self.documents.episode_by_hash(space, digest)
+            current_tombstone = await self.documents.tombstone_by_hash(space, digest)
+            if ((current.episode_id if current else None) != (existing.episode_id if existing else None)
+                    or current_tombstone != prior_tombstone):
+                raise InvalidInput("source changed while preparing replacement; inspect its current state and retry")
+        except Exception as error:
+            await self._emit(space, "remember", {
+                "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
+            })
+            raise
         receipt = None
         if existing is not None:
             receipt = await self.forget(space, existing.episode_id)
         try:
-            [added] = await self.remember_many(space, [record])
+            results: list[Added | _DupOf | None] = [None]
+            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
+            await self.documents.bump_revision(space)
+            added = cast(Added, results[0])
+            if self.code_graph:
+                prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
+                await self._map_code(space, [prepared], [added])
         except Exception as error:
+            await self._emit(space, "remember", {
+                "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
+            })
             if receipt is not None:
                 raise InvalidInput(
-                    f"replace forgot episode {receipt.episode_id} and the new record then failed to land "
-                    f"({type(error).__name__}); the key {record.dedup_key!r} names nothing now, so send it again"
+                    f"replace forgot episode {receipt.episode_id}, then its storage or receipt stage failed "
+                    f"({type(error).__name__}); inspect the current record under {record.dedup_key!r} before retrying"
                 ) from error
             raise
+        await self._emit(space, "remember", {
+            "records": 1, "fresh": 1, "deduplicated": 0, "chunks": added.chunks,
+            "bytes": len(new.content.encode()), "embedder": runtime.embedder.id, "latency_ms": _ms(started),
+        })
         outcome = "updated" if receipt is not None else added.outcome
         added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
         return Replaced(added=added, outcome=outcome, replaced=receipt)
@@ -418,6 +489,7 @@ class MemoryEngine:
         return await self.blobs.get(space, attachment_id)
 
     async def remember_many(self, space: str, records: Iterable[Record], *,
+                            embedding_checkpoint: EmbeddingCheckpoint | None = None,
                             partial: bool = False) -> list[Added]:
         """Ingest a batch: one embedding call per EMBED_BATCH chunk texts
         instead of one per record, and one revision bump. Outcomes come
@@ -442,7 +514,7 @@ class MemoryEngine:
         started = time.perf_counter()
         records = list(records)
         try:
-            resolved = await self._remember_many(space, records, partial=partial)
+            resolved = await self._remember_many(space, records, embedding_checkpoint=embedding_checkpoint, partial=partial)
         except Exception as e:
             await self._emit(space, "remember", {
                 "records": len(records), "error": f"{type(e).__name__}: {e}",
@@ -461,15 +533,16 @@ class MemoryEngine:
         })
         return resolved
 
-    def _ingestion_runtime(self) -> ingestion_batch.IngestionRuntime:
+    def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit, code_aware=self.code_aware,
+            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
         )
 
     async def _remember_many(self, space: str, records: Sequence[Record], *,
+                             embedding_checkpoint: EmbeddingCheckpoint | None = None,
                              partial: bool = False) -> list[Added]:
-        added = await ingestion_batch.remember_many(self._ingestion_runtime(), space, records,
+        added = await ingestion_batch.remember_many(self._ingestion_runtime(embedding_checkpoint), space, records,
                                                     partial=partial)
         if self.code_graph:
             await self._map_code(space, records, added)
@@ -543,6 +616,10 @@ class MemoryEngine:
         it are reported, not closed: a source being gone is a fact about
         the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
+
+    async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
+        """Observe retained, pending or completed source removal without writes."""
+        return await retention.forget_status(self._retention_runtime(), space, episode_id)
 
     async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
         """Remove the episode, its chunks and vectors, and release the
@@ -699,6 +776,13 @@ class MemoryEngine:
         found = await self._episode_or_gone(space, episode_id)
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
+
+    async def episode_by_key(self, space: str, dedup_key: str) -> Episode:
+        """Read a keyed source and its attachment metadata. Unknown keys raise
+        NotFound; a key with only a deletion record raises Gone. A changing
+        key is retried at most three times before Conflict. The result does
+        not reserve the key for a subsequent write or include prior versions."""
+        return await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key)
 
     # -- recall -----------------------------------------------------------
 

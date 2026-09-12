@@ -13,12 +13,13 @@ from ..core.validation import check_space
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
 
 if TYPE_CHECKING:
+    from ..core.ports import EmbeddingCheckpoint
     from ..memory.engine import MemoryEngine
 
 
 class PdfManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     geometry: Literal['unrotated_media_box_points'] = 'unrotated_media_box_points'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
@@ -30,6 +31,8 @@ class PdfManifest(BaseModel):
     def consistent_version(self) -> PdfManifest:
         if self.schema_version == 1 and any(page.extraction == 'ocr' for page in self.pages):
             raise ValueError('OCR provenance requires manifest schema version 2')
+        if self.schema_version < 3 and any(page.reading_order is not None for page in self.pages):
+            raise ValueError('OCR reading order requires manifest schema version 3')
         return self
 
 
@@ -62,7 +65,8 @@ def _coverage(pages: tuple[PdfPage, ...]) -> str:
 
 
 async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename: str | None = None,
-                     limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None) -> PdfIngested:
+                     limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None,
+                     embedding_checkpoint: EmbeddingCheckpoint | None = None) -> PdfIngested:
     """Parse first, then store original, manifest and searchable derived episode.
 
     Uses existing attachment/write primitives; this is not an atomic ingest job.
@@ -77,10 +81,13 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     parsed = await (parser or PypdfParser()).parse(data, limits)
     validate_pdf(parsed, limits)
     has_ocr = any(page.extraction == 'ocr' for page in parsed.pages)
-    manifest = PdfManifest(schema_version=2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
+    has_order = any(page.reading_order is not None for page in parsed.pages)
+    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
         parser=parsed.parser, pages=parsed.pages)
     encoded = manifest.model_dump_json(exclude=None if has_ocr else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
+    if len(encoded) > memory.max_attachment_bytes:
+        raise InvalidInput('PDF manifest exceeds its attachment byte limit')
     # Include actual output and parser version: new source bytes or new parser
     # output must never inherit another source's deduplicated episode metadata.
     identity = f'pdf-v1:{_sha(data)}:{_sha(encoded)}'
@@ -93,6 +100,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     empty = tuple(page.number for page in parsed.pages if page.empty)
     added = await memory.remember(space, parsed.text, kind='file', source=f'attachment:{original.attachment_id}',
         dedup_key=identity, attachment_ids=(original.attachment_id, retained.attachment_id),
+        embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': 'pdf', 'evidence_origin': 'extracted_text',
             'pdf_original': original.attachment_id, 'pdf_manifest': retained.attachment_id,
             'pdf_coverage': _coverage(parsed.pages)})

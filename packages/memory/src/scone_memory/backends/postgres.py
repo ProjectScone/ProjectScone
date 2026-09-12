@@ -26,6 +26,9 @@ from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.retirement import (
+    Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
+)
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
@@ -189,6 +192,8 @@ class PostgresDocumentStore:
     CREATE INDEX IF NOT EXISTS tombstones_hash ON {s}.tombstones (space, content_hash);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+    CREATE TABLE IF NOT EXISTS {s}.retirements (space TEXT NOT NULL, episode_id BIGINT NOT NULL,
+        payload TEXT NOT NULL, PRIMARY KEY (space, episode_id));
     CREATE TABLE IF NOT EXISTS {s}.erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
     """
 
@@ -309,7 +314,7 @@ class PostgresDocumentStore:
         gone = DeletedSpace(chunk_ids=chunk_ids, episodes=await count("episodes"), facts=await count("facts"),
                             links=await count("fact_links"), tombstones=await count("tombstones"))
         for table in ("chunks", "episodes", "fact_links", "fact_affirmations", "facts", "tombstones", "inflight",
-                      "revisions"):
+                      "revisions", "retirements"):
             await self._rows(f"DELETE FROM {s}.{table} WHERE space = %s RETURNING space", (space,))
         await self._rows(
             f"INSERT INTO {s}.erased_spaces (space, erased_at) VALUES (%s, %s)"
@@ -323,11 +328,10 @@ class PostgresDocumentStore:
         return row["erased_at"] if row else None
 
     async def delete_episode(self, space: str, episode_id: int) -> list[int]:
-        if await self.get_episode(space, episode_id) is None:
-            return []
-        chunk_ids = [r["id"] for r in await self._rows(f"SELECT id FROM {self.schema}.chunks WHERE episode_id = %s ORDER BY id", (episode_id,))]
+        chunk_ids = [r["id"] for r in await self._rows(
+            f"DELETE FROM {self.schema}.chunks WHERE episode_id = %s AND space = %s RETURNING id", (episode_id, space))]
         await self._rows(f"DELETE FROM {self.schema}.episodes WHERE id = %s AND space = %s RETURNING id", (episode_id, space))
-        return chunk_ids
+        return sorted(chunk_ids)
 
     async def insert_chunks(self, new: Sequence[NewChunk]) -> list[Chunk]:
         out = []
@@ -525,6 +529,35 @@ class PostgresDocumentStore:
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         rows = await self._rows(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s ORDER BY episode_id", (space,))
         return [_tombstone(r) for r in rows]
+
+    async def record_retirement(self, record: Retirement) -> Retirement:
+        payload = encode_retirement(record)
+        row = await self._row(
+            f"INSERT INTO {self.schema}.retirements (space, episode_id, payload) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING RETURNING space, episode_id, payload", (record.space, record.episode_id, payload))
+        if row is None:
+            row = await self._required_row(
+                f"SELECT space, episode_id, payload FROM {self.schema}.retirements WHERE space = %s AND episode_id = %s",
+                (record.space, record.episode_id))
+        return decode_retirement(row["payload"], (record.space, record.episode_id))
+
+    async def retirement(self, space: str, episode_id: int) -> Retirement | None:
+        row = await self._row(f"SELECT space, episode_id, payload FROM {self.schema}.retirements WHERE space = %s AND episode_id = %s",
+                              retirement_key(space, episode_id))
+        return decode_retirement(row["payload"], (space, episode_id)) if row is not None else None
+
+    async def page_retirements(self, after: RetirementCursor | None, limit: int) -> list[Retirement]:
+        retirement_page(after, limit)
+        if after is None:
+            rows = await self._rows(f"SELECT space, episode_id, payload FROM {self.schema}.retirements ORDER BY space, episode_id LIMIT %s", (limit,))
+        else:
+            rows = await self._rows(f"SELECT space, episode_id, payload FROM {self.schema}.retirements WHERE (space, episode_id) > (%s, %s)"
+                                    " ORDER BY space, episode_id LIMIT %s", (*after, limit))
+        return [decode_retirement(row["payload"], (row["space"], row["episode_id"])) for row in rows]
+
+    async def clear_retirement(self, space: str, episode_id: int) -> None:
+        await self._rows(f"DELETE FROM {self.schema}.retirements WHERE space = %s AND episode_id = %s RETURNING episode_id",
+                          retirement_key(space, episode_id))
 
     async def add_affirmation(self, new: NewAffirmation) -> Affirmation:
         row = await self._row(

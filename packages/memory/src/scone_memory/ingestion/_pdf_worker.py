@@ -10,7 +10,8 @@ from ..core.errors import InvalidInput
 from .pdf import ParsedPdf, PdfLimits, PdfPage
 
 
-def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metadata_only: bool = False) -> ParsedPdf:
+def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metadata_only: bool = False,
+            allow_text_errors: bool = False) -> ParsedPdf:
     import pypdf
 
     try:
@@ -23,9 +24,19 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
         texts: list[str] = []
         pages: list[PdfPage] = []
         offset = 0
+        recovered_text_error = False
         for number, page in enumerate(reader.pages, 1):
-            text = '' if metadata_only else page.extract_text(extraction_mode='layout', layout_mode_space_vertically=False,
-                                     layout_mode_strip_rotated=False).rstrip()
+            text = ''
+            if not metadata_only and page.get('/Contents') is not None:
+                try:
+                    text = page.extract_text(extraction_mode='layout', layout_mode_space_vertically=False,
+                                             layout_mode_strip_rotated=False).rstrip()
+                except (InvalidInput, MemoryError, RecursionError, pypdf.errors.LimitReachedError):
+                    raise
+                except Exception:
+                    if not allow_text_errors:
+                        raise
+                    recovered_text_error = True
             if number > 1:
                 offset += 2
             end = offset + len(text.encode('utf-8'))
@@ -39,7 +50,8 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
             offset = end
         if not allow_empty and all(page.empty for page in pages):
             raise InvalidInput('PDF has no extractable text; OCR may be required and is not enabled')
-        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:' + ('pages-v1' if metadata_only else 'layout-v1'), pages=tuple(pages))
+        strategy = 'pages-v1' if metadata_only else ('layout-fallback-v1' if recovered_text_error else 'layout-v1')
+        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}', pages=tuple(pages))
     except InvalidInput:
         raise
     except Exception as error:
@@ -54,7 +66,8 @@ def main() -> None:
         if len(data) > limits.max_input_bytes:
             raise InvalidInput('PDF input exceeds its byte limit')
         payload = extract(data, limits, allow_empty='--allow-empty' in sys.argv[2:],
-            metadata_only='--metadata-only' in sys.argv[2:]).model_dump_json()
+            metadata_only='--metadata-only' in sys.argv[2:],
+            allow_text_errors='--allow-text-errors' in sys.argv[2:]).model_dump_json()
     except Exception as error:
         message = str(error) if isinstance(error, InvalidInput) else 'PDF parser failed'
         payload = json.dumps({'error': message})

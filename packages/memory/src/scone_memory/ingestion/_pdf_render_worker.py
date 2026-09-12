@@ -42,7 +42,7 @@ def render(data: bytes, options: RenderOptions) -> bytes:
                 image = bitmap.to_pil()
                 try:
                     output = BytesIO()
-                    image.save(output, format='PNG')
+                    image.save(output, format='PNG', dpi=(options.dpi, options.dpi))
                     return output.getvalue()
                 finally:
                     image.close()

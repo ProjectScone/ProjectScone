@@ -9,21 +9,38 @@ import sys
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ..runtime.agent_runtime import AgentRuntime
     from ..realtime.catalog import PersonaCatalog
     from ..runtime.model_runtime import DynamicLocalCatalog
 
 from ..runtime.config import Settings, build_engine, build_worker
 from ..runtime.model_connections import ModelConnectionError
+from ..agents.workflow import WorkflowError
 from .app import create_app
 
 
 def build_app(settings: Settings, engine):
+    from ..runtime.agent_runtime import load_agent_runtime
+
+    agents = load_agent_runtime(settings.agents_config, engine) if settings.agents_config else None
+    try:
+        app = _build_app(settings, engine, agents)
+        return agents.own(app) if agents is not None else app
+    except BaseException:
+        if agents is not None:
+            agents.close_idle()
+        raise
+
+
+def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None):
     """The app ``serve`` runs: the memory API alone, or the conversation
     service composed over it on the same origin when the settings name a
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
     or model factory the operator got wrong, before anything is served."""
     from ..runtime.diagnostics import install_http_diagnostics
+    from ..runtime.document_ocr import build_document_ocr
 
+    document_ocr = build_document_ocr(settings)
     store = None
     model_management = False
     vision_available = None
@@ -57,6 +74,10 @@ def build_app(settings: Settings, engine):
 
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
+                          document_ocr=document_ocr,
+                          agent_catalog=agents.catalog if agents else None,
+                          agent_plan_store=agents.plans if agents else None,
+                          agent_run_service=agents.service if agents else None,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                           model_connections_available=model_management, vision_available=vision_available))
     from .conversation_server import journal_path, load_model_factory
@@ -103,6 +124,10 @@ def build_app(settings: Settings, engine):
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
+                                   document_ocr=document_ocr,
+                                   agent_catalog=agents.catalog if agents else None,
+                                   agent_plan_store=agents.plans if agents else None,
+                                   agent_run_service=agents.service if agents else None,
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    runtime_available=runtime_available,
                                    model_connections_available=model_management, vision_available=vision_available,
@@ -144,10 +169,11 @@ def main(settings: Optional[Settings] = None) -> None:
         # made every Mongo request fail with "Cannot use AsyncMongoClient
         # in different event loop" (seen in the compose smoke test).
         engine = await build_engine(settings)
+        app = None
         try:
             try:
                 app = build_app(settings, engine)
-            except (ValueError, OSError, ImportError, AttributeError, TypeError, ModelConnectionError) as error:
+            except (ValueError, OSError, ImportError, AttributeError, TypeError, ModelConnectionError, WorkflowError) as error:
                 print(f"refusing to serve: {error}", file=sys.stderr)
                 sys.exit(2)
             worker = app.state.worker
@@ -167,7 +193,12 @@ def main(settings: Optional[Settings] = None) -> None:
             )
             await build_server(settings, app).serve()
         finally:
-            await engine.close()
+            try:
+                agent_runtime = getattr(getattr(app, 'state', None), 'agent_runtime', None)
+                if agent_runtime is not None:
+                    await agent_runtime.aclose()
+            finally:
+                await engine.close()
 
     from ._signals import termination_unwinds
     with termination_unwinds():
