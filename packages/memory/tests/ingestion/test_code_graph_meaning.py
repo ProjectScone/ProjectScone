@@ -249,3 +249,24 @@ def test_a_colon_that_is_not_inheritance_is_not_read():
     source = "class Shelf {\n  size: number = 3;\n}\n"
     found = code_claims(source, "web/a.ts", language="braces")
     assert [c.object for c in found if c.predicate == INHERITS] == []
+
+
+def test_commented_out_code_is_not_code():
+    """Blanking string literals keeps comments, because rationale and
+    citations live in them. The structural scanner must not read that same
+    text as executable: a commented-out class is not a class, and an edge
+    invented from one is exactly the fabrication this module forbids."""
+    source = "// class Fake extends Invented {}\nclass Real extends Base {\n}\n"
+    found = code_claims(source, "web/a.ts", language="braces")
+    edges = [(c.subject, c.object) for c in found if c.predicate == INHERITS]
+    assert edges == [("web/a.ts:Real", "Base")], edges
+
+
+def test_a_note_in_a_comment_beside_commented_out_code_is_still_read():
+    """The line the fix must not cross: comments remain the place notes and
+    citations come from."""
+    source = "// WHY: the old class is kept for reference, see ADR-9\n// class Fake extends X {}\nclass Real {}\n"
+    found = code_claims(source, "web/a.ts", language="braces")
+    assert any(c.predicate == NOTES and "kept for reference" in c.object for c in found), found
+    assert any(c.predicate == CITES and c.object == "ADR-9" for c in found), found
+    assert [c.object for c in found if c.predicate == INHERITS] == []

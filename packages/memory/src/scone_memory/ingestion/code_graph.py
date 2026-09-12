@@ -97,15 +97,24 @@ def _cited(text: str) -> list[str]:
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
 
 
-def _masked(content: str) -> str:
-    """The source with the inside of every string literal blanked.
+def _masked(content: str, *, prose: bool = True) -> str:
+    """The source with text that is not code blanked, in place.
 
-    A regex over raw source cannot tell code from data: a string holding
-    ``# WHY: ...`` or ``class X extends Y`` reads as a comment or a
-    declaration, and the graph would then assert something the code never
-    said. Blanking string contents in place keeps every line and column
-    where it was, so line numbers and quotes are unaffected. Comments are
-    recognised before strings, which is what makes ``// "unclosed`` safe.
+    A regex over raw source cannot tell code from data, and there are two
+    different things to hide depending on what is being looked for:
+
+    - ``prose=True`` blanks **string literals** and keeps comments. That
+      is what rationale and citations are read from: they live in
+      comments, while a string holding ``# WHY: ...`` is data.
+    - ``prose=False`` blanks **strings and comments both**. That is what
+      declarations and inheritance are read from, because a commented-out
+      ``// class Fake extends Invented {}`` is not a class, and an edge
+      invented from one is the fabrication this module exists to avoid.
+
+    Either way the blanking is in place, so every line and column stays
+    where it was and line numbers, offsets and quotes are unaffected.
+    Comments are recognised before strings, which is what makes
+    ``// "unclosed`` safe.
     """
     out: list[str] = []
     quote = comment = ""
@@ -115,12 +124,14 @@ def _masked(content: str) -> str:
         if comment:
             if comment == "//" and here == "\n":
                 comment = ""
+                out.append(here)
             elif comment == "/*" and pair == "*/":
                 comment = ""
-                out.append(pair)
+                out.append(pair if prose else "  ")
                 at += 2
                 continue
-            out.append(here)
+            else:
+                out.append(here if prose or here == "\n" else " ")
         elif quote:
             if here == "\\" and at + 1 < len(content):
                 out.append("  " if content[at + 1] != "\n" else " \n")
@@ -131,7 +142,7 @@ def _masked(content: str) -> str:
                 quote = ""
         elif pair in ("//", "/*"):
             comment = pair
-            out.append(pair)
+            out.append(pair if prose else "  ")
             at += 2
             continue
         else:
@@ -498,7 +509,7 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    for number, line in enumerate(_masked(content).split("\n"), start=1):
+    for number, line in enumerate(_masked(content, prose=False).split("\n"), start=1):
         declares = _DECLARES.search(line)
         if not declares:
             continue
