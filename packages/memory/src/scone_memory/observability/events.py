@@ -29,6 +29,11 @@ def _same_payload(a, b) -> bool:
 class InMemoryEventLog:
     name = "memory"
 
+    #: A ring always evicts, so it can never be trusted with configuration
+    #: something depends on. Declared rather than left to be inferred: a
+    #: reader must not have to guess what a log keeps.
+    keeps_configuration = False
+
     def __init__(self, max_events: int = 10_000) -> None:
         self.max_events = max_events
         self._events: deque[Event] = deque(maxlen=max_events)
@@ -98,6 +103,16 @@ class SqliteEventLog:
     CREATE UNIQUE INDEX IF NOT EXISTS events_dedup ON events(space, dedup_key) WHERE dedup_key IS NOT NULL;
     """
     SWEEP_EVERY = 100
+
+    @property
+    def keeps_configuration(self) -> bool:
+        """Whether this log promises to keep what it is given.
+
+        True only while no expiry is configured. ``max_age_days=0`` is the
+        most aggressive setting there is, not the absence of one, so any
+        value at all is a refusal.
+        """
+        return self.max_age_days is None
 
     def __init__(
         self,
@@ -208,6 +223,11 @@ def _event(row: sqlite3.Row) -> Event:
 
 class MongoEventLog:
     name = "mongo"
+
+    @property
+    def keeps_configuration(self) -> bool:
+        """True only while no expiry is configured; any value is a refusal."""
+        return self.max_age_days is None
 
     def __init__(self, url: str, database: str = "scone", max_age_days: Optional[float] = None, client=None) -> None:
         try:

@@ -291,9 +291,57 @@ async def test_a_log_that_may_evict_its_events_cannot_hold_a_vocabulary():
     try:
         with pytest.raises(NoEventLog) as refused:
             await save_meanings(engine, "alpha", RelationMeanings())
-        assert "keeps at most" in str(refused.value), str(refused.value)
+        assert "does not keep what it is given" in str(refused.value), str(refused.value)
         held = await read_vocabulary(engine, "alpha")
         assert held.source == "process"
         assert "cannot hold" in held.why, held.why
+    finally:
+        await engine.close()
+
+
+async def test_a_zero_day_retention_is_the_most_aggressive_setting_not_the_absence_of_one(tmp_path):
+    """`max_age_days=0` expires everything immediately. Testing `> 0`
+    accepted it -- the guard failed open at exactly the setting that
+    destroys configuration fastest."""
+    from scone_memory.observability.events import SqliteEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=SqliteEventLog(tmp_path / "e.db", max_age_days=0),
+                                relation_meanings=EMPLOYS).open()
+    try:
+        with pytest.raises(NoEventLog):
+            await save_meanings(engine, "default", RelationMeanings())
+        assert (await read_vocabulary(engine, "default")).source == "process"
+    finally:
+        await engine.close()
+
+
+async def test_a_log_that_makes_no_promise_is_not_assumed_to_keep_anything():
+    """Duck typing is not a promise. A log with no retention attributes
+    might keep everything, or might be a wrapper that drops whatever it
+    likes -- and reading "no bound declared" as "keeps forever" is absence
+    of evidence used as evidence of absence.
+
+    The promise has to be made, not inferred.
+    """
+    class Anonymous:
+        """An event log that says nothing about what it keeps."""
+
+        name = "anonymous"
+
+        async def append(self, new):
+            raise AssertionError("not reached: the save must be refused first")
+
+        async def query(self, space, kind=None, since=None, limit=100, after_id=None):
+            return []
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=Anonymous(), relation_meanings=EMPLOYS).open()
+    try:
+        with pytest.raises(NoEventLog) as refused:
+            await save_meanings(engine, "default", EMPLOYS)
+        assert "does not promise" in str(refused.value), str(refused.value)
+        held = await read_vocabulary(engine, "default")
+        assert held.source == "process" and "does not promise" in held.why, held.why
     finally:
         await engine.close()

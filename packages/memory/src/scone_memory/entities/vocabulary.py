@@ -52,27 +52,31 @@ SAVED = "graph.meanings"
 #: Events read back when looking for the latest save. One space's
 #: vocabulary changes rarely; this is a ceiling, not an expectation.
 MAX_READ = 200
-#: What an event log may say it drops. A log that declares either of these
-#: will evict eventually -- a ring filling with unrelated traffic in
-#: another space, or an age limit passing -- and the record holding this
-#: space's configuration is as evictable as any other. A reader would then
-#: be told the space holds no vocabulary, which by then would be false.
+#: The promise a log must make before configuration may be kept in it.
 #:
-#: Configuration a reader depends on cannot live somewhere that may forget
-#: it, so such a log refuses the save instead of losing it later.
-#: ``SqliteEventLog`` and ``MongoEventLog`` are unbounded unless an
-#: operator sets ``max_age_days``; ``InMemoryEventLog`` is always a ring
-#: and so can never hold one.
-_RETENTION = ("max_events", "max_age_days")
+#: Asked of the log rather than inferred from it. The first version looked
+#: for ``max_events``/``max_age_days`` and treated their absence as a
+#: promise to keep -- absence of evidence used as evidence of absence, and
+#: worthless against a wrapper or any implementation that simply does not
+#: name its limits. It also tested ``> 0``, which accepted
+#: ``max_age_days=0``: the most aggressive expiry there is, admitted by the
+#: guard meant to catch expiry.
+#:
+#: So the default is now refusal. A log that keeps what it is given says
+#: so; anything that does not is assumed to forget, because for
+#: configuration a reader depends on, guessing wrong in that direction is
+#: the cheaper mistake.
+KEEPS = "keeps_configuration"
 
 
 def _forgets(log: object) -> Optional[str]:
-    """What this log admits it may drop, or None when it promises to keep."""
-    for named in _RETENTION:
-        held = getattr(log, named, None)
-        if isinstance(held, (int, float)) and held > 0:
-            return f"keeps at most {held:g} ({named})"
-    return None
+    """Why this log cannot be trusted with configuration, or None if it can."""
+    promised = getattr(log, KEEPS, None)
+    if promised is True:
+        return None
+    if promised is False:
+        return "says it does not keep what it is given"
+    return f"does not promise to keep what it is given (no {KEEPS})"
 
 
 class NoEventLog(SconeError):
@@ -144,10 +148,10 @@ async def _write(engine: "MemoryEngine", space: str,
     forgets = _forgets(engine.events)
     if forgets is not None:
         raise NoEventLog(
-            f"this event log {forgets}, so a vocabulary saved for {space!r} could be evicted by "
-            f"unrelated traffic and every reader would silently fall back to its own "
-            f"configuration. Refusing to keep configuration somewhere that may forget it: use a "
-            f"log without a retention bound, or leave the vocabulary to process configuration.")
+            f"this event log {forgets}, so a vocabulary saved for {space!r} could be dropped and "
+            f"every reader would silently fall back to its own configuration. Refusing to keep "
+            f"configuration somewhere that may forget it: use a log that keeps what it is given "
+            f"and has no expiry configured, or leave the vocabulary to process configuration.")
     # A space that has been deleted takes no writes. A save that reported
     # success into one would be a claim about durable state that nothing
     # will ever honour.
