@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from ..core.errors import InvalidInput
 from ..ocr.layout import ReadingMode
 from ..ocr.types import OcrEngine
+from .extraction_checkpoint import ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.registry import BuiltinDocumentParser, extension
 from .formats.types import DocumentLimits, ParsedDocument
 from .pdf_ocr import OcrPdfOptions, OcrPdfParser
@@ -52,9 +53,18 @@ class SelectedDocumentOcr:
     dpi: int
 
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocument:
+        return await self._parse(data, filename, limits)
+
+    async def parse_checkpointed(self, data: bytes, filename: str, limits: DocumentLimits,
+                                 checkpoints: ExtractionCheckpoints) -> ParsedDocument:
+        return await self._parse(data, filename, limits, checkpoints)
+
+    async def _parse(self, data: bytes, filename: str, limits: DocumentLimits,
+                     checkpoints: ExtractionCheckpoints | None = None) -> ParsedDocument:
         if extension(filename) != '.pdf':
             raise InvalidInput('PDF OCR can only be selected for a PDF document')
-        parsed = await self.parser.parse(data, filename, limits)
+        parsed = (await self.parser.parse_checkpointed(data, filename, limits, checkpoints)
+                  if checkpoints is not None and checkpoint_dispatch_allowed(self.parser) else await self.parser.parse(data, filename, limits))
         metadata = {**parsed.metadata, 'pdf_ocr': json.dumps(
             {**self.selection.model_dump(), 'dpi': self.dpi}, sort_keys=True, separators=(',', ':'))}
         return ParsedDocument.model_validate({**parsed.model_dump(), 'metadata': metadata})

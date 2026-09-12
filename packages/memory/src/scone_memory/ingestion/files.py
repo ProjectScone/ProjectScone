@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
 from ..core.validation import MAX_METADATA_VALUE, check_space
+from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .document_source import DocumentSource, source_revision_key
@@ -110,12 +111,16 @@ def extraction_filename(original: Attachment, filename: str | None = None) -> st
 
 
 async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser,
-                           limits: DocumentLimits) -> DocumentManifest:
+                           limits: DocumentLimits,
+                           extraction_checkpoint: ExtractionCheckpoints | None = None) -> DocumentManifest:
     extension(filename)
     if not isinstance(data, bytes) or not data or len(data) > limits.max_input_bytes:
         raise InvalidInput('document exceeds its input byte limit or is empty')
     try:
-        parsed = await asyncio.wait_for(parser.parse(data, filename, limits), limits.timeout_seconds)
+        operation = (parser.parse_checkpointed(data, filename, limits, extraction_checkpoint)
+                     if extraction_checkpoint is not None and isinstance(parser, CheckpointedDocumentParser) and checkpoint_dispatch_allowed(parser)
+                     else parser.parse(data, filename, limits))
+        parsed = await asyncio.wait_for(operation, limits.timeout_seconds)
     except asyncio.TimeoutError:
         raise InvalidInput('document parser exceeded its wall time limit') from None
     validate_document(parsed, limits)

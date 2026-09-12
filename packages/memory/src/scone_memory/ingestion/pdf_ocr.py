@@ -5,6 +5,8 @@ import asyncio
 from collections.abc import Mapping
 from importlib.util import find_spec
 import json
+import hashlib
+from importlib.metadata import PackageNotFoundError, version
 import logging
 import time
 from typing import Literal
@@ -16,6 +18,7 @@ from ..ocr.process import python_worker, run_bounded
 from ..ocr.tesseract import png_dimensions
 from ..ocr.types import OcrEngine, OcrResult
 from ..ocr.layout import ReadingMode, OrderedRegions, order_columns
+from .extraction_checkpoint import ExtractionCheckpoints
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfTextRegion, PypdfParser, validate_pdf
 
 
@@ -105,6 +108,44 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
     return output
 
 
+class _PageReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
+    schema_version: Literal[1] = 1
+    binding: str = Field(pattern=r'^[a-f0-9]{64}$')
+    page: int = Field(ge=1, le=1000)
+    result: OcrResult
+
+
+def _checkpoint_binding(data: bytes, parsed: ParsedPdf, options: OcrPdfOptions,
+                        limits: PdfLimits) -> str:
+    dependencies: dict[str, str] = {}
+    for package in ('pypdf', 'pypdfium2'):
+        try:
+            dependencies[package] = version(package)
+        except PackageNotFoundError:
+            dependencies[package] = 'unavailable'
+    payload = {'strategy': 'ocr-page-observations-v1',
+        'original': hashlib.sha256(data).hexdigest(),
+        'inspection': hashlib.sha256(parsed.model_dump_json().encode()).hexdigest(),
+        'options': options.model_dump(), 'limits': limits.model_dump(),
+        'dependencies': dependencies}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _page_receipt(raw: bytes, binding: str, page: int, options: OcrPdfOptions) -> OcrResult:
+    try:
+        if type(raw) is not bytes or len(raw) > 16 * 1024 * 1024:
+            raise ValueError('checkpoint bytes')
+        receipt = _PageReceipt.model_validate_json(raw)
+        if (receipt.binding != binding or receipt.page != page
+                or receipt.result.width * receipt.result.height > options.max_pixels
+                or len(receipt.result.regions) > options.max_regions):
+            raise ValueError('checkpoint binding or bounds')
+        return receipt.result
+    except (ValueError, TypeError):
+        raise InvalidInput('PDF OCR page checkpoint is invalid or does not match this extraction') from None
+
+
 class OcrPdfParser:
     """OCR missing text pages, or explicitly all pages, within one wall deadline.
 
@@ -121,17 +162,45 @@ class OcrPdfParser:
         except asyncio.TimeoutError as error:
             raise InvalidInput('PDF OCR exceeded its wall time limit') from error
 
-    async def _parse(self, data: bytes, limits: PdfLimits) -> ParsedPdf:
+    async def parse_checkpointed(self, data: bytes, limits: PdfLimits,
+                                 checkpoints: ExtractionCheckpoints) -> ParsedPdf:
+        """Reuse completed page observations within the existing whole-call deadline."""
+        try:
+            return await asyncio.wait_for(self._parse(data, limits, checkpoints), limits.timeout_seconds)
+        except asyncio.TimeoutError as error:
+            raise InvalidInput('PDF OCR exceeded its wall time limit') from error
+
+    async def _parse(self, data: bytes, limits: PdfLimits,
+                     checkpoints: ExtractionCheckpoints | None = None) -> ParsedPdf:
         deadline = time.monotonic() + limits.timeout_seconds
         parsed = await self.inspect(data, limits)
+        binding = _checkpoint_binding(data, parsed, self.options, limits) if checkpoints is not None else ""
+        if checkpoints is not None:
+            saved_binding = checkpoints.get('ocr-binding')
+            encoded_binding = binding.encode('ascii')
+            if saved_binding is None:
+                checkpoints.put('ocr-binding', encoded_binding)
+            elif saved_binding != encoded_binding:
+                raise InvalidInput('PDF OCR checkpoints do not match this extraction')
         recognized: dict[int, OcrResult] = {}
         text_bytes = len(parsed.text.encode())
         for page in parsed.pages:
             if page.empty or self.options.mode == 'all_pages':
-                result = await self._recognize(data, page.number, deadline)
+                key = f'ocr-page:{page.number}'
+                cached = checkpoints.get(key) if checkpoints is not None else None
+                if cached is None:
+                    result = await self._recognize(data, page.number, deadline)
+                else:
+                    result = _page_receipt(cached, binding, page.number, self.options)
+                _remaining(deadline)
                 text_bytes += sum(len(r.text.encode()) for r in result.regions) + max(0, len(result.regions) - 1) - (page.end - page.start)
                 if text_bytes > limits.max_text_bytes:
                     raise InvalidInput('PDF OCR text exceeds its byte limit')
+                if cached is None and checkpoints is not None:
+                    receipt = _PageReceipt(binding=binding, page=page.number, result=result).model_dump_json().encode()
+                    result = _page_receipt(receipt, binding, page.number, self.options)
+                    _remaining(deadline)
+                    checkpoints.put(key, receipt)
                 recognized[page.number] = result
         output = assemble_ocr_pdf(parsed, recognized, limits, reading_order=self.options.reading_order)
         _remaining(deadline)
