@@ -163,9 +163,9 @@ delegates to the same verification.
 
 Frame reads require current source access. After decoding, the host rechecks
 original and manifest bytes, current links, the raw source row and authorization
-before sending the response. Forgetting, unlinking or changing access during
-those checks prevents stale frame delivery. These checks are not a distributed
-storage transaction. Requests share bounded host ingestion capacity and return
+before sending the response. Observed forgetting, unlinking or access changes
+prevent frame delivery. These are separate storage observations, not a distributed
+transaction; a change after its final observation is not guaranteed to be caught. Requests share bounded host ingestion capacity and return
 429 when it is full; cancelling a read releases its slot.
 
 This implementation redecodes the sampled inventory for each request and does
