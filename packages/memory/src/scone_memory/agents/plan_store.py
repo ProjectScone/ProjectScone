@@ -16,19 +16,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from ._encrypted_store import EncryptedRecordStore
 from .catalog import AgentCatalog, BoundAgent
 from .handoff_workflow import AgentHandoffPlan
-from .task_workflow import AgentTaskPlan
+from .interactive_plan import InteractiveAgentPlan
+from .task_workflow import AgentTask, AgentTaskPlan
 from .workflow import WorkflowError, _integer, _name
 from ..core.validation import check_space
 
 _APP_ID = 0x5343504C
 _MAX_REVISION = 2**63 - 1
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
-AgentPlan = AgentTaskPlan | AgentHandoffPlan
+AgentPlan = AgentTaskPlan | AgentHandoffPlan | InteractiveAgentPlan
 
 
 def _selections(plan: AgentPlan) -> dict[str, tuple[str, str | None]]:
-    if isinstance(plan, AgentTaskPlan):
-        return {task.task_id: (task.agent_id, task.model_id) for task in plan.tasks}
+    if isinstance(plan, (AgentTaskPlan, InteractiveAgentPlan)):
+        return {task.task_id: (task.agent_id, task.model_id) for task in plan.tasks
+                if isinstance(task, AgentTask)}
     return {agent.agent_id: (agent.agent_id, agent.model_id) for agent in plan.agents}
 
 
@@ -37,10 +39,16 @@ def _snapshot(plan: AgentPlan) -> AgentPlan:
         return AgentTaskPlan.model_validate(plan.model_dump())
     if isinstance(plan, AgentHandoffPlan):
         return AgentHandoffPlan.model_validate(plan.model_dump())
+    if isinstance(plan, InteractiveAgentPlan):
+        return InteractiveAgentPlan.model_validate(plan.model_dump())
     raise ValueError('validated agent plan required')
 
 
 def _explicit(plan: AgentPlan, agents: dict[str, BoundAgent]) -> AgentPlan:
+    if isinstance(plan, InteractiveAgentPlan):
+        return InteractiveAgentPlan(kind='interactive', workflow_id=plan.workflow_id, tasks=tuple(
+            task.model_copy(update={'model_id': agents[task.task_id].model_id})
+            if isinstance(task, AgentTask) else task for task in plan.tasks))
     if isinstance(plan, AgentTaskPlan):
         return AgentTaskPlan(workflow_id=plan.workflow_id, tasks=tuple(
             task.model_copy(update={'model_id': agents[task.task_id].model_id}) for task in plan.tasks))
