@@ -38,6 +38,23 @@ DATASET = [
 ]
 
 
+#: A question the temporal route answers by handing back the day's
+#: passages rather than by computing anything -- status "recalled". It has
+#: to be in a fixture of its own, because the split it exercises is
+#: invisible on a file where every temporal question computes.
+FROM_PASSAGES = [
+    item("q1", "What did I do 9 days ago?", "repainted the crane",
+         ["I repainted the harbour crane today."], ["2023/05/23 (Tue) 09:00"]),
+]
+
+
+@pytest.fixture()
+def recalling(tmp_path):
+    path = tmp_path / "recalled.json"
+    path.write_text(json.dumps(FROM_PASSAGES), encoding="utf-8")
+    return path
+
+
 @pytest.fixture()
 def dataset(tmp_path):
     path = tmp_path / "items.json"
@@ -66,6 +83,28 @@ async def test_the_computed_answers_are_scored_against_the_file(dataset):
     assert "1 agree with the file" in scored.text()
 
 
+async def test_an_answer_read_from_passages_is_not_counted_as_a_computed_one(recalling):
+    """The temporal route answers two ways: it computes, or it hands back
+    the day's passages. A recalled answer has no arithmetic in it, so
+    `score_answer` cannot judge it -- and putting it in the `computed`
+    denominator made the ratio report the computation as wrong when nothing
+    had been computed at all."""
+    scored = await run_route_bench(recalling)
+    assert scored.routes["temporal"] == 1, scored.record()
+    assert scored.recalled == 1 and scored.computed == 0, scored.record()
+    assert "read from passages" in scored.text(), scored.text()
+    assert "agree with the file" not in scored.text(), \
+        "with nothing computed there is no score to report"
+
+
+async def test_an_answer_the_scorer_cannot_judge_is_counted_apart_from_a_wrong_one(dataset):
+    """"Cannot tell" and "wrong" are different facts, and adding them
+    together tells a reader neither."""
+    scored = await run_route_bench(dataset)
+    assert scored.computed_unscored == 0, scored.record()
+    assert not hasattr(scored, "_") and scored.computed_wrong == 0, scored.record()
+
+
 async def test_the_report_says_what_it_cannot_say(dataset):
     scored = await run_route_bench(dataset)
     said = scored.text()
@@ -84,3 +123,23 @@ async def test_the_score_is_a_record_that_can_be_kept(dataset):
     assert record["questions"] == 2 and record["routes"]["temporal"] >= 1
     assert record["dataset"].endswith("items.json")
     assert isinstance(scored, RouteScore)
+
+
+async def test_the_bench_can_run_with_passage_merging(dataset):
+    """A feature the bench cannot run is a feature nobody can judge."""
+    from scone_memory.bench.runner import load_items, run
+
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+
+    async def make():
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                  HashEmbedder(), chunk_target=90).open()
+
+    items = load_items(dataset)
+    plain = await run(make, items, ks=(1, 2), limit=3, dataset=str(dataset))
+    joined = await run(make, items, ks=(1, 2), limit=3, dataset=str(dataset), merge=True)
+    assert plain.items == joined.items == len(items)
+    # The claim under test: merging cannot invent or lose an episode, so
+    # recall at the recall limit is the same. Anything else would mean it
+    # was changing what came back rather than how it was packed.
+    assert plain.recall_any[2] == joined.recall_any[2], (plain.recall_any, joined.recall_any)

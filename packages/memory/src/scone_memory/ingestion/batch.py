@@ -24,11 +24,28 @@ EMBED_BATCH = 64
 
 
 def _validated_vectors(response: object, count: int, dimension: int) -> list[list[float]]:
+    """Vectors from one batch, checked. ``dimension`` is the width already
+    settled for this operation, or 0 when the embedder declares none and
+    nothing has settled it yet."""
     if not isinstance(response, list) or len(response) != count:
         raise ValueError('embedding response must contain one vector per input text')
+    # Not every embedder declares a width -- a remote model behind an
+    # endpoint that does not advertise one reports 0, and the abstention
+    # floor reads the width off the vectors themselves for exactly that
+    # case. Checking against 0 would refuse every vector such an embedder
+    # ever returned. With no declared width the width of the first vector
+    # settles it, and the caller carries that forward across every batch of
+    # one operation: settling it per batch would let 64 vectors be eight
+    # wide and the next sixteen, and an index built from those is silently
+    # incoherent.
+    expected = dimension if dimension else None
     vectors: list[list[float]] = []
     for vector in response:
-        if not isinstance(vector, list) or len(vector) != dimension:
+        if not isinstance(vector, list) or not vector:
+            raise ValueError('embedding vector does not match the configured dimension')
+        if expected is None:
+            expected = len(vector)
+        if len(vector) != expected:
             raise ValueError('embedding vector does not match the configured dimension')
         try:
             valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -56,6 +73,7 @@ async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
             digest.update(encoded)
         prefix = digest.hexdigest()
     vectors: list[list[float]] = []
+    settled = dimension
     for offset in range(0, len(texts), EMBED_BATCH):
         batch = texts[offset:offset + EMBED_BATCH]
         key = f'{prefix}:{offset}'
@@ -69,7 +87,12 @@ async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
                 raise ValueError('embedding checkpoint is invalid') from None
         if embedder.id != identifier or embedder.dim != dimension:
             raise ValueError('embedding identity changed during indexing')
-        validated = _validated_vectors(response, len(batch), dimension)
+        validated = _validated_vectors(response, len(batch), settled)
+        # An undeclared width is settled by the first vector of the
+        # operation and holds for every batch after it, checkpointed ones
+        # included -- one operation produces one width or it fails.
+        if not settled and validated:
+            settled = len(validated[0])
         if saved is None and checkpoint is not None:
             checkpoint.put(key, json.dumps(validated, allow_nan=False, separators=(',', ':')).encode())
         vectors.extend(validated)

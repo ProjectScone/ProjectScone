@@ -201,6 +201,15 @@ read nor written, and the computed answers are scored against the file's
 own answers — read from the file, because the bench loader keeps only the
 fields retrieval is scored on.
 
+The temporal route answers two ways and the report keeps them apart. It
+either **computes** an answer or hands back the day's **passages**, and
+only the first has arithmetic to compare with the file; a recalled answer
+in the `computed` denominator made the ratio report the computation as
+wrong when nothing had been computed. Of the computed ones, `agree`,
+`disagree` and "a shape this cannot judge" are three separate counts,
+because the scorer returns *cannot tell* for answer shapes it does not
+handle and adding those to the wrong ones tells a reader neither.
+
 What this **cannot** say is the more interesting half: whether a question
 the rule sent to search would have been answered better by computing it.
 That needs a known answer for every question under every route, which
@@ -228,6 +237,19 @@ scone recall "What did I decide about billing, and who was at the meeting?" --pa
 `GET /v1/recall/parts` (capability `recall.parts`). Nothing is
 paraphrased: a part is a verbatim span of the question and carries its own
 offsets, so a receipt can quote exactly what was searched.
+
+It takes the same narrowing as an ordinary search — `as_of`, `tags`,
+`where`, `conditions`, `kind`, `source_prefix`, `since`, `until` — and the
+response **echoes the space it authenticated for and the filters it
+actually applied**. A filter a caller passed and the server quietly
+dropped is worse than one it refused: the page shows an answer that looks
+narrowed and is not.
+
+`history` is **refused rather than ignored**. It returns the closed chain
+behind the facts one query matched, and merged across a question's parts
+that has no defined meaning; inventing one silently would be the same
+fault as dropping a filter. Ask `/v1/recall` with `history` for the whole
+question instead.
 
 ### What it measured, which is nothing
 
@@ -473,6 +495,127 @@ gap. `value` carries `days`, `months`, `years`, `holds`, `spells` and
 `periods` (every stretch, half-open); the working names each stretch. A
 claim that still holds is counted up to the moment asked and says so.
 
+## One passage instead of three fragments of it
+
+Small chunks match precisely and read badly. Three neighbouring fragments
+of one paragraph are three citations to the same thought, and between them
+they crowd the rest of the answer out of the limit.
+
+The leading frameworks fix this by indexing a hierarchy at ingestion — a
+parent node holding children — and merging children back into the parent
+at retrieval. That means choosing the hierarchy before anyone has asked a
+question, and re-indexing to change it.
+
+```bash
+scone recall "crane survey rust jib slew" --merge --limit 5
+# 1 passage(s) joined from 3 chunk(s)
+# joined 3 chunk(s) into #12: 11, 12, 13
+```
+
+**No hierarchy and no re-index**, because every chunk already carries the
+byte span it came from: neighbours from one episode are merged by reading
+the span that contains them. The shape of a merge is therefore decided by
+what was actually retrieved, not by a decision taken at ingestion.
+
+Three rules it keeps:
+
+- **A merged passage says what went into it.** `from_chunks` names every
+  chunk absorbed, because a citation nobody can check is worse than three
+  that can.
+- **It keeps the best score of its parts, never their sum.** A sum would
+  make a merged passage outrank everything by arithmetic rather than by
+  relevance.
+- **It is a passage, not a document.** Fragments further apart than
+  `max_merged` bytes are left alone and the report says so — silently
+  returning most of a document to answer a question about a sentence
+  would be worse than not merging.
+- **The caller's ranking survives.** Neighbours are found per episode and
+  emitted in the order they arrived, a merged passage taking the place of
+  its best fragment. Walking a ranked list by episode and appending group
+  by group would rearrange it, which is a change nobody asked for and
+  nothing reports.
+- **A deleted source is not an unreadable one.** If the episode is
+  confirmed absent its text is gone, so the fragments quoting it are
+  dropped rather than served from text this space no longer holds. A
+  store that merely would not answer is a different fact: those fragments
+  stand, and the reason says the merge *failed* rather than that there
+  was nothing to merge.
+
+Opt-in, because it is not yet measured. It changes the shape of an answer
+for certain; whether it changes what is *found* is a question for the
+bench, and until that number exists this does not become the default.
+
+## What a codebase says about itself beyond who calls whom
+
+Call edges are not a code graph. Two questions people actually ask are
+answered by neither `calls` nor `imports`, and both are readable without
+a model:
+
+**Which types are which.** A class hierarchy is how anyone navigates a
+codebase, and nothing in a call graph says a word about it. `inherits`
+edges now come out of the same pass:
+
+```
+pkg/shelf.py:Paper  inherits  pkg/shelf.py:Shelf      # a base this file defines
+pkg/shelf.py:Shelf  inherits  pkg.base.Store          # a base from an import
+web/shelf.ts:Shelf  inherits  Store                   # extends / implements / :
+```
+
+A base the file can see is named by its path, like any other declaration.
+One that arrived through an import whose module resolves to a file is
+named there. Anything else is recorded **as the source wrote it** — the
+same rule imports already follow, because the name is what the file said
+even when its home is unknown. A base that is not a plain name (a
+subscripted generic, a call) is left out rather than guessed at.
+
+**Why the code is the way it is.** The rationale is in the comments and
+the decision it came from is in an ADR or an RFC, and both were
+previously invisible:
+
+```
+pkg/shelf.py:Shelf.open  notes  the index is rebuilt on open because a
+                                half-written index is worse than none
+pkg/shelf.py:Shelf.open  cites  ADR-0007
+pkg/shelf.py:Paper       flags  the paper shelf cannot hold two of the
+                                same thing yet
+```
+
+Three things this gets right that one predicate would not:
+
+- **A rationale and a known problem are different claims.** "Why does
+  this exist" and "what is wrong with it" are different questions;
+  `notes` (`WHY:`, `NOTE:`, `RATIONALE:`) and `flags` (`TODO:`, `FIXME:`,
+  `HACK:`, `XXX:`) answer them separately, and one predicate for both
+  would answer neither.
+- **A citation is a node, not a string.** `ADR-0007`, `ADR 7` and `adr#7`
+  normalise to one name, so every declaration that cites a decision
+  record is reachable from it — which is the point of putting it in a
+  graph rather than in a grep.
+- **Rationale belongs to the thing it explains.** A note is attached to
+  the innermost declaration whose lines contain it, not to the file that
+  happens to hold it, using the same declaration spans recall cites.
+
+Only tagged comments become claims: an untagged line is a remark, not a
+statement about the code.
+
+**Never from a string literal.** A string holding `# WHY: …`, `ADR-0007`
+or `class X extends Y` is data, and reading it would have the graph
+assert something the source never said — the one thing this must not do.
+Python comments therefore come from `tokenize`, which knows a comment
+from a string that looks like one, and citations additionally from
+docstrings, because a docstring is documentation while an arbitrary
+string is not. The brace languages have no tokenizer here, so their
+source is scanned with string contents blanked in place, which keeps
+every line and column where it was.
+
+An earlier version read the raw source with a regex and fabricated
+claims from quoted text. It also joined `extends Base implements Face`
+into one invented target, resolved `Store as Shelf` to the local
+nickname, and let `import json, csv` claim both names came from the last
+module. Those were found by review, on hand-built counterexamples rather
+than on a corpus — a graph whose claim is that it does not guess has to
+be tested on the shapes that tempt it into guessing.
+
 ## Code: cut where the declarations are
 
 A source file stored under a name that says which language it is in
@@ -567,6 +710,164 @@ is a recommendation with its measurement attached and the environment
 lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
+
+## Trying a parked record again, on purpose
+
+A record the extractor keeps failing on is **parked** after
+`SCONE_DISTILL_MAX_ATTEMPTS` tries, and reported as failed without
+another model call. That is right: a poisoned record should not burn a
+call every pass forever.
+
+But the park lives in the **running process**. Until now the only way to
+try a parked record again was to restart the server — which un-parks
+*everything*, including the records there was every reason to leave
+alone. So there is a deliberate version:
+
+```bash
+curl -XPOST $SCONE/v1/consolidate/retry -H "$AUTH" -d '{"episodes": [412]}'
+# {"cleared": 1, "unparked": 1, "unknown": 0, "asked": 1, "parked_now": 3}
+```
+
+`POST /v1/consolidate/retry` (capability `consolidation.retry`, present
+only when a consolidation worker is configured). With no `episodes` it
+retries every failure the running distiller holds for the space.
+
+- **`cleared` and `unparked` are counted apart.** A record with one
+  failure of five against it is not the same as one that has been given
+  up on, and a single number for both would hide which happened.
+- **The durable attempt count is not reset.** A retry that works still
+  shows it took two goes, which is what the job item's `attempts` is for.
+- **An unknown id is reported, not refused.** A record may have succeeded
+  since it last failed, so `unknown` counts ids with nothing recorded
+  against them rather than failing the whole call.
+- **`parked_now` is what is left**, so a caller can tell "I cleared the
+  one I named" from "I cleared the lot".
+- **`queued` and `blocked` are counted apart from `cleared`.** A pass only
+  considers episodes no claim cites yet, so an episode whose extraction
+  failed *after* writing one fact is never looked at again: clearing its
+  park is real and nothing follows from it. Reporting that as `cleared`
+  alone would read as "queued", which is a promise this cannot keep.
+- **Episode ids are strict integers.** Pydantic's default would coerce
+  `true`, `"1"` and `1.0` all to the integer 1, so a caller could clear
+  episode 1 without ever naming it.
+
+There is deliberately **no `scone retry`**. The park is in the process
+that holds it, and a command-line invocation is a *new* process with
+nothing parked in it — a CLI retry would report success and do nothing.
+`scone distill` already retries everything, for the same reason.
+
+## Keeping a space in step with a directory
+
+`map` remembers the files under a directory and notices when it has seen
+one before. What it cannot notice is that a file has **changed** or that
+a file is **gone** — and those two are the difference between an import
+you run once and a sync you run on a schedule.
+
+```bash
+scone sync ~/work/notes                          # a plan: nothing is written
+# would sync /Users/me/work/notes: 34 of 34 file(s) read; 2 added, 1 updated,
+# 31 unchanged; 1 file(s) are gone from disk but not removed from memory; pass
+# remove to forget them
+# last sync: 2026-09-11T22:04:11Z (34 added, 0 updated)
+
+scone sync ~/work/notes --apply                  # writes the added and changed
+scone sync ~/work/notes --apply --remove         # also forgets what is gone
+```
+
+An unchanged file is **not a write**: the space's revision does not move,
+so a sync on a timer does not churn the store. A changed file is an
+update through the engine's keyed `replace`, so a source that changed
+leaves **one** memory and not two.
+
+### Deletion is opt-in, previewed, and refused when the path looks wrong
+
+Forgetting memory because a file is missing is destructive, and a
+directory can be missing for reasons that have nothing to do with
+intent: an unmounted volume, a half-finished checkout, a typo. So there
+are three separate guards, each with its own test:
+
+- **Nothing is written without `--apply`.** The default is a plan.
+- **Nothing is forgotten without `--remove`** *as well*. An ordinary
+  sync reports what is gone and leaves it alone, because a caller who
+  has not thought about deletion should not get it.
+- **An empty directory is refused outright.** If the walk found no files
+  and the marker holds memories, the sync stops before forgetting
+  anything and says so. A repository whose every file was deleted is far
+  rarer than a wrong path.
+
+Two further guards are about honesty rather than intent, and both exist
+because a file can stop appearing in the walk for reasons that have
+nothing to do with the disk:
+
+- If the walk stops at the **file cap** it has not seen the whole
+  directory, so it cannot tell a file that is gone from one it never
+  reached. Such a sync reports `checked_for_missing: false` and forgets
+  nothing — without that, lowering `--limit` would silently delete
+  memory, and `removed: 0` would read as "nothing is gone" when it means
+  "we did not look".
+- If this run's **`--suffix` list** no longer selects a file the marker
+  holds, that file was never looked for. It is counted as `out_of_scope`
+  and left alone, never as missing. Otherwise narrowing a flag between
+  two runs would delete every memory the narrower run stopped asking
+  about.
+- If a **directory could not be read**, an unknown number of files are
+  hidden behind it. `rglob` swallows a `PermissionError` and returns what
+  it could reach, which is indistinguishable from a smaller directory —
+  so the walk is explicit, counts what it could not open, and a run with
+  any `unreadable` forgets nothing and says why.
+
+**Only ordinary files are opened.** A named pipe matching the suffixes
+would block on open until somebody wrote to it, and a sync that hangs is
+worse than one that counts wrongly: nothing reports it and nothing
+recovers. Pipes, sockets and devices are counted as `special` and left
+shut.
+
+Two more things the walk does not do, both because the root is the whole
+scope. **A symbolic link is counted and not followed**: what it points at
+is outside the root the caller named, and storing it would file content
+nobody asked for under a path inside the root, so nothing in the space
+would say where it came from. And a file longer than `--max-bytes` is
+**read only to the limit plus one byte** — enough to know it is longer,
+without reading a gigabyte to keep a kilobyte.
+
+An earlier version got the hidden-directory rule wrong in a way worth
+recording, because the report it produced was confident and false. The
+rule is meant to skip a repository's own `.git`, and it was judged on the
+whole path rather than on the part below the root — so syncing any root
+*reached through* a dot-segment (`~/.config/notes`, `~/.claude/projects`,
+the checkout this is developed in) excluded the entire tree. `files_found`
+came back 0 with every file on disk, `checked_for_missing` was `true`
+because `0 == 0`, and the receipt said every memory the marker held was
+gone from disk and offered to forget it. The guard above refused the
+deletion, which is the only reason it was not data loss.
+
+### The marker is a name, not a path
+
+Every episode a sync writes carries its marker in metadata, so "what did
+the last sync of this directory leave here" has an exact answer rather
+than a guess from path prefixes. `--marker` lets a directory be moved or
+renamed without losing what it stored.
+
+The **identity** a file is stored under carries the marker too, and has
+to: keyed on the relative path alone, two directories synced into one
+space would share an identity for every filename they had in common —
+`README.md` and `README.md` — and the second sync's `replace` would
+forget the first's episode to store its own. No `--remove`, nothing in
+the receipt, memory gone. The marker's length precedes it in the key, so
+no marker and path can be read two ways; a separator alone could be,
+since both halves are text a caller chose.
+
+`last sync` comes from the event log, and only an **applied** sync is
+recorded — a plan succeeded at nothing. A store with no event log raises
+rather than answering "never", because "nothing keeps the record" and
+"it has never run" are different facts.
+
+### Not on the HTTP surface
+
+`scone sync` reads whatever local directory it is pointed at. Exposing
+that over HTTP would let an API caller choose which of the server's
+directories to read, so it is a command-line operation only. The
+sandboxed memory filesystem below is the HTTP-facing story for paths.
 
 ## Memory as a tree of paths
 

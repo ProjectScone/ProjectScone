@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, check_space, normalise_term
-from ..core.errors import SconeError
+from ..core.errors import InvalidInput, SconeError
 from ..providers.llm import ChatModel, StructuredChatModel
 from ..core.models import Episode, Fact
 from ..core.timeutil import parse_rfc3339
@@ -168,6 +168,55 @@ class _Attempts:
     last_error: str = ""
 
 
+@dataclass(frozen=True)
+class Retried:
+    """What a retry forgot, and what it could not find to forget."""
+
+    space: str
+    #: Episodes whose recorded failures were forgotten.
+    cleared: int = 0
+    #: Of those, the ones that had been parked — given up on. The rest had
+    #: failures against them but had not run out of attempts yet, and one
+    #: number for both would hide which of the two happened.
+    unparked: int = 0
+    #: Ids asked for with nothing recorded against them. Not an error: the
+    #: record may have succeeded since, or never have failed.
+    unknown: int = 0
+    #: Ids named, or the number cleared when the whole space was asked for.
+    asked: int = 0
+    #: Of the cleared ones, how many a later pass will actually look at.
+    queued: int = 0
+    #: How many it will not. Clearing one of these was real -- the park
+    #: went -- but nothing follows from it, and reporting it as cleared
+    #: alone reads as "queued". Why it is ineligible is deliberately not
+    #: claimed: a claim may already cite the episode, a concurrent pass may
+    #: have parked it again, or it may have completed while this ran.
+    blocked: int = 0
+
+    def record(self) -> dict[str, object]:
+        return {"space": self.space, "cleared": self.cleared, "unparked": self.unparked,
+                "unknown": self.unknown, "asked": self.asked, "queued": self.queued,
+                "blocked": self.blocked}
+
+    def text(self) -> str:
+        lines = [f"retry {self.space}: {self.cleared} record(s) cleared, "
+                 f"{self.unparked} of them parked"]
+        if self.queued:
+            lines.append(f"{self.queued} will be looked at again on the next pass")
+        if self.blocked:
+            # Deliberately does not name one reason. A record can be
+            # ineligible because a claim already cites it, because a
+            # concurrent worker parked it again, or because it completed
+            # while this ran, and asserting the first would be a guess.
+            lines.append(f"{self.blocked} will not, so clearing the failure changed nothing on "
+                         f"its own: a claim may already cite the episode, a pass may have parked "
+                         f"it again, or it may have completed meanwhile")
+        if self.unknown:
+            lines.append(f"nothing recorded against {self.unknown} of {self.asked} "
+                         f"episode(s) asked for")
+        return "; ".join(lines)
+
+
 # -- parsing ------------------------------------------------------------------
 
 
@@ -286,6 +335,64 @@ class Distiller:
             for (owner, episode_id), attempts in self._failures.items()
             if owner == space and attempts.count >= self.max_attempts
         }
+
+    def _parked_now(self, key: tuple[str, int]) -> bool:
+        """Whether a pass would skip this episode for having run out of
+        attempts. The same test :meth:`distill_pending` applies, because a
+        receipt that used a different one would describe a different
+        system: any recorded failure is not a park, and calling it one
+        reports work as blocked that the next pass will do.
+        """
+        attempts = self._failures.get(key)
+        return attempts is not None and attempts.count >= self.max_attempts
+
+    async def retry(self, space: str, *, episodes: Optional[Sequence[int]] = None) -> "Retried":
+        """Forget the failures recorded against these episodes, so the next
+        pass tries them again. With no ``episodes``, the whole space.
+
+        Parking a record that keeps failing is right: a poisoned record
+        should not burn a model call every pass forever. But the park lives
+        in this process, so without this the only way to try one again is
+        to restart — which un-parks **everything**, including the records
+        there was every reason to leave alone. This is the deliberate
+        version, one episode at a time if you like.
+
+        The durable attempt count on the job item is **not** reset, because
+        a retry that works should still show it took two goes. What is
+        forgotten is only this instance's reason to skip the episode.
+
+        An episode that was processed successfully is not a failure and is
+        not reconsidered here; re-extracting one is a different operation.
+        """
+        check_space(space)
+        if episodes is not None:
+            if not episodes:
+                raise InvalidInput(
+                    "a retry needs at least one episode id; omit episodes to retry the whole space")
+            for episode_id in episodes:
+                if isinstance(episode_id, bool) or not isinstance(episode_id, int) \
+                        or not 0 < episode_id < 2 ** 63:
+                    raise InvalidInput(
+                        f"an episode id must be a positive 64-bit integer, not {episode_id!r}")
+        wanted = None if episodes is None else set(episodes)
+        held = {episode_id for owner, episode_id in self._failures if owner == space}
+        going = [key for key in list(self._failures)
+                 if key[0] == space and (wanted is None or key[1] in wanted)]
+        unparked = sum(1 for key in going if self._failures[key].count >= self.max_attempts)
+        for key in going:
+            del self._failures[key]
+        # Clearing a failure is not the same as queueing the work, and
+        # eligibility is read with an await in the middle. A worker can
+        # fail the same episode again while that read is in flight, so the
+        # park is re-checked after the await and by the same rule a pass
+        # uses -- attempts against max_attempts, not the mere presence of a
+        # failure. One new failure with budget left is still eligible.
+        waiting = {episode.episode_id for episode in await self._pending(space)}
+        queued = sum(1 for key in going if key[1] in waiting and not self._parked_now(key))
+        return Retried(space=space, cleared=len(going), unparked=unparked,
+                       unknown=0 if wanted is None else len(wanted - held),
+                       asked=len(going) if wanted is None else len(wanted),
+                       queued=queued, blocked=len(going) - queued)
 
     async def distill_text(self, space: str, text: str, created_at: Optional[str] = None) -> list[Fact]:
         """Facts from text that is not stored as an episode. They date

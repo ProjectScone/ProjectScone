@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal, Mapping, Optional
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, StrictInt, Field
 
 from contextlib import asynccontextmanager
 
@@ -51,6 +51,22 @@ if TYPE_CHECKING:
 INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class RetryBody(BaseModel):
+    """Which parked records to let the next pass try again.
+
+    ``episodes`` names them; omitting it retries every failure the running
+    distiller holds for this space. Naming them is the point of the
+    endpoint: restarting the process already retries everything, and that
+    is usually not what anyone wants.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Strict, because the default would coerce true, "1" and 1.0 all to
+    #: the integer 1 -- a caller could clear episode 1 without naming it.
+    episodes: Optional[list[StrictInt]] = None
 
 
 class ConsolidateBody(BaseModel):
@@ -417,7 +433,8 @@ def create_app(
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
@@ -710,6 +727,9 @@ def create_app(
         source_prefix: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
+        where: Optional[str] = None,
+        conditions: Optional[str] = None,
+        history: bool = False,
         rerank: bool = True,
         graph_boost: bool = False,
         space: str = Depends(space_for),
@@ -726,12 +746,25 @@ def create_app(
         answered."""
         from ..retrieval.parts import recall_parts
 
-        parted = await recall_parts(
-            engine, space, q, limit=limit, as_of=as_of,
-            tags=[t for t in (tags or "").split(",") if t.strip()], kind=kind,
-            source_prefix=source_prefix, since=since, until=until, rerank=rerank,
-            graph_boost=graph_boost)
-        return parted.record()
+        if history:
+            # Refused, not ignored. `history` is the closed chain behind the
+            # facts one query matched; merged across parts it has no defined
+            # meaning, and a caller whose filter was silently dropped reads a
+            # narrowed answer that was never narrowed.
+            raise InvalidInput(
+                "history is not available for a parted search: it is the chain behind one "
+                "query's matched facts, and there is no defined meaning for it merged across "
+                "a question's parts. Ask /v1/recall with history for the whole question.")
+        narrowing = {"as_of": as_of, "tags": [t for t in (tags or "").split(",") if t.strip()],
+                     "where": parse_where(where), "kind": kind, "source_prefix": source_prefix,
+                     "since": since, "until": until, "conditions": read_conditions(conditions)}
+        parted = await recall_parts(engine, space, q, limit=limit, rerank=rerank,
+                                    graph_boost=graph_boost, **narrowing)  # type: ignore[arg-type]
+        # What was actually applied, echoed back. A page cannot otherwise
+        # tell a filter that took effect from one the server never used.
+        applied = {name: value for name, value in narrowing.items() if value}
+        return parted.record() | {"space": space, "applied": applied,
+                                  "rerank": rerank, "graph_boost": graph_boost}
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(
@@ -919,6 +952,30 @@ def create_app(
             return JSONResponse({"error": "no consolidation worker configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL, or SCONE_RETAIN)"}, status_code=501)
         report = await worker.run_once(space)
         return JSONResponse({"space": space, "scope": "distill", **report.as_payload()})
+
+    @app.post("/v1/consolidate/retry")
+    async def post_consolidate_retry(body: RetryBody, space: str = Depends(space_for)) -> JSONResponse:
+        """Let the next pass try parked records again, on purpose.
+
+        A record the extractor keeps failing on is parked so it does not
+        burn a model call every pass. The park lives in this process, so
+        the only other way to try one again is to restart the server —
+        which un-parks **everything**, including the records there was
+        every reason to leave alone.
+
+        The durable attempt count is not reset: a retry that works still
+        shows it took two goes. Ids with nothing recorded against them are
+        reported as unknown rather than refused, since a record may have
+        succeeded since it last failed.
+        """
+        distiller = getattr(worker, "distiller", None) if worker is not None else None
+        if distiller is None:
+            return JSONResponse(
+                {"error": "no consolidation worker configured, so nothing is parked in this "
+                          "process to retry (SCONE_CHAT_URL and SCONE_CHAT_MODEL)"},
+                status_code=501)
+        again = await distiller.retry(space, episodes=body.episodes)
+        return JSONResponse({"parked_now": len(distiller.parked(space)), **again.record()})
 
     @app.post("/v1/facts/decide")
     async def post_decide(body: DecideBody, space: str = Depends(space_for), actor: str = Depends(actor_for)) -> dict:
