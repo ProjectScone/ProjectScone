@@ -232,6 +232,7 @@ class FeedbackBody(BaseModel):
 
 
 from ..ingestion.document_ocr import DocumentOcr
+from ..ingestion.import_service import DocumentImportService
 
 
 def create_app(
@@ -247,6 +248,7 @@ def create_app(
     agent_plan_store: AgentPlanStore | None = None,
     agent_run_service: AgentRunService | None = None,
     document_ocr: DocumentOcr | None = None,
+    document_import_service: DocumentImportService | None = None,
     filesystem=None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
@@ -271,6 +273,9 @@ def create_app(
             raise ValueError("Agent run service requires the host catalog and plan store")
         agent_run_service.require_host(engine, agent_plan_store, agent_catalog)
 
+    if document_import_service is not None:
+        document_import_service.require_host(engine)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if worker is not None:
@@ -282,14 +287,19 @@ def create_app(
                 if agent_run_service is not None:
                     await agent_run_service.aclose()
             finally:
-                if worker is not None:
-                    await worker.stop()
+                try:
+                    if document_import_service is not None:
+                        await document_import_service.aclose()
+                finally:
+                    if worker is not None:
+                        await worker.stop()
 
     app = FastAPI(title="scone-memory", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan,
                   default_response_class=LedgerJSONResponse)
     if isinstance(ingest_concurrency, bool) or not isinstance(ingest_concurrency, int) or not 1 <= ingest_concurrency <= 64:
         raise ValueError("ingest_concurrency must be an integer in 1..64")
     app.state.engine = engine
+    app.state.document_import_service = document_import_service
     app.state.roles = dict(roles or {})
     app.state.ingest_lane_width = ingest_concurrency
     ingest_lane = asyncio.Semaphore(ingest_concurrency)
@@ -417,6 +427,8 @@ def create_app(
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
+        if document_import_service is not None:
+            features["documents.jobs"] = True
         if conversations:
             # Present only when the service is mounted here; its own manifest
             # at /v1/conversations/capabilities says what it can do.
@@ -441,6 +453,9 @@ def create_app(
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr)
+    if document_import_service is not None:
+        from .document_jobs import mount_document_job_routes
+        mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for)
     from .filesystem_routes import mount_filesystem_routes

@@ -589,3 +589,82 @@ extraction deadline, pixel/region limits and original-backed indexing apply.
 These HTTP imports remain synchronous: after an uncertain write, inspect the
 source library instead of automatically repeating the import. Native per-page
 checkpoint recovery remains the separate `PdfOcrWorkflow` interface.
+
+
+## Durable local document jobs
+
+The standard memory and conversation hosts can own document imports independently
+of an HTTP connection. Enable this with `SCONE_DOCUMENT_JOBS_CONFIG` pointing to
+an owned, regular **0600 JSON file**, containing:
+
+```json
+{
+  "schema_version": 1,
+  "state_dir": "document-jobs",
+  "key_env": "SCONE_DOCUMENT_JOBS_KEY",
+  "parser_revision": "installed-parser-v1",
+  "max_active": 2,
+  "max_imports": 4096,
+  "max_attempts": 3,
+  "deadline_s": 120.0
+}
+```
+
+Set the named environment variable to a separately generated 32-byte encryption
+key encoded as 64 hexadecimal characters. Keep it outside configuration and source
+control; retain it to reopen saved requests and journals. The state directory is
+local, owned and private; relative paths resolve beside the configuration file.
+Startup opens encrypted state but does not replay imports or call models. No
+cloud queue or external worker is required.
+
+`parser_revision` is an operator promise: change it when OCR executables, trained
+language data or custom extraction behavior change. Installed Python dependency
+versions, OCR settings and the operator revision bind the parser used by each
+request. An incompatible parser refuses to resume an old job. Optional `limits`
+uses `DocumentLimits`; requests freeze those limits, deadline and attempt budget.
+Changing the host budget does not grant old requests more attempts.
+
+Upload an original to `/v1/attachments`, then use a unique import ID:
+
+```http
+POST /v1/document-jobs
+Content-Type: application/json
+Authorization: Bearer <write key>
+
+{"import_id":"report-2026-09","attachment_id":"<SHA-256>","filename":"report.pdf"}
+```
+
+Add the same optional `pdf_ocr` selection as synchronous document imports. The
+202 response acknowledges ownership, not completed indexing. Repeating an ID
+with identical input only reads its current state; changed input is a conflict.
+An admitted task continues after a browser disconnect. Unuploaded local files
+are not durable jobs.
+
+- `GET /v1/document-jobs?limit=20&after=<cursor>` pages saved job statuses within
+  the authenticated space. Cursor order is stable opaque identity order, not a
+  completion ranking or a frozen snapshot.
+- `GET /v1/document-jobs/{id}` reads stage progress; `/request` reads the immutable
+  original filename, OCR choices, parser identity and execution limits.
+- `GET /v1/document-jobs/{id}/result` verifies retained original and indexed source
+  evidence before returning a receipt. It never extracts, indexes or resumes.
+- `POST /v1/document-jobs/{id}/resume` and `/cancel` require JSON
+  `{"expected_revision":1}` using the current control revision. Read-only keys
+  cannot mutate jobs, and stale controls cannot affect newer attempts.
+
+After a restart, incomplete jobs remain passive until an explicit resume. A
+resume reuses completed extraction/indexing stages and saved embedding batches;
+these generic document jobs do **not** promise per-page OCR recovery. Each failed
+stage waits for an explicit resume, within the saved attempt budget (1–4 total
+admissions). Async cancellation and deadlines are cooperative. Cancellation may
+follow a partial write; inspect status and retained source evidence before
+assuming no work occurred. Cancellation stops owned work even if writing its
+intent fails, while reporting that storage failure.
+
+A per-job local file lock prevents simultaneous execution by another process.
+Capacity is bounded per service; excess admission returns 429 with Retry-After.
+This is local task ownership, not a distributed queue. Request/result reads do
+not start jobs. A confirmed forgotten source invalidates completed evidence;
+a temporary verification outage refuses the result without replaying work.
+
+The capability `documents.jobs` is advertised only when configured. The existing
+synchronous `/v1/documents` endpoint remains available.

@@ -194,6 +194,7 @@ class Settings:
     # origin under `serve`; the factory is the same trusted module:callable
     # as `serve-conversations --model-factory`, absent meaning history-only.
     agents_config: Optional[str] = None
+    document_jobs_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
     document_ocr_psm: int = 3
@@ -406,6 +407,7 @@ class Settings:
             ingest_concurrency=int(env.get("SCONE_INGEST_CONCURRENCY", "4")),
             retention=parse_retention(env.get("SCONE_RETAIN", "")),
             agents_config=env.get("SCONE_AGENTS_CONFIG") or None,
+            document_jobs_config=env.get("SCONE_DOCUMENT_JOBS_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
