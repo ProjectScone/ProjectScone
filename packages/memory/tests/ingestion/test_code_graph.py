@@ -221,8 +221,10 @@ def test_a_brace_relative_import_names_a_file_spelt_like_the_one_importing_it():
               "export function put(p: string) { return keep(p); }\n")
     found = code_claims(source, "web/memory/page.tsx", language="braces")
     imports = {claim.object for claim in found if claim.predicate == "imports"}
-    assert "web/memory/store.tsx" in imports, imports
-    assert "web/core/api.tsx" in imports, imports
+    # `.ts`, not the importer's own `.tsx`: that is what the compiler
+    # tries first, confirmed with `tsc --traceResolution` (7.0.2).
+    assert "web/memory/store.ts" in imports, imports
+    assert "web/core/api.ts" in imports, imports
     # An external package still names itself and gains no path.
     assert "react" in imports, imports
 
@@ -244,8 +246,8 @@ def test_a_brace_import_that_already_names_its_file_keeps_that_name():
     imports = {claim.object for claim in found if claim.predicate == "imports"}
     assert "web/memory/page.css" in imports, imports
     assert "web/assets/logo.png" in imports, imports
-    # And one with no extension of its own still takes the importer's.
-    assert "web/memory/store.tsx" in imports, imports
+    # No extension of its own: it takes the family's first spelling.
+    assert "web/memory/store.ts" in imports, imports
 
 
 def test_from_dot_import_names_its_module_without_a_resolver_too():
@@ -263,3 +265,108 @@ def test_from_dot_import_names_its_module_without_a_resolver_too():
     inherits = {(claim.subject, claim.object) for claim in found if claim.predicate == "inherits"}
     assert "pkg/ingestion/core.py" in imports, imports
     assert ("pkg/ingestion/graph.py:Shelf", "pkg/ingestion/core.py:Base") in inherits, inherits
+
+
+def test_a_brace_language_records_the_calls_it_can_see():
+    """There was no call graph outside Python at all.
+
+    Measured over 58 files of this project's web application: 263 `calls`
+    relations for the equivalent Python corpus and **0** for TypeScript,
+    in something the reference survey marks done. `calls` is the backbone
+    of a code graph and it existed for one language.
+
+    The rule is the one the Python reader already follows: a bare name is
+    a call to this file's own declaration when it has one. Anything else
+    -- a function from another module, a method on a value whose type
+    nobody wrote down -- is left out rather than pointed at a name that
+    might mean anything.
+
+    Coarser than Python in one way that the assertions below state
+    rather than hide: the brace declaration reader reports a class and
+    not its methods, so a call written in a method is attributed to the
+    class holding it.
+    """
+    source = ("function helper(p) { return p; }\n"
+              "export class Shelf {\n"
+              "  keep(p) { return helper(p); }\n"
+              "  put(p) { return this.keep(p); }\n"
+              "}\n"
+              "export function drive(p) {\n"
+              "  return elsewhere(p) + helper(p);\n"
+              "}\n")
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert ("web/shelf.ts:Shelf", "web/shelf.ts:helper") in calls, calls
+    assert ("web/shelf.ts:drive", "web/shelf.ts:helper") in calls, calls
+    # `elsewhere` is not declared here and is not guessed at.
+    assert not any("elsewhere" in one for pair in calls for one in pair), calls
+
+
+def test_a_brace_call_is_not_read_out_of_a_string_or_a_comment():
+    """The masked copy of the source is what the declaration reader
+    already uses; the call reader has to use it too, or `// helper(p)`
+    and `"helper(p)"` become edges."""
+    source = ("function helper(p) { return p; }\n"
+              "export function drive(p) {\n"
+              "  // helper(p) used to be called here\n"
+              "  const said = 'helper(p)';\n"
+              "  return said;\n"
+              "}\n")
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls
+
+
+def test_an_unknown_suffix_is_part_of_the_name_not_an_extension():
+    """`./foo.bar` means `foo.bar.ts`, confirmed against
+    `tsc --traceResolution` (TypeScript 7.0.2). Treating `.bar` as an
+    extension to keep sent the import to an unrelated `foo.ts`."""
+    found = code_claims("import {x} from './foo.bar';\n", "web/page.ts", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"web/foo.bar.ts"}, imports
+
+
+def test_a_call_in_a_method_belongs_to_the_method_and_not_also_its_class():
+    """Spans nest, so a line inside a method sits inside its class too.
+    The innermost declaration holding a call is the one that made it, or
+    every call in a class would be claimed twice at two granularities."""
+    source = ("function helper(p) { return p; }\n"
+              "export class Shelf {\n"
+              "  keep(p) {\n"
+              "    return helper(p);\n"
+              "  }\n"
+              "}\n")
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert calls == {("web/shelf.ts:Shelf.keep", "web/shelf.ts:helper")}, calls
+
+
+def test_an_import_that_writes_its_own_extension_is_not_given_a_second():
+    """`import {x} from './personas.ts'` is ordinary in modern ESM and
+    under `moduleResolution: bundler`. Appending the family's extension
+    to it produced `personas.ts.ts`.
+
+    Found by measuring this project's web application rather than by
+    reading: five of six import targets that landed on nothing were this,
+    and `./foo.bar` -- where the suffix belongs to no language -- must
+    still become `foo.bar.ts`.
+    """
+    found = code_claims("import {a} from './personas.ts';\n"
+                        "import {b} from './wire.js';\n"
+                        "import {c} from './foo.bar';\n", "web/page.ts", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"web/personas.ts", "web/wire.js", "web/foo.bar.ts"}, imports
+
+
+def test_a_declaration_header_is_not_a_call_to_itself():
+    """`gamma() {` matches the call pattern exactly, so a class was
+    claimed to call each of its own methods at the line where they are
+    written. That is where a thing is declared, not where it is used."""
+    source = ("class Beta {\n"
+              "  gamma() {\n"
+              "    return 1;\n"
+              "  }\n"
+              "}\n")
+    found = code_claims(source, "web/app.ts", language="braces")
+    calls = {(claim.subject, claim.object) for claim in found if claim.predicate == "calls"}
+    assert not calls, calls

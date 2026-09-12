@@ -80,10 +80,19 @@ def test_go_imports_are_read_from_the_block_they_are_written_in():
     assert ("cmd/main.go", "defines", "cmd/main.go:Handle") in found
 
 
-def test_no_calls_are_claimed_for_a_language_this_cannot_parse():
-    """helper(n) is a call. Without a parser, saying so would mean guessing
-    what helper refers to, and an edge nobody can check is worse than none."""
-    assert not [claim for claim in claims(TYPESCRIPT, "web/app.ts") if claim.predicate == "calls"]
+def test_a_call_to_something_this_file_never_declared_is_still_left_out():
+    """`helper(n)` is a call, and this file does not say what `helper`
+    is. Saying so would mean guessing, and an edge nobody can check is
+    worse than none.
+
+    This test used to be named for a stronger claim -- that no calls are
+    claimed at all for a language without a parser -- and that is no
+    longer true: a call to a declaration the file does make is recorded.
+    The rule it actually guards, then and now, is that a name this file
+    never declared is left alone.
+    """
+    calls = [claim for claim in claims(TYPESCRIPT, "web/app.ts") if claim.predicate == "calls"]
+    assert not calls, calls
 
 
 def test_every_brace_claim_is_quoted_from_its_own_line():

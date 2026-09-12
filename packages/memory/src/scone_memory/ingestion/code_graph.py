@@ -30,6 +30,17 @@ from typing import Callable, Optional
 #: exists — so whoever walked the tree decides, and a name nothing
 #: resolves to is left out rather than guessed at.
 Resolve = Callable[[str, int, str], Optional[str]]
+#: What a relative import is spelt as when nobody has read the tree: the
+#: first file name the language itself would try. Keyed by the importing
+#: file's extension, because that is what says which language this is.
+FIRST = {"ts": "ts", "tsx": "ts", "mts": "ts", "cts": "ts", "d.ts": "ts",
+         "js": "js", "jsx": "js", "mjs": "js", "cjs": "js",
+         "go": "go", "rs": "rs"}
+#: Extensions a bundler resolves by exact path rather than by trying a
+#: language's own list. An import of one of these already names its file.
+ASSETS = frozenset("css scss sass less styl png jpg jpeg gif svg webp avif ico bmp json json5 "
+                   "yaml yml toml wasm txt md mdx woff woff2 ttf otf eot mp4 webm mov mp3 wav "
+                   "ogg flac pdf csv graphql gql".split())
 
 import re
 
@@ -565,6 +576,7 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                                begins + len(text.encode())))
 
     held: dict[str, str] = {}
+    spans: list[tuple[str, str, int, int]] = []
     for item in declarations(content, language="braces"):
         owner = path if "." not in item.name else f"{path}:{item.name.rsplit('.', 1)[0]}"
         # A Rust `impl Shelf` block is a good place to cut a chunk and not
@@ -578,6 +590,9 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             continue
         say(owner, DEFINES, f"{path}:{item.name}", item.first_line)
         held[item.name.rsplit(".", 1)[-1]] = f"{path}:{item.name}"
+        spans.append((f"{path}:{item.name}",
+                      item.name.rsplit(".", 1)[0] if "." in item.name else "",
+                      item.first_line, item.last_line))
 
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
@@ -678,8 +693,69 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             used = _USE.match(line)
             if used:
                 say(path, IMPORTS, used.group(1).split("::")[0], number)
+    _brace_calls(code, path, held, spans, say)
     _meaning(content, path, "braces", say)
     return tuple(found)
+
+
+#: A call site: a name, then an opening bracket. Read from the masked
+#: copy of the source, so a call written inside a string or a comment is
+#: not one. `new Shelf(` is a construction and names the same thing.
+_CALL = re.compile(r"(?:\bnew\s+)?\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
+#: Words that take a bracket and are not calls.
+_NOT_CALLS = frozenset("if while for switch catch return typeof await yield function class new "
+                       "else do try throw case delete void in of instanceof".split())
+
+
+def _brace_calls(code: list[str], path: str, held: dict[str, str],
+                 spans: list[tuple[str, str, int, int]], say) -> None:
+    """Calls between things this file can see, and no others.
+
+    The same rule the Python reader follows, which is the only one a
+    brace language can keep honestly: a bare name is a call to this
+    file's own declaration when it has one. A function from another
+    module, or a method on a value whose type nobody wrote down, is left
+    out rather than pointed at a name that might mean anything.
+
+    ``code`` is the masked source the declaration reader already uses, so
+    a call inside a string or a comment is not a call.
+
+    Each call belongs to the **innermost** declaration holding it, so a
+    call in a method is the method's and not also its class's. That is
+    also what keeps a declaration's own header from being a call to
+    itself: `gamma() {` matches the call pattern exactly, and while every
+    enclosing span was being credited it made `Beta` call `Beta.gamma`
+    at the line where the method is written rather than used. Innermost,
+    the caller and the target are the same thing and it is dropped. A
+    method whose whole body is on one line is not a declaration to this
+    reader, and then its class is the innermost there is.
+
+    Two limits, neither claimed away. A call to a name that came from an
+    import is left out, which the Python reader does resolve. And there
+    was no call graph outside Python at all before this: 263 `calls`
+    relations over 60 files of this package against 0 over 58 files of
+    this project's web application.
+    """
+    # The innermost declaration covering each line, and the line each
+    # declaration is written on.
+    holder: dict[int, str] = {}
+    width: dict[int, int] = {}
+    for whole, _inside, first, last in spans:
+        for number in range(first, last + 1):
+            if number not in width or last - first < width[number]:
+                holder[number], width[number] = whole, last - first
+    for number, line in enumerate(code, start=1):
+        caller = holder.get(number)
+        if caller is None:
+            continue
+        for match in _CALL.finditer(line):
+            name = match.group(1)
+            if name in _NOT_CALLS or line[:match.start(1)].rstrip().endswith("."):
+                continue
+            target = held.get(name)
+            if target is None or target == caller:
+                continue
+            say(caller, CALLS, target, number)
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
@@ -710,14 +786,20 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     stem = posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
     if stem.startswith("..") or stem in (".", "/"):
         return None
-    # A path that already names its file keeps that name: a web
+    # An import that already names a file keeps that name. A web
     # application imports `./page.css` and `../assets/logo.png` by
-    # relative path, and appending the importer's extension to those
-    # produced `page.css.tsx`, a name for a file that cannot exist.
-    if "." in posixpath.basename(stem):
+    # relative path and a bundler resolves those exactly; `./personas.ts`
+    # is ordinary in modern ESM and under `moduleResolution: bundler`.
+    # Appending to either produced `page.css.tsx` and `personas.ts.ts`,
+    # names no file can have.
+    written = posixpath.splitext(stem)[1].lstrip(".").lower()
+    if written in ASSETS or written in FIRST:
         return stem
-    suffix = posixpath.splitext(path)[1]
-    return f"{stem}{suffix}" if suffix else None
+    # Everything else takes the **family's** first spelling, not the
+    # importing file's own. `tsc --traceResolution` selects `store.ts`
+    # for `./store` from a `.tsx` file, and `foo.bar.ts` for `./foo.bar`
+    # -- an unknown suffix is part of the name, not an extension to keep.
+    return f"{stem}.{FIRST[suffix]}" if (suffix := posixpath.splitext(path)[1].lstrip(".")) in FIRST else None
 
 
 def _at_impl(lines: list[str], line: int) -> bool:
