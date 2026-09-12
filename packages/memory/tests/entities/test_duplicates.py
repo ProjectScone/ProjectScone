@@ -594,3 +594,54 @@ async def test_names_past_the_spelling_budget_are_found_by_their_words_alone(mon
     assert "spellings_cut 4 names" in found.coverage["reasons"]  # Lisbon is a name too
     monkeypatch.setattr(duplicates_module, "MAX_SPELLINGS", 250_000)
     assert ("acme gobotics", "acme robotics") in pairs(await likely_duplicates(engine, "alpha", min_score=0.0))
+
+
+async def test_two_files_one_letter_apart_are_not_one_thing():
+    """A one-letter difference is a misspelling in a person's name and a
+    different thing entirely in an identifier. `gate` and `rate` are not
+    a typo for each other, and neither are `min` and `max`.
+
+    Measured on this repository once code symbols reached the entity
+    graph: `scone_memory/audio/gate.py` and `scone_memory/audio/rate.py`
+    were suggested as one thing at 0.667, over the 0.5 default. The score
+    comes from the path, not the name -- every file in a directory shares
+    its directory's words, so two files in one folder whose basenames
+    differ by a letter share four words out of five and differ in one.
+    Shared directories say two files live together, which is not evidence
+    that they are the same file.
+    """
+    engine = await engine_with(
+        ("scone_memory/audio/gate.py", "defines", "scone_memory/audio/gate.py:Gate"),
+        ("scone_memory/audio/rate.py", "defines", "scone_memory/audio/rate.py:Rate"),
+        ("pkg/store.py", "defines", "pkg/store.py:Shelf"),
+        ("pkg.store", "imports", "json"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", min_score=0.0, limit=100)
+    finally:
+        await engine.close()
+    shown = [(one["label"], two["label"], score, why)
+             for one, two, score, *why in (tuple(pair.values()) for pair in found.pairs)]
+    paths = [row for row in shown if "/" in str(row[0]) or "." in str(row[0])]
+    assert not paths, shown
+
+
+async def test_a_misspelt_person_is_still_found_beside_an_identifier():
+    """The narrowing above must cost the heuristic nothing where it
+    belongs. A one-letter difference between two people's names is what
+    it was written for, and it still fires -- in the same space, and in
+    the same answer, as the identifiers it now declines to pair."""
+    engine = await engine_with(
+        ("Katherine Brown", "works_at", "Acme"),
+        ("Katharine Brown", "works_at", "Acme"),
+        ("scone_memory/audio/gate.py", "defines", "scone_memory/audio/gate.py:Gate"),
+        ("scone_memory/audio/rate.py", "defines", "scone_memory/audio/rate.py:Rate"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", min_score=0.0, limit=100)
+    finally:
+        await engine.close()
+    pairs = [tuple(sorted((tuple(pair.values())[0]["label"], tuple(pair.values())[1]["label"])))
+             for pair in found.pairs]
+    assert ("katharine brown", "katherine brown") in pairs, found.pairs
+    assert not any("/" in left or "/" in right for left, right in pairs), found.pairs
