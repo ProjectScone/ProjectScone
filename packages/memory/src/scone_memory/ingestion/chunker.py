@@ -65,10 +65,16 @@ def _best_cut(text: str, start: int, limit: int) -> int:
     preference: blank line, sentence end, any whitespace; else ``limit``."""
     floor = start + MIN_CHUNK
     window = text[floor:limit]
-    # A blank line is a paragraph and outranks everything.
-    idx = window.rfind("\n\n")
-    if idx != -1:
-        return floor + idx + 2
+    # A blank line is a paragraph and outranks everything. Both spellings
+    # of one: `rfind("\n\n")` does not match `\r\n\r\n`, so a CRLF
+    # document had no paragraphs at all as far as this could see.
+    best = -1
+    for marker in ("\n\n", "\r\n\r\n"):
+        idx = window.rfind(marker)
+        if idx != -1:
+            best = max(best, idx + len(marker))
+    if best != -1:
+        return floor + best
     # Then a sentence end, and **then** a lone newline -- which is the
     # order this module's docstring has always described and the code
     # did not keep. A single newline ranked second, and in hard-wrapped
@@ -77,7 +83,8 @@ def _best_cut(text: str, start: int, limit: int) -> int:
     # mid-sentence and 85 of those 86 were at a soft wrap. How the text
     # was typed is not a boundary in what it says.
     best = -1
-    for marker in (". ", "! ", "? ", ".\t", ".\n", "!\n", "?\n"):
+    for marker in (". ", "! ", "? ", ".\t", ".\n", "!\n", "?\n",
+                   ".\r\n", "!\r\n", "?\r\n"):
         idx = window.rfind(marker)
         if idx > best:
             best = idx + len(marker)
