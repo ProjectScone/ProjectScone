@@ -22,6 +22,7 @@ from ..memory.engine import MemoryEngine
 
 if TYPE_CHECKING:
     from .history_capture import AgentRunHistory
+    from .run_text import AgentRunText
     from .approval_store import AgentApprovalStore
     from .approval_models import ToolApprovalRecord
 
@@ -66,13 +67,14 @@ class InteractiveAgentWorkflow:
     def __init__(self, path: str | Path, *, key: bytes, catalog: AgentCatalog, request: AgentRunRequest,
                  memory: MemoryEngine, inputs: AgentInputStore, activated: Sequence[AgentInputRecord],
                  deadline_s: float = 120.0, approval_store: AgentApprovalStore | None = None,
-                 approval_activation: str | None = None, history: AgentRunHistory | None = None, read_only: bool = False) -> None:
+                 approval_activation: str | None = None, history: AgentRunHistory | None = None, text: AgentRunText | None = None, read_only: bool = False) -> None:
         plan = request.plan.checked_plan(catalog)
         if not isinstance(plan, InteractiveAgentPlan):
             raise ValueError('interactive plan required')
         self._request, self._memory, self._inputs = request, memory, inputs
         self._approvals, self._approval_activation = approval_store, approval_activation
         self._history = history
+        self._text = text
         self._tasks = {task.task_id: task for task in plan.ordered()}
         self._agents = {task.task_id: catalog.bind(task.agent_id, model_id=task.model_id)
                         for task in self._tasks.values() if isinstance(task, AgentTask)}
@@ -166,7 +168,7 @@ class InteractiveAgentWorkflow:
             from .workflow_approvals import invoke_agent
             result = await invoke_agent(agent, task.prompt + '\n\nUser request:\n' + context.inputs,
                 tools=self._tools(), context=context, step_id=task.task_id, selection_id=task.task_id,
-                store=self._approvals, activation_id=self._approval_activation, history=self._history,
+                store=self._approvals, activation_id=self._approval_activation, history=self._history, text=self._text,
                 prior=handoff, requirements=task.answer_requirements)
             if isinstance(result, WorkflowPaused):
                 return result

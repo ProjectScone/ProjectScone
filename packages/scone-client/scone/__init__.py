@@ -31,6 +31,7 @@ from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
 from .agent_events import ProgressEvent, ProgressGap, CollectionEvent
+from .agent_answer import AnswerStream, Ended, Gap, Terminal, TextDelta, Withdrawn
 from .agent_history import HistoryEntry, HistoryPage, HistoryStream
 
 __version__ = "0.2.1"
@@ -41,6 +42,7 @@ __all__ = [
     "Capabilities",
     "AgentClient",
     "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage", "HistoryStream",
+    "AnswerStream", "TextDelta", "Withdrawn", "Gap", "Terminal", "Ended",
     "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",
     "TaskAnswerRequirements",
     "ModelTokenUsage", "ToolTokenUsage",
