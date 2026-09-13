@@ -206,3 +206,47 @@ async def test_a_name_a_builtin_also_carries_is_not_even_a_candidate(tree):
     engine = await memory()
     said = await mapped(engine, str(tree), "--graph")
     assert "0 name one declaration here" in said, said
+
+
+# --- A credential in the tree is refused, named, and never stored ---------
+
+KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----\n"
+
+
+async def test_a_source_holding_a_private_key_is_withheld_and_named(tree):
+    """`map` reads source files, and a key pasted into one is still a key.
+    It is not remembered, not embedded, not claimed -- and the receipt
+    names it, because a map that quietly skipped a file is the thing this
+    command exists not to be."""
+    (tree / "app" / "deploy.py").write_text('KEY = """' + KEY + '"""\n', encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree))
+    assert "1 withheld as sensitive" in said, said
+    assert "app/deploy.py" in said, said
+    sources = {e.source for e in await engine.documents.recent_episodes("default", limit=50)}
+    assert "app/deploy.py" not in sources
+    assert KEY not in "".join(e.content for e in await engine.documents.recent_episodes("default", limit=50))
+
+
+async def test_including_sensitive_sources_is_an_explicit_choice(tree):
+    (tree / "app" / "deploy.py").write_text('KEY = """' + KEY + '"""\n', encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree), "--include-sensitive")
+    assert "withheld" not in said, said
+    sources = {e.source for e in await engine.documents.recent_episodes("default", limit=50)}
+    assert "app/deploy.py" in sources
+
+
+async def test_the_json_receipt_carries_what_was_withheld_and_why(tree):
+    import json as _json
+
+    (tree / "app" / "deploy.py").write_text('KEY = """' + KEY + '"""\n', encoding="utf-8")
+    (tree / "app" / "config.py").write_text('TOKEN = "ghp_' + "b" * 36 + '"\n', encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree), "--json")
+    report = _json.loads(said)
+    assert report["withheld"] == [
+        {"path": "app/config.py", "reason": "content:secret"},
+        {"path": "app/deploy.py", "reason": "content:private_key"},
+    ]
+    assert report["read"] == 3
