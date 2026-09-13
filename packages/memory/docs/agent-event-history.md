@@ -13,8 +13,8 @@ interactive workflows, including parallel tasks and approval resumptions. Native
 replay checks current space, scope, catalog bindings and an optional host admission
 guard. Authenticated HTTP replay, standalone SDK replay and SSE live delivery
 (host route and SDK stream) are available, and the Console shows an execution
-timeline for every opened run, following the stream live. Provider
-answer-token streaming for agents remains follow-up work.
+timeline for every opened run, following the stream live. A running step's
+answer streams too, provisionally, through its own route (below).
 The store itself trusts the host; neither storage nor native metadata replay
 revalidates answers or grants recipient authorization. The HTTP delivery path
 adds current recipient and committed/paused-source verification, described below.
@@ -213,6 +213,41 @@ The window ending is not run completion, and unavailable history ends the
 observation. This is past execution metadata streamed as it is written. It is
 not answer-token streaming, and cursor replay does not simulate one.
 
+## The answer as it is written
+
+Hosts that run agents and ask for it (`AgentRunService(public_text=True)`,
+advertised as `agents.text_stream`) also publish the text a running step
+is writing: `GET /v1/agent-runs/{run_id}/steps/{step_id}/text/stream`.
+This is the one thing the history route is not -- the answer itself,
+provisionally -- and it is built so that nothing else leaks with it.
+
+The model turn streams its content through the same parser that accepts
+a nonstreaming reply (`SelfHostedToolChat.complete(..., on_public_text=)`),
+so what a reader saw stream and what the loop accepts are one reply;
+tool-call arguments accumulate silently and reasoning fields are never
+read. The evidence loop hands the sink to a model whose turn accepts one
+and settles each accepted turn: text streamed in a turn that then called
+tools was not the answer and is **withdrawn**; a turn that answers without
+having streamed -- a model that cannot stream, a structured answer, a step
+replayed from the journal -- is delivered as one delta, so the sum of the
+deltas is the accepted text byte for byte. The run service holds one
+process-local window per running step; the route publishes it as
+`text` frames with the sequence as the SSE `id`, `withdraw`, `gap` when a
+reader fell behind the bounded window, `terminal` (`read_receipt: true`)
+once the run has a receipt, and `end` when the observation window closed.
+Admission is the history route's -- the run must exist for this recipient
+with committed and paused sources verified -- and the recipient is checked
+again before every frame; a cursor arrives as the query or `Last-Event-ID`
+and the two must agree; one ahead of what was observed is refused.
+
+What streams is provisional. The window is never stored and does not
+survive the process; after the run, or after a restart, a reader is given
+`terminal` and no text, and `/result` returns the verified answer. Nothing
+here restarts a run, calls a model, counts tokens, or exposes a tool
+argument. The standalone SDK reads it as `agents.stream_answer()` and the
+Console shows it as a **Live answer** pane that yields to the verified
+result.
+
 ## Remaining delivery work
 
 The standalone SDK exposes immutable typed `agents.history()` pages, cursor
@@ -223,8 +258,8 @@ block exits. Native process-restart tests cover both. The Console (Webapp
 PR21) renders an execution timeline on every opened run with the same checks
 as the SDK decoder, loads more by cursor, follows the SSE route live with
 bounded reconnection, and withholds an entry that carries anything beyond
-metadata. Still required: genuine provider public-text streaming for agent
-answers -- the agent tool chat is a nonstreaming turn by design, while
-conversations already stream public deltas through a process-local text
-window. Neither cursor replay nor metadata delivery substitutes for that or
-simulates token streaming.
+metadata. Provider public-text streaming for agent answers now exists as
+described above, provisional until the receipt, with the SDK's
+`stream_answer()` and the Console's Live answer pane reading it. Nothing
+named in this document remains open. Neither cursor replay nor metadata
+delivery is answer text, and none of the three simulates token streaming.
