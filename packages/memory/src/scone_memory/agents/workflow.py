@@ -187,8 +187,9 @@ def _copy(value: JSONValue, maximum: int) -> JSONValue:
     return cast(JSONValue, json.loads(_encode(value, maximum)))
 
 
-def _private_file(path: Path) -> int:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+def _private_file(path: Path, *, read_only: bool = False) -> int:
+    flags = os.O_RDONLY if read_only else os.O_RDWR | os.O_CREAT
+    fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or info.st_mode & 0o077 or info.st_nlink != 1):
@@ -235,8 +236,11 @@ class WorkflowRunner:
         max_payload_bytes: int = 256000, deadline: float = 30.0, max_retries: int = 1,
         verify_before_step: bool = False, automatic_retries: bool = True,
         dependencies: Mapping[str, Sequence[str]] | None = None, max_parallel: int = 1,
-        completion: WorkflowCompletion | None = None,
+        completion: WorkflowCompletion | None = None, read_only: bool = False,
     ):
+        if type(read_only) is not bool:
+            raise WorkflowError('invalid_journal_mode')
+        self._read_only = read_only
         if type(key) is not bytes or len(key) != 32:
             raise WorkflowError('key_must_be_32_bytes')
         if type(verify_before_step) is not bool:
@@ -313,11 +317,18 @@ class WorkflowRunner:
         self._db: sqlite3.Connection
         try:
             target = Path(path).absolute()
-            fd = _private_file(target)
+            fd = _private_file(target, read_only=read_only)
+            checked = os.fstat(fd)
             os.close(fd)
-            self._lock_fd = _private_file(Path(str(target) + '.lock'))
-            self._db = sqlite3.connect(target, timeout=0, isolation_level=None)
-            self._db.execute('PRAGMA synchronous=FULL')
+            if read_only:
+                self._db = sqlite3.connect(target.as_uri() + '?mode=ro', uri=True, timeout=0, isolation_level=None)
+                current = target.stat(follow_symlinks=False)
+                if (checked.st_dev, checked.st_ino) != (current.st_dev, current.st_ino):
+                    raise WorkflowError('journal_unavailable')
+            else:
+                self._lock_fd = _private_file(Path(str(target) + '.lock'))
+                self._db = sqlite3.connect(target, timeout=0, isolation_level=None)
+                self._db.execute('PRAGMA synchronous=FULL')
             self._initialize()
         except WorkflowError:
             if hasattr(self, '_db'):
@@ -343,12 +354,12 @@ class WorkflowRunner:
             raise WorkflowError('journal_key_or_integrity') from None
 
     def _initialize(self) -> None:
-        self._db.execute('BEGIN IMMEDIATE')
+        self._db.execute('BEGIN' if self._read_only else 'BEGIN IMMEDIATE')
         try:
             app = self._db.execute('PRAGMA application_id').fetchone()[0]
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
             names = {r[0] for r in self._db.execute("SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")}
-            if not app and not version and not names:
+            if not app and not version and not names and not self._read_only:
                 self._db.execute('CREATE TABLE workflow_runs (token TEXT PRIMARY KEY, payload BLOB NOT NULL)')
                 self._db.execute('CREATE TABLE workflow_meta (payload BLOB NOT NULL)')
                 self._db.execute('INSERT INTO workflow_meta VALUES (?)', (self._seal('key-check', b'scone-workflow-v1'),))
@@ -369,7 +380,8 @@ class WorkflowRunner:
             raise WorkflowError('busy')
         if not self._closed:
             self._db.close()
-            os.close(self._lock_fd)
+            if self._lock_fd >= 0:
+                os.close(self._lock_fd)
             self._closed = True
 
     def _save(self, token: str, state: dict[str, JSONValue]) -> None:
@@ -600,6 +612,8 @@ class WorkflowRunner:
         _name(space)
         if self._closed:
             raise WorkflowError('closed')
+        if self._read_only:
+            raise WorkflowError('read_only_journal')
         if self._running:
             raise WorkflowError('busy')
         if not isinstance(scope, Mapping):
@@ -648,6 +662,8 @@ class WorkflowRunner:
         _name(space)
         if self._closed:
             raise WorkflowError('closed')
+        if self._read_only:
+            raise WorkflowError('read_only_journal')
         if self._running:
             raise WorkflowError('busy')
         if not isinstance(scope, Mapping):
