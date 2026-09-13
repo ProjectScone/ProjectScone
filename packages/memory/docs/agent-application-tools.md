@@ -109,7 +109,8 @@ Invalid arguments return an `invalid_arguments` denial without executing the
 handler. Handler exceptions, invalid or oversized output, timeout, or cancellation
 stop the turn. The framework does not automatically retry a failed handler.
 Synchronous handlers run in a worker thread; cancellation cannot force-stop
-that thread or undo its effects. A coroutine returned after cancellation is
+an executing handler or undo its effects. A queued worker checks cancellation
+and the deadline again immediately before entering the handler. A coroutine returned after cancellation is
 closed instead of being executed. Async handlers must cooperate with cancellation.
 
 Durable workflows record an interrupted attempt as an uncertain outcome and

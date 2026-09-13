@@ -108,3 +108,74 @@ async def test_exhausted_tool_output_budget_never_dispatches_next_handler(memory
     except RuntimeError:pass
     print('exhausted tool output invoked',invoked)
     assert invoked==[1],'second effect ran with zero bytes left for any result'
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+async def test_queued_sync_handler_does_not_start_after_turn_ends(monkeypatch, cancelled):
+    from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
+    import threading
+    occupied, release, queued = threading.Event(), threading.Event(), asyncio.Event()
+    invoked = []
+    pool = ThreadPoolExecutor(max_workers=1)
+
+    def occupy():
+        occupied.set()
+        release.wait(5)
+
+    blocker = pool.submit(occupy)
+    assert occupied.wait(1)
+
+    async def queued_thread(function, *args, **kwargs):
+        future = asyncio.get_running_loop().run_in_executor(pool, partial(function, *args, **kwargs))
+        queued.set()
+        return await future
+
+    monkeypatch.setattr(asyncio, 'to_thread', queued_thread)
+    context = ToolContext('alpha', RecallScope.validated(), None,
+                          asyncio.get_running_loop().time() + (5 if cancelled else .05))
+    pending = asyncio.create_task(tool(lambda args, ctx: invoked.append(1)).invoke({'count': 3}, context))
+    try:
+        await asyncio.wait_for(queued.wait(), 1)
+        if cancelled:
+            pending.cancel()
+        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+            await pending
+    finally:
+        release.set()
+        blocker.result(timeout=1)
+        pool.shutdown(wait=True)
+        await asyncio.sleep(0)
+    assert not invoked, 'queued application effect started after the turn had ended'
+
+
+async def test_cancelled_running_handler_does_not_log_private_late_exception():
+    import threading
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    notices = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda loop, context: notices.append(context))
+
+    def execute(arguments, context):
+        started.set()
+        try:
+            release.wait(5)
+            raise RuntimeError('PRIVATE_HANDLER_CREDENTIAL')
+        finally:
+            finished.set()
+
+    context = ToolContext('alpha', RecallScope.validated(), None, loop.time() + 5)
+    pending = asyncio.create_task(tool(execute).invoke({'count': 3}, context))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        await asyncio.sleep(.01)
+    finally:
+        release.set()
+        loop.set_exception_handler(previous_handler)
+    assert not notices, 'late private handler exception reached the event-loop error logger'
