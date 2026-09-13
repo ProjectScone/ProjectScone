@@ -14,6 +14,10 @@ from collections import defaultdict
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
 from typing import Mapping, Optional, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
@@ -519,6 +523,10 @@ class InMemoryDocumentStore:
 
 class InMemoryVectorIndex:
     name = "memory"
+    #: Metadata conditions are evaluated here, against the row's own
+    #: metadata, so a condition reaches every stored vector rather than
+    #: the best few a post-filter then thins.
+    narrows_conditions = True
 
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
@@ -579,7 +587,7 @@ class InMemoryVectorIndex:
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         # While another embedder's write is pending the record never vouches
         # for anyone else: writes change it before they yield, and swap_writer
         # refuses to vouch past them.
@@ -587,7 +595,7 @@ class InMemoryVectorIndex:
         if not vouches(record, writer, bool(self._points)):
             raise VectorsNotComparable(f"stored vectors are recorded as "
                                        f"{record[0] if record else 'unrecorded'}, not {writer}")
-        found = await self.search(space, vector, limit, as_of, tags, where)
+        found = await self.search(space, vector, limit, as_of, tags, where, conditions)
         # A search override may yield; any write that changed the record
         # while it ran may have put another writer's vectors into it.
         if self._writer != record:
@@ -616,6 +624,7 @@ class InMemoryVectorIndex:
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
+        conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
         scored = []
@@ -627,6 +636,8 @@ class InMemoryVectorIndex:
             if tags and not set(tags) <= set(point.tags):
                 continue
             if where and any(point.metadata.get(k) != v for k, v in where.items()):
+                continue
+            if conditions is not None and not conditions.matches(point.metadata):
                 continue
             scored.append((point.chunk_id, _cosine(vector, point.vector)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
