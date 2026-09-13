@@ -379,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also record what each file defines, imports and calls, as claims quoted from the line")
     p.add_argument("--limit", type=int, default=5_000, help="files to read at most (default 5000)")
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
+    p.add_argument("--include-sensitive", action="store_true",
+                   help="take a source that screens as a credential anyway; off, it is withheld and named")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -661,6 +663,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
     from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
+    from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
 
     root = pathlib.Path(args.directory)
@@ -706,6 +709,11 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     unbound: set[str] = set()
+    # A key pasted into a source file is still a key. It is not remembered,
+    # not embedded, not claimed -- and it is named below, because a map
+    # that quietly skipped a file is the thing this command exists not to
+    # be. Taking one anyway is a decision, made with --include-sensitive.
+    withheld: list[tuple[str, str]] = []
     # A file alone cannot say what `thing.method()` refers to. The corpus
     # can, when exactly one declaration in it answers to that name --
     # gathered here and settled once every file has been read.
@@ -719,6 +727,13 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         if not text.strip():
             continue
         where = str(path.relative_to(root))
+        if not args.include_sensitive:
+            # Not `found`: that is this function's list of files, and the
+            # receipt counts it.
+            screened = screen(where, raw[: args.max_bytes])
+            if screened.reason is not None:
+                withheld.append((where, screened.reason))
+                continue
         added = await engine.remember(args.space, text, kind="file", source=where)
         if added.deduplicated:
             again += 1
@@ -778,9 +793,14 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{len(found) - args.limit} left unread of {len(found)}")
     if cut:
         parts.append(f"{cut} read only to {args.max_bytes} bytes")
+    if withheld:
+        parts.append(f"{len(withheld)} withheld as sensitive: "
+                     + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
         print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "withheld": [{"path": where, "reason": reason}
+                                         for where, reason in sorted(withheld)],
                             # Candidates, not claims: nothing here was written
                             # to the ledger, and the name says so.
                             "unconfirmed_call_candidates": (
