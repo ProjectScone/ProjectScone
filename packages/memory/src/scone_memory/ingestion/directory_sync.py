@@ -112,6 +112,12 @@ class DirectorySync:
         encoded = episode.content.encode('utf-8')
         end = 0
         if not chunks:
+            if episode.content == '':
+                from .formats.types import visual_only, ParsedDocument
+                evidence = await document_provenance(self.memory, self.space, episode.episode_id)
+                if visual_only(ParsedDocument(format=evidence.format, parser=evidence.parser,
+                        segments=evidence.segments, metadata=evidence.metadata, video=evidence.video)):
+                    return
             raise InvalidInput('managed source has no indexed chunks')
         for ordinal, chunk in enumerate(chunks):
             if (chunk.ordinal != ordinal or chunk.space != self.space or chunk.episode_id != episode.episode_id

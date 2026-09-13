@@ -57,3 +57,20 @@ def test_discovery_keeps_video_and_audio_separate_and_supports_older_hosts():
         'selection': {'video_ocr': True}, 'extensions': ['.mp4'],
         'extraction': 'sampled-frame-text', 'includes_audio': False}})
     assert formats.video_ocr_available is True and formats.video_ocr_extensions == ('.mp4',)
+
+
+def test_visual_only_result_requires_explicit_video_choice_and_zero_chunks(fixture):
+    server, jobs = fixture
+    selected(server)
+    result = {**RESULT, 'filename': 'slides.mp4', 'format': 'mp4', 'video_ocr': True,
+              'segments': 0, 'added': {**RESULT['added'], 'chunks': 0}}
+    server.route('GET', '/v1/document-jobs/one/result', 200, result)
+    assert jobs.result('one').segments == 0
+    server.route('GET', '/v1/document-jobs/one/result', 200,
+                 {**result, 'added': {**result['added'], 'chunks': 1}})
+    with pytest.raises(SconeError):
+        jobs.result('one')
+    selected(server, retained=False)
+    server.route('GET', '/v1/document-jobs/one/result', 200, {**result, 'video_ocr': False})
+    with pytest.raises(SconeError):
+        jobs.result('one')
