@@ -15,9 +15,12 @@ from ..ocr.tables import infer_tables
 from ..core.errors import InvalidInput
 from ..ingestion.document_media import DocumentMedia, MEDIA_DOCUMENT_EXTENSIONS
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection, ocr_choices
+from ..ingestion.document_video import DocumentVideo, video_choices
 from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
 from ..ingestion.formats.types import DocumentLimits
 from ..memory.engine import MemoryEngine
+from .video_documents import mount_video_frame_routes
+from .video_catalogue import mount_video_catalogue_route
 
 
 class _FileBody(BaseModel):
@@ -25,6 +28,7 @@ class _FileBody(BaseModel):
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str | None = Field(default=None, min_length=1, max_length=1024)
     pdf_ocr: PdfOcrSelection | None = None
+    video_ocr: bool = False
 
 
 def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
@@ -32,12 +36,17 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
                                ingest_slot: Callable[[int], AsyncContextManager[None]],
                                document_ocr: DocumentOcr | None = None, *,
                                assert_current_space: Callable[[Request, str], None],
-                               document_media: DocumentMedia | None = None) -> None:
+                               document_media: DocumentMedia | None = None,
+                               document_video: DocumentVideo | None = None) -> None:
+    mount_video_frame_routes(app, engine, space_for, ingest_slot, document_video,
+                             assert_current_space=assert_current_space)
+    mount_video_catalogue_route(app, engine, space_for, ingest_slot,
+                               assert_current_space=assert_current_space)
     @app.get('/v1/documents/formats')
     async def formats(_space: str = Depends(space_for)) -> dict[str, object]:
         from ..ingestion.formats.capabilities import document_formats
         return {'formats': {**document_formats(), **(document_media.formats() if document_media else {})}, 'max_input_bytes': min(engine.max_attachment_bytes, 25*1024*1024),
-                'pdf_ocr': ocr_choices(document_ocr)}
+                'pdf_ocr': ocr_choices(document_ocr), 'video_ocr': video_choices(document_video)}
 
     @app.post('/v1/documents')
     async def index_file(request: Request, space: str = Depends(space_for)) -> JSONResponse:
@@ -52,6 +61,12 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             return JSONResponse({'error': 'invalid document attachment request'}, status_code=400)
         assert_current_space(request, space)
         parser: DocumentParser = document_media.parser() if document_media else BuiltinDocumentParser()
+        if body.video_ocr:
+            if body.pdf_ocr is not None:
+                raise InvalidInput('video OCR and PDF OCR cannot be selected together')
+            if document_video is None:
+                raise InvalidInput('video OCR is not configured on this server')
+            parser = document_video.parser
         if body.pdf_ocr is not None:
             if document_ocr is None:
                 raise InvalidInput('document OCR is not configured on this server')
@@ -65,6 +80,7 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             saved = await store_document(engine, space, original, manifest)
         assert_current_space(request, space)
         return JSONResponse(jsonable_encoder({**asdict(saved),
+            **({'video_ocr': True} if body.video_ocr else {}),
             **({'pdf_ocr': body.pdf_ocr.model_dump()} if body.pdf_ocr is not None else {})}))
 
     @app.get('/v1/episodes/{episode_id}/document')

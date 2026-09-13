@@ -455,7 +455,7 @@ class Distiller:
         episodes = await documents.recent_episodes(space, max(counts.episodes, 1))
         referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)}
         fresh = [
-            e for e in episodes if e.episode_id not in referenced and (space, e.episode_id) not in self._done
+            e for e in episodes if e.content.strip() and e.episode_id not in referenced and (space, e.episode_id) not in self._done
         ]
         return sorted(fresh, key=lambda e: (parse_rfc3339(e.created_at), e.episode_id))
 
@@ -474,6 +474,8 @@ class Distiller:
         return outcome
 
     async def _distill(self, episode: Episode) -> DistillOutcome:
+        if not episode.content.strip():
+            return DistillOutcome(episode.episode_id)
         triples, rejected = await self._extract(episode.content)
         return await self._apply(
             episode.space, episode.episode_id, triples, episode.created_at, rejected
