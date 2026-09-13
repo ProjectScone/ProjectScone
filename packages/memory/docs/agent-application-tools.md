@@ -74,6 +74,78 @@ before calling the handler, even if the provider ignores the schema.
 
 ## Contracts and scope
 
+### Infer a schema from a typed function
+
+Use `function_tool` when the Python signature describes the arguments:
+
+```python
+from typing import Annotated
+from scone_memory.agents.function_tools import function_tool
+
+
+def multiply(
+    count: Annotated[int, "Number of items."],
+    context: ToolContext,
+    factor: int = 2,
+) -> object:
+    """Multiply the supplied count by a factor."""
+    return {"total": count * factor, "space": context.space}
+
+
+count_tool = function_tool(multiply, revision="1", context_parameter="context")
+# Register count_tool in AgentCatalog.tools, selecting tools=("multiply",)
+# in the agent definition. Model selection works exactly as above.
+```
+
+The name and description default to the function name and docstring; explicit
+`name` and `description` overrides are available. Both synchronous and async
+functions work. Bound methods and `functools.partial` work with inspectable,
+annotated signatures; supply explicit metadata when the callable has no name or
+docstring. The return value must satisfy the existing strict JSON result contract;
+return annotations do not add output validation or convert Python objects.
+
+Supported parameter annotations are `str`, `int`, `float`, `bool`, `None`,
+`list[T]`, `dict[str, T]`, fixed tuples, `tuple[T, ...]`, unions/`Optional`,
+`Literal`, scalar-valued enums, and `Annotated[T, "description"]`. JSON arrays
+become tuples when the declared type requires one; enum values become members.
+Booleans do not satisfy integer parameters. Union conversion first prefers a
+branch preserving the input's exact Python types, then a unique conversion.
+For example, `int | float` preserves an integer, while `Color | str` receives a
+plain string. Ambiguous conversions are refused rather than choosing by order.
+
+Parameters with defaults are optional in the schema. Registration snapshots each
+default, includes it in the saved binding, and creates fresh values for every
+invocation. Mutating the function's defaults later cannot change the registration.
+A default must round-trip without changing its Python type or value: use `1.0`
+for a float default, and avoid an enum default in `Color | str` or a tuple default
+in `tuple[int, ...] | list[int]`. These ambiguous defaults fail registration.
+
+Every model-supplied parameter requires an annotation. Variadic arguments,
+`Any`, arbitrary classes, dataclasses, and Pydantic parameters are not inferred.
+Use explicit `AgentTool` schemas and a host-owned conversion function for those
+contracts. Constraints such as numeric bounds also require an explicit schema.
+At most 32 parameters are accepted, including an injected context.
+
+Only the explicitly named `context_parameter` receives the host context; it is
+excluded from the model schema. If annotated, it must resolve to `ToolContext`.
+Positional-only and keyword-only parameters retain their Python calling semantics.
+String annotations use a bounded syntax parser, without `eval`, imports, calls,
+or arbitrary attribute access. `annotation_namespace={"Color": Color}` supplies
+local type aliases that are absent from the function's module namespace.
+Known `typing` forms are supported; module-qualified application types should
+be supplied under a direct alias. Schemas remain bounded to 32,768 UTF-8 bytes.
+Python 3.14 deferred annotations require readable Python function source;
+registration refuses dynamically created deferred functions without source.
+The bounded source module is parsed and compiled without execution, and its
+annotation code must match the loaded function. Editing an annotation on disk
+without reloading the function therefore refuses registration. This avoids
+executing Python's deferred annotation machinery during inspection.
+
+Conversion failures stop execution through the existing sanitized tool-error
+path; they never invoke the application function. Schema validation still rejects
+invalid arguments before dispatch. The adapter shares the existing deadlines,
+cancellation behavior, model selection, and durable-run rules below.
+
 An embedded host can combine its existing private runtime configuration with
 trusted Python registrations:
 
@@ -153,6 +225,6 @@ closures are not hashed. A changed registration refuses reuse of an old run.
 Agents with no selected application tools retain their historical serialization
 and binding identity.
 
-This API registers functions explicitly. Automatic signature inference,
-runtime plugin loading, custom tool management in the console, and public SDK
-registration are separate capabilities and are not provided by this change.
+Runtime plugin loading, custom tool management in the console, streaming custom
+results, and public SDK registration remain separate capabilities. Inferred
+function tools still require explicit host registration and agent selection.

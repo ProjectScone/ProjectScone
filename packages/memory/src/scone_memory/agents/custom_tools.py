@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 import inspect
@@ -19,6 +20,7 @@ from ..retrieval.recall_scope import RecallScope
 
 _RESERVED = {'search_memory', 'trace_memory', 'read_memory', 'compute_memory',
              'answer', 'unknown_tool', 'custom_tool'}
+_dispatch_abort: ContextVar[threading.Event | None] = ContextVar('scone_tool_dispatch_abort', default=None)
 
 
 def _result_packet(result: object) -> dict[str, object]:
@@ -132,6 +134,13 @@ def _check_context(context: ToolContext) -> None:
         raise RuntimeError('application tool deadline exceeded')
 
 
+def _check_dispatch(context: ToolContext) -> None:
+    """Check a nested synchronous dispatch without changing public context data."""
+    aborted = _dispatch_abort.get()
+    if (aborted is not None and aborted.is_set()) or time.monotonic() >= context.deadline:
+        raise RuntimeError('application tool turn ended before worker dispatch')
+
+
 @dataclass(frozen=True)
 class ToolContext:
     """Detached invocation scope; trusted handlers enforce their own resources.
@@ -231,9 +240,12 @@ class AgentTool:
                     aborted = threading.Event()
 
                     def execute() -> object:
-                        if aborted.is_set() or time.monotonic() >= context.deadline:
-                            raise RuntimeError('application tool turn ended before worker dispatch')
-                        return self.handler(detached, context)
+                        token = _dispatch_abort.set(aborted)
+                        try:
+                            _check_dispatch(context)
+                            return self.handler(detached, context)
+                        finally:
+                            _dispatch_abort.reset(token)
 
                     worker = asyncio.create_task(_run_worker(execute))
                     try:
