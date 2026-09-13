@@ -123,6 +123,10 @@ class VideoDocumentParser:
     async def parse(self, data: bytes, filename: str, limits: DocumentLimits = DocumentLimits()) -> ParsedDocument:
         return await self._parse(data, filename, limits, None)
 
+    async def read_frame(self, data: bytes, filename: str, evidence: DocumentVideoEvidence,
+                         ordinal: int, *, limits: DocumentLimits | None = None) -> VideoFrame:
+        return await self._decoder.read_frame(data, filename, evidence, ordinal, limits=limits)
+
     async def parse_checkpointed(self, data: bytes, filename: str, limits: DocumentLimits,
                                  checkpoints: ExtractionCheckpoints) -> ParsedDocument:
         return await self._parse(data, filename, limits, checkpoints)
