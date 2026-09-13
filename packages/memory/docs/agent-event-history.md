@@ -11,8 +11,8 @@ run identifiers in row keys are HMAC-derived.
 `AgentRunService` automatically collects metadata for saved task, handoff and
 interactive workflows, including parallel tasks and approval resumptions. Native
 replay checks current space, scope, catalog bindings and an optional host admission
-guard. Authenticated HTTP replay is available; live delivery, strict SDK replay
-and a Console timeline remain follow-up work.
+guard. Authenticated HTTP replay is available; standalone SDK replay is also available. Live delivery and a Console timeline
+remain follow-up work.
 The store itself trusts the host; neither storage nor native metadata replay
 revalidates answers or grants recipient authorization. The HTTP delivery path
 adds current recipient and committed/paused-source verification, described below.
@@ -179,6 +179,7 @@ storage backends. Final answers must still use the verified result endpoint.
 
 ## Remaining delivery work
 
-Authenticated live delivery, strict standalone SDK history/reconnect models,
-Console rendering and genuine provider public-text streaming remain required.
+The standalone SDK exposes immutable typed `agents.history()` pages and cursor
+reconnect, with native process-restart tests. Authenticated live delivery, Console
+rendering and genuine provider public-text streaming remain required.
 Cursor replay does not substitute for these features or simulate token streaming.
