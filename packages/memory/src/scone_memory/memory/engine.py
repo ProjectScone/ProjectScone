@@ -1308,7 +1308,7 @@ class MemoryEngine:
         and are rebuilt on import, so a dump moves between stores and
         between embedders. ``include_attachments=True`` selects archive/2:
         verified linked bytes and episode links travel with the ledger.
-        The export is bounded and does not constitute an atomic snapshot."""
+        Attachment transfer is bounded; neither profile is an atomic snapshot."""
         check_space(space)
         # What the space holds that an archive does not carry is counted
         # here, where the blob store is, and said in the header: a dump of
