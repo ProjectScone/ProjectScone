@@ -171,9 +171,21 @@ line that is not a chunk, or a stream that ends without a finish is refused,
 the response byte budget covers the whole stream, and a sink that raises
 fails the turn. A server that ignores `stream` still answers with one message,
 which the sink receives as one delta. Without a sink nothing changes: the
-request is the nonstreaming turn it always was. Nothing above the provider
-uses the sink yet; delivering an agent's answer live to a reader is the
-remaining work named in `agent-event-history.md`.
+request is the nonstreaming turn it always was.
+
+The evidence loop carries that sink for a whole run:
+`BoundAgent.run(..., public_text=sink)` and `EvidenceToolLoop(...,
+public_text=sink)` hand it to a model whose turn accepts one (checked by
+signature, so a model that never heard of streaming is called exactly as
+before), and settle each accepted turn: text streamed in a turn that then
+called tools was not the answer and the sink is told to `withdraw()` it; a
+turn that answers without having streamed -- a model that cannot stream, a
+structured answer, a step replayed from the journal -- is delivered as one
+delta, so a reader is never told less than the loop accepted, and the sum
+of deltas is the accepted text byte for byte. A sink that raises fails the
+turn. The loop never closes the sink: whoever owns the reader's window does,
+once the receipt is written. Delivering that window to a reader over HTTP is
+the remaining work named in `agent-event-history.md`.
 
 `describe()` returns agent IDs, defaults and allowed model metadata. It excludes
 instructions, endpoints, credentials and factories. The host must filter the
