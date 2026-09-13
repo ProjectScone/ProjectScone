@@ -7,15 +7,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import uuid4
 
+from ..agents.usage import ModelTokenUsage
 
 ProtocolName = Literal['native', 'structured_action', 'structured_answer']
 FailureKind = Literal['http_error', 'transport_timeout', 'transport_error',
                       'request_timeout', 'response_bytes', 'invalid_response', 'internal_error']
-
-
-def _tokens(value: object) -> int | None:
-    # Usage is optional, untrusted provider metadata, never an inferred count.
-    return value if type(value) is int and 0 <= value <= 10**9 else None
 
 
 @dataclass
@@ -44,11 +40,10 @@ class ToolCallDiagnostics:
             reason = choices[0].get('finish_reason')
             allowed = ('stop', 'tool_calls', 'length', 'content_filter', 'function_call')
             self.finish_reason = reason if isinstance(reason, str) and reason in allowed else 'unknown'
-        usage = packet.get('usage')
-        if isinstance(usage, dict):
-            self.prompt_tokens = _tokens(usage.get('prompt_tokens'))
-            self.completion_tokens = _tokens(usage.get('completion_tokens'))
-            self.total_tokens = _tokens(usage.get('total_tokens'))
+        usage = ModelTokenUsage.from_provider(packet.get('usage'))
+        self.prompt_tokens = usage.prompt_tokens
+        self.completion_tokens = usage.completion_tokens
+        self.total_tokens = usage.total_tokens
 
     def log_started(self, logger: logging.Logger) -> None:
         logger.info('tool_model.started call_id=%s protocol=%s request_bytes=%s output_token_limit=%s timeout_s=%s',
