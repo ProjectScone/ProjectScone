@@ -163,5 +163,9 @@ async def test_calls_the_graph_could_not_bind_are_reported(tree):
 
     facts = await engine.documents.list_facts("default", include_closed=True)
     calls = {(f.subject, f.object) for f in facts if f.predicate == "calls"}
-    assert not any("thing.run" in obj or "json.dumps" in obj for _, obj in calls), calls
+    # `json.dumps` is bound -- the file's own `import json` says where it
+    # lives. `thing.run` is a method on a value of unstated type and
+    # cannot be, and `len` is a builtin that resolves to nothing here.
+    assert ("app/outward.py:handle", "json.dumps") in calls, calls
+    assert not any("thing.run" in obj for _, obj in calls), calls
     assert not any(obj == "len" for _, obj in calls), calls
