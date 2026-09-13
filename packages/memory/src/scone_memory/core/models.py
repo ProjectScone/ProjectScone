@@ -259,7 +259,9 @@ class ForgetReceipt(BaseModel):
     same shape answers the preview and the deed: chunks (and their
     vectors) go; an attachment is released only when no other episode of
     the space still carries it; the claims and links that cited the
-    episode stand, with their source ids intact."""
+    episode stand, with their source ids intact -- unless the forget was
+    asked to take the claims with it, and then each claim that cited or
+    affirmed the episode is listed under what happened to it."""
 
     episode_id: int
     chunks: int
@@ -273,6 +275,16 @@ class ForgetReceipt(BaseModel):
     affirmations_citing: list[int] = Field(default_factory=list)
     #: Set once the deed is done; a preview has none.
     forgotten_at: Optional[str] = None
+    #: What happened to the claims that cited or affirmed the episode.
+    #: ``keep``, the default, leaves every one standing. ``exclude`` takes
+    #: out of recall each ledger claim no retained source still supports,
+    #: with a reason naming the episode and reversibly; the rest are
+    #: listed under why they stayed.
+    claims_policy: Literal["keep", "exclude"] = "keep"
+    claims_excluded: list[int] = Field(default_factory=list)
+    claims_kept_other_support: list[int] = Field(default_factory=list)
+    claims_kept_not_in_ledger: list[int] = Field(default_factory=list)
+    claims_already_excluded: list[int] = Field(default_factory=list)
 
 
 class ForgetStatus(BaseModel):

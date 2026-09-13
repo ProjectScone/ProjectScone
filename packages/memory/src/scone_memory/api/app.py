@@ -731,8 +731,9 @@ def create_app(
         return (await engine.forget_status(space, episode_id)).model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
-    async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
-        receipt = await engine.forget(space, episode_id)
+    async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
+                             space: str = Depends(space_for)) -> dict:
+        receipt = await engine.forget(space, episode_id, with_claims=with_claims)
         return {"forgotten": episode_id, **receipt.model_dump()}
 
     @app.get("/v1/spaces/{name}/impact")
