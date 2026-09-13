@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job_id")
     p = sub.add_parser("cancel-job", help="stop expecting more of a batch; stored records stay stored")
     p.add_argument("job_id")
-    p = sub.add_parser("merge-space", help="move everything this space holds into another; --dry-run previews it")
+    p = sub.add_parser("merge-space", help="move episodes, claims and attachments; --dry-run previews it")
     p.add_argument("--into", required=True, help="the space to move it into")
     p.add_argument("--confirm", help="repeat the space being merged; a whole space does not move by accident")
     p.add_argument("--dry-run", action="store_true", help="say what would move and move nothing")
@@ -1344,7 +1344,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             preview = await engine.merge_space(space, into=args.into, preview=True)
             emit(preview.record()) if args.json else print(
                 f"would move {preview.episodes} episode(s) and {preview.facts} claim(s) "
-                f"from {space} into {args.into}", file=out)
+                f"from {space} into {args.into}; {preview.attachments} attachment(s), "
+                f"{preview.attachment_bytes} bytes, {preview.unlinked_attachments} unlinked; "
+                f"{preview.tombstoned} forgotten source(s) skipped; "
+                f"{preview.forgotten_source_references} forgotten-source reference(s) omitted", file=out)
             return 0
         if args.confirm != space:
             print(f"refusing: --confirm must repeat the space being merged {space!r}; nothing moved", file=out)
@@ -1352,7 +1355,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         moved = await engine.merge_space(space, into=args.into, confirm=args.confirm)
         emit(moved.record()) if args.json else print(
             f"moved {moved.episodes} episode(s) and {moved.facts} claim(s) from {space} "
-            f"into {args.into}; {space} is closed", file=out)
+            f"into {args.into}; {moved.attachments} attachment(s), {moved.attachment_bytes} bytes, "
+            f"{moved.unlinked_attachments} unlinked; {moved.tombstoned} forgotten source(s) skipped; "
+            f"{moved.forgotten_source_references} forgotten-source reference(s) omitted; {space} is closed", file=out)
         return 0
 
     if args.command == "delete-space":

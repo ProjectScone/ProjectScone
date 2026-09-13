@@ -42,8 +42,9 @@ The ledger import policies remain the same as profile 1: target exclusions are
 preserved, fact supersession pointers are not reconstructed, and source references
 to episodes skipped by the destination's tombstones are dropped. Facts and quotes
 remain under those existing rules. Profile 2 is an attachment transfer format,
-not a lossless ledger or policy snapshot. It does not change `merge_space`, which
-still uses the legacy profile; do not use space merge to move attached evidence.
+not a lossless ledger or policy snapshot. For whole-space movement, [space merge](space-merge.md) additionally carries
+unlinked attachment holds, reports known forgotten-source reference omissions,
+and verifies retained evidence before closing the source.
 
 ## Limits and retries
 
