@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -69,6 +70,51 @@ def _pairs(values: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _decoded_state(payload: bytes, maximum: int, operations: int) -> _State:
+    try:
+        if type(payload) is not bytes or len(payload) > maximum:
+            raise ValueError()
+        decoded = json.loads(payload, object_pairs_hook=_pairs)
+        _bytes(decoded, maximum)
+        state = _State.model_validate(decoded)
+        if (len(state.events) > operations
+                or any(row.status != 'completed' for row in state.events[:-1])
+                or (state.configuration is not None and
+                    (len(state.configuration) != 64 or any(c not in '0123456789abcdef' for c in state.configuration)))):
+            raise ValueError()
+        return state
+    except (ValueError, TypeError, RecursionError, TurnJournalError):
+        raise TurnJournalError('journal_integrity') from None
+
+
+@dataclass(frozen=True)
+class TurnJournalInspection:
+    """Detached completed operation data; cannot advance or write a journal."""
+    _state: _State = field(repr=False)
+    _maximum: int = field(repr=False)
+
+    @classmethod
+    def read(cls, payload: bytes) -> TurnJournalInspection:
+        maximum = 4 * 1024 * 1024
+        state = _decoded_state(payload, maximum, 64)
+        if any(event.status != 'completed' for event in state.events):
+            raise TurnJournalError('outcome_unknown')
+        if state.finished or not state.events or state.configuration is None:
+            raise TurnJournalError('no_pending_operation')
+        return cls(state, maximum)
+
+    def operations(self) -> tuple[tuple[OperationKind, str, JSONValue], ...]:
+        return tuple((event.kind, event.request, cast(JSONValue, json.loads(_bytes(event.result, self._maximum))))
+                     for event in self._state.events)
+
+    def pending_identity(self, kind: OperationKind, request: JSONValue) -> str:
+        if kind not in ('model', 'custom', 'memory') or len(self._state.events) >= 64:
+            raise TurnJournalError('invalid_operation')
+        digest = hashlib.sha256(_bytes(request, self._maximum)).hexdigest()
+        return hashlib.sha256(_bytes(['tool-operation-v1', self._state.binding,
+            self._state.configuration, len(self._state.events), kind, digest], self._maximum)).hexdigest()
+
+
 class ToolTurnJournal:
     """One activation of a trusted native turn; construct anew after each pause.
 
@@ -101,19 +147,7 @@ class ToolTurnJournal:
             self._state = _State(version=1, binding=identity, configuration=None,
                                  elapsed=0.0, finished=False, events=[])
         else:
-            try:
-                if len(self._saved) > max_bytes:
-                    raise ValueError()
-                decoded = json.loads(self._saved, object_pairs_hook=_pairs)
-                _bytes(decoded, max_bytes)
-                self._state = _State.model_validate(decoded)
-                if (len(self._state.events) > max_operations
-                        or any(row.status != 'completed' for row in self._state.events[:-1])
-                        or (self._state.configuration is not None and
-                            (len(self._state.configuration) != 64 or any(c not in '0123456789abcdef' for c in self._state.configuration)))):
-                    raise ValueError()
-            except (ValueError, TypeError, RecursionError, TurnJournalError):
-                raise TurnJournalError('journal_integrity') from None
+            self._state = _decoded_state(self._saved, max_bytes, max_operations)
             if self._state.binding != identity:
                 raise TurnJournalError('binding_mismatch')
             if any(row.status == 'started' for row in self._state.events):

@@ -1,4 +1,4 @@
-# Native approval of exact tool calls
+# Approval of exact tool calls
 
 An application tool can declare `requires_approval=True` on `AgentTool` or
 `function_tool`. The default remains false and is omitted from registration
@@ -6,11 +6,12 @@ metadata, preserving existing agent fingerprints. Changing the policy changes
 the bound agent fingerprint. Register tools and select models explicitly through
 `AgentCatalog`; the model cannot enable a tool or choose its approval policy.
 
-This native API adds encrypted requests, immutable decisions, explicit activation,
-and single execution claims. It does **not yet** connect these operations to
-`AgentWorkflow`, interactive/handoff services, HTTP, SDKs, or the console. A guarded
-agent invoked without the required native context refuses before its model factory
-runs. Existing unguarded workflows retain their behavior.
+Saved task, interactive, and handoff runs support encrypted requests, immutable
+decisions, explicit activation, and single execution claims through
+`AgentRunService`, authenticated HTTP, and the standalone Python SDK. The console
+approval interface is still pending. A guarded agent invoked directly without the
+required native context refuses before its model factory runs. Existing unguarded
+workflow signatures and fingerprints retain their behavior.
 
 ## State and identity
 
@@ -37,7 +38,76 @@ Requests and activation receipts are bounded to 512 each per run and do not coun
 against run capacity or appear in run pagination. Arguments remain encrypted in
 storage and returned only through the host's scoped inspection boundary.
 
-## Host integration
+## Saved runs and HTTP
+
+`AgentRunService` supplies the approval context for registered guarded tools.
+The saved plan retains the selected LLM for every task or handoff agent. A run
+waiting for a decision exposes `status="paused"` and `paused_steps`; it is not an
+unknown attempt. Reading status or approvals, recording a decision, restarting the
+service, or repeating `start` does not resume it.
+
+| HTTP operation | Required role | Effect |
+| --- | --- | --- |
+| `GET /v1/agent-runs/{run_id}/approvals` | Any authenticated role in the space | Inspect current requests and visible consumed history |
+| `POST /v1/agent-runs/{run_id}/approvals/{request_id}/decision` | `review` or `full` | Persist `decision` and `expected_revision: 1` |
+| `POST /v1/agent-runs/{run_id}/approval-continuations` | `write` or `full` | Activate the exact `continuation_id` and `decisions: {request_id: 2}` batch |
+
+Hosts advertise `agents.approvals` when these operations are mounted. Bodies are
+bounded to 8 KiB, reject duplicate JSON keys at every depth, and cannot supply the
+decision actor. The host derives a stable `key:<digest>` actor using a keyed hash
+of the currently authenticated bearer key; the bearer secret is never stored in
+the approval record. Authorization is checked again after awaited verification.
+Responses carry `Cache-Control: no-store`.
+
+Inspection authenticates the paused workflow ticket and turn checkpoint, checks
+the first unfinished application call, and restores retained evidence with scoped
+point reads. It does not search again, invoke a model, acquire execution authority,
+or create an execution journal for an unstarted run. Changed source or checkpoint
+state refuses inspection. Unknown operations remain non-replayable.
+
+Only selected paused steps resume. An unrelated tool pause retains its ticket and
+attempt count. Human-input continuation is separate: a tool continuation cannot
+consume a human response whose earlier admission failed. Admission capacity is
+reserved before awaited source checks, and process ownership is released even if
+workflow cleanup raises. A committed activation followed by failed admission can
+be reconciled only by the same explicit activation ID and batch.
+
+The continuation response contains `status` and an immutable `activation` receipt.
+Each decided request exposes `decision_digest`; the activation's
+`decision_digests` must match the selected records. These opaque hashes allow the
+client to validate the exact acknowledgment without exposing the private
+invocation digest. A consumed approval still proves admission only; use the
+workflow result to establish completion.
+
+## Standalone Python client
+
+The SDK supports Python 3.9 and later and needs no native framework import.
+After inspecting the literal call and obtaining the operator's decision:
+
+```python
+agents = client.agents(expected_space="alpha")
+pending, = agents.approvals("run-1")
+print(pending.call.model_id, pending.call.tool_name, pending.call.arguments())
+
+# Explicit review action; this does not execute the tool.
+decided = agents.decide_tool(pending, decision="approve")  # or "deny"
+
+# Separate explicit execution action, using a write/full credential.
+continuation = agents.continue_tools(
+    "run-1", continuation_id="review-1", decisions=(decided,),
+)
+print(continuation.activation.activation_id, continuation.status.status)
+```
+
+The client validates selected models, saved bindings, canonical argument JSON,
+revision state, exact decision hashes and the activation batch. It rejects agents
+unreachable at the claimed handoff depth; the server verifies the actual receipt
+history. It issues one POST per explicit operation and does not retry an ambiguous
+failure automatically. Retrying the same completed activation returns its original
+receipt without rerunning the call. `agents.continue_run(..., responses=...)`
+remains the separate human-input protocol.
+
+## Low-level host integration
 
 The host first saves a plan with `AgentPlanStore`, registers its immutable question
 and recall scope with `AgentRunStore`, and obtains a `BoundAgent` matching that saved
@@ -86,8 +156,10 @@ of `TurnJournalPaused` with an opaque `request_id`. It contains a sealed workflo
 pause and occurs **before** the custom operation is marked started. A scheduling
 pause from `max_new_operations` remains separate and grants no approval.
 
-After inspecting a request through `approval_store.list(space, run_id)` or `get`,
-the authorized host can record a decision without executing anything:
+Raw `approval_store.list(space, run_id)` and `get` authenticate stored records;
+they do not establish that a call is currently pending or its sources retained.
+After verifying the current workflow checkpoint and sources (or using the saved-run
+service inspection above), the authorized host can record a decision without execution:
 
 ```python
 approval_store.decide(

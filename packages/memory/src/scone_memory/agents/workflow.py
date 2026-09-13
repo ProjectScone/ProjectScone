@@ -20,7 +20,8 @@ from typing import TypeAlias, cast
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .workflow_pause import (PauseReceipt, WorkflowPaused as WorkflowPaused,
+from .workflow_pause import (PauseReceipt, WorkflowPauseSnapshot as WorkflowPauseSnapshot,
+                             WorkflowPaused as WorkflowPaused,
                              WorkflowPausableStep as WorkflowPausableStep,
                              pause_receipt, paused_state, validate_pause)
 
@@ -507,6 +508,85 @@ class WorkflowRunner:
             raise WorkflowError('journal_unavailable')
         return cast(dict[str, JSONValue], _copy(state['results'], self._maximum))
 
+    async def inspect_pauses(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue],
+                             inputs: JSONValue) -> tuple[WorkflowPauseSnapshot, ...]:
+        """Verify exact pause tickets without executing, writing or issuing a lease."""
+        _name(run_id)
+        _name(space)
+        if not isinstance(scope, Mapping):
+            raise WorkflowError('invalid_payload')
+        clean_scope = cast(dict[str, JSONValue], _copy(dict(scope), self._maximum))
+        clean_input = _copy(inputs, self._maximum)
+        signature = hashlib.sha256(_encode({'space': space, 'scope': clean_scope,
+            'inputs': clean_input, 'revision': self._revision}, self._maximum)).hexdigest()
+        token = hmac.new(self._key, run_id.encode(), hashlib.sha256).hexdigest()
+        expires = asyncio.get_running_loop().time() + self._deadline
+
+        def read(identifier: str) -> bytes | None:
+            if self._closed:
+                raise WorkflowError('closed')
+            try:
+                row = self._db.execute('SELECT payload FROM workflow_runs WHERE token=?', (identifier,)).fetchone()
+                return None if row is None else bytes(row[0])
+            except (sqlite3.Error, ValueError, TypeError):
+                raise WorkflowError('journal_unavailable') from None
+
+        saved = read(token)
+        if saved is None:
+            return ()
+        state = cast(dict[str, JSONValue], json.loads(self._unseal(token, saved)))
+        if state['binding'] != signature:
+            raise WorkflowError('binding_mismatch')
+        if state['status'] == 'sources_invalid':
+            raise WorkflowError('sources_invalid')
+        tickets = paused_state(state, self._steps, self._dependencies)
+        payloads: dict[str, tuple[str, bytes]] = {}
+        for name, ticket in tickets.items():
+            encoded = _encode([signature, name, ticket['checkpoint']], 1024)
+            identifier = token + ':checkpoint:' + hmac.new(self._key, encoded, hashlib.sha256).hexdigest()
+            encrypted = read(identifier)
+            payload = None if encrypted is None else self._unseal(identifier, encrypted)
+            if not payload or not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), ticket['digest']):
+                raise WorkflowError('pause_checkpoint_changed')
+            payloads[name] = identifier, payload
+
+        def current() -> None:
+            active = asyncio.current_task()
+            if active is not None and active.cancelling():
+                raise asyncio.CancelledError
+            if asyncio.get_running_loop().time() >= expires:
+                raise WorkflowError('verification_unavailable')
+            if read(token) != saved:
+                raise WorkflowError('pause_snapshot_changed')
+            for identifier, original in payloads.values():
+                encrypted = read(identifier)
+                if encrypted is None or self._unseal(identifier, encrypted) != original:
+                    raise WorkflowError('pause_snapshot_changed')
+
+        if not tickets:
+            return ()
+        context = self._context(run_id, space, clean_scope, clean_input, state)
+        try:
+            async with asyncio.timeout(self._deadline) as timer:
+                valid = await self._verifier(context)
+                if timer.expired():
+                    raise WorkflowError('verification_unavailable')
+                current()
+        except WorkflowError:
+            raise
+        except FileNotFoundError:
+            valid = False
+        except (OSError, sqlite3.OperationalError):
+            raise WorkflowError('verification_unavailable') from None
+        except Exception:
+            valid = False
+        if valid is not True:
+            raise WorkflowError('sources_invalid')
+        current()
+        return tuple(WorkflowPauseSnapshot(step.step_id, tickets[step.step_id]['checkpoint'],
+            payloads[step.step_id][1], self._context(run_id, space, clean_scope, clean_input, state), current)
+            for step in self._steps if step.step_id in tickets)
+
     async def read_result(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue],
                           inputs: JSONValue) -> WorkflowResult | None:
         """Revalidate completed results without executing any workflow step.
@@ -561,7 +641,8 @@ class WorkflowRunner:
             self._running = False
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
 
-    async def run(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
+    async def run(self, run_id: str, *, space: str, scope: Mapping[str, JSONValue], inputs: JSONValue,
+                  resume_steps: Sequence[str] | None = None) -> WorkflowResult:
         _name(run_id)
         _name(space)
         if self._closed:
@@ -570,6 +651,14 @@ class WorkflowRunner:
             raise WorkflowError('busy')
         if not isinstance(scope, Mapping):
             raise WorkflowError('invalid_payload')
+        selected: frozenset[str] | None = None
+        if resume_steps is not None:
+            if (not isinstance(resume_steps, (list, tuple)) or len(resume_steps) > 32
+                    or any(type(name) is not str for name in resume_steps)
+                    or len(set(resume_steps)) != len(resume_steps)
+                    or set(resume_steps) - {step.step_id for step in self._steps if isinstance(step, WorkflowPausableStep)}):
+                raise WorkflowError('invalid_resume_selection')
+            selected = frozenset(resume_steps)
         clean_scope = cast(dict[str, JSONValue], _copy(dict(scope), self._maximum))
         clean_input = _copy(inputs, self._maximum)
         binding: JSONValue = {'space': space, 'scope': clean_scope, 'inputs': clean_input, 'revision': self._revision}
@@ -593,7 +682,7 @@ class WorkflowRunner:
                     state = None
                     raise WorkflowError('binding_mismatch')
             paused_state(state, self._steps, self._dependencies)
-            return await asyncio.wait_for(self._execute(token, state, run_id, space, clean_scope, clean_input), timeout=self._deadline)
+            return await asyncio.wait_for(self._execute(token, state, run_id, space, clean_scope, clean_input, selected), timeout=self._deadline)
         except asyncio.CancelledError:
             if state is not None:
                 self._record_interruption(token, 'cancelled', 'CancelledError')
@@ -718,12 +807,13 @@ class WorkflowRunner:
         state.update(candidate)
         self._check_pause_deadline()
 
-    async def _execute(self, token: str, state: dict[str, JSONValue], run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
+    async def _execute(self, token: str, state: dict[str, JSONValue], run_id: str, space: str, scope: dict[str, JSONValue], inputs: JSONValue,
+                       resume_steps: frozenset[str] | None = None) -> WorkflowResult:
         if state['status'] == 'sources_invalid':
             self._clear_checkpoints(token)
             raise WorkflowError('sources_invalid')
         if self._dependencies is not None:
-            return await self._execute_parallel(token, state, run_id, space, scope, inputs)
+            return await self._execute_parallel(token, state, run_id, space, scope, inputs, resume_steps)
         await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
         results = cast(dict[str, JSONValue], state['results'])
         attempts = cast(dict[str, JSONValue], state['attempts'])
@@ -747,6 +837,11 @@ class WorkflowRunner:
             if self._verify_before_step:
                 await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
             if isinstance(step, WorkflowPausableStep):
+                if (resume_steps is not None and step.step_id not in resume_steps
+                        and step.step_id in paused_state(state, self._steps, self._dependencies)):
+                    state.update(status='paused')
+                    self._save(token, state)
+                    return WorkflowResult(run_id, 'paused', cast(dict[str, JSONValue], _copy(results, self._maximum)), reused)
                 checkpoints = self._checkpoints(token, cast(str, state['binding']), step.step_id)
                 try:
                     self._admit_pause_step(token, state, step, checkpoints)
@@ -819,7 +914,8 @@ class WorkflowRunner:
         return WorkflowResult(run_id, 'completed', cast(dict[str, JSONValue], _copy(results, self._maximum)), reused)
 
     async def _execute_parallel(self, token: str, state: dict[str, JSONValue], run_id: str,
-                                space: str, scope: dict[str, JSONValue], inputs: JSONValue) -> WorkflowResult:
+                                space: str, scope: dict[str, JSONValue], inputs: JSONValue,
+                                resume_steps: frozenset[str] | None = None) -> WorkflowResult:
         dependencies = self._dependencies
         assert dependencies is not None
         await self._verify(token, self._context(run_id, space, scope, inputs, state), state)
@@ -832,7 +928,7 @@ class WorkflowRunner:
             self._save(token, state)
             raise WorkflowError('outcome_unknown')
         active: dict[str, asyncio.Task[JSONValue | PauseReceipt]] = {}
-        paused_this_run: set[str] = set()
+        paused_this_run = set(pauses) - resume_steps if resume_steps is not None else set()
         polled: set[str] = set()
         waiting = set(cast(list[str], state.get('waiting_steps', [])))
         has_inputs = any(isinstance(step, WorkflowInputStep) for step in self._steps)

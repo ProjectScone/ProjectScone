@@ -417,3 +417,32 @@ requires `documents.video.understand`. Older hosts refuse unsupported operations
 The client remains independently installable on Python 3.9+, with no decoder,
 OCR, model or native-framework dependencies. Model output is unsaved and may be
 incorrect; sampled frames do not describe everything between those frames.
+
+
+### Exact tool approvals
+
+Hosts advertising `agents.approvals` support review of the exact pending tool
+call, including its selected model and literal canonical arguments. Reads and
+decisions do not execute the tool. After reviewing the call:
+
+```python
+pending, = agents.approvals("run-1")
+print(pending.call.model_id, pending.call.tool_name, pending.call.arguments())
+decided = agents.decide_tool(pending, decision="approve")  # or "deny"
+continuation = agents.continue_tools(
+    "run-1", continuation_id="review-1", decisions=(decided,),
+)
+```
+
+Decision requests require a review/full key; continuation requires a write/full
+key. The authenticated host records the actor. SDK validation binds the selected
+records and their decision hashes to the returned immutable activation receipt.
+It never retries an ambiguous mutation automatically. An explicit retry with the
+same activation ID and selection preserves the original receipt without replaying
+a completed tool call. `RunStatus.paused_steps` identifies resumable tool pauses;
+unknown outcomes remain non-replayable. Human responses still use the separate
+`continue_run(..., responses=...)` method.
+
+The console approval interface is not included. The native protocol is exercised
+across process restarts by `tests/test_native_agent_approvals.py`, using the same
+`SCONE_TEST_NATIVE_PYTHON` setting as the other native contract tests.
