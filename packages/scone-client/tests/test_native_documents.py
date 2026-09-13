@@ -78,3 +78,13 @@ def test_video_selection_survives_native_host_restart(tmp_path):
             result = jobs.result('slides')
             assert result.video_ocr and result.format == 'mp4' and result.segments == 2
             assert len((tmp_path / 'recognitions').read_text().splitlines()) == 2
+
+            videos = client.video_documents(expected_space='alpha')
+            evidence = videos.catalogue(result.added.episode_id)
+            assert evidence.original == result.original and evidence.manifest == result.manifest
+            assert len(evidence.frames) == 2 and evidence.frames[0].text == 'Café launch Friday'
+            assert videos.frame(evidence, 0).startswith(b'\x89PNG')
+            inferred = videos.interpret(evidence, 0, prompt='Describe this sampled frame.')
+            assert inferred.model == 'native-client-vision' and inferred.text == 'Fixture frame description.'
+            assert not inferred.persisted and len((tmp_path / 'recognitions').read_text().splitlines()) == 2
+            assert len((tmp_path / 'interpretations').read_text().splitlines()) == (1 if first else 2)
