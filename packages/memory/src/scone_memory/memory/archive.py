@@ -12,7 +12,7 @@ from itertools import chain
 from typing import Optional
 
 from ..backends.blobs import BlobStore
-from . import attachment_archive
+from . import attachment_archive, archive_supersession
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
@@ -91,10 +91,14 @@ class ImportSummary:
     #: Verified distinct attachments and links restored, including existing ones.
     attachments: int = 0
     attachment_links: int = 0
+    #: Replacement edges restored after fact identity remapping.
+    supersessions: int = 0
 
     def record(self) -> dict[str, object]:
-        """Keep the legacy wire receipt unchanged for archive/1 imports."""
+        """Keep ordinary legacy receipts stable; disclose nonzero edge repairs."""
         result: dict[str, object] = dataclasses.asdict(self)
+        if not self.supersessions:
+            result.pop('supersessions')
         if self.profile == ARCHIVE_PROFILE:
             result.pop('attachments')
             result.pop('attachment_links')
@@ -204,13 +208,14 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             episodes.append(episode)
             source_ids.append(record.get("episode_id"))
         elif kind == "fact":
-            facts.append(record)
+            facts.append(dict(record))
         elif kind == "fact_link":
             links.append(record)
         elif kind == "affirmation":
             affirmations.append(record)
         else:
             raise InvalidInput(f"unknown record type {kind!r}")
+    supersessions = archive_supersession.parse(facts)
     # Ids are store-local (spec 3.1). Provenance in the dump names the
     # source store's episodes, so it is remapped through the ids this
     # import produced; a reference to an episode not in the dump is
@@ -236,10 +241,13 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             if transfer is not None:
                 assert runtime.blobs is not None
                 summary.attachment_links += await transfer.link(runtime.blobs, space, int(old_id), added.episode_id)
-    existing = {_fact_identity(f): f.fact_id for f in await runtime.documents.list_facts(space, include_closed=True)}
+    destination_facts = (await archive_supersession.inventory(runtime.documents, space) if supersessions
+                         else await runtime.documents.list_facts(space, include_closed=True))
+    existing = {_fact_identity(f): f.fact_id for f in destination_facts}
     # Fact ids are store-local too: a link's ends are remapped through
     # the ids this import produced or found already present.
     fact_map: dict[int, int] = {}
+    prepared: list[tuple[Mapping, NewFact]] = []
     for f in facts:
         source = f.get("source_episode_id")
         new = NewFact(
@@ -255,11 +263,14 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             source_episode_id=id_map.get(int(source)) if source is not None else None,
             origin=str(f.get("origin", "stated")),
             excluded_reason=f.get("excluded_reason"),
-            superseded_by=None,  # ids are store-local; the reason text keeps the history
+            superseded_by=None,  # Restored after all destination fact IDs are known.
             quote=f.get("quote"),
         )
         if new.status not in STATUSES or new.origin not in ORIGINS:
             raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
+        prepared.append((f, new))
+    archive_supersession.preflight(supersessions, prepared, destination_facts, _fact_identity)
+    for f, new in prepared:
         identity = _fact_identity(new)
         if identity in existing:
             summary.facts_skipped += 1
@@ -271,6 +282,7 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
         if f.get("fact_id") is not None:
             fact_map[int(f["fact_id"])] = stored.fact_id
         summary.facts += 1
+    summary.supersessions = await archive_supersession.restore(runtime.documents, space, supersessions, fact_map)
     for record in links:
         kind = str(record.get("kind", ""))
         from_fact = fact_map.get(int(record["from_fact"]))
@@ -326,7 +338,7 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
 def _fact_identity(fact: Fact | NewFact) -> tuple:
     """Import identity includes retained evidence after source-ID remapping.
 
-    Store-local fact/supersession IDs are not preserved. Exclusion is mutable
+    Store-local fact IDs are remapped; supersession edges are restored separately. Exclusion is mutable
     target policy: reimporting the same evidence must not create a fresh,
     unexcluded copy of a fact the target has suppressed.
     """
