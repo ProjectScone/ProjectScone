@@ -1,5 +1,7 @@
 # Recall semantics, storage and recovery
 
+Interrupted whole-space erasure uses [durable deletion recovery](space-deletion-recovery.md).
+
 [Package overview](../README.md) · [Architecture](../ARCHITECTURE.md)
 
 Examples below run from `packages/memory/` unless a section names another working directory.

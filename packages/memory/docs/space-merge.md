@@ -62,12 +62,13 @@ change or missing/changed destination evidence refuses source closure; the
 partially populated destination is retained. Resolve concurrent changes before
 retrying. Successful completion closes the source name permanently.
 
-Once source deletion begins, failures follow the existing `delete_space` backend
-semantics. The copy is already verified, but cleanup across the document, vector,
-blob and event stores is not transactional, and retrying the merge may no longer
-be possible if the source has been marked deleted. Inspect both stores and use
-the backend's cleanup/recovery facilities; merge does not claim a durable
-whole-space deletion journal.
+Once source deletion is durably accepted, the source is closed and cleanup uses
+the [space deletion journal](space-deletion-recovery.md). Repair a failed storage
+operation and run `engine.recover()` (also invoked on open) to finish erasure.
+The copy is already verified; cleanup across stores remains nontransactional.
+Recovery does not re-run the merge or reconstruct a lost merge receipt, so a
+normal merge retry may refuse the now-closed source. Inspect the destination
+when the original request lost its final response.
 
 ## HTTP authorization
 

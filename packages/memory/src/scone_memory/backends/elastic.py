@@ -27,6 +27,9 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -225,6 +228,9 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
+        await self.shared.ensure_index("space_deletions", {"properties": {
+            "space": KEYWORD, "payload": {"type": "text", "index": False},
+        }})
         await self.shared.ensure_index("retirements", {"properties": {
             "space": KEYWORD, "episode_id": {"type": "long"}, "payload": {"type": "text", "index": False},
         }})
@@ -251,7 +257,7 @@ class ElasticsearchDocumentStore:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
         names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "fact_affirmations", "tombstones",
-                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces", "retirements")]
+                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces", "retirements", "space_deletions")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -381,6 +387,22 @@ class ElasticsearchDocumentStore:
             {'term':{'space':space}}, {'term':{'episode_id':episode_id}}, {'range':{'ordinal':{'gte':start_ordinal}}}]}},
             size=limit, sort=[{'ordinal':'asc'}, {'chunk_id':'asc'}])
         return [_chunk(hit) for hit in hits]
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        deletion_key(space)
+        pairs: list[tuple[int, int]] = []
+        after: list | None = None
+        while True:
+            options = {} if after is None else {"search_after": after}
+            response = await self.client.search(
+                index=self._idx("chunks"), query={"term": {"space": space}}, size=self.PAGE,
+                sort=[{"chunk_id": "asc"}], source=["chunk_id", "episode_id"], **options,
+            )
+            hits = response["hits"]["hits"]
+            pairs.extend((int(hit["_source"]["chunk_id"]), int(hit["_source"]["episode_id"])) for hit in hits)
+            if len(hits) < self.PAGE:
+                return pairs
+            after = hits[-1]["sort"]
 
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         out: list[Chunk] = []
@@ -541,6 +563,40 @@ class ElasticsearchDocumentStore:
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self._doc("tombstones", f"{space}|{episode_id}")
         return _tombstone(doc) if doc is not None else None
+
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        from elasticsearch import ConflictError
+
+        payload = encode_deletion(record)
+        try:
+            await self.client.index(index=self._idx("space_deletions"), id=record.space, op_type="create", refresh=True,
+                                    document={"space": record.space, "payload": payload})
+        except ConflictError:
+            pass
+        doc = await self._doc("space_deletions", record.space)
+        if doc is None:
+            raise RuntimeError("space deletion disappeared after its write")
+        return decode_deletion(doc["payload"], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        doc = await self._doc("space_deletions", deletion_key(space))
+        return decode_deletion(doc["payload"], space) if doc is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        options = {} if after is None else {"search_after": [after]}
+        hits = await self._search("space_deletions", query={"match_all": {}}, size=limit,
+                                  sort=[{"space": "asc"}], **options)
+        return [decode_deletion(hit["payload"], hit["space"]) for hit in hits]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        from elasticsearch import NotFoundError
+
+        deletion_key(space)
+        try:
+            await self.client.delete(index=self._idx("space_deletions"), id=space, refresh=True)
+        except NotFoundError:
+            pass
 
     async def record_retirement(self, record: Retirement) -> Retirement:
         from elasticsearch import ConflictError
