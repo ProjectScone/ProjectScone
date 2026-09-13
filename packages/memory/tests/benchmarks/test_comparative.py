@@ -113,3 +113,27 @@ async def test_the_report_records_and_serialises_every_item_ranking():
     assert [row["question_id"] for row in record["items"]] == ["q1", "q2"]
     assert all(set(row) >= {"question_id", "scone", "llamaindex", "answer_sessions"} for row in record["items"])
     assert record["protocol"] == "comparative-retrieval-v1"
+
+
+async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages():
+    """LlamaIndex's TreeSummarize runs over the passages we hand it, through
+    our ChatModel port, so the two synthesizers share one local model."""
+    from scone_memory.providers.llm import FakeChat
+    from scone_memory.bench.comparative import llamaindex_summary
+
+    model = FakeChat(["The launch moved to March after the audit."])
+    summary = await llamaindex_summary(model, "What happened with the launch?",
+                                       ["Priya moved the launch to March.", "The audit found two billing errors."])
+    assert summary.text == "The launch moved to March after the audit."
+    assert summary.model_calls == 1 and summary.synthesizer == "TreeSummarize"
+    assert summary.cites is False, "the reference's summary carries no citations to check"
+    (system, prompt), = model.calls
+    assert "Priya moved the launch to March." in prompt and "What happened with the launch?" in prompt
+
+
+async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising():
+    from scone_memory.providers.llm import ChatError, FakeChat
+    from scone_memory.bench.comparative import llamaindex_summary
+
+    summary = await llamaindex_summary(FakeChat([ChatError("down")]), "q", ["one passage"])
+    assert summary.text == "" and summary.failed == "ChatError" and summary.model_calls == 1
