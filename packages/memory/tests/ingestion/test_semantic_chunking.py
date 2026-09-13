@@ -263,7 +263,7 @@ async def test_an_embedder_answering_wrongly_is_refused(name, answer):
         await semantic_spans(ONE + OTHER, _Broken(answer), target=400)
 
 
-def test_valleys_are_found_in_passes_not_by_walking_out_from_every_gap():
+async def test_valleys_are_found_in_passes_not_by_walking_out_from_every_gap():
     """A plateau is the worst case and the likeliest one.
 
     Walking outward from each gap re-reads the whole flat run every time:
@@ -281,7 +281,7 @@ def test_valleys_are_found_in_passes_not_by_walking_out_from_every_gap():
     assert time.perf_counter() - started < 5.0, "still walking outward from every gap"
 
 
-def test_the_faster_valleys_agree_with_walking_outward():
+async def test_the_faster_valleys_agree_with_walking_outward():
     """The refactor's real risk is changing which gaps are boundaries, so
     this compares against a literal transcription of the outward walk
     over shapes built to have plateaus, ties and edges."""
