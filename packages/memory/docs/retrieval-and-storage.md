@@ -912,6 +912,12 @@ Dependency names are not bound to import names. They differ often
 enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
 would guess, and the graph does not.
 
+A package a manifest names is an entity, as a code symbol is, so the
+questions the graph answers about code reach it: `scone graph affected
+requests` lists the projects whose manifests declare it, through
+`depends_on`, beside the files that import it, and a test dependency's
+blast radius runs through `develops_with`.
+
 ### Claims read from files hold side by side
 
 A ledger predicate holds one value at a time unless configured
