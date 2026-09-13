@@ -9,6 +9,7 @@ import inspect
 import json
 import math
 import re
+import threading
 import time
 from types import MappingProxyType
 
@@ -100,11 +101,25 @@ def _dispose(value: object) -> None:
         value.cancel()
 
 
-def _discard_worker(task: asyncio.Task[object]) -> None:
+@dataclass(frozen=True)
+class _WorkerOutcome:
+    value: object = None
+    error: BaseException | None = None
+
+
+async def _run_worker(function: Callable[[], object]) -> _WorkerOutcome:
+    try:
+        return _WorkerOutcome(value=await asyncio.to_thread(function))
+    except BaseException as error:
+        # A shielded failed task can log its exception after its caller cancels.
+        return _WorkerOutcome(error=error)
+
+
+def _discard_worker(task: asyncio.Task[_WorkerOutcome]) -> None:
     if task.cancelled():
         return
     try:
-        _dispose(task.result())
+        _dispose(task.result().value)
     except Exception:
         pass
 
@@ -213,12 +228,23 @@ class AgentTool:
                 if inspect.iscoroutinefunction(self.handler):
                     result: object = self.handler(detached, context)
                 else:
-                    worker = asyncio.create_task(asyncio.to_thread(self.handler, detached, context))
+                    aborted = threading.Event()
+
+                    def execute() -> object:
+                        if aborted.is_set() or time.monotonic() >= context.deadline:
+                            raise RuntimeError('application tool turn ended before worker dispatch')
+                        return self.handler(detached, context)
+
+                    worker = asyncio.create_task(_run_worker(execute))
                     try:
-                        result = await asyncio.shield(worker)
+                        outcome = await asyncio.shield(worker)
                     except BaseException:
+                        aborted.set()
                         worker.add_done_callback(_discard_worker)
                         raise
+                    if outcome.error is not None:
+                        raise outcome.error
+                    result = outcome.value
                 try:
                     _check_context(context)
                 except BaseException:
