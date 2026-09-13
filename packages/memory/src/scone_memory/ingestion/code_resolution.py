@@ -136,7 +136,7 @@ def file_resolver(paths: Iterable[str]) -> "Resolve":
     function of the paths, shared by ``map``, ``sync`` and any batch of
     files remembered together, so the three cannot come to differ.
     """
-    seen = {path.replace("\\", "/") for path in paths}
+    seen = {path.replace("\\", "/") for path in paths if isinstance(path, str)}
 
     def resolve(path: str, level: int, module: str) -> Optional[str]:
         here = posixpath.dirname(path)
