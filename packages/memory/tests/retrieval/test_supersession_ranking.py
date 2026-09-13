@@ -122,37 +122,42 @@ async def test_nothing_moves_when_the_replacement_was_not_returned():
         await engine.close()
 
 
-async def test_a_query_matching_no_fact_asks_the_ledger_nothing():
-    """The cost has to be proportionate: this fires only where the ledger
-    has something to say, and a query that matched no fact must not pay
-    for a chain lookup at all."""
+async def test_the_ledger_is_asked_about_the_passages_returned_not_the_query():
+    """The cost has to be proportionate. What is read is the facts each
+    returned episode stated -- one indexed read per episode -- so a query
+    that matched no fact at all still learns whether the passages it got
+    have been retired, and a query that matched ten facts of one subject
+    does not read that subject's chain ten times."""
     engine = await chain()
-    asked: list[tuple[str, str]] = []
-    original = engine.documents.facts_for
+    read: list[int] = []
+    original = engine.documents.facts_for_graph
 
-    async def counted(space, subject, predicate):
-        asked.append((subject, predicate))
-        return await original(space, subject, predicate)
+    async def counted(space, source_episode_id, limit):
+        read.append(source_episode_id)
+        return await original(space, source_episode_id, limit)
 
-    engine.documents.facts_for = counted  # type: ignore[method-assign]
+    engine.documents.facts_for_graph = counted  # type: ignore[method-assign]
     try:
-        await engine.recall("s", "unrelated words about weather", limit=5)
-        assert asked == []
-        await engine.recall("s", QUERY, limit=5)
-        assert asked, "a query that matched a fact should consult its chain"
+        found = await engine.recall("s", "unrelated words about weather", limit=5)
+        assert sorted(read) == sorted({item.episode_id for item in found.items}), read
+        read.clear()
+        found = await engine.recall("s", QUERY, limit=5)
+        assert sorted(read) == sorted({item.episode_id for item in found.items}), read
     finally:
-        engine.documents.facts_for = original  # type: ignore[method-assign]
+        engine.documents.facts_for_graph = original  # type: ignore[method-assign]
         await engine.close()
 
 
-async def test_two_retired_passages_keep_their_order_when_the_replacement_is_absent():
-    """The replacement is real but was not retrieved.
+async def test_a_retired_passage_follows_its_own_successor_even_one_retired_in_turn():
+    """Northwind was replaced by Calderon, and Calderon by Brightlake,
+    whose episode does not match the query.
 
-    Both passages here are retired by the same later claim, whose own
-    episode does not match the query. Without a guard they would be
-    grouped and reordered among themselves against a leader that is not
-    there -- reordering the reader's results by a comparison they cannot
-    see. Nothing should move.
+    An earlier version of this test expected nothing to move here, on the
+    premise that both passages were retired by the same absent claim.
+    The ledger says otherwise: Northwind's successor is Calderon, and the
+    Calderon passage was returned. So the Calderon passage leads, both
+    are marked, and nothing is compared against the Brightlake passage
+    the reader did not get.
     """
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
                                 HashEmbedder()).open()
@@ -169,13 +174,13 @@ async def test_two_retired_passages_keep_their_order_when_the_replacement_is_abs
             await engine.assert_fact("s", "person-1", "works_at", what,
                                      valid_from=f"{when}T00:00:00Z",
                                      source_episode_id=episode.episode_id)
-        # Bounded so the replacement falls outside what the reader got:
-        # demotion runs after the result is cut to `limit`, which is
-        # exactly the situation this guards.
+        # Bounded so the last replacement falls outside what the reader
+        # got: demotion runs after the result is cut to `limit`.
         found = await engine.recall("s", QUERY, limit=2)
         order = [item.source or "" for item in found.items]
         assert "away" not in order, order
-        assert order == ["first", "second"], order
+        assert order == ["second", "first"], order
+        assert [item.superseded for item in found.items] == [True, True]
     finally:
         await engine.close()
 
