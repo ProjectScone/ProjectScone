@@ -1613,7 +1613,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         raw = read_source(args.file, stdin)
         summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()],
                                               resurrect=args.resurrect)
-        emit(summary.__dict__) if args.json else print(
+        emit(summary.record()) if args.json else print(
             f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
             f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)"
             + (f"; attachments: {summary.attachments}, episode links: {summary.attachment_links}"
