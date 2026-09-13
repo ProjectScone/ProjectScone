@@ -68,3 +68,24 @@ blob and event stores is not transactional, and retrying the merge may no longer
 be possible if the source has been marked deleted. Inspect both stores and use
 the backend's cleanup/recovery facilities; merge does not claim a durable
 whole-space deletion journal.
+
+## HTTP authorization
+
+`POST /v1/spaces/{source}/merge` requires two explicit credentials, for both
+preview and execution:
+
+- `Authorization: Bearer <source-key>` must authorize the source with the full role.
+- `X-Scone-Destination-Authorization: Bearer <destination-key>` must authorize
+  `into` with the full role. Copying a ledger can carry review decisions, so a
+  destination write-only key is insufficient.
+
+A key for the source alone cannot inject records or attachments into another
+space. The header is also described in the generated OpenAPI schema. Locally
+invoked engine/CLI operations use the caller's direct storage authority.
+
+The host rechecks both keys and their current roles/scopes at stage boundaries,
+before source closure and before returning a receipt. Revocation detected after
+a partial copy leaves the source open and the already copied target data in place.
+These checks do not roll back writes already in flight, and revocation during
+source deletion cannot undo completed cleanup. Inspect the destination if a
+request loses authorization after copying began.

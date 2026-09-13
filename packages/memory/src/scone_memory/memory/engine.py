@@ -742,7 +742,8 @@ class MemoryEngine:
         return await retention.space_receipt(self._retention_runtime(), space)
 
     async def merge_space(self, space: str, *, into: str, confirm: Optional[str] = None,
-                          preview: bool = False) -> "archive.MergeReceipt":
+                          preview: bool = False,
+                          _authorize: Callable[[], None] | None = None) -> "archive.MergeReceipt":
         """Move episodes, claims and retained attachments, then close the source.
 
         Target tombstones take precedence. Known forgotten-source references
@@ -765,7 +766,7 @@ class MemoryEngine:
                 f"confirm must repeat the space being merged ({space!r}); a whole space does not move "
                 f"by accident")
         from .space_transfer import merge
-        return await merge(self, space, into, preview=preview)
+        return await merge(self, space, into, preview=preview, authorize=_authorize)
 
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""

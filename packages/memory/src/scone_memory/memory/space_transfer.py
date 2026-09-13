@@ -6,7 +6,7 @@ and destination writers must be quiescent throughout a whole-space movement.
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
@@ -159,23 +159,38 @@ async def verify_destination(memory: MemoryEngine, snapshot: Snapshot, into: str
             raise InvalidInput('destination attachment evidence changed during space transfer')
 
 
-async def merge(memory: MemoryEngine, space: str, into: str, *, preview: bool) -> archive.MergeReceipt:
+async def merge(memory: MemoryEngine, space: str, into: str, *, preview: bool,
+                authorize: Callable[[], None] | None = None) -> archive.MergeReceipt:
+    def check() -> None:
+        if authorize is not None:
+            authorize()
+
+    check()
     snapshot = await capture(memory, space)
+    check()
     selected = await selected_episodes(memory, snapshot, into)
     result = receipt(space, into, snapshot, selected)
+    check()
     if preview:
         return result
     await attachment_archive.preflight_blobs(memory.blobs, into, snapshot.unlinked)
+    check()
     imported = await memory.import_records(into, snapshot.rows)
+    check()
     if imported.tombstoned != result.tombstoned:
-        raise InvalidInput("destination tombstone policy changed during space transfer")
+        raise InvalidInput('destination tombstone policy changed during space transfer')
     await attachment_archive.stage_blobs(memory.blobs, into, snapshot.unlinked)
+    check()
     await verify_destination(memory, snapshot, into, selected)
+    check()
     current = await capture(memory, space)
+    check()
     if snapshot.identities() != current.identities() or snapshot.blobs != current.blobs:
         raise InvalidInput('source changed during space transfer; source remains open')
     await verify_destination(memory, snapshot, into, selected)
     await memory._living(into)
+    check()
     await memory.delete_space(space)
+    check()
     result.moved = True
     return result
