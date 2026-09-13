@@ -743,37 +743,29 @@ class MemoryEngine:
 
     async def merge_space(self, space: str, *, into: str, confirm: Optional[str] = None,
                           preview: bool = False) -> "archive.MergeReceipt":
-        """Move everything one space holds into another.
+        """Move episodes, claims and retained attachments, then close the source.
 
-        It is the archive read out of one and into the other, so
-        everything that makes an import honest holds: identity is
-        re-derived for the space it lands in, what was forgotten there
-        stays forgotten, and claims arrive with their history. With
-        ``preview`` nothing moves and the receipt says what would.
+        Target tombstones take precedence. Known forgotten-source references
+        are omitted and counted, preserving claims without inventing evidence.
+        Preview reports verified attachment counts and bytes without writes.
 
-        The space merged from is closed for good afterwards. Everything it
-        held is somewhere else now, and leaving the name open would invite
-        somebody to write into a space whose contents have moved and find
-        them missing."""
+        Quiesce source and destination writers throughout this operation: copy
+        and validation use separate storage observations, not an atomic cutover.
+        A copy failure leaves the source open for a retry; source deletion keeps
+        the existing backend-specific cleanup failure semantics.
+        """
         check_space(space)
         check_space(into)
         if space == into:
             raise InvalidInput(f"a space is not merged into itself ({space!r})")
         await self._living(space)
         await self._living(into)
-        counts = await self.documents.counts(space)
-        facts = len(await self.documents.list_facts(space, include_closed=True))
-        if preview:
-            return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts)
-        if confirm != space:
+        if not preview and confirm != space:
             raise InvalidInput(
                 f"confirm must repeat the space being merged ({space!r}); a whole space does not move "
                 f"by accident")
-        records = [record async for record in self.export(space)]
-        await self.import_records(into, records)
-        await self.delete_space(space)
-        return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts,
-                                    moved=True)
+        from .space_transfer import merge
+        return await merge(self, space, into, preview=preview)
 
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""
