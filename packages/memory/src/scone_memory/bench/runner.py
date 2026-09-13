@@ -244,6 +244,10 @@ class RunReport:
     mrr: float = 0.0
     precision: dict[int, float] = field(default_factory=dict)
     ndcg: dict[int, float] = field(default_factory=dict)
+    #: Mean average precision, and the share of items whose top k held
+    #: anything at all. The last two the reference reported and we did not.
+    mean_average_precision: float = 0.0
+    hit_rate: dict[int, float] = field(default_factory=dict)
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -386,6 +390,8 @@ async def run(
                  if denom else 0.0 for k in ks}
     ndcg = {k: round(sum(bench_metrics.ndcg_at(a, b, k) for a, b in ranked) / denom, 4)
             if denom else 0.0 for k in ks}
+    average_precision = round(bench_metrics.mean_average_precision(ranked), 4) if denom else 0.0
+    hits = {k: round(bench_metrics.hit_rate(ranked, k), 4) if denom else 0.0 for k in ks}
     by_type: dict[str, dict[str, float]] = {}
     for qt in sorted({r.question_type for r in scored}):
         rows = [r for r in scored if r.question_type == qt]
@@ -403,6 +409,7 @@ async def run(
         merge=merge, window=window, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, by_type=by_type,
         mrr=mean_reciprocal, precision=precision, ndcg=ndcg,
+        mean_average_precision=average_precision, hit_rate=hits,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),

@@ -7,8 +7,10 @@ beside one good one scores perfectly. Both matter to somebody reading the
 result, and neither is visible in the numbers this benchmark reported.
 
 The reference RAG framework reports hit rate, MRR, precision, recall,
-average precision and NDCG. These are the three ours lacked that need no
-model and no labels beyond the ones the dataset already carries.
+average precision and NDCG. Ours reported recall@k alone, so every
+comparison drawn against that framework was weaker than it looked. All
+five it had and we lacked are here now; each needs no model and no
+labels beyond the ones the dataset already carries.
 
 Relevance here is binary -- a returned source either is one of the
 answer's sources or is not -- because that is what the datasets state.
@@ -54,6 +56,53 @@ def precision_at(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
         return 0.0
     found = {source for source in retrieved[:k] if source in relevant}
     return len(found) / k
+
+
+def average_precision(retrieved: Sequence[str], relevant: set[str]) -> float:
+    """Precision measured at each relevant hit, averaged over them all.
+
+    Where the reciprocal rank stops at the first relevant source, this
+    keeps counting, so it can tell `[a, b]` from `[a, x, b]` -- both find
+    something first and only one found the rest early. That is the whole
+    reason the reference reports both.
+
+    Divided by how many were **findable**, not by how many were found: a
+    run that returns one of three possible answers has missed two, and
+    dividing by the one it found would call that perfect. A source
+    returned twice fills two slots and answers one question, so it
+    raises the denominator of the later hits without scoring again.
+    """
+    if not relevant:
+        return 0.0
+    seen: set[str] = set()
+    total = 0.0
+    for position, source in enumerate(retrieved, start=1):
+        if source in relevant and source not in seen:
+            seen.add(source)
+            total += len(seen) / position
+    return total / len(relevant)
+
+
+def mean_average_precision(pairs: Iterable[tuple[Sequence[str], set[str]]]) -> float:
+    """Average precision over items; zero over no items."""
+    scores = [average_precision(retrieved, relevant) for retrieved, relevant in pairs]
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def hit_rate(pairs: Iterable[tuple[Sequence[str], set[str]]], k: int) -> float:
+    """The share of items whose first ``k`` results held anything relevant.
+
+    The coarsest of these and the one the reference leads with. It says
+    nothing about where or how many, which is exactly why it belongs
+    beside the others rather than instead of them: a run can lose half
+    its precision without moving this at all.
+    """
+    items = list(pairs)
+    if not items or k <= 0:
+        return 0.0
+    landed = sum(1 for retrieved, relevant in items
+                 if any(source in relevant for source in retrieved[:k]))
+    return landed / len(items)
 
 
 def ndcg_at(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
