@@ -54,9 +54,9 @@ write. Ordinary empty notes and caller-supplied metadata cannot select this path
 
 Archive profile `scone.archive/1` omits attachment bytes. Import and space merge
 therefore refuse visual-only source records explicitly before mutations; they do
-not create an unverifiable empty source or delete its original space. Use storage
-backups that carry document and attachment stores together until attachment
-transfer is supported.
+not create an unverifiable empty source or delete its original space. Use [attachment archives](attachment-archives.md) with
+`export(..., include_attachments=True)` to transfer retained video evidence, or
+keep storage backups that carry document and attachment stores together.
 
 The default selection limit is 64 frames, configurable up to 256; input and
 execution obey `DocumentLimits`. Each OCR result is limited to 10,000 regions,

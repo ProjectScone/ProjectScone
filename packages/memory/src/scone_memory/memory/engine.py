@@ -1290,16 +1290,25 @@ class MemoryEngine:
 
     # -- portability ------------------------------------------------------
 
-    async def export(self, space: str) -> AsyncIterator[dict]:
+    async def export(self, space: str, *, include_attachments: bool = False) -> AsyncIterator[dict]:
         """Every episode and every fact in a space as plain dicts, the
         shape `import_records` accepts. Chunks and vectors are derived
         and are rebuilt on import, so a dump moves between stores and
-        between embedders."""
+        between embedders. ``include_attachments=True`` selects archive/2:
+        verified linked bytes and episode links travel with the ledger.
+        The export is bounded and does not constitute an atomic snapshot."""
         check_space(space)
         # What the space holds that an archive does not carry is counted
         # here, where the blob store is, and said in the header: a dump of
         # an illustrated space is not the whole of it, and nobody should
         # have to find that out by restoring one.
+        if include_attachments:
+            from .attachment_archive import export_records as export_attachments
+            records = archive.export_records(self.documents, space, wrote_at=self.clock())
+            for record in await export_attachments(records, self.blobs, self.documents, space,
+                                                    self.max_attachment_bytes, ATTACHMENT_TYPES):
+                yield record
+            return
         left_behind = {"attachments": len(await self.blobs.linked(space))}
         async for record in archive.export_records(self.documents, space, wrote_at=self.clock(),
                                                    left_behind=left_behind):
@@ -1320,7 +1329,8 @@ class MemoryEngine:
         deduplicating a same-space move and not a renamed one."""
         await self._living(space)
         check_space(space)
-        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many)
+        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many,
+                                         self.blobs, self.max_attachment_bytes, ATTACHMENT_TYPES)
         return await archive.import_records(runtime, space, records, resurrect=resurrect)
 
 
