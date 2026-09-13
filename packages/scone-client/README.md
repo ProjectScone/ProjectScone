@@ -242,7 +242,29 @@ schema content in a detached, deeply immutable snapshot. `to_json()` returns a
 fresh mutable copy. It performs bounded JSON checks, not full JSON Schema
 validation or compilation; the configured native host owns execution validation.
 
-An absent task contract is omitted from the wire for compatibility with older
+The same contract can constrain the final answer of a handoff workflow:
+
+```python
+from scone import HandoffAgent, HandoffPlan
+
+handoff = HandoffPlan(
+    "research-handoff", "research",
+    (HandoffAgent("research", "careful", ("writer",)),
+     HandoffAgent("writer", "careful")),
+    max_handoffs=1,
+    answer_requirements=requirements,
+)
+saved = agents.save_plan(handoff, expected_revision=0)
+```
+
+Saving a handoff contract requires `agents.handoffs.output_requirements`, in
+addition to ordinary handoff support; a schema also requires `agents.output_schema`.
+The contract applies to the final answer. Intermediate handoff answers remain text.
+For JSON output, the native model protocol carries an object in the final envelope;
+the public result's `final.text` remains a string. The SDK does not run models or
+rewrite answers, and a handoff-limit result still has no final answer.
+
+An absent task or handoff contract is omitted from the wire for compatibility with older
 hosts. Saving a contracted plan requires the relevant advertised capabilities
 before any write, and its acknowledgement must preserve the authored contract.
 Output contracts guide and constrain model output; they do not establish factual

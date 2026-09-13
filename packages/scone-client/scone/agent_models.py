@@ -117,11 +117,14 @@ class HandoffPlan:
     root_agent: str
     agents: tuple[HandoffAgent, ...]
     max_handoffs: int = 3
+    answer_requirements: Optional[TaskAnswerRequirements] = None
 
     def __post_init__(self) -> None:
         identifier(self.workflow_id)
         identifier(self.root_agent)
         integer(self.max_handoffs, 0, 31)
+        if self.answer_requirements is not None and not isinstance(self.answer_requirements, TaskAnswerRequirements):
+            raise invalid('answer requirements')
         if not isinstance(self.agents, tuple) or not 1 <= len(self.agents) <= 32:
             raise invalid('handoff agents')
         if any(not isinstance(agent, HandoffAgent) for agent in self.agents):
@@ -132,8 +135,11 @@ class HandoffPlan:
             raise invalid('handoff targets')
 
     def to_json(self) -> Dict[str, object]:
-        return {'workflow_id': self.workflow_id, 'root_agent': self.root_agent,
+        result: Dict[str, object] = {'workflow_id': self.workflow_id, 'root_agent': self.root_agent,
                 'agents': [agent.to_json() for agent in self.agents], 'max_handoffs': self.max_handoffs}
+        if self.answer_requirements is not None:
+            result['answer_requirements'] = self.answer_requirements.to_json()
+        return result
 
 
 Plan = Union[TaskPlan, HandoffPlan]
@@ -142,7 +148,7 @@ Plan = Union[TaskPlan, HandoffPlan]
 def parse_plan(value: object) -> Plan:
     row = record(value)
     if 'agents' in row:
-        if set(row) - {'workflow_id', 'root_agent', 'agents', 'max_handoffs'}:
+        if set(row) - {'workflow_id', 'root_agent', 'agents', 'max_handoffs', 'answer_requirements'}:
             raise invalid('handoff fields')
         agents = []
         for value in items(row.get('agents'), 32):
@@ -152,7 +158,8 @@ def parse_plan(value: object) -> Plan:
             agents.append(HandoffAgent(identifier(agent.get('agent_id')), identifier(agent.get('model_id')),
                                        names(agent.get('can_handoff_to'))))
         return HandoffPlan(identifier(row.get('workflow_id')), identifier(row.get('root_agent')),
-                           tuple(agents), integer(row.get('max_handoffs'), 0, 31))
+                           tuple(agents), integer(row.get('max_handoffs'), 0, 31),
+                           TaskAnswerRequirements.from_json(row['answer_requirements']) if row.get('answer_requirements') is not None else None)
     if set(row) - {'workflow_id', 'tasks', 'kind'} or ('kind' in row and row['kind'] != 'interactive'):
         raise invalid('task plan fields')
     tasks: list[Task] = []
