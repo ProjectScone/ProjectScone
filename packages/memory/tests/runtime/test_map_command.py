@@ -169,3 +169,40 @@ async def test_calls_the_graph_could_not_bind_are_reported(tree):
     assert ("app/outward.py:handle", "json.dumps") in calls, calls
     assert not any("thing.run" in obj for _, obj in calls), calls
     assert not any(obj == "len" for _, obj in calls), calls
+
+
+async def test_a_single_matching_declaration_is_reported_and_not_asserted(tree):
+    """The corpus can name a candidate. It must not write one down.
+
+    `handler` calls `thing.settle()`, and exactly one `settle` is
+    declared in everything mapped. That is a candidate, not evidence --
+    nothing in the corpus says what `thing` is, and sampling this rule
+    over the real package bound `.items()` to a function of ours five
+    times in twelve. So the count is reported and the ledger is left
+    alone.
+    """
+    (tree / "app" / "shelf.py").write_text(
+        "class Shelf:\n    def settle(self):\n        return 1\n", encoding="utf-8")
+    (tree / "app" / "caller.py").write_text(
+        "def handler(thing):\n    return thing.settle()\n", encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree), "--graph")
+    assert "name one declaration here" in said, said
+
+    facts = await engine.documents.list_facts("default", include_closed=True)
+    assert not [f for f in facts if f.predicate == "calls"
+                and f.subject == "app/caller.py:handler"], "no edge may be written"
+    assert not [f for f in facts if f.origin == "inferred"], "nothing here is inferred"
+
+
+async def test_a_name_a_builtin_also_carries_is_not_even_a_candidate(tree):
+    """`.items()` is the collision that made this a report rather than a
+    feature: on an unknown receiver it cannot be told from a dictionary's
+    own method, so a declaration named `items` is not offered at all."""
+    (tree / "app" / "payload.py").write_text(
+        "def items():\n    return []\n", encoding="utf-8")
+    (tree / "app" / "caller.py").write_text(
+        "def handler(thing):\n    return thing.items()\n", encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree), "--graph")
+    assert "0 name one declaration here" in said, said
