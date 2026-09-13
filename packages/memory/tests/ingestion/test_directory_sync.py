@@ -450,3 +450,35 @@ async def test_pending_deletion_is_disclosed_when_retry_omits_delete_flag(env, m
     assert not deferred.complete and deferred.receipts[0].code == 'deletion_pending'
     assert (await memory.episode('alpha', old)).content == 'managed missing source'
     assert (await runner(env).synchronize(delete_missing=True)).complete
+
+
+from tests.ingestion.test_video_ocr import video, ScriptedOcr
+
+
+async def test_visual_only_directory_source_survives_unchanged_delete_and_reappearance(env, video):
+    from scone_memory.ingestion.video_ocr import VideoDocumentParser
+    memory, root, _ = env
+    data, decoder = video
+    path = root / 'slides.mp4'
+    path.write_bytes(data)
+    ocr = ScriptedOcr(empty=True)
+    sync = runner(env, parser=VideoDocumentParser(decoder, ocr, model_revision='fixture-v1'),
+                  extensions=frozenset({'.mp4'}))
+    first = await sync.synchronize()
+    assert first.complete
+    source = receipts(first)['slides.mp4']
+    assert (await memory.episode('alpha', source.episode_id)).content == ''
+    calls = len(ocr.calls)
+    second = await sync.synchronize()
+    assert second.complete and receipts(second)['slides.mp4'].status == 'unchanged'
+    assert len(ocr.calls) == calls and memory.embedder.calls == 0
+    path.unlink()
+    removed = await sync.synchronize(delete_missing=True)
+    assert removed.complete
+    with pytest.raises(Gone):
+        await memory.episode('alpha', source.episode_id)
+    path.write_bytes(data)
+    returned = await sync.synchronize()
+    assert returned.complete
+    assert receipts(returned)['slides.mp4'].episode_id != source.episode_id
+    assert memory.embedder.calls == 0

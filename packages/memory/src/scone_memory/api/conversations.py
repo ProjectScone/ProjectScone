@@ -104,7 +104,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
-                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None,
+                            agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
                             directory_sync_service=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
@@ -1062,7 +1062,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     # lifespan never runs under a mount, so ownership stays with this one.
     memory_app = create_app(engine, keys, conversations=True, worker=worker,
                             agent_catalog=agent_catalog, agent_plan_store=agent_plan_store,
-                            agent_run_service=agent_run_service, document_ocr=document_ocr, document_media=document_media,
+                            agent_run_service=agent_run_service, document_ocr=document_ocr, document_media=document_media, document_video=document_video,
                             document_import_service=document_import_service,
                             directory_sync_service=directory_sync_service,
                             ingest_concurrency=ingest_concurrency, roles=roles,

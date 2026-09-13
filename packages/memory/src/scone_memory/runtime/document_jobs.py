@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ..agents.catalog import Identifier
 from ..core.errors import InvalidInput
 from ..ingestion.document_media import DocumentMedia
+from ..ingestion.document_video import DocumentVideo
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection
 from ..ingestion.formats.registry import BuiltinDocumentParser
 from ..ingestion.formats.types import DocumentLimits
@@ -74,7 +75,8 @@ class DocumentJobsConfig(BaseModel):
 
 
 def load_document_imports(path: str, memory: MemoryEngine, *, document_ocr: DocumentOcr | None = None,
-                          ocr_identity: str = '', document_media: DocumentMedia | None = None) -> DocumentImportService:
+                          ocr_identity: str = '', document_media: DocumentMedia | None = None,
+                          document_video: DocumentVideo | None = None) -> DocumentImportService:
     """Open private state without admitting jobs or calling a parser.
 
     The operator revision must change when native OCR executables, trained data
@@ -114,6 +116,15 @@ def load_document_imports(path: str, memory: MemoryEngine, *, document_ocr: Docu
             raise InvalidInput('document OCR is not configured on this server')
         return ImportParserBinding(revision, document_ocr.parser(selection))
 
+    def video_parser_for() -> ImportParserBinding:
+        if document_video is None:
+            raise ValueError('video OCR is not configured on this server')
+        fingerprint = {'implementation': 'document-video-import-v1', 'operator': config.parser_revision,
+                       'dependencies': dependencies, 'video_revision': document_video.revision}
+        revision = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
+        return ImportParserBinding(revision, document_video.parser)
+
     return DocumentImportService(target, key=bytes.fromhex(secret), memory=memory, parser_for=parser_for,
+        video_parser_for=video_parser_for if document_video is not None else None,
         limits=config.limits, max_active=config.max_active, max_imports=config.max_imports,
         deadline_s=config.deadline_s, max_attempts=config.max_attempts)

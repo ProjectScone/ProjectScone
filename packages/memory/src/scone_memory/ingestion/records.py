@@ -37,6 +37,14 @@ class Record:
         return cls(**known)
 
 
+@dataclass(frozen=True)
+class RetainedVideoRecord(Record):
+    """Internal document dispatch; empty content still requires verified blob evidence.
+
+    Generic records and archive dictionaries cannot opt in through metadata.
+    """
+
+
 @dataclass
 class RecoveryReport:
     """What recover() found: episodes brought to a complete state, of

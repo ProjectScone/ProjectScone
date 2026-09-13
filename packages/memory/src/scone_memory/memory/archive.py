@@ -159,6 +159,8 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             continue
         if kind == "episode":
             episode = _rederived(Record.from_dict(record), record.get("space"), space)
+            if episode.content == '' and episode.kind == 'file':
+                raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
             # Forgetting was a decision; an archive that carries the
             # forgotten content does not undo it unless told to.
             digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
