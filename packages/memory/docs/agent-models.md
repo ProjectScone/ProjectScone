@@ -160,6 +160,21 @@ assert result.model_id == "careful"
 print(result.output.text)
 ```
 
+`SelfHostedToolChat.complete(messages, tools, on_public_text=...)` can also
+stream: given a sink, the turn is requested as a stream and every content
+delta is handed to the sink as it arrives, so a reader can watch an answer
+being written. Only content is public -- tool-call arguments accumulate
+silently and reasoning fields are never read -- and the assembled reply goes
+through the same parser as a nonstreaming one, so what streamed and what the
+loop accepts are one reply: a delta after the finish, more than one choice, a
+line that is not a chunk, or a stream that ends without a finish is refused,
+the response byte budget covers the whole stream, and a sink that raises
+fails the turn. A server that ignores `stream` still answers with one message,
+which the sink receives as one delta. Without a sink nothing changes: the
+request is the nonstreaming turn it always was. Nothing above the provider
+uses the sink yet; delivering an agent's answer live to a reader is the
+remaining work named in `agent-event-history.md`.
+
 `describe()` returns agent IDs, defaults and allowed model metadata. It excludes
 instructions, endpoints, credentials and factories. The host must filter the
 catalog for the caller's permissions before exposing it through an application.
