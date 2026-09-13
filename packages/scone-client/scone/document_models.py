@@ -11,6 +11,7 @@ import re
 from ._wire import boolean, digest, identifier, integer, invalid, names, record, text, timestamp
 
 MAX_REVISION = 2**31 - 1
+VIDEO_EXTENSIONS = frozenset({'.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpeg', '.mpg', '.mpegts'})
 
 
 def filename(value: object) -> str:
@@ -59,6 +60,12 @@ def check_ocr(name: str, selection: Optional[PdfOcr]) -> None:
         raise invalid('PDF OCR requires PDF filename')
 
 
+def check_video_ocr(name: str, selected: bool, pdf_ocr: Optional[PdfOcr]) -> None:
+    boolean(selected)
+    if selected and (pdf_ocr is not None or PurePosixPath(name).suffix.lower() not in VIDEO_EXTENSIONS):
+        raise invalid('video OCR requires video filename and cannot be combined with PDF OCR')
+
+
 @dataclass(frozen=True)
 class ParserLimits:
     max_input_bytes: int
@@ -86,15 +93,18 @@ class DocumentSpec:
     pdf_ocr: Optional[PdfOcr]
     deadline_s: float
     max_attempts: int
+    video_ocr: bool = False
 
     @classmethod
     def from_json(cls, value: object) -> DocumentSpec:
         row = record(value)
         name, ocr = filename(row.get('filename')), PdfOcr.from_json(row.get('pdf_ocr'))
         check_ocr(name, ocr)
+        video = boolean(row.get('video_ocr', False))
+        check_video_ocr(name, video, ocr)
         return cls(digest(row.get('attachment_id')), name, identifier(row.get('parser_revision')),
                    ParserLimits.from_json(row.get('limits')), ocr, seconds(row.get('deadline_s'), 300),
-                   integer(row.get('max_attempts'), 1, 4))
+                   integer(row.get('max_attempts'), 1, 4), video)
 
 
 @dataclass(frozen=True)
@@ -218,20 +228,23 @@ class DocumentResult:
     manifest: DocumentAttachment
     added: DocumentStored
     pdf_ocr: Optional[PdfOcr]
+    video_ocr: bool = False
 
     @classmethod
     def from_json(cls, value: object, *, request: DocumentRequest) -> DocumentResult:
         row = record(value)
         original, manifest = DocumentAttachment.from_json(row.get('original')), DocumentAttachment.from_json(row.get('manifest'))
         ocr = PdfOcr.from_json(row.get('pdf_ocr'))
+        video = boolean(row.get('video_ocr', False))
         if (row.get('space') != request.space or row.get('import_id') != request.import_id
                 or row.get('filename') != request.spec.filename or original.attachment_id != request.spec.attachment_id
                 or original.bytes > request.spec.limits.max_input_bytes or manifest.media_type != 'application/json'
-                or manifest.attachment_id == original.attachment_id or ocr != request.spec.pdf_ocr):
+                or manifest.attachment_id == original.attachment_id or ocr != request.spec.pdf_ocr
+                or video != request.spec.video_ocr):
             raise invalid('document result binding')
         return cls(request.space, request.import_id, request.spec.filename, text(row.get('format'), 256),
                    integer(row.get('segments'), 1, request.spec.limits.max_segments), original, manifest,
-                   DocumentStored.from_json(row.get('added')), ocr)
+                   DocumentStored.from_json(row.get('added')), ocr, video)
 
 
 @dataclass(frozen=True)
@@ -248,6 +261,8 @@ class DocumentFormats:
     pdf_ocr_available: bool
     pdf_ocr_modes: tuple[str, ...]
     pdf_reading_orders: tuple[str, ...]
+    video_ocr_available: bool = False
+    video_ocr_extensions: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: object) -> DocumentFormats:
@@ -266,5 +281,15 @@ class DocumentFormats:
         modes, orders = names(ocr.get('modes'), 2), names(ocr.get('reading_orders'), 3)
         if set(modes) - {'missing_text', 'all_pages'} or set(orders) - {'provider', 'columns_ltr', 'columns_rtl'}:
             raise invalid('document OCR choices')
+        video_available = False
+        video_extensions: tuple[str, ...] = ()
+        if 'video_ocr' in row:
+            video = record(row['video_ocr'])
+            video_available = boolean(video.get('available'))
+            video_extensions = names(video.get('extensions'), 32)
+            if (set(video_extensions) - VIDEO_EXTENSIONS or video.get('extraction') != 'sampled-frame-text'
+                    or boolean(video.get('includes_audio')) or record(video.get('selection')) != {'video_ocr': True}
+                    or type(record(video['selection']).get('video_ocr')) is not bool):
+                raise invalid('document video OCR choices')
         return cls(MappingProxyType(parsed), integer(row.get('max_input_bytes'), 1, 25*1024*1024),
-                   boolean(ocr.get('available')), modes, orders)
+                   boolean(ocr.get('available')), modes, orders, video_available, video_extensions)

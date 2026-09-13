@@ -198,6 +198,7 @@ class Settings:
     document_jobs_config: Optional[str] = None
     directory_sync_config: Optional[str] = None
     document_media_config: Optional[str] = None
+    document_video_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
     document_ocr_psm: int = 3
@@ -414,6 +415,7 @@ class Settings:
             document_jobs_config=env.get("SCONE_DOCUMENT_JOBS_CONFIG") or None,
             directory_sync_config=env.get("SCONE_DIRECTORY_SYNC_CONFIG") or None,
             document_media_config=env.get("SCONE_DOCUMENT_MEDIA_CONFIG") or None,
+            document_video_config=env.get("SCONE_DOCUMENT_VIDEO_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
