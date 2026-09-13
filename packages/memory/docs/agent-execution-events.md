@@ -110,3 +110,7 @@ authenticated streaming, workflow identity and retention handling remain separat
 required work. Real provider text streaming also remains required; these events
 neither simulate token streaming nor expose hidden reasoning. Old journals do
 not acquire historical timing data retrospectively.
+
+The native [encrypted history store](agent-event-history.md) can persist supplied
+metadata observations with authenticated cursors. Automatic collection and the
+remaining integrations above are still required.
