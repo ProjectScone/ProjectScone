@@ -445,6 +445,14 @@ class Added(BaseModel):
     replaced: Optional[ForgetReceipt] = None
     #: Why nothing was stored, for a failed record. None for the rest.
     reason: Optional[str] = None
+    #: How a stored record was cut -- the way actually used, which is
+    #: ``code`` for a code source unless the record said otherwise -- and,
+    #: when it was cut at its structure, the chunker's own counts: what
+    #: landed on a boundary, what was split by size, whether a unit ran
+    #: over the target and whether the unit bound bit. None on a receipt
+    #: that stored nothing.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    structure: Optional[dict[str, object]] = None
 
 
 class Status(BaseModel):

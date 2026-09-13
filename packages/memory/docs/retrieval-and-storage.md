@@ -682,6 +682,19 @@ This reads the structure the document already carries.
 MemoryEngine(store, index, embedder, structure_aware=True)
 ```
 
+That is the engine's rule for every record. One record can choose for
+itself: `remember(..., chunking="structure")`, `scone remember --chunking
+structure`, `"chunking": "structure"` on `POST /v1/episodes` and in each
+batch record (`length`, `code`, `structure` or `semantic`; unset keeps
+the rule). The receipt says which way was actually used -- `code` for a
+code source unless the record said otherwise -- and, for structure, the
+chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
+The choice is kept on the episode's metadata under `chunking`, so a
+recovery after an interruption cuts the way the record asked; `code` on
+a source whose name does not say its language, a mode not on the list,
+or a metadata key that already says otherwise is refused before anything
+is stored.
+
 Built on `ingestion/structure.py`, which already finds headings, fenced
 code and pipe tables and is already used by retrieval and source
 inspection. Only what that parser deliberately leaves out is new:
