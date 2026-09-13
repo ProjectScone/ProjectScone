@@ -34,6 +34,7 @@ from ..retrieval import fact_recall
 from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..ingestion.code_graph import Resolve
     # Type-only: the vocabulary store needs cryptography, and a base
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
@@ -460,7 +461,8 @@ class MemoryEngine:
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
 
-    async def replace(self, space: str, record: Record, *, map_code: bool = True) -> "Replaced":
+    async def replace(self, space: str, record: Record, *, map_code: bool = True,
+                      resolve: "Resolve | None" = None) -> "Replaced":
         """Store a keyed record as the current one under its key. A key
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
@@ -526,7 +528,7 @@ class MemoryEngine:
             retired = file_claims.Retired(closed=0)
             if self.code_graph and map_code:
                 prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
-                mapped = await self._map_code(space, [prepared], [added])
+                mapped = await self._map_code(space, [prepared], [added], resolve=resolve)
                 if receipt is not None:
                     # The old episode's claims stood through the forget, by
                     # its contract. What the new content no longer says is
@@ -656,7 +658,8 @@ class MemoryEngine:
             await self._map_code(space, records, added)
         return added
 
-    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> list[Fact]:
+    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added], *,
+                        resolve: "Resolve | None" = None) -> list[Fact]:
         """What a source file says about itself, recorded as claims like any
         other: quoted from the line they were read on, cited to the episode
         they came from, and marked extracted rather than stated, because
@@ -666,13 +669,19 @@ class MemoryEngine:
         already here, and asserting them again would say the same thing
         twice for no reason."""
         from ..ingestion.code_graph import record_claims
+        from ..ingestion.code_resolution import file_resolver
 
+        # A batch of files remembered together can follow relative imports
+        # among themselves; a caller that walked a tree passes its own.
+        if resolve is None:
+            resolve = file_resolver([record.source for record in records if record.source])
         mapped: list[Fact] = []
         for record, outcome in zip(records, added):
             if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
                 continue
             await record_claims(self, space, episode_id=outcome.episode_id, content=record.content,
-                                path=record.source, when=record.created_at or self.clock(), _facts=mapped)
+                                path=record.source, when=record.created_at or self.clock(), resolve=resolve,
+                                _facts=mapped)
         return mapped
 
     async def close_unstated(self, space: str, episode_id: int, *, kept: Sequence[tuple[str, str, str]] = (),
