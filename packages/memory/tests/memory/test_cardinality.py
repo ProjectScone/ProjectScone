@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from scone_memory.core.extracted import MANY_VALUED
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
 from scone_memory.testing import Clock
@@ -87,7 +88,8 @@ async def test_closing_one_value_leaves_the_others():
 
 async def test_a_predicate_is_configured_as_the_ledger_stores_it():
     memory = await engine(many_valued=["  KNOWS "])
-    assert memory.many_valued == frozenset({"knows"})
+    # Beside what the framework extracts, which is many-valued by nature.
+    assert memory.many_valued - MANY_VALUED == frozenset({"knows"})
     await memory.assert_fact(SPACE, "alice", "Knows", "Bob", valid_from="2020-01-01T00:00:00Z")
     await memory.assert_fact(SPACE, "alice", "knows", "Carol", valid_from="2021-01-01T00:00:00Z")
     assert [value for value, _, until in await held(memory, "alice", "knows") if until is None] == ["Bob", "Carol"]

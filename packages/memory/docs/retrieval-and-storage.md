@@ -869,6 +869,61 @@ module. Those were found by review, on hand-built counterexamples rather
 than on a corpus — a graph whose claim is that it does not guess has to
 be tested on the shapes that tempt it into guessing.
 
+### What a project says it depends on
+
+A manifest is where a project writes down what it needs, and until now
+none was read: the graph knew every `import requests` and nothing about
+which project declares requests, at what version, or only for its tests.
+`pyproject.toml` (PEP 621, PEP 735 dependency groups, Poetry),
+`requirements*.txt`, `package.json`, `Cargo.toml` and `go.mod` are now read
+wherever they sit, by `scone map --graph` and by any remembered file with
+one of those names as its source, into claims like a source file's --
+quoted from the line, cited to the file, extracted rather than stated:
+
+```
+packages/memory/pyproject.toml  defines        scone-memory
+scone-memory                    depends_on     requests        "requests>=2.31",
+scone-memory                    depends_on     uvicorn         "uvicorn[standard]==0.30.1",
+scone-memory                    develops_with  pytest          test = ["pytest>=8", "pytest-asyncio"]
+```
+
+Two predicates, because they answer two questions: `depends_on` is what
+the project needs to run, optional extras included; `develops_with` is
+what it needs to build, test or document itself -- build requirements,
+dependency groups, dev dependencies. A project does not run on pytest.
+
+The object is the package's bare name, spelled as its index spells it (a
+Python name lowercased with runs of `-_.` as one `-`, a crate with `_` as
+`-`, an npm name lowercased), and the extras, version and marker stay in
+the quote. So a package five manifests name is one thing in the graph,
+and each manifest's line says what it asked for. The subject is the
+project's declared name where it has one, else the manifest's path. A Go
+`// indirect` requirement is left out: it is what a dependency needs, not
+what the module declares. A renamed Cargo dependency is the crate it names,
+not the alias. `pom.xml` is not read.
+
+Dependency names are not bound to import names. They differ often
+enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
+would guess, and the graph does not.
+
+### Claims read from files hold side by side
+
+A ledger predicate holds one value at a time unless configured
+otherwise, and that is right for what people state: "lives in Lisbon"
+retires "lives in Austin". It was wrong for what the readers extract. A
+module with three imports held one and closed two as superseded, a file
+with two functions defined the second, and every graph built on the
+ledger kept the last claim of each kind and called the rest history.
+
+The predicates the framework extracts -- `defines`, `imports`, `calls`,
+`inherits`, `mixes_in`, `notes`, `flags`, `cites`, `depends_on`,
+`develops_with` -- are many-valued by their nature, declared so in the
+core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
+takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
+person names; `GET /v1/graph/schema` marks both kinds as `many`. A file
+read again restates its claims; a claim a changed file no longer makes is
+not closed by this, which remains open.
+
 ## Code: cut where the declarations are
 
 A source file stored under a name that says which language it is in
