@@ -236,3 +236,36 @@ async def test_invalid_video_choices_refuse_before_ocr(video_host, mode):
         response = await client.post('/v1/document-jobs', json={**body, 'import_id': 'invalid'})
         assert response.status_code == 422, response.text
         assert recognizer.calls == 0
+
+
+async def test_visual_only_video_durable_result_and_frame_reads_survive_restart(video_host, monkeypatch):
+    engine, video, recognizer, original, env = video_host
+    async def empty(image, **options):
+        recognizer.calls += 1
+        return OcrResult(engine='fixture', width=64, height=32, regions=())
+    monkeypatch.setattr(recognizer, 'recognize', empty)
+    settings = Settings.from_env(env)
+    for first in (True, False):
+        app = build_app(settings, engine, document_video=video)
+        async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app),
+            base_url='http://fixture', headers={'authorization': 'Bearer writer'}) as client:
+            if first:
+                response = await client.post('/v1/document-jobs', json={'import_id': 'empty-video',
+                    'attachment_id': original.attachment_id, 'filename': 'slides.mp4', 'video_ocr': True})
+                assert response.status_code == 202, response.text
+                status = await app.state.document_import_service.wait('alpha', 'empty-video')
+                assert status.status == 'completed', status
+            result = await client.get('/v1/document-jobs/empty-video/result')
+            assert result.status_code == 200, result.text
+            body = result.json()
+            assert body['segments'] == 0 and body['added']['chunks'] == 0
+            episode_id = body['added']['episode_id']
+            assert (await client.get(f'/v1/episodes/{episode_id}')).json()['content'] == ''
+            path = f'/v1/episodes/{episode_id}/document'
+            catalogue = await client.get(path + '/video/catalogue')
+            assert catalogue.status_code == 200, catalogue.text
+            evidence = catalogue.json()['evidence']
+            assert evidence['segments'] == [] and all(f['empty'] for f in evidence['video']['frames'])
+            png = await client.get(path + '/video/frames/0')
+            assert png.status_code == 200 and png.content.startswith(b'\x89PNG')
+            assert recognizer.calls == 2

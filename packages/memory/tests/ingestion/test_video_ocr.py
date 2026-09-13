@@ -68,11 +68,12 @@ async def test_video_ocr_keeps_empty_frame_and_exact_utf8_geometry(video):
     assert parsed.video.model_revision == 'fixture-v1'
 
 
-async def test_empty_video_ocr_refuses_without_fabricated_text(video):
+async def test_empty_video_ocr_retains_evidence_without_fabricated_text(video):
     data, decoder = video
-    with pytest.raises(InvalidInput, match='no recognized text'):
-        await VideoDocumentParser(decoder, ScriptedOcr(empty=True), model_revision='fixture-v1').parse(
-            data, 'slides.mp4', DocumentLimits())
+    parsed = await VideoDocumentParser(decoder, ScriptedOcr(empty=True), model_revision='fixture-v1').parse(
+        data, 'slides.mp4', DocumentLimits())
+    assert parsed.segments == ()
+    assert parsed.video.frames and all(frame.empty for frame in parsed.video.frames)
 
 
 async def test_recovery_reuses_completed_frames_including_empty(video):
@@ -383,3 +384,116 @@ async def test_final_receipt_write_cannot_report_success_after_deadline(video, m
     with pytest.raises(InvalidInput, match='wall time'):
         await VideoDocumentParser(decoder, ScriptedOcr(), model_revision='fixture').parse_checkpointed(
             data, 'slides.mp4', DocumentLimits(timeout_seconds=0.05), SlowReceipts())
+
+
+async def test_visual_only_source_retention_recovery_and_archive_refusal(video):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import prepare_document, store_document, document_provenance
+    from scone_memory.ingestion.records import Record
+
+    class NoEmbedding(HashEmbedder):
+        async def embed(self, texts):
+            raise AssertionError('visual-only sources must not call embeddings')
+
+    class NoVectors(InMemoryVectorIndex):
+        async def upsert(self, points):
+            raise AssertionError('visual-only sources must not write vectors')
+
+    data, decoder = video
+    manifest = await prepare_document(data, 'slides.mp4', parser=VideoDocumentParser(
+        decoder, ScriptedOcr(empty=True), model_revision='fixture-v1'), limits=DocumentLimits())
+    assert manifest.schema_version == 7
+    with pytest.raises(ValueError, match='version seven'):
+        type(manifest).model_validate({**manifest.model_dump(), 'schema_version': 6})
+    engine = await MemoryEngine(InMemoryDocumentStore(), NoVectors(), NoEmbedding(),
+                                table_context_embeddings=True).open()
+    try:
+        original = await engine.attach('alpha', data, media_type='video/mp4')
+        stored = await store_document(engine, 'alpha', original, manifest)
+        episode = await engine.episode('alpha', stored.added.episode_id)
+        assert episode.content == '' and stored.added.chunks == 0
+        assert await engine.documents.chunks_of('alpha', episode.episode_id) == []
+        assert (await document_provenance(engine, 'alpha', episode.episode_id)).video == manifest.parsed.video
+        again = await store_document(engine, 'alpha', original, manifest)
+        assert again.added.deduplicated and again.added.episode_id == episode.episode_id
+        for kind in ('note', 'file'):
+            with pytest.raises(InvalidInput, match='empty'):
+                await engine.remember('alpha', '', kind=kind, source=episode.source, metadata=episode.metadata)
+        await engine.documents.mark_inflight('alpha', episode.content_hash)
+        recovered = await engine.recover()
+        assert recovered.completed == 1 and recovered.rechunked == 0
+        archive = [row async for row in engine.export('alpha')]
+        with pytest.raises(InvalidInput, match='visual-only.*attachment'):
+            await engine.import_records('beta', archive)
+        assert (await engine.documents.counts('beta')).episodes == 0
+        with pytest.raises(InvalidInput, match='visual-only.*attachment'):
+            await engine.merge_space('alpha', into='beta', confirm='alpha')
+        assert await engine.space_deleted('alpha') is None
+        await engine.forget('alpha', episode.episode_id)
+        assert (await engine.documents.counts('alpha')).episodes == 0
+    finally:
+        await engine.close()
+
+
+def test_empty_parsed_document_requires_all_empty_video_evidence():
+    from scone_memory.ingestion.formats.types import ParsedDocument, validate_document
+    with pytest.raises(ValueError):
+        ParsedDocument(format='txt', parser='plain', segments=())
+    with pytest.raises(InvalidInput):
+        validate_document(ParsedDocument.model_construct(format='txt', parser='plain', segments=()), DocumentLimits())
+
+
+async def test_visual_only_distillation_never_calls_model(video):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.distill import Distiller
+    from scone_memory.ingestion.files import ingest_document
+
+    class NoChat:
+        async def complete(self, *args, **kwargs):
+            raise AssertionError('textless evidence must not invoke a language model')
+
+    data, decoder = video
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        saved = await ingest_document(engine, 'alpha', data, filename='slides.mp4',
+            parser=VideoDocumentParser(decoder, ScriptedOcr(empty=True), model_revision='fixture-v1'))
+        distiller = Distiller(engine, NoChat())
+        assert await distiller.distill_pending('alpha') == []
+        result = await distiller.distill_episode('alpha', saved.added.episode_id)
+        assert result.added == [] and result.error is None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.parametrize('repair', ['retry', 'recover'])
+async def test_visual_only_partial_attachment_link_keeps_recoverable_source(video, monkeypatch, repair):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import prepare_document, store_document, document_provenance
+    data, decoder = video
+    manifest = await prepare_document(data, 'slides.mp4', parser=VideoDocumentParser(
+        decoder, ScriptedOcr(empty=True), model_revision='fixture-v1'), limits=DocumentLimits())
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        original = await engine.attach('alpha', data, media_type='video/mp4')
+        link = engine.blobs.link
+        async def interrupt(space, attachment_id, episode_id):
+            if attachment_id != original.attachment_id:
+                raise OSError('manifest link failed')
+            await link(space, attachment_id, episode_id)
+        monkeypatch.setattr(engine.blobs, 'link', interrupt)
+        with pytest.raises(OSError, match='manifest link failed'):
+            await store_document(engine, 'alpha', original, manifest)
+        assert (await engine.documents.counts('alpha')).episodes == 1
+        assert len(await engine.documents.inflight()) == 1
+        monkeypatch.setattr(engine.blobs, 'link', link)
+        if repair == 'recover':
+            result = await engine.recover()
+            assert result.completed == 1 and result.rechunked == 0
+        saved = await store_document(engine, 'alpha', original, manifest)
+        assert saved.added.deduplicated
+        assert (await document_provenance(engine, 'alpha', saved.added.episode_id)).video == manifest.parsed.video
+        assert await engine.documents.inflight() == []
+        await engine.forget('alpha', saved.added.episode_id)
+        assert not await engine.blobs.linked('alpha')
+    finally:
+        await engine.close()

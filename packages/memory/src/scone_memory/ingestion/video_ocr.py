@@ -215,8 +215,6 @@ class VideoDocumentParser:
                 presentation_timestamp=frame.selection.presentation_timestamp,
                 requested_seconds=frame.selection.requested_seconds, width=frame.width, height=frame.height,
                 png_sha256=frame.sha256, png_bytes=len(frame.png), ocr_engine=result.engine, empty=segment is None))
-        if not segments:
-            raise InvalidInput('video contains no recognized text')
         base = sampled.plan.time_base
         evidence = DocumentVideoEvidence(source_sha256=sampled.source_sha256, decoder_revision=sampled.decoder_revision,
             policy_revision=sampled.policy_revision, model_revision=self._revision, policy=sampled.policy,

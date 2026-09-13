@@ -1,9 +1,9 @@
 """Format-neutral extraction results with source-local evidence locators."""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from ...core.errors import InvalidInput
 from ...ocr.types import OrderedOcrRegion
@@ -50,9 +50,15 @@ class ParsedDocument(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
     format: str = Field(min_length=1, max_length=64)
     parser: str = Field(min_length=1, max_length=128)
-    segments: tuple[DocumentSegment, ...] = Field(min_length=1, max_length=20_000)
+    segments: tuple[DocumentSegment, ...] = Field(max_length=20_000)
     metadata: dict[str, str] = Field(default_factory=dict)
     video: DocumentVideoEvidence | None = None
+
+    @model_validator(mode='after')
+    def validate_textless(self) -> Self:
+        if not self.segments and not visual_only(self):
+            raise ValueError('empty document requires sampled video evidence without recognized text')
+        return self
 
     @model_serializer(mode='wrap')
     def serialize_video(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -62,7 +68,14 @@ class ParsedDocument(BaseModel):
         return result
 
 
+def visual_only(parsed: ParsedDocument) -> bool:
+    return (not parsed.segments and parsed.parser == 'video-frame-ocr' and parsed.video is not None
+            and bool(parsed.video.frames) and all(frame.empty for frame in parsed.video.frames))
+
+
 def validate_document(parsed: ParsedDocument, limits: DocumentLimits) -> None:
+    if not parsed.segments and not visual_only(parsed):
+        raise InvalidInput('empty document requires sampled video evidence without recognized text')
     if len(parsed.segments) > limits.max_segments:
         raise InvalidInput('document exceeds its segment limit')
     total = 0
