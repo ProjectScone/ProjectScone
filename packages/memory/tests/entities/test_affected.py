@@ -842,3 +842,25 @@ def test_the_spellings_a_candidate_may_stand_for():
     assert "pkg/core.ts" not in _spellings("pkg/core", "py"), _spellings("pkg/core", "py")
     # An extension from no family this reader knows stands only for itself.
     assert _spellings("web/foo", "bar") == ("web/foo.bar",), _spellings("web/foo", "bar")
+
+
+async def test_what_rests_on_a_package_includes_the_projects_whose_manifests_declare_it():
+    """A manifest's `depends_on` is a dependency edge like an import: a
+    change to the package reaches the project that declares it. So is
+    `develops_with` -- a test dependency breaking breaks the tests."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                code_graph=True).open()
+    try:
+        await engine.remember("default", '[project]\nname = "shelf"\ndependencies = ["requests>=2"]\n'
+                              '[dependency-groups]\ntest = ["pytest"]\n', source="pyproject.toml")
+        await engine.remember("default", "requests==2.32\n", source="tools/requirements.txt")
+        await engine.remember("default", "import requests\n", source="pkg/fetch.py")
+        blast = await affected(engine, "default", "requests")
+        labels = {one.label: one for one in blast.reached}
+        assert "shelf" in labels and labels["shelf"].through == "depends_on", blast.record()
+        assert "tools/requirements.txt" in labels, sorted(labels)
+        assert "pkg/fetch.py" in labels and labels["pkg/fetch.py"].through == "imports"
+        tests = await affected(engine, "default", "pytest")
+        assert {one.through for one in tests.reached} == {"develops_with"}, tests.record()
+    finally:
+        await engine.close()
