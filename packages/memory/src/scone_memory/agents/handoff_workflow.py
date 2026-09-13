@@ -184,7 +184,7 @@ class AgentHandoffWorkflow:
                 depends_on=(self._hop_id(index - 1),) if index else (), text=decision.answer,
                 source_status=cast(Literal['retained', 'none'], result.output.source_status),
                 evidence_ids=result.output.evidence_ids, evidence_packets=result.output.evidence_packets,
-                model_calls=result.output.model_calls, tool_calls=result.output.tool_calls)
+                model_calls=result.output.model_calls, tool_calls=result.output.tool_calls, usage=result.output.usage)
             return cast(JSONValue, HandoffReceipt(output=receipt, handoff_to=decision.handoff_to).model_dump(mode='json'))
         return execute
 
