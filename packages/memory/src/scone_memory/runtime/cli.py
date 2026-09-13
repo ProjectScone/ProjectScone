@@ -380,7 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("map", help="remember every source file under a directory, and optionally what each says")
     p.add_argument("directory")
     p.add_argument("--graph", action="store_true",
-                   help="also record what each file defines, imports and calls, as claims quoted from the line")
+                   help="also record what each file defines, imports and calls, and what each package "
+                        "manifest depends on, as claims quoted from the line")
     p.add_argument("--limit", type=int, default=5_000, help="files to read at most (default 5000)")
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
     p.add_argument("--include-sensitive", action="store_true",
@@ -671,6 +672,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
+    from ..ingestion.manifests import is_manifest
     from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
@@ -687,7 +689,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # dot-segment would otherwise skip its entire tree and report nothing
     # read -- exactly the quietly-skipped map this command warns about.
     found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name))
              and not any(part.startswith(".") or part == "__pycache__"
                          for part in path.relative_to(root).parts)]
     # Resolution belongs here, because this is what knows which files
