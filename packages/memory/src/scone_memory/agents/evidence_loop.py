@@ -6,6 +6,7 @@ turn; the host owns tools, scope, budgets, and the final publication boundary.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -23,6 +24,7 @@ from .custom_tools import AgentTool, snapshot_tools
 from .progress import ProgressEmitter, operation_scope
 from .turn_journal import ToolTurnJournal, TurnJournalError, TurnJournalPaused
 from .workflow import JSONValue
+from .public_text import PublicText
 from .usage import ModelTokenUsage, ToolTokenUsage
 
 
@@ -56,6 +58,14 @@ class ToolLoopLimits(BaseModel):
 
 class ToolModel(Protocol):
     async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep: ...
+
+
+class StreamingToolModel(Protocol):
+    """A tool model whose turn can hand its content to a sink as it is
+    written; ``SelfHostedToolChat`` is one."""
+
+    async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]], *,
+                       on_public_text: Callable[[str], Awaitable[None]] | None = None) -> ToolStep: ...
 
 
 class ConstrainedToolModel(ToolModel, Protocol):
@@ -173,8 +183,16 @@ class EvidenceToolLoop:
                  initial_search: bool = False, answer_requirements: AnswerRequirements | None = None,
                  compact_search_results: bool = False,
                  custom_tools: Sequence[AgentTool] = (), journal: ToolTurnJournal | None = None,
-                 approval: BoundApproval | None = None, progress: ProgressEmitter | None = None) -> None:
+                 approval: BoundApproval | None = None, progress: ProgressEmitter | None = None,
+                 public_text: PublicText | None = None) -> None:
         self._progress = progress
+        if public_text is not None and not isinstance(public_text, PublicText):
+            raise ValueError('invalid public text sink')
+        self._public_text = public_text
+        # Content delivered to the sink in the current model turn, so a
+        # tool turn knows whether there is anything to withdraw and a final
+        # turn knows whether the answer still has to be delivered whole.
+        self._delivered = 0
         if journal is not None and not isinstance(journal, ToolTurnJournal):
             raise ValueError('invalid turn journal')
         self._journal = journal
@@ -197,10 +215,50 @@ class EvidenceToolLoop:
         self._limits = ToolLoopLimits.model_validate((limits or ToolLoopLimits()).model_dump())
         self._answer_requirements = validated_requirements(answer_requirements)
 
+    async def _deliver(self, text: str) -> None:
+        assert self._public_text is not None
+        if not isinstance(text, str):
+            raise ValueError('public text must be a string')
+        if text:
+            await self._public_text.append(text)
+            self._delivered += len(text)
+
+    def _streams(self) -> bool:
+        """Whether this model's turn accepts a public-text sink. Checked by
+        signature, so a model that never heard of streaming is called
+        exactly as before."""
+        if self._public_text is None:
+            return False
+        try:
+            return 'on_public_text' in inspect.signature(self._model.complete).parameters
+        except (TypeError, ValueError):
+            return False
+
+    async def _settle_public_text(self, step: ToolStep) -> None:
+        """After a turn is accepted: withdraw what a tool turn wrote, or
+        deliver whole an answer that nothing streamed."""
+        if self._public_text is None:
+            return
+        # `_complete` zeroes the count before each streamed turn, and no
+        # other path delivers, so nothing needs resetting here.
+        try:
+            if step.calls:
+                if self._delivered:
+                    self._public_text.withdraw()
+            elif not self._delivered and step.content:
+                await self._public_text.append(step.content)
+        except (asyncio.CancelledError, TimeoutError):
+            raise
+        except Exception:
+            raise RuntimeError('public text observation failed') from None
+
     async def _complete(self, transcript: list[dict[str, object]], schemas: list[dict[str, object]]) -> ToolStep:
         messages, tools = json.loads(_json(transcript)), json.loads(_json(schemas))
         constrained = getattr(self._model, 'complete_with_requirements', None)
         if self._answer_requirements is None or not callable(constrained):
+            if self._streams():
+                self._delivered = 0
+                return await cast(StreamingToolModel, self._model).complete(messages, tools, on_public_text=self._deliver)
             return await self._model.complete(messages, tools)
         requirements = validated_requirements(self._answer_requirements)
         assert requirements is not None
@@ -503,6 +561,7 @@ class EvidenceToolLoop:
                         raise RuntimeError('tool model unavailable') from None
                     model_calls += 1
                     step = _accepted_step(step, seen, enabled)
+                    await self._settle_public_text(step)
                 ids = [call.id for call in step.calls]
                 usage.append(step.usage)
                 if not step.calls:
