@@ -446,3 +446,56 @@ unknown outcomes remain non-replayable. Human responses still use the separate
 The console approval interface is not included. The native protocol is exercised
 across process restarts by `tests/test_native_agent_approvals.py`, using the same
 `SCONE_TEST_NATIVE_PYTHON` setting as the other native contract tests.
+
+
+### Agent execution history
+
+Hosts advertising `agents.history` provide typed cursor replay:
+
+```python
+from scone import ProgressEvent, ProgressGap, CollectionEvent
+
+page = agents.history("run-1", limit=50)
+if not page.available:
+    print("No retained observations are available")
+if page.omitted is not None:
+    print("History positions removed by retention:", page.omitted)
+for entry in page.items:
+    event = entry.event
+    if isinstance(event, ProgressEvent):
+        print(entry.step_id, event.model_id, event.kind, event.elapsed_s)
+    elif isinstance(event, ProgressGap):
+        print("Unobserved sequences:", event.first_sequence, event.last_sequence)
+    elif isinstance(event, CollectionEvent):
+        print(event.kind, event.observed_events, event.lost_events, event.terminal_kind)
+
+# Persist the cursor to reconnect later, including after a server restart.
+if page.next_after is not None:
+    later = agents.history("run-1", after=page.next_after)
+```
+
+`HistoryPage`, `HistoryEntry` and their event objects are immutable. The decoder
+checks the expected space/run, saved task or reachable handoff selection, exact
+model binding, event shape, timestamps, finite timing, collection identity and
+cursor/page continuity. Unknown metadata fields and private diagnostic strings
+are rejected. Built-in memory tool names remain valid observations. Legacy entries
+without collection/activation IDs remain readable; no timing is fabricated.
+
+Producer loss (`ProgressGap`) and storage retention (`page.omitted`) are distinct.
+Collection completion means observation ended, including for a failed, paused or
+cancelled turn; it does not prove workflow success or that every event was saved.
+An empty tail page retains its cursor. Purged or changed histories require a fresh
+observation read, and server errors propagate without retries or model selection
+changes. Every call is read-only and checks fresh capability/request metadata
+before the server's final current-source and recipient verification.
+
+Cursor shape and position checks do not let the client authenticate the server's
+HMAC independently. The host remains responsible for authorization and encrypted
+journal integrity. History contains execution metadata, never prompts, tool
+arguments, answer text or hidden reasoning. Use `agents.result()` for a currently
+verified final answer. Live streaming remains separate required work; `history()`
+reads one bounded page and does not poll or resume the agent automatically.
+
+`tests/test_native_agent_history.py` verifies typed replay across two process
+restarts with the selected model called once, both with and without an initial
+native memory search. Set `SCONE_TEST_NATIVE_PYTHON` as described above to run it.

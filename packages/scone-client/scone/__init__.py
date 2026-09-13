@@ -30,6 +30,9 @@ from .video_models import VideoCatalogue, VideoFrame, VideoRegion, VideoInterpre
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
+from .agent_events import ProgressEvent, ProgressGap, CollectionEvent
+from .agent_history import HistoryEntry, HistoryPage
+
 __version__ = "0.2.1"
 
 __all__ = [
@@ -37,6 +40,7 @@ __all__ = [
     "VideoDocuments", "VideoCatalogue", "VideoFrame", "VideoRegion", "VideoInterpretation",
     "Capabilities",
     "AgentClient",
+    "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage",
     "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",
     "TaskAnswerRequirements",
     "ModelTokenUsage", "ToolTokenUsage",
