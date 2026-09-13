@@ -33,6 +33,19 @@ class WorkflowPausableStep:
 
 
 @dataclass(frozen=True)
+class WorkflowPauseSnapshot:
+    """Detached authenticated bytes; no checkpoint lease or execution capability."""
+    step_id: str
+    checkpoint: str
+    payload: bytes
+    context: StepContext
+    _current: Callable[[], None]
+
+    def check_current(self) -> None:
+        self._current()
+
+
+@dataclass(frozen=True)
 class PauseReceipt:
     checkpoint: str
     digest: str
