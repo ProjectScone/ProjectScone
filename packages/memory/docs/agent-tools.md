@@ -6,6 +6,8 @@ Examples below run from `packages/memory/` unless a section names another workin
 
 For host-registered synchronous or asynchronous application functions in native
 agent workflows, see [Registered application tools](agent-application-tools.md).
+For explicit native callback suspension and restart, see
+[Checkpoint-backed workflow pauses](workflow-pauses.md).
 
 ## Using it from a framework
 
