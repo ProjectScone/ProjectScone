@@ -1,6 +1,7 @@
 """Persistent native host with explicit frame OCR and observable recognition."""
 import asyncio
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -16,6 +17,9 @@ from scone_memory.ingestion.video_frames import VideoFrameDecoder, VideoFramePol
 from scone_memory.ingestion.video_ocr import VideoDocumentParser
 from scone_memory.ocr.types import OcrRegion, OcrResult
 from scone_memory.runtime.config import Settings
+from scone_memory.runtime.model_connections import ModelConnectionStore, ModelConnection
+from scone_memory.runtime import model_runtime
+from scone_memory.providers.vision import ImageUnderstanding
 
 
 async def run():
@@ -38,8 +42,22 @@ async def run():
         'key_env': 'NATIVE_VIDEO_JOB_KEY', 'parser_revision': 'native-v1'}))
     config.chmod(0o600)
     os.environ['NATIVE_VIDEO_JOB_KEY'] = 'ab' * 32
+    class Vision:
+        model = 'native-client-vision'
+
+        async def describe(self, data, media_type, *, prompt, source=None, attachment_id=None):
+            with (state / 'interpretations').open('a') as output:
+                output.write(self.model + '\n')
+            return ImageUnderstanding('Fixture frame description.', hashlib.sha256(data).hexdigest(),
+                                      source, media_type, self.model, 64, 32)
+
+    models = state / 'models.json'
+    connections = ModelConnectionStore(models, {})
+    connections.replace('vision', ModelConnection(base_url=f'http://127.0.0.1:{port}/fixture/', model=Vision.model),
+                        expected_revision=connections.snapshot()['revision'])
+    model_runtime.local_vision_factory = lambda store: lambda: Vision()
     app = build_app(Settings.from_env({'SCONE_API_KEYS': 'agent-fixture:alpha:write',
-        'SCONE_DOCUMENT_JOBS_CONFIG': str(config)}), memory, document_video=video)
+        'SCONE_DOCUMENT_JOBS_CONFIG': str(config), 'SCONE_MODEL_CONNECTIONS': str(models)}), memory, document_video=video)
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
 
     async def commands():
