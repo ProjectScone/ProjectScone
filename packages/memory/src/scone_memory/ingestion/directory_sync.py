@@ -19,6 +19,7 @@ from .files import (FILE_MEDIA_TYPES, DocumentManifest, digest, document_provena
                     encode_manifest, prepare_document, store_document)
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits
+from .sensitive import screen
 from .source_journal import SourceEntry, SourceJournal, SourceRevision, SourceState
 from .source_scan import DirectoryScanner, ScanIssue, ScanLimits, ScannedFile
 
@@ -26,7 +27,7 @@ from .source_scan import DirectoryScanner, ScanIssue, ScanLimits, ScannedFile
 @dataclass(frozen=True)
 class SourceReceipt:
     path: str
-    status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed']
+    status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed', 'withheld']
     episode_id: int | None = None
     previous_episode_id: int | None = None
     code: str | None = None
@@ -51,13 +52,17 @@ class DirectorySync:
     return. Missing evidence or ownership mismatches fail closed.
     """
 
-    def __init__(self, memory: MemoryEngine, root: str | Path, *, space: str,
+    def __init__(self, memory: MemoryEngine, root: str | Path, *, space: str, include_sensitive: bool = False,
                  journal: str | Path, key: bytes, store_id: str, parser_revision: str,
                  parser: DocumentParser | None = None, limits: DocumentLimits = DocumentLimits(),
                  scan_limits: ScanLimits = ScanLimits(), extensions: frozenset[str] | None = None):
         DocumentSource('0' * 32, 'validation.txt', parser_revision)
         if not isinstance(store_id, str) or not 1 <= len(store_id) <= 512:
             raise InvalidInput('directory synchronization requires a bounded stable store identity')
+        #: Whether a source that screens as a credential is taken anyway.
+        #: Off unless asked for: a store that quietly held a key was the
+        #: fault this exists to remove, and taking one must be a decision.
+        self.include_sensitive = include_sensitive
         self.scanner = DirectoryScanner(root, limits=scan_limits, extensions=extensions)
         # Changes to the catalog, root inode or supported suffixes require an
         # explicit new collection, never an apparent mass deletion in this one.
@@ -220,6 +225,21 @@ class DirectorySync:
     async def _prepare(self, state: SourceState, item: ScannedFile, current: SourceRevision | None,
                        generation: int) -> SourceReceipt:
         data = await asyncio.to_thread(self.scanner.read, item)
+        # The bytes are in hand and nothing has been retained yet. A file
+        # that screens as a credential goes no further: no attachment, no
+        # episode, no journal entry to recover into one later. The last
+        # clean revision, if any, is left standing and named.
+        #
+        # One place, on purpose. A cheaper name-only refusal in `_file`
+        # was provably indistinguishable from this one -- `screen` runs
+        # the name stage first anyway -- and it sat ahead of the journal
+        # recovery above, so a named credential with a pending entry would
+        # have been refused without that entry ever being settled.
+        if not self.include_sensitive:
+            found = screen(item.path, data)
+            if found.reason is not None:
+                return SourceReceipt(item.path, 'withheld', None,
+                                     current.episode_id if current else None, found.reason)
         if len(data) > self.memory.max_attachment_bytes:
             raise InvalidInput('directory document exceeds its attachment limit')
         manifest = await prepare_document(data, item.path, parser=self.parser, limits=self.limits)

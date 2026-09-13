@@ -76,7 +76,7 @@ class SyncRunRecord(_Record):
 
 class SyncSourceOutcome(_Record):
     path: str = Field(min_length=1, max_length=1024)
-    status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed']
+    status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed', 'withheld']
     episode_id: int | None = Field(default=None, gt=0, lt=2**63)
     previous_episode_id: int | None = Field(default=None, gt=0, lt=2**63)
     code: Identifier | None = None

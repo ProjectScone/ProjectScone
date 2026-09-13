@@ -482,3 +482,61 @@ async def test_visual_only_directory_source_survives_unchanged_delete_and_reappe
     assert returned.complete
     assert receipts(returned)['slides.mp4'].episode_id != source.episode_id
     assert memory.embedder.calls == 0
+
+
+# --- A credential under the root is withheld, named, and never retained ---
+
+KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----\n"
+
+
+async def test_a_credential_file_is_withheld_before_anything_is_retained(env):
+    """`.json` is an admitted suffix and the walk descends everywhere, so
+    `credentials.json` was ingested whole. Now it is refused by name
+    before its bytes are attached, and the receipt says which rule."""
+    memory, root, _ = env
+    (root / 'credentials.json').write_text('{"token": "abc"}', encoding='utf-8')
+    (root / 'readme.txt').write_text('plain notes', encoding='utf-8')
+    result = await runner(env).synchronize()
+    got = receipts(result)
+    assert got['credentials.json'].status == 'withheld'
+    assert got['credentials.json'].code == 'name:credential_file'
+    assert got['credentials.json'].episode_id is None
+    assert got['readme.txt'].status == 'added'
+    contents = [e.content for e in await memory.documents.recent_episodes('alpha', limit=20)]
+    assert not any('abc' in c for c in contents)
+    assert memory.blobs is not None
+    held = [a async for a in memory.blobs.list('alpha')] if hasattr(memory.blobs, 'list') else None
+    if held is not None:
+        assert not any(getattr(a, 'filename', '') == 'credentials.json' for a in held)
+
+
+async def test_a_secret_inside_an_ordinary_file_is_found_by_its_bytes(env):
+    _, root, _ = env
+    (root / 'notes.txt').write_text('deploy with API_KEY=' + 'sk_live_' + 'a' * 24 + '\n', encoding='utf-8')
+    (root / 'plain.txt').write_text('nothing here', encoding='utf-8')
+    got = receipts(await runner(env).synchronize())
+    assert got['notes.txt'].status == 'withheld' and got['notes.txt'].code == 'content:secret'
+    assert got['plain.txt'].status == 'added'
+
+
+async def test_including_sensitive_sources_is_an_explicit_choice(env):
+    _, root, _ = env
+    (root / 'credentials.json').write_text('{"token": "abc"}', encoding='utf-8')
+    got = receipts(await runner(env, include_sensitive=True).synchronize())
+    assert got['credentials.json'].status == 'added'
+
+
+async def test_a_tracked_file_that_gains_a_secret_keeps_its_last_clean_revision(env):
+    """The file was fine yesterday and holds a key today. The new bytes
+    are withheld; the episode that exists is left standing and named, so
+    a reader can see both that there is history and that it stopped."""
+    memory, root, _ = env
+    (root / 'notes.txt').write_text('clean on day one\n', encoding='utf-8')
+    first = receipts(await runner(env).synchronize())['notes.txt']
+    assert first.status == 'added' and first.episode_id is not None
+    (root / 'notes.txt').write_text('clean on day one\n' + KEY, encoding='utf-8')
+    second = receipts(await runner(env).synchronize())['notes.txt']
+    assert second.status == 'withheld' and second.code == 'content:private_key'
+    assert second.previous_episode_id == first.episode_id
+    kept = await memory.documents.get_episode('alpha', first.episode_id)
+    assert kept is not None and KEY not in kept.content
