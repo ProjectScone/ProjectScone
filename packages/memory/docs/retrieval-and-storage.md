@@ -68,6 +68,46 @@ with the lane off and for all 20 with it on. A single synthetic set
 shows the mechanism works; whether it helps on real questions is for
 the retrieval benchmarks to show before the default changes.
 
+### What the ledger says about a passage
+
+A passage is evidence for a claim, and the ledger may have retired that
+claim since: replaced it (`superseded_by`), or closed it without a
+replacement. Fusion cannot see this. `demote_restated` reorders passages
+that **lexically** restate one another, and for a replacement that
+differs at the end it is perfect; a replacement that differs
+mid-sentence, or is worded afresh, shares nothing it can see, and the
+retired passage led in every such case measured. So recall reads the
+ledger once more, about the passages it is returning.
+
+For each returned episode it reads the claims that episode stated -- one
+indexed read per episode, proportional to the result and never to the
+ledger -- and asks of each: had it ended by the boundary asked about
+(`as_of`, else now)? A passage with such a claim carries
+`superseded: true`. If the claim's successor was stated by another
+returned episode, the retired passage is placed after that episode's
+passages; the passages involved fill their own positions, and every
+other passage keeps its place. The pairing is by id: a retired claim
+follows the claim that replaced it, never a coexisting value of a
+many-valued predicate, and never a replacement the reader did not
+receive. A passage may replace one claim and be replaced under another,
+and is ordered accordingly; where two passages each replace a claim the
+other made, the reader's order stands for that pair.
+
+The ledger is honoured as written. A claim a person **excluded** is
+suppressed from recall: it neither marks nor moves anything, and an
+excluded successor cannot pull its passage ahead -- though the interval
+it left behind stands, so the claim it replaced is still retired. A
+claim that had not begun by the boundary is not retired; ask about March
+and March's statement leads, unmarked. Nothing is ever dropped, since
+the reader may be asking about the past.
+
+What could not be read is said in `degraded`: a store that cannot read
+facts by episode (`supersession: store cannot read facts by episode; …`),
+and an episode that stated more than the read cap of 2000 claims, of
+which only the first 2000 are seen (`supersession: episode N stated more
+than 2000 facts; …`). `MemoryEngine(demote_superseded=False)` turns the
+rule off, and then neither the mark nor the reordering is applied.
+
 ## A profile: who the space is about
 
 A profile answers "who is this about" without being asked a question:
