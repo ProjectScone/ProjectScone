@@ -386,7 +386,10 @@ def create_app(
 
     if vision_factory is not None:
         from .image_understanding import mount_image_understanding_routes
+        from .video_understanding import mount_video_understanding_routes
 
+        mount_video_understanding_routes(app, engine, space_for, ingest_slot, document_video, vision_factory,
+                                         assert_current_space=assert_current_space)
         mount_image_understanding_routes(app, engine, space_for, vision_factory,
                                          assert_current_space=assert_current_space)
 
@@ -480,8 +483,11 @@ def create_app(
             features["conversations"] = True
         if model_connections_available:
             features["models.manage"] = True
-        if vision_available is not None and vision_available():
+        has_vision = vision_available is not None and vision_available()
+        if has_vision:
             features["images.understand"] = True
+        if has_vision and vision_factory is not None and document_video is not None:
+            features["documents.video.understand"] = True
         # Manual passes must share a server-side guard with scheduled work
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
