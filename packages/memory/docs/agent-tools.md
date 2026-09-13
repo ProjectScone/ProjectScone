@@ -4,6 +4,9 @@
 
 Examples below run from `packages/memory/` unless a section names another working directory.
 
+For host-registered synchronous or asynchronous application functions in native
+agent workflows, see [Registered application tools](agent-application-tools.md).
+
 ## Using it from a framework
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
