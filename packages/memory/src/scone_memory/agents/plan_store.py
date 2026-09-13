@@ -53,7 +53,7 @@ def _explicit(plan: AgentPlan, agents: dict[str, BoundAgent]) -> AgentPlan:
         return AgentTaskPlan(workflow_id=plan.workflow_id, tasks=tuple(
             task.model_copy(update={'model_id': agents[task.task_id].model_id}) for task in plan.tasks))
     return AgentHandoffPlan(workflow_id=plan.workflow_id, root_agent=plan.root_agent,
-        max_handoffs=plan.max_handoffs, agents=tuple(
+        max_handoffs=plan.max_handoffs, answer_requirements=plan.answer_requirements, agents=tuple(
             agent.model_copy(update={'model_id': agents[agent.agent_id].model_id}) for agent in plan.agents))
 
 
