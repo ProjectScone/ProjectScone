@@ -202,10 +202,40 @@ class EvidenceToolLoop:
             if time.monotonic() >= deadline:
                 raise TimeoutError('tool loop deadline exceeded')
 
-        async def record_call(call: ToolCall, origin: Literal['host', 'model']) -> None:
+        async def finish(text: str) -> ToolLoopResult:
+            check_deadline()
+            if not text.strip() or len(text.encode()) > limits.max_reply_bytes:
+                raise RuntimeError('tool reply byte limit or empty reply')
+            if self._answer_requirements is not None and not self._answer_requirements.accepts(text):
+                raise RuntimeError('tool answer format rejected')
+            retained = tuple(prepared)
+
+            async def validate() -> bool:
+                async with asyncio.timeout_at(deadline):
+                    check_deadline()
+                    for evidence in retained:
+                        valid = await asyncio.create_task(evidence.validate())
+                        check_deadline()
+                        if not valid:
+                            return False
+                    return True
+
+            if not await validate():
+                raise RuntimeError('tool evidence changed before publication')
+            evidence_ids = tuple(dict.fromkeys(key for evidence in retained for key in evidence.evidence_ids))
+            return ToolLoopResult(text, model_calls, calls, evidence_ids,
+                                  'retained' if evidence_ids else 'none',
+                                  tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
+                                  tuple(outcomes), validate, deadline=deadline,
+                                  usage=ToolTokenUsage(calls=tuple(usage)))
+
+        async def record_call(call: ToolCall, origin: Literal['host', 'model'], *, skipped: bool = False) -> str | None:
             nonlocal calls, tool_bytes
             reused = False
-            if calls >= limits.max_tool_calls:
+            direct = False
+            if skipped:
+                payload = _denied('direct_return')
+            elif calls >= limits.max_tool_calls:
                 payload = _denied('tool_budget')
             else:
                 calls += 1
@@ -218,6 +248,7 @@ class EvidenceToolLoop:
                         self._tools.invocation_context(deadline),
                         remaining_output_bytes=limits.max_tool_bytes - tool_bytes)
                     check_deadline()
+                    direct = self._custom_tools[call.name].return_direct
                 elif call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
                     payload = _denied('search_for_seed_first')
                 elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
@@ -286,7 +317,7 @@ class EvidenceToolLoop:
             codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                      'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
                      'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window',
-                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required'}
+                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required', 'direct_return'}
             # Model-authored IDs/unknown names can contain source text.
             # Keep them only in the transient provider protocol.
             name = (call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory')
@@ -294,6 +325,10 @@ class EvidenceToolLoop:
             outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                 error=error if isinstance(error, str) and error in codes else None,
                 output_bytes=len(payload.encode()), origin=origin, reused=reused))
+            if direct and packet.get('ok') is True and packet['status'] == 'prepared':
+                result = packet['result']
+                return result if isinstance(result, str) else _json(result)
+            return None
 
         async with asyncio.timeout(limits.timeout_s):
             if self._initial_search:
@@ -342,34 +377,18 @@ class EvidenceToolLoop:
                     raise RuntimeError('invalid tool protocol') from None
                 usage.append(step.usage)
                 if not step.calls:
-                    if not step.content.strip() or len(step.content.encode()) > limits.max_reply_bytes:
-                        raise RuntimeError('tool reply byte limit or empty reply')
-                    if self._answer_requirements is not None and not self._answer_requirements.accepts(step.content):
-                        raise RuntimeError('tool answer format rejected')
-                    retained = tuple(prepared)
-
-                    async def validate() -> bool:
-                        async with asyncio.timeout_at(deadline):
-                            check_deadline()
-                            for evidence in retained:
-                                valid = await asyncio.create_task(evidence.validate())
-                                check_deadline()
-                                if not valid:
-                                    return False
-                            return True
-
-                    if not await validate():
-                        raise RuntimeError('tool evidence changed before publication')
-                    evidence_ids = tuple(dict.fromkeys(key for evidence in prepared for key in evidence.evidence_ids))
-                    return ToolLoopResult(step.content, model_calls, calls, evidence_ids,
-                                          'retained' if evidence_ids else 'none',
-                                          tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
-                                          tuple(outcomes), validate, deadline=deadline,
-                                          usage=ToolTokenUsage(calls=tuple(usage)))
+                    return await finish(step.content)
                 rounds += 1
                 seen.update(ids)
                 transcript.append({'role': 'assistant', 'content': step.content or None, 'tool_calls': [
                     {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': _json(call.arguments)}}
                     for call in step.calls]})
+                direct_result: str | None = None
                 for call in step.calls:
-                    await record_call(call, 'model')
+                    result = await record_call(call, 'model', skipped=direct_result is not None)
+                    if result is not None:
+                        direct_result = result
+                if direct_result is not None:
+                    if len(_json(transcript).encode()) > limits.max_transcript_bytes:
+                        raise RuntimeError('tool transcript byte limit')
+                    return await finish(direct_result)

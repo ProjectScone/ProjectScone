@@ -176,6 +176,7 @@ class AgentTool:
     parameters: Mapping[str, object]
     handler: Callable[[dict[str, object], ToolContext], object] = field(repr=False, compare=False)
     max_output_bytes: int = 16000
+    return_direct: bool = field(default=False, kw_only=True)
     _compiled: dict[str, object] = field(init=False, repr=False, compare=False)
     _parameters_json: str = field(init=False, repr=False, compare=False)
 
@@ -186,7 +187,8 @@ class AgentTool:
             raise ValueError('invalid application tool name or revision')
         if (not isinstance(self.description, str) or not self.description.strip()
                 or len(self.description) > 4000 or len(self.description.encode()) > 4000 or not callable(self.handler)
-                or type(self.max_output_bytes) is not int or not 1 <= self.max_output_bytes <= 64000):
+                or type(self.max_output_bytes) is not int or not 1 <= self.max_output_bytes <= 64000
+                or type(self.return_direct) is not bool):
             raise ValueError('invalid application tool metadata or output budget')
         try:
             parameters = _thaw(self.parameters) if isinstance(self.parameters, MappingProxyType) else self.parameters
@@ -200,11 +202,14 @@ class AgentTool:
 
     def snapshot(self) -> AgentTool:
         return AgentTool(self.name, self.description, self.revision, json.loads(self._parameters_json),
-                         self.handler, self.max_output_bytes)
+                         self.handler, self.max_output_bytes, return_direct=self.return_direct)
 
     def info(self) -> dict[str, object]:
-        return {'name': self.name, 'description': self.description, 'revision': self.revision,
-                'parameters': json.loads(self._parameters_json), 'max_output_bytes': self.max_output_bytes}
+        result: dict[str, object] = {'name': self.name, 'description': self.description, 'revision': self.revision,
+                                   'parameters': json.loads(self._parameters_json), 'max_output_bytes': self.max_output_bytes}
+        if self.return_direct:
+            result['return_direct'] = True
+        return result
 
     def openai(self) -> dict[str, object]:
         return {'type': 'function', 'function': {'name': self.name, 'description': self.description,

@@ -21,7 +21,8 @@ from .test_task_workflow import memory
 @pytest.mark.parametrize('structured', [False, True])
 @pytest.mark.parametrize('exhausted', [False, True])
 @pytest.mark.parametrize('inferred', [False, True])
-async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_result(tmp_path, memory, structured, exhausted, inferred):
+@pytest.mark.parametrize('direct', [False, True])
+async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_result(tmp_path, memory, structured, exhausted, inferred, direct):
     requests, invocations = [], []
     output_schema = {'type': 'object', 'properties': {'doubled': {'type': 'integer'}},
                      'required': ['doubled'], 'additionalProperties': False}
@@ -65,8 +66,8 @@ async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_res
         assert multiplier == 2
         return await execute({'count': count}, context)
 
-    registration = (function_tool(double_count, revision='1', context_parameter='context')
-                    if inferred else tool(execute))
+    registration = (function_tool(double_count, revision='1', context_parameter='context', return_direct=direct)
+                    if inferred else tool(execute, return_direct=direct))
 
     provider = SelfHostedStructuredToolChat if structured else SelfHostedToolChat
     catalog = AgentCatalog(models=[
@@ -100,6 +101,6 @@ async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_res
     try:
         saved = await work.run('r', 'Double three')
         assert saved.results == result.results and saved.reused_steps == ('one',)
-        assert len(invocations) == 1 and len(requests) == 2
+        assert len(invocations) == 1 and len(requests) == (1 if direct else 2)
     finally:
         work.close()

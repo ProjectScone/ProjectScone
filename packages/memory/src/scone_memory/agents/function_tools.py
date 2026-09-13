@@ -172,6 +172,7 @@ def _parameters(signature: inspect.Signature, namespace: Mapping[str, object],
 def function_tool(function: Callable[..., object], *, revision: str,
                   name: str | None = None, description: str | None = None,
                   context_parameter: str | None = None, max_output_bytes: int = 16000,
+                  return_direct: bool = False,
                   annotation_namespace: Mapping[str, object] | None = None) -> AgentTool:
     """Adapt an annotated sync/async function without evaluating annotations.
 
@@ -201,7 +202,8 @@ def function_tool(function: Callable[..., object], *, revision: str,
 
     selected_name = getattr(function, '__name__', '') if name is None else name
     selected_description = (inspect.getdoc(function) or '') if description is None else description
-    return AgentTool(selected_name, selected_description, revision, schema, invoke, max_output_bytes)
+    return AgentTool(selected_name, selected_description, revision, schema, invoke, max_output_bytes,
+                     return_direct=return_direct)
 
 
 __all__ = ['function_tool']
