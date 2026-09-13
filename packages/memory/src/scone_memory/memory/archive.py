@@ -92,6 +92,14 @@ class ImportSummary:
     attachments: int = 0
     attachment_links: int = 0
 
+    def record(self) -> dict[str, object]:
+        """Keep the legacy wire receipt unchanged for archive/1 imports."""
+        result: dict[str, object] = dataclasses.asdict(self)
+        if self.profile == ARCHIVE_PROFILE:
+            result.pop('attachments')
+            result.pop('attachment_links')
+        return result
+
 
 @dataclass(frozen=True)
 class ArchiveRuntime:
