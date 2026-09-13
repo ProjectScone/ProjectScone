@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import json as _json
 from types import TracebackType
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
 
 import requests
 
@@ -244,6 +244,38 @@ class Scone:
         finally:
             response.close()
 
+    def _stream(self, path: str, *, params: Optional[Mapping[str, str]] = None,
+                headers: Optional[Mapping[str, str]] = None) -> "_OpenStream":
+        """Open one streamed GET and hand back its lines, bounded and closable.
+
+        The read timeout on the session is what bounds a server that goes
+        quiet: a stalled stream raises rather than holding the caller.
+        """
+        from ._response import read_lines
+        request_headers = requests.structures.CaseInsensitiveDict(headers or {})
+        request_headers["Accept"] = "text/event-stream"
+        request_headers["Accept-Encoding"] = "identity"
+        request_headers["Cache-Control"] = "no-store"
+        try:
+            response = self.session.request("GET", f"{self.base_url}{path}", params=params,
+                                            headers=request_headers, timeout=self.timeout,
+                                            allow_redirects=False, stream=True)
+        except requests.RequestException as exc:
+            raise SconeError(f"GET {path} failed: {exc}") from exc
+        if response.status_code != 200:
+            try:
+                body = read_response(response, self.max_response_bytes)
+                text = body.decode(response.encoding or "utf-8", errors="replace")
+            finally:
+                response.close()
+            raise SconeError(text.strip() or f"HTTP {response.status_code}", response.status_code, body=text)
+        kind = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if kind != "text/event-stream":
+            response.close()
+            raise SconeError("streamed response is not an event stream", response.status_code)
+        return _OpenStream(response, read_lines(response, line_limit=1024 * 1024,
+                                                total_limit=self.max_response_bytes))
+
     def _request(
         self,
         method: str,
@@ -309,3 +341,17 @@ class Scone:
                 response.status_code, body=error_text(),
             )
         return payload
+
+
+class _OpenStream:
+    """Lines of one streamed response; closing releases the connection."""
+
+    def __init__(self, response: requests.Response, lines: Iterator[bytes]) -> None:
+        self._response = response
+        self._lines = lines
+
+    def __iter__(self) -> Iterator[bytes]:
+        return self._lines
+
+    def close(self) -> None:
+        self._response.close()
