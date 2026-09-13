@@ -45,6 +45,7 @@ from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_L
 from ..retrieval.overview import OverviewResult
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
+from ..core import extracted
 from ..core.validation import (
     entity_key as entity_key,
     many_valued_predicates,
@@ -231,7 +232,9 @@ class MemoryEngine:
         self.reranker = reranker
         #: Predicates configured to hold many values at once; every other
         #: predicate holds one value at a time. Named, never inferred.
-        self.many_valued = many_valued_predicates(many_valued)
+        # What a person configures, plus what the framework extracts and
+        # knows the shape of: a file's imports are many by nature.
+        self.many_valued = many_valued_predicates(many_valued) | extracted.MANY_VALUED
         self.rerank_limit = rerank_limit
         self.rerank_max_bytes = rerank_max_bytes
         self.rerank_timeout = rerank_timeout

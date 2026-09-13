@@ -670,9 +670,14 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     cited to the episode, extracted rather than stated — so the engine and
     the command line cannot come to differ about it."""
     from .code import code_language
+    from .manifests import is_manifest, manifest_claims
 
     said = 0
-    for claim in code_claims(content, path, language=code_language(path), resolve=resolve):
+    # A manifest says what the project depends on; a source file says what
+    # it defines, imports and calls. Both are read the same way from here.
+    claims = (manifest_claims(content, path) if is_manifest(path)
+              else code_claims(content, path, language=code_language(path), resolve=resolve))
+    for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
         await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,

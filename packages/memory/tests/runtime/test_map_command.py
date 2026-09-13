@@ -250,3 +250,36 @@ async def test_the_json_receipt_carries_what_was_withheld_and_why(tree):
         {"path": "app/deploy.py", "reason": "content:private_key"},
     ]
     assert report["read"] == 3
+
+
+async def test_mapping_reads_the_manifests_beside_the_code(tree):
+    """A project's dependencies are claims like a file's imports: quoted
+    from the manifest's line, held by the project's declared name."""
+    (tree / "pyproject.toml").write_text('[project]\nname = "planner"\ndependencies = ["requests>=2.31", "rich"]\n'
+                                         '[dependency-groups]\ntest = ["pytest"]\n', encoding="utf-8")
+    (tree / "app" / "requirements.txt").write_text("numpy==2.0\n", encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(tree), "--graph")
+    held = {(f.subject, f.predicate, f.object) for f in await engine.facts("default")}
+    assert ("pyproject.toml", "defines", "planner") in held
+    assert ("planner", "depends_on", "requests") in held and ("planner", "depends_on", "rich") in held
+    assert ("planner", "develops_with", "pytest") in held
+    assert ("app/requirements.txt", "depends_on", "numpy") in held
+    requests = next(f for f in await engine.facts("default") if f.object == "requests")
+    assert requests.quote == 'dependencies = ["requests>=2.31", "rich"]' and requests.grounded is True
+
+
+async def test_everything_a_file_says_holds_at_once(tree):
+    """A module with three imports imports three modules. Under the
+    one-value-at-a-time rule the ledger kept the last and closed the rest
+    as superseded, and `list_facts(include_closed=True)` hid it."""
+    (tree / "app" / "wide.py").write_text("import os\nimport re\nimport json\n\ndef a():\n    pass\n\ndef b():\n    pass\n",
+                                          encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(tree), "--graph")
+    current = await engine.facts("default")
+    assert sorted(f.object for f in current if f.subject == "app/wide.py" and f.predicate == "imports") == \
+        ["json", "os", "re"]
+    assert sorted(f.object for f in current if f.subject == "app/wide.py" and f.predicate == "defines") == \
+        ["app/wide.py:a", "app/wide.py:b"]
+    assert [f for f in await engine.facts("default", status="closed") if f.subject == "app/wide.py"] == []
