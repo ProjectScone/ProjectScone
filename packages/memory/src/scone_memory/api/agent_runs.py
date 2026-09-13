@@ -66,7 +66,7 @@ def _failure(error: WorkflowError | ValueError) -> JSONResponse:
     status = 503
     if code in {'run_busy', 'busy'}:
         status = 429
-    elif code in {'run_request_conflict', 'plan_revision_conflict', 'plan_configuration_changed',
+    elif code in {'history_changed', 'run_request_conflict', 'plan_revision_conflict', 'plan_configuration_changed',
                   'run_scope_changed', 'outcome_unknown', 'run_cancelled', 'sources_invalid',
                   'not_completed', 'run_not_owned', 'binding_mismatch', 'input_request_conflict',
                   'input_revision_conflict', 'input_response_conflict', 'input_activation_conflict',

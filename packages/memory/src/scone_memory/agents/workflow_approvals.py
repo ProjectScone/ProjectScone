@@ -8,6 +8,7 @@ from .approval_context import ApprovalContext
 from .approval_inspection import inspect_tool_approval
 from .approval_models import ToolApprovalRecord
 from .approval_store import AgentApprovalStore
+from .history_capture import AgentRunHistory, collect_agent
 from .catalog import AgentResult, BoundAgent
 from .turn_journal import TurnJournalPaused
 from .workflow import (JSONValue, StepContext, WorkflowError, WorkflowPaused, WorkflowPauseSnapshot,
@@ -35,17 +36,19 @@ def model_step(step_id: str, version: str, callback: Callable[[StepContext], Awa
 async def invoke_agent(agent: BoundAgent, question: str, *, tools: ScopedMemoryTools, context: StepContext,
                        step_id: str, selection_id: str, store: AgentApprovalStore | None,
                        activation_id: str | None, prior: str | None,
-                       requirements: AnswerRequirements | None) -> AgentResult | WorkflowPaused:
-    if not guarded(agent):
-        return await agent.run(question, tools=tools, context=prior, answer_requirements=requirements)
-    if store is None:
-        raise WorkflowError('approval_store_required')
-    approval = ApprovalContext(store, context, step_id=step_id, selection_id=selection_id, activation_id=activation_id)
-    try:
-        return await agent.run(question, tools=tools, context=prior, answer_requirements=requirements,
-                               checkpoints=context.checkpoints, approval=approval)
-    except TurnJournalPaused as pause:
-        return pause.pause
+                       requirements: AnswerRequirements | None, history: AgentRunHistory | None = None) -> AgentResult | WorkflowPaused:
+    async with collect_agent(history, agent=agent, context=context, tools=tools,
+                             step_id=step_id, selection_id=selection_id) as events:
+        if not guarded(agent):
+            return await agent.run(question, tools=tools, context=prior, answer_requirements=requirements, events=events)
+        if store is None:
+            raise WorkflowError('approval_store_required')
+        approval = ApprovalContext(store, context, step_id=step_id, selection_id=selection_id, activation_id=activation_id)
+        try:
+            return await agent.run(question, tools=tools, context=prior, answer_requirements=requirements,
+                                   checkpoints=context.checkpoints, approval=approval, events=events)
+        except TurnJournalPaused as pause:
+            return pause.pause
 
 
 async def inspect_workflow_approvals(runner: WorkflowRunner, store: AgentApprovalStore | None, *,
