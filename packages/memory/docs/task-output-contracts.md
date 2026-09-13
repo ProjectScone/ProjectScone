@@ -61,6 +61,6 @@ any contract, and `agents.output_schema` before authoring a schema. These HTTP
 capabilities describe mounted plan support and optional validator availability;
 simple text/JSON-object requirements work without the schema dependency.
 
-This implements original per-task output contracts for task and interactive
-DAGs. It does not add handoff-wide schemas, custom output transformation code,
-typed partial streaming, or console editing. Those remain separate capabilities.
+Task and interactive DAGs use per-task contracts. Handoff workflows instead use
+a [workflow-wide final contract](handoff-output-contracts.md). Custom output
+transformation code and typed partial streaming remain separate capabilities.

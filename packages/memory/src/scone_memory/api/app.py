@@ -473,6 +473,7 @@ def create_app(
             from ..agents.task_requirements import output_schema_available
             features["agents.output_requirements"] = True
             features["agents.output_schema"] = output_schema_available()
+            features["agents.handoffs.output_requirements"] = features["agents.output_schema"]
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.usage"] = True
