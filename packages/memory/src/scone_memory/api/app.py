@@ -486,6 +486,7 @@ def create_app(
             features["agents.handoffs.output_requirements"] = features["agents.output_schema"]
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.history"] = True
             features["agents.usage"] = True
             features["agents.inputs"] = True
             features["agents.approvals"] = True
@@ -516,6 +517,8 @@ def create_app(
         from .agent_runs import mount_agent_run_routes
         from .agent_approvals import mount_agent_approval_routes
         mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
+        from .agent_history import mount_agent_history_routes
+        mount_agent_history_routes(app, agent_run_service, space_for, assert_current_space)
         def approval_actor(request: Request) -> str:
             current_space_for(request)
             token = request.headers.get('authorization', '').partition(' ')[2].strip()

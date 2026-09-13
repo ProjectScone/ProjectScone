@@ -77,6 +77,10 @@ async def test_saved_service_approval_reopens_without_reproposing(memory, tmp_pa
         paused = await service.wait('alpha', 'one')
         assert paused.status == 'paused' and not paused.outcome_unknown and not paused.active_local
         assert paused.paused_steps == (('hop-01',) if kind == 'handoff' else ('work',))
+        paused_history = await service.history('alpha', 'one', limit=100)
+        assert paused_history.items[-1].event.kind == 'collection_finished'
+        assert paused_history.items[-1].event.terminal_kind == 'turn_paused'
+        first_collection = paused_history.items[-1].collection_id
         await service.aclose()
         service = open_service()
         records = await service.approvals('alpha', 'one')
@@ -98,6 +102,12 @@ async def test_saved_service_approval_reopens_without_reproposing(memory, tmp_pa
         assert admitted.status.active_local
         complete = await service.wait('alpha', 'one')
         assert complete.status == ('awaiting_input' if kind == 'interactive' else 'completed')
+        resumed_history = await service.history('alpha', 'one', limit=100)
+        last = resumed_history.items[-1]
+        assert last.event.kind == 'collection_finished' and last.event.terminal_kind == 'turn_completed'
+        assert last.collection_id != first_collection and last.activation_id == 'continue'
+        assert any(row.event.kind == 'operation_reused' for row in resumed_history.items
+                   if row.collection_id == last.collection_id)
         assert effects == ([3] if decision == 'approve' else []) and len(model.requests) == 2
         (history,) = await service.approvals('alpha', 'one')
         assert history.revision == 4
