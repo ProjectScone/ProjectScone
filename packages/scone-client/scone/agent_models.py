@@ -249,6 +249,7 @@ class RunStatus:
     max_parallel: int
     outcome_unknown: bool
     error_class: Optional[str]
+    paused_steps: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: object, *, expected_space: str, run_id: Optional[str] = None) -> RunStatus:
@@ -258,7 +259,7 @@ class RunStatus:
         state = text(row.get('status'), 64)
         if state not in {'created', 'deadline', 'outcome_unknown', 'retry_not_allowed', 'registered', 'running',
                          'completed', 'failed', 'cancelled', 'sources_invalid', 'verification_unavailable',
-                         'unavailable', 'awaiting_input'}:
+                         'unavailable', 'awaiting_input', 'paused'}:
             raise invalid('run status')
         inflight = identifier(row['inflight']) if row.get('inflight') is not None else None
         inflights = names(row.get('inflight_steps', [inflight] if inflight else []))
@@ -266,13 +267,17 @@ class RunStatus:
         if (inflights[0] if inflights else None) != inflight or len(inflights) > width:
             raise invalid('inflight tasks')
         completed, waiting = names(row.get('completed_steps')), names(row.get('waiting_steps', []))
-        if set(completed) & set(inflights) or set(waiting) & (set(completed) | set(inflights)):
+        paused = names(row.get('paused_steps', []))
+        unknown = boolean(row.get('outcome_unknown'))
+        if (set(completed) & set(inflights) or set(waiting) & (set(completed) | set(inflights))
+                or set(paused) & set(completed + waiting + inflights)):
             raise invalid('overlapping task states')
+        if (state == 'paused' and (not paused or unknown)) or (state == 'completed' and paused):
+            raise invalid('paused task state')
         return cls(expected_space, identifier(row.get('run_id')), identifier(row.get('workflow_id')),
                    integer(row.get('plan_revision'), 1), timestamp(row.get('created_at')), state,
                    boolean(row.get('active_local')), completed, inflights, waiting, width,
-                   boolean(row.get('outcome_unknown')),
-                   text(row['error_class'], 128) if row.get('error_class') is not None else None)
+                   unknown, text(row['error_class'], 128) if row.get('error_class') is not None else None, paused)
 
     def match(self, request: RunRequest) -> None:
         if (self.space != request.space or self.run_id != request.run_id
@@ -288,12 +293,17 @@ class RunStatus:
                 raise invalid('handoff progress')
             if self.inflight_steps and self.inflight_steps != ids[len(self.completed_steps):len(self.completed_steps) + 1]:
                 raise invalid('handoff inflight')
+            if self.paused_steps and self.paused_steps != ids[len(self.completed_steps):len(self.completed_steps) + 1]:
+                raise invalid('handoff pause')
             return
         ids = tuple(task.task_id for task in plan.tasks)
         human = {task.task_id for task in plan.tasks if isinstance(task, HumanInput)}
-        if (set(self.completed_steps + self.inflight_steps + self.waiting_steps) - set(ids)
-                or set(self.inflight_steps) & human or set(self.waiting_steps) - human):
+        if (set(self.completed_steps + self.inflight_steps + self.waiting_steps + self.paused_steps) - set(ids)
+                or set(self.inflight_steps + self.paused_steps) & human or set(self.waiting_steps) - human):
             raise invalid('task progress')
+        for task in plan.tasks:
+            if task.task_id in self.paused_steps and not set(task.depends_on) <= set(self.completed_steps):
+                raise invalid('paused task dependencies')
 
 
 @dataclass(frozen=True)

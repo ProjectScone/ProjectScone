@@ -9,6 +9,7 @@
 """
 
 from ._wire import Capabilities
+from .agent_approvals import ApprovalCall, ToolApprovalRecord, ToolApprovalActivation, AgentToolContinuation
 from .agent_inputs import InputRecord
 from .task_requirements import TaskAnswerRequirements
 from .agent_usage import ModelTokenUsage, ToolTokenUsage
@@ -36,7 +37,7 @@ __all__ = [
     "VideoDocuments", "VideoCatalogue", "VideoFrame", "VideoRegion", "VideoInterpretation",
     "Capabilities",
     "AgentClient",
-    "InputRecord",
+    "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",
     "TaskAnswerRequirements",
     "ModelTokenUsage", "ToolTokenUsage",
     "AgentResult", "HandoffHop", "HandoffResult", "HumanOutput", "ModelOutput", "TaskResult", "EvidencePacket",
