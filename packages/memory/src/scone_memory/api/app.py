@@ -18,7 +18,7 @@ import json
 
 import re
 
-from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, cast
 from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -457,7 +457,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True,
+            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -900,6 +900,11 @@ def create_app(
                                                "imports beside a code passage, with their line "
                                                "numbers. Never spliced into the passage."),
         structural_context: bool = False,
+        highlight: bool = Query(default=False,
+                                description="Give, beside the items and in the same order, the "
+                                            "code-point spans of every word in each returned "
+                                            "passage that the lexical lane would match to the "
+                                            "question. Computed last, on the text as returned."),
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
@@ -1090,6 +1095,15 @@ def create_app(
             response["items"] = [item_json(one) for one in inside.items]
             response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
             response["code_context"] = staged(inside.record())
+        if highlight:
+            from ..retrieval.highlights import Shown, highlights
+
+            # After everything, code context included, because every stage
+            # before this one may rewrite or drop a passage's text, and a
+            # span is only true of the text it was measured on.
+            returned = cast(list[dict[str, Any]], response["items"])
+            response["highlights"] = [marks.model_dump() for marks in highlights(
+                [Shown(one["chunk_id"], one["text"]) for one in returned], q)]
         return response
 
     @app.get("/v1/facts")
