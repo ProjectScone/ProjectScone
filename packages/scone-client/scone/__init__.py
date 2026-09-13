@@ -10,6 +10,7 @@
 
 from ._wire import Capabilities
 from .agent_inputs import InputRecord
+from .agent_usage import ModelTokenUsage, ToolTokenUsage
 from .agent_results import AgentResult, HandoffHop, HandoffResult, HumanOutput, ModelOutput, TaskResult
 from .agent_evidence import EvidencePacket
 from .agents import AgentClient, PlanPage, RunPage
@@ -35,6 +36,7 @@ __all__ = [
     "Capabilities",
     "AgentClient",
     "InputRecord",
+    "ModelTokenUsage", "ToolTokenUsage",
     "AgentResult", "HandoffHop", "HandoffResult", "HumanOutput", "ModelOutput", "TaskResult", "EvidencePacket",
     "DirectorySyncRuns", "SyncCollection", "SyncSpec", "SyncRecord", "SyncStatus", "SyncPage",
     "SyncSourceOutcome", "SyncScanIssue", "SyncOutcome", "SyncOutcomePage",
