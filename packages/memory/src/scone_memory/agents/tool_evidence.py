@@ -5,6 +5,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import json
+import hashlib
+import hmac
+import re
 import math
 import sqlite3
 import time
@@ -24,13 +27,16 @@ class PreparedToolEvidence:
     evidence_ids: tuple[str, ...]
     _validator: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
 
+    source_digest: str | None = field(default=None, repr=False, compare=False)
+
     async def validate(self) -> bool:
         return await self._validator()
 
 
 async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallScope,
                                 excluded_session: str | None, result: dict[str, object],
-                                timeout_s: float, *, raise_unavailable: bool = False) -> PreparedToolEvidence:
+                                timeout_s: float, *, raise_unavailable: bool = False,
+                                expected_source_digest: str | None = None) -> PreparedToolEvidence:
     # The serialized result is detached from mutable store/provider models.
     payload = _json(result)
     if len(payload.encode()) > 64000:
@@ -139,7 +145,20 @@ async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallS
                 raise TimeoutError('tool evidence unavailable')
             return snapshot
 
+    if expected_source_digest is not None and (not isinstance(expected_source_digest, str)
+            or re.fullmatch(r'[0-9a-f]{64}', expected_source_digest) is None):
+        raise ValueError('invalid evidence receipt')
     original = await bounded_capture()
+    fingerprint = hashlib.sha256(b'scone-tool-evidence-v1\0')
+    header = _json({'payload': payload, 'space': space, 'scope': scope.kwargs(),
+                   'excluded_session': excluded_session, 'revision': revision})
+    for record in (header, *original):
+        encoded = record.encode()
+        fingerprint.update(len(encoded).to_bytes(8, 'big'))
+        fingerprint.update(encoded)
+    digest = fingerprint.hexdigest()
+    if expected_source_digest is not None and not hmac.compare_digest(digest, expected_source_digest):
+        raise ValueError('tool evidence changed')
 
     async def validate() -> bool:
         try:
@@ -153,4 +172,4 @@ async def prepare_tool_evidence(memory: MemoryEngine, space: str, scope: RecallS
         except Exception:
             return False
 
-    return PreparedToolEvidence(payload, ids, validate)
+    return PreparedToolEvidence(payload, ids, validate, source_digest=digest)
