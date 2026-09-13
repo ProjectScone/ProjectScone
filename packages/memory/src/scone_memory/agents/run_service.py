@@ -199,6 +199,22 @@ class AgentRunService:
             exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel,
             approval_store=self._approvals, approval_activation=approval_activation, history=history, text=self._text, read_only=read_only)
 
+    @property
+    def public_text(self) -> bool:
+        """Whether this host asked for provisional public text windows."""
+        return self._text is not None
+
+    def step_known(self, space: str, run_id: str, step_id: str) -> bool:
+        """Whether the run's plan has a step by this name: a task, an input
+        task, or a handoff hop. Read from the saved request; nothing runs."""
+        request = self._runs.get(space, run_id)
+        if request is None:
+            return False
+        plan = request.plan.checked_plan(self._catalog)
+        if isinstance(plan, AgentHandoffPlan):
+            return step_id in tuple('hop-' + format(index, '02d') for index in range(1, plan.max_handoffs + 2))
+        return any(task.task_id == step_id for task in plan.tasks)
+
     def text_window(self, space: str, run_id: str, step_id: str) -> TextWindow | None:
         """The window onto a step's public text while this process runs
         it, or None: no such run or step here, the host did not ask for
