@@ -21,6 +21,7 @@ from .evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, Too
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 
 if TYPE_CHECKING:
+    from .approval_context import ApprovalContext
     from ..integrations.scoped_tools import ScopedMemoryTools
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9._:-]+$')]
@@ -125,7 +126,8 @@ class BoundAgent:
 
     async def run(self, question: str, *, tools: ScopedMemoryTools, context: str | None = None,
                   answer_requirements: AnswerRequirements | None = None,
-                  checkpoints: StepCheckpoints | None = None, max_new_operations: int | None = None) -> AgentResult:
+                  checkpoints: StepCheckpoints | None = None, max_new_operations: int | None = None,
+                  approval: ApprovalContext | None = None) -> AgentResult:
         if not isinstance(question, str) or not question.strip() or len(question.encode('utf-8')) > 8000:
             raise ValueError('agent question must contain 1..8000 UTF-8 bytes')
         if context is not None and (not isinstance(context, str) or len(context.encode('utf-8')) > 32000):
@@ -138,9 +140,17 @@ class BoundAgent:
         messages.append({'role': 'user', 'content': question})
         if checkpoints is None and max_new_operations is not None:
             raise ValueError('operation scheduling requires step checkpoints')
+        if any(tool.requires_approval for tool in self.tools) and (approval is None or checkpoints is None):
+            raise ValueError('guarded tools require approval context and checkpoints')
+        if approval is not None:
+            from .approval_context import ApprovalContext
+            if not isinstance(approval, ApprovalContext):
+                raise ValueError('invalid approval context')
+        bound_approval = approval.bind(self, tools, checkpoints) if approval is not None else None
+        approval_binding = {'approval': approval.journal_binding()} if approval is not None else {}
         memory_binding = json.dumps(tools.journal_binding(), sort_keys=True, allow_nan=False) if checkpoints is not None else None
         journal = None if checkpoints is None else ToolTurnJournal(checkpoints,
-            binding=cast(JSONValue, {'agent': self.fingerprint, 'messages': messages,
+            binding=cast(JSONValue, {**approval_binding, 'agent': self.fingerprint, 'messages': messages,
                 'memory': tools.journal_binding(),
                 'requirements': requirements.model_dump(mode='json') if requirements else None}),
             timeout_s=self.definition.limits.timeout_s, max_new_operations=max_new_operations)
@@ -151,7 +161,7 @@ class BoundAgent:
             raise ValueError('agent factory did not return a tool model')
         result = await EvidenceToolLoop(model, tools, limits=self.definition.limits,
             initial_search=self.definition.initial_search, answer_requirements=requirements,
-            custom_tools=self.tools, journal=journal).run(messages)
+            custom_tools=self.tools, journal=journal, approval=bound_approval).run(messages)
         return AgentResult(self.definition.agent_id, self.model_id, self.fingerprint, result)
 
 

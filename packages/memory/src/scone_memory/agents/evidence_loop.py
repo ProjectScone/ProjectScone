@@ -10,7 +10,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +23,10 @@ from .custom_tools import AgentTool, snapshot_tools
 from .turn_journal import ToolTurnJournal, TurnJournalError, TurnJournalPaused
 from .workflow import JSONValue
 from .usage import ModelTokenUsage, ToolTokenUsage
+
+
+if TYPE_CHECKING:
+    from .approval_context import BoundApproval
 
 
 class ToolCall(BaseModel):
@@ -167,7 +171,8 @@ class EvidenceToolLoop:
     def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
                  initial_search: bool = False, answer_requirements: AnswerRequirements | None = None,
                  compact_search_results: bool = False,
-                 custom_tools: Sequence[AgentTool] = (), journal: ToolTurnJournal | None = None) -> None:
+                 custom_tools: Sequence[AgentTool] = (), journal: ToolTurnJournal | None = None,
+                 approval: BoundApproval | None = None) -> None:
         if journal is not None and not isinstance(journal, ToolTurnJournal):
             raise ValueError('invalid turn journal')
         self._journal = journal
@@ -176,6 +181,14 @@ class EvidenceToolLoop:
         if type(compact_search_results) is not bool:
             raise ValueError('compact_search_results must be a boolean')
         self._custom_tools = {tool.name: tool for tool in snapshot_tools(custom_tools)}
+        if any(tool.requires_approval for tool in self._custom_tools.values()) and (approval is None or journal is None):
+            raise ValueError('guarded tools require bound approval and journal')
+        if approval is not None:
+            from .approval_context import BoundApproval
+            if not isinstance(approval, BoundApproval) or journal is None:
+                raise ValueError('invalid bound approval')
+            approval.check(tools, tuple(self._custom_tools.values()))
+        self._approval = approval
         self._initial_search = initial_search
         self._compact_search_results = compact_search_results
         self._model, self._tools = model, tools
@@ -227,6 +240,8 @@ class EvidenceToolLoop:
         deadline = time.monotonic() + duration
 
         def check_deadline() -> None:
+            if self._approval is not None:
+                self._approval.check(self._tools, tuple(self._custom_tools.values()))
             if memory_binding is not None and _json(self._tools.journal_binding()) != memory_binding:
                 raise TurnJournalError('binding_mismatch')
             active = asyncio.current_task()
@@ -280,14 +295,42 @@ class EvidenceToolLoop:
                     check_deadline()
                     if len(_json(transcript).encode()) > limits.max_transcript_bytes:
                         raise RuntimeError('tool transcript byte limit')
-                    async def invoke_custom() -> JSONValue:
+                    registered = self._custom_tools[call.name]
+                    async def validate_custom() -> None:
                         check_deadline()
                         if journal is not None:
                             for evidence in prepared:
                                 if not await asyncio.create_task(evidence.validate()):
                                     raise RuntimeError('tool evidence changed before application dispatch')
                                 check_deadline()
-                        return await self._custom_tools[call.name].invoke(call.arguments,
+                    approval_record = None
+                    if registered.requires_approval:
+                        assert self._approval is not None and journal is not None
+                        identity, replay = journal.operation_identity('custom', cast(JSONValue, call.model_dump(mode='json')))
+                        arguments_json = registered.prepare_arguments(call.arguments)
+                        check_deadline()
+                        if not replay and arguments_json is not None:
+                            await validate_custom()
+                            journal.operation_identity('custom', cast(JSONValue, call.model_dump(mode='json')))
+                            approval_record = self._approval.request(registered, arguments_json, identity)
+                            if (approval_record.activation_id is None
+                                    or approval_record.activation_id != self._approval.context.activation_id):
+                                boundary = journal.pause()
+                                from .approval_context import ToolApprovalPaused
+                                raise ToolApprovalPaused(boundary.checkpoint, approval_record.request_id)
+                    async def invoke_custom() -> JSONValue:
+                        await validate_custom()
+                        if journal is not None:
+                            journal.check_current()
+                        arguments = call.arguments
+                        if approval_record is not None:
+                            assert self._approval is not None
+                            check_deadline()
+                            admitted = self._approval.claim(approval_record)
+                            if admitted.decision == 'deny':
+                                return _denied('approval_denied')
+                            arguments = admitted.call.arguments()
+                        return await registered.invoke(arguments,
                             self._tools.invocation_context(deadline),
                             remaining_output_bytes=limits.max_tool_bytes - tool_bytes)
                     if journal is None:
@@ -383,7 +426,7 @@ class EvidenceToolLoop:
             codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                      'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
                      'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window',
-                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required', 'direct_return'}
+                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required', 'direct_return', 'approval_denied'}
             # Model-authored IDs/unknown names can contain source text.
             # Keep them only in the transient provider protocol.
             name = (call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory')
