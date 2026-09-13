@@ -132,8 +132,9 @@ class AgentRunStore:
                 if _invocation_identity(prior) != _invocation_identity(saved):
                     raise RunConflict()
                 return prior
-            if db.execute('SELECT COUNT(*) FROM agent_runs WHERE token NOT LIKE ? AND token NOT LIKE ?',
-                          ('input:%', 'activation:%')).fetchone()[0] >= self._maximum:
+            if db.execute('SELECT COUNT(*) FROM agent_runs WHERE token NOT LIKE ? AND token NOT LIKE ? '
+                          'AND token NOT LIKE ? AND token NOT LIKE ?',
+                          ('input:%', 'activation:%', 'tool-approval:%', 'tool-activation:%')).fetchone()[0] >= self._maximum:
                 raise WorkflowError('run_store_limit')
             db.execute('INSERT INTO agent_runs VALUES (?, ?)', (token, payload))
         return saved
