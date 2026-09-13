@@ -95,16 +95,31 @@ async def test_native_tools_publish_only_final_and_preserve_scoped_receipt_histo
 
 async def test_stale_tool_source_prevents_callback_and_assistant_capture(engine):
     episode = await engine.remember('alpha', 'Juniper uses Polaris.')
+    packets = []
     async def delete_then_answer():
+        packets.append(json.loads(model.requests[-1][-1]['content']))
         await engine.documents.delete_episode('alpha', episode.episode_id)
         return ToolStep(content='Must never be published.')
     model = Script(search(), delete_then_answer)
     conversation = TextConversation(engine, 'alpha', 'stale-tools', unused_factory, tool_model_factory=lambda: model)
     observed = []
     async def observe(text): observed.append(text)
-    with pytest.raises(RuntimeError, match='evidence changed'):
-        await conversation.reply('Juniper?', on_text=observe)
-    assert observed == [] and conversation.closed
+    try:
+        with pytest.raises(RuntimeError, match='evidence changed'):
+            await conversation.reply('Juniper?', on_text=observe)
+    finally:
+        closed_after_reply = conversation.closed
+        try:
+            packet = packets[-1] if packets else {}
+            source_ids = [item.get('episode_id') for item in packet.get('items', [])]
+            assert packet.get('status') == 'prepared' and episode.episode_id in source_ids, (
+                'stale-source setup was not retained: '
+                + json.dumps({'status': packet.get('status'), 'error': packet.get('error'),
+                              'expected_episode': episode.episode_id, 'observed_episodes': source_ids}, sort_keys=True)
+            )
+        finally:
+            await conversation.close()
+    assert observed == [] and closed_after_reply
     assert [row.metadata['role'] for row in await engine.episodes('alpha', {'session_id': 'stale-tools'})] == ['user']
 
 
