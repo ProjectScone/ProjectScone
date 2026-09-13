@@ -134,5 +134,42 @@ collection (or existing media-transcription configuration). An explicit
 that collection's parser binding. Directory sync retains whole-document results;
 per-frame interruption receipts are provided by document jobs, not directory sync.
 
-Checked frame-serving routes, generated vision interpretations and video citation
-UI remain subsequent integration work.
+## Verified frame viewing
+
+A configured video host serves retained frame pixels at:
+
+```text
+GET /v1/episodes/{episode_id}/document/video/frames/{ordinal}
+Authorization: Bearer <space-scoped-read-key>
+```
+
+Obtain the ordinal from `GET /v1/episodes/{episode_id}/document` under
+`video.frames`. It is the decoded frame ordinal, not the sampling-list index or
+an approximate playback time. Only retained frames can be requested. The response
+is `image/png` with `Cache-Control: no-store` and `nosniff`; the
+`X-Scone-Video-Frame-SHA256`, `X-Scone-Video-Frame-Ordinal`, `X-Scone-Video-PTS` and
+`X-Scone-Video-Time-Base` headers bind the returned pixels to the stored evidence.
+The timestamp is an integer in that rational time base, including the original
+stream offset. It is not a floating-point time guessed from nominal frame rate.
+
+The decoder reproduces the retained sampling plan and checks the source hash,
+decoder revision, complete frame inventory, dimensions and PNG bytes. Reading a
+frame performs no OCR or generated vision inference. Current OCR language or
+model choices do not reinterpret stored observations. A changed decoder or
+non-reproducible frame refuses instead of serving different pixels under an old
+citation. The library equivalent is `VideoFrameDecoder.read_frame(data,
+filename, evidence, ordinal, limits=...)`; `VideoDocumentParser.read_frame`
+delegates to the same verification.
+
+Frame reads require current source access. After decoding, the host rechecks
+original and manifest bytes, current links, the raw source row and authorization
+before sending the response. Observed forgetting, unlinking or access changes
+prevent frame delivery. These are separate storage observations, not a distributed
+transaction; a change after its final observation is not guaranteed to be caught. Requests share bounded host ingestion capacity and return
+429 when it is full; cancelling a read releases its slot.
+
+This implementation redecodes the sampled inventory for each request and does
+not retain a frame cache. The work remains bounded by the recorded sampling
+policy and the host document limits. Entirely visual documents with no recognized
+text, generated video interpretations and video citation UI remain subsequent
+integration work.
