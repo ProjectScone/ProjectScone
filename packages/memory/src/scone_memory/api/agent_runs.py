@@ -73,10 +73,13 @@ def _failure(error: WorkflowError | ValueError) -> JSONResponse:
                   'input_not_answered', 'input_not_ready', 'interactive_plan_required',
                   'approval_not_ready', 'approval_request_conflict', 'approval_decision_conflict',
                   'approval_activation_conflict', 'approval_not_decided', 'approval_not_activated',
-                  'approval_selection_mismatch'}:
+                  'approval_selection_mismatch', 'text_cursor_ahead'}:
         status = 409
-    elif code in {'agent_plan_not_found', 'space_deleted', 'run_not_found', 'input_not_found', 'input_task_not_found', 'approval_not_found'}:
+    elif code in {'agent_plan_not_found', 'space_deleted', 'run_not_found', 'input_not_found', 'input_task_not_found', 'approval_not_found',
+                  'step_not_found'}:
         status = 404
+    elif code == 'public_text_not_configured':
+        status = 501
     elif code == 'run_request_limit':
         status = 413
     elif code.startswith('invalid_') or code == 'run_store_limit':

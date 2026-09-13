@@ -5,6 +5,8 @@ adapters continue to treat tool-shaped prose as text, never executable calls.
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 import json
 import re
 from dataclasses import dataclass
@@ -317,7 +319,11 @@ class SelfHostedStructuredToolChat(SelfHostedToolChat):
     usefulness or answer correctness.
     """
 
-    async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
+    async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]], *,
+                       on_public_text: Callable[[str], Awaitable[None]] | None = None) -> ToolStep:
+        """A structured turn is a JSON action decision, not public text: the
+        sink, when one is handed over, receives nothing here, and the loop
+        delivers the accepted answer whole once it is known."""
         return await self._complete_turn(messages, tools, None)
 
     async def complete_with_requirements(self, messages: list[dict[str, object]],

@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Literal, cast
 
 from ..agents.evidence_loop import ToolCall, ToolStep
@@ -86,6 +86,106 @@ def _step(raw: bytes, enabled: bool) -> ToolStep:
     return ToolStep(content=content or '', calls=tuple(parsed))
 
 
+class _StreamedReply:
+    """The reply a chat-completions stream is assembling, chunk by chunk.
+
+    Only content is public: it goes to the sink as it arrives. Tool-call
+    arguments accumulate by index and are handed to the ordinary parser
+    once the stream finishes, so acceptance is decided exactly as for a
+    nonstreaming reply. A delta after the finish, more than one choice, a
+    line that is not a chunk, or a stream that ends without a finish is a
+    ValueError.
+    """
+
+    def __init__(self) -> None:
+        self.content = ''
+        self.refusal = ''
+        self.finish: str | None = None
+        self.calls: dict[int, dict[str, object]] = {}
+        self.usage: ModelTokenUsage | None = None
+        self.saw_stream = False
+        self.done = False
+        self._other = bytearray()
+
+    async def take(self, line: str, sink: Callable[[str], Awaitable[None]]) -> None:
+        if not line.startswith('data:'):
+            if line and not line.startswith(':'):
+                self._other.extend((line + '\n').encode())
+            return
+        payload = line[5:].strip()
+        if self.done:
+            raise ValueError('chunk after done')
+        if payload == '[DONE]':
+            self.done = True
+            return
+        self.saw_stream = True
+        chunk = _mapping(_decode(payload))
+        if 'usage' in chunk and chunk['usage'] is not None:
+            self.usage = ModelTokenUsage.from_provider(chunk['usage'])
+        choices = chunk.get('choices')
+        if choices is None or (isinstance(choices, list) and not choices):
+            return
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ValueError('invalid choices')
+        choice = _mapping(choices[0])
+        delta = _mapping(choice.get('delta')) if choice.get('delta') is not None else {}
+        content, calls = delta.get('content'), delta.get('tool_calls')
+        if content is not None and not isinstance(content, str):
+            raise ValueError('invalid text')
+        if self.finish is not None and (content or calls):
+            raise ValueError('delta after finish')
+        refusal = delta.get('refusal')
+        if isinstance(refusal, str):
+            self.refusal += refusal
+        if content:
+            self.content += content
+            await sink(content)
+        if calls is not None:
+            if not isinstance(calls, list) or len(calls) > 8:
+                raise ValueError('invalid calls')
+            for raw_call in calls:
+                call = _mapping(raw_call)
+                index = call.get('index')
+                if type(index) is not int or not 0 <= index < 8:
+                    raise ValueError('invalid call index')
+                held = self.calls.setdefault(index, {'id': None, 'type': None, 'name': None, 'arguments': ''})
+                for name in ('id', 'type'):
+                    if call.get(name) is not None:
+                        held[name] = call[name]
+                function = call.get('function')
+                if function is not None:
+                    parts = _mapping(function)
+                    if parts.get('name') is not None:
+                        held['name'] = parts['name']
+                    arguments = parts.get('arguments')
+                    if arguments is not None:
+                        if not isinstance(arguments, str):
+                            raise ValueError('invalid call')
+                        held['arguments'] = str(held['arguments']) + arguments
+        reason = choice.get('finish_reason')
+        if reason is not None:
+            if not isinstance(reason, str) or self.finish is not None:
+                raise ValueError('invalid finish')
+            self.finish = reason
+
+    def reply(self) -> bytes:
+        """The equivalent nonstreaming body, for the parser that owns
+        acceptance; or the body as sent, when the server never streamed."""
+        if not self.saw_stream:
+            return bytes(self._other)
+        # A stream that never finished carries no finish reason, and the
+        # parser refuses that exactly as it refuses a nonstreaming reply
+        # without one; no second guard is needed here.
+        message: dict[str, object] = {'role': 'assistant', 'content': self.content or None}
+        if self.refusal:
+            message['refusal'] = self.refusal
+        if self.calls:
+            message['tool_calls'] = [{'id': held['id'], 'type': held['type'] or 'function',
+                                      'function': {'name': held['name'], 'arguments': held['arguments']}}
+                                     for _, held in sorted(self.calls.items())]
+        return json.dumps({'choices': [{'finish_reason': self.finish, 'message': message}]}).encode()
+
+
 class SelfHostedToolChat:
     """One nonstreaming native tool turn, with bounded response bytes.
 
@@ -116,19 +216,29 @@ class SelfHostedToolChat:
         self._max_tokens, self._transport = max_tokens, transport
         self._think = think
 
-    async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ToolStep:
+    async def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]], *,
+                       on_public_text: Callable[[str], Awaitable[None]] | None = None) -> ToolStep:
+        """One tool turn. With ``on_public_text``, the turn is requested as a
+        stream and every content delta is handed to the sink as it arrives;
+        the assembled reply then goes through the same parser as a
+        nonstreaming one, so what streamed and what is accepted are one
+        reply. Tool-call arguments accumulate silently and reasoning fields
+        are never read. A sink that raises fails the turn."""
         body: dict[str, object] = {'model': self._model, 'messages': messages, 'stream': False,
                                   'temperature': 0, 'max_tokens': self._max_tokens,
                                   'tool_choice': 'auto' if tools else 'none'}
         if tools:
             body['tools'] = tools
-        return await self._request(body, lambda raw: _step(raw, bool(tools)))
+        return await self._request(body, lambda raw: _step(raw, bool(tools)), on_public_text=on_public_text)
 
     async def _request(self, body: dict[str, object], parse: Callable[[bytes], ToolStep], *,
-                       protocol: Literal['native', 'structured_action', 'structured_answer'] = 'native') -> ToolStep:
+                       protocol: Literal['native', 'structured_action', 'structured_answer'] = 'native',
+                       on_public_text: Callable[[str], Awaitable[None]] | None = None) -> ToolStep:
         import httpx
 
         body = {**body, **_thinking_options(self._think)}
+        if on_public_text is not None:
+            body = {**body, 'stream': True, 'stream_options': {'include_usage': True}}
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1100000:
             raise ValueError('tool model request byte limit')
@@ -149,14 +259,28 @@ class SelfHostedToolChat:
                     diagnostics.headers_ms = (time.monotonic() - started) * 1000
                     response.raise_for_status()
                     raw = bytearray()
-                    async for part in response.aiter_bytes():
-                        diagnostics.response_bytes += len(part)
-                        if len(raw) + len(part) > self._max_bytes:
-                            diagnostics.failure_kind = 'response_bytes'
-                            raise ValueError('tool response byte limit')
-                        raw.extend(part)
+                    streamed: _StreamedReply | None = None
+                    if on_public_text is None:
+                        async for part in response.aiter_bytes():
+                            diagnostics.response_bytes += len(part)
+                            if len(raw) + len(part) > self._max_bytes:
+                                diagnostics.failure_kind = 'response_bytes'
+                                raise ValueError('tool response byte limit')
+                            raw.extend(part)
+                    else:
+                        streamed = _StreamedReply()
+                        async for line in response.aiter_lines():
+                            diagnostics.response_bytes += len(line.encode()) + 1
+                            if diagnostics.response_bytes > self._max_bytes:
+                                diagnostics.failure_kind = 'response_bytes'
+                                raise ValueError('tool response byte limit')
+                            try:
+                                await streamed.take(line, on_public_text)
+                            except (ValueError, TypeError, RecursionError):
+                                diagnostics.failure_kind = 'invalid_response'
+                                raise
                     diagnostics.phase = 'parse'
-                    response_body = bytes(raw)
+                    response_body = bytes(raw) if streamed is None else streamed.reply()
                     usage = ModelTokenUsage()
                     try:
                         metadata = _decode(response_body)
@@ -167,6 +291,12 @@ class SelfHostedToolChat:
                         if isinstance(metadata, dict):
                             usage = ModelTokenUsage.from_provider(metadata.get('usage'))
                     result = parse(response_body)
+                    if streamed is not None and streamed.usage is not None:
+                        usage = streamed.usage
+                    if streamed is not None and on_public_text is not None and not streamed.saw_stream and result.content:
+                        # A server that ignored `stream` answered with one
+                        # message; the reader still gets it, as one delta.
+                        await on_public_text(result.content)
                     result = result.model_copy(update={'usage': usage})
                     diagnostics.phase = 'cleanup'
             return result

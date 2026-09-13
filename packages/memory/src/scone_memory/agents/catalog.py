@@ -20,6 +20,7 @@ from .progress import AgentEventStream, ProgressEmitter
 from .workflow import JSONValue, StepCheckpoints
 from .custom_tools import AgentTool, snapshot_tools
 from .evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
+from .public_text import PublicText
 from .model_lifecycle import owned_model
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 
@@ -130,13 +131,15 @@ class BoundAgent:
     async def run(self, question: str, *, tools: ScopedMemoryTools, context: str | None = None,
                   answer_requirements: AnswerRequirements | None = None,
                   checkpoints: StepCheckpoints | None = None, max_new_operations: int | None = None,
-                  approval: ApprovalContext | None = None, events: AgentEventStream | None = None) -> AgentResult:
+                  approval: ApprovalContext | None = None, events: AgentEventStream | None = None,
+                  public_text: PublicText | None = None) -> AgentResult:
         if events is not None and not isinstance(events, AgentEventStream):
             raise ValueError('invalid agent event stream')
         progress = events._begin(self.definition.agent_id, self.model_id, self.fingerprint) if events is not None else None
         try:
             result = await self._run(question, tools=tools, context=context, answer_requirements=answer_requirements,
-                checkpoints=checkpoints, max_new_operations=max_new_operations, approval=approval, progress=progress)
+                checkpoints=checkpoints, max_new_operations=max_new_operations, approval=approval, progress=progress,
+                public_text=public_text)
         except TurnJournalPaused:
             if progress is not None:
                 progress.finish('turn_paused')
@@ -156,7 +159,7 @@ class BoundAgent:
     async def _run(self, question: str, *, tools: ScopedMemoryTools, context: str | None,
                    answer_requirements: AnswerRequirements | None, checkpoints: StepCheckpoints | None,
                    max_new_operations: int | None, approval: ApprovalContext | None,
-                   progress: ProgressEmitter | None) -> AgentResult:
+                   progress: ProgressEmitter | None, public_text: PublicText | None = None) -> AgentResult:
         if not isinstance(question, str) or not question.strip() or len(question.encode('utf-8')) > 8000:
             raise ValueError('agent question must contain 1..8000 UTF-8 bytes')
         if context is not None and (not isinstance(context, str) or len(context.encode('utf-8')) > 32000):
@@ -191,7 +194,8 @@ class BoundAgent:
                 raise ValueError('agent factory did not return a tool model')
             result = await EvidenceToolLoop(model, tools, limits=self.definition.limits,
                 initial_search=self.definition.initial_search, answer_requirements=requirements,
-                custom_tools=self.tools, journal=journal, approval=bound_approval, progress=progress).run(messages)
+                custom_tools=self.tools, journal=journal, approval=bound_approval, progress=progress,
+                public_text=public_text).run(messages)
         if closed and not await result.validate():
             raise RuntimeError('agent evidence changed during model cleanup')
         return AgentResult(self.definition.agent_id, self.model_id, self.fingerprint, result)

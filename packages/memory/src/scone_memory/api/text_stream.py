@@ -12,7 +12,7 @@ MAX_CHUNKS = 256
 
 class TextWindow:
     def __init__(self):
-        self._chunks: deque[tuple[int, str, int]] = deque()
+        self._chunks: deque[tuple[int, str | None, int]] = deque()
         self._bytes = 0
         self.last_sequence = 0
         self.closed = False
@@ -43,14 +43,29 @@ class TextWindow:
             self._bytes -= self._chunks.popleft()[2]
         self.changed.set()
 
+    def withdraw(self) -> None:
+        """What was delivered so far was not the answer. Recorded as a
+        chunk with no text, in sequence, so a reader that already showed
+        the text is told to clear it rather than keep it."""
+        if self.closed:
+            raise RuntimeError("text observation is closed")
+        if self.last_sequence == 2**63 - 1:
+            self.failed = True
+            self.finish()
+            raise ValueError("public text exceeds the stream limit")
+        self.last_sequence += 1
+        self._chunks.append((self.last_sequence, None, 0))
+        self.changed.set()
+
     def finish(self) -> None:
         self.closed = True
         self._chunks.clear()
         self._bytes = 0
         self.changed.set()
 
-    def next_after(self, cursor: int) -> tuple[int | None, tuple[int, str] | None]:
-        """A missing prefix, next whole chunk, or no available text."""
+    def next_after(self, cursor: int) -> tuple[int | None, tuple[int, str | None] | None]:
+        """A missing prefix, next whole chunk (text, or None for a
+        withdrawal), or no available text."""
         if type(cursor) is not int or not 0 <= cursor <= self.last_sequence:
             raise ValueError("invalid stream cursor")
         if self.closed or not self._chunks:
