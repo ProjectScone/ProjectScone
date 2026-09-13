@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .agent_history import HistoryPage, history_cursor
+from .agent_history import HistoryStream, HistoryPage, history_cursor
 from ._wire import ResourceClient, address, boolean, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_approvals import AgentToolContinuation, ApprovalCall, ToolApprovalActivation, ToolApprovalRecord
 from .agent_inputs import InputRecord
@@ -101,6 +101,23 @@ class AgentClient(ResourceClient):
         request = self.request(run_id)
         return HistoryPage.from_json(self._client._request('GET', path, params=params),
                                      request=request, after=after, limit=limit)
+
+    def stream_history(self, run_id: str, *, limit: int = 50, after: Optional[str] = None) -> HistoryStream:
+        """Read verified metadata as it is published; resume with a cursor.
+
+        Never resumes work. Use as a context manager: the connection is
+        released whether the stream ended, was refused, or you stopped early.
+        """
+        path = '/v1/agent-runs/' + address(run_id) + '/history/stream'
+        params = {'limit': str(integer(limit, 1, 100))}
+        headers: dict[str, str] = {}
+        if after is not None:
+            params['after'] = history_cursor(after)
+            headers['Last-Event-ID'] = params['after']
+        self._check('agents.runs').require('agents.history')
+        request = self.request(run_id)
+        return HistoryStream(self._client._stream(path, params=params, headers=headers),
+                             request=request, after=after, limit=limit)
 
     def runs(self, *, limit: int = 20, after: Optional[str] = None) -> RunPage:
         params = {'limit': str(integer(limit, 1, 100))}

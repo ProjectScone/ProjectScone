@@ -11,8 +11,9 @@ run identifiers in row keys are HMAC-derived.
 `AgentRunService` automatically collects metadata for saved task, handoff and
 interactive workflows, including parallel tasks and approval resumptions. Native
 replay checks current space, scope, catalog bindings and an optional host admission
-guard. Authenticated HTTP replay is available; standalone SDK replay is also available. Live delivery and a Console timeline
-remain follow-up work.
+guard. Authenticated HTTP replay, standalone SDK replay and SSE live delivery
+(host route and SDK stream) are available. A Console timeline and provider
+answer-token streaming remain follow-up work.
 The store itself trusts the host; neither storage nor native metadata replay
 revalidates answers or grants recipient authorization. The HTTP delivery path
 adds current recipient and committed/paused-source verification, described below.
@@ -213,9 +214,10 @@ not answer-token streaming, and cursor replay does not simulate one.
 
 ## Remaining delivery work
 
-The standalone SDK exposes immutable typed `agents.history()` pages and cursor
-reconnect, with native process-restart tests, and the native host now delivers
-live over SSE as described above. Still required: SDK streaming with
-context-managed cleanup and reconnect (the SDK replays pages only), Console
-rendering, and genuine provider public-text streaming. Neither cursor replay nor
+The standalone SDK exposes immutable typed `agents.history()` pages, cursor
+reconnect and `agents.stream_history()`, a context-managed reader of the SSE
+route above that yields the same verified pages, keeps the last cursor for a
+resume after a disconnect or server restart, and closes the connection when the
+block exits. Native process-restart tests cover both. Still required: Console
+rendering and genuine provider public-text streaming. Neither cursor replay nor
 metadata delivery substitutes for those or simulates token streaming.
