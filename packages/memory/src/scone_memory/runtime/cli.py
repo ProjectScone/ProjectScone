@@ -871,10 +871,11 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
               f"{report.errors} error(s)", file=out)
         for k in report.ks:
             print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%"
-                  f"   P@{k} {report.precision.get(k, 0.0) * 100:5.1f}%   nDCG@{k} {report.ndcg.get(k, 0.0) * 100:5.1f}%",
+                  f"   P@{k} {report.precision.get(k, 0.0) * 100:5.1f}%   nDCG@{k} {report.ndcg.get(k, 0.0) * 100:5.1f}%"
+                  f"   hit@{k} {report.hit_rate.get(k, 0.0) * 100:5.1f}%",
                   file=out)
         # Rank, which recall cannot see: whether the answer led or trailed.
-        print(f"  MRR {report.mrr:.4f}", file=out)
+        print(f"  MRR {report.mrr:.4f}   MAP {report.mean_average_precision:.4f}", file=out)
         print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
               f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
         for qt, row in report.by_type.items():

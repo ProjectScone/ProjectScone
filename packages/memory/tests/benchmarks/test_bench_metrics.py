@@ -13,6 +13,8 @@ it was being compared against.
 
 from __future__ import annotations
 
+import pytest
+
 from scone_memory.bench.metrics import mrr, ndcg_at, precision_at, reciprocal_rank
 
 
@@ -69,3 +71,43 @@ def test_metrics_are_defined_when_nothing_is_relevant():
     for value in (reciprocal_rank(["a"], set()), precision_at(["a"], set(), 1),
                   ndcg_at(["a"], set(), 1), ndcg_at(["x", "y"], {"a"}, 2)):
         assert value == 0.0
+
+
+def test_average_precision_rewards_finding_all_of_them_early():
+    """AP is the mean of the precision measured at each relevant hit, so
+    unlike MRR it keeps counting after the first one.
+
+    `[a, b]` with both relevant scores 1.0. `[a, x, b]` scores the mean
+    of 1/1 and 2/3. MRR cannot tell those apart -- both find something
+    first -- which is why the reference reports both.
+    """
+    from scone_memory.bench.metrics import average_precision
+
+    assert average_precision(["a", "b"], {"a", "b"}) == 1.0
+    assert average_precision(["a", "x", "b"], {"a", "b"}) == pytest.approx((1.0 + 2 / 3) / 2)
+    assert average_precision(["x", "a", "b"], {"a", "b"}) == pytest.approx((1 / 2 + 2 / 3) / 2)
+    assert average_precision(["x", "y"], {"a"}) == 0.0
+    assert average_precision([], {"a"}) == 0.0
+
+
+def test_average_precision_divides_by_what_was_findable():
+    """Divided by the number of relevant sources, not by how many were
+    found: a run that returns one of three possible answers perfectly
+    has still missed two, and dividing by one would score it 1.0."""
+    from scone_memory.bench.metrics import average_precision
+
+    assert average_precision(["a"], {"a", "b", "c"}) == pytest.approx(1 / 3)
+    # A source returned twice fills two slots and answers one question.
+    assert average_precision(["a", "a"], {"a", "b"}) == pytest.approx(0.5)
+
+
+def test_hit_rate_asks_only_whether_anything_landed():
+    """The coarsest of them, and the one the reference leads with: did
+    the top k contain any relevant source at all."""
+    from scone_memory.bench.metrics import hit_rate
+
+    assert hit_rate([(["a"], {"a"})], 1) == 1.0
+    assert hit_rate([(["x", "a"], {"a"})], 1) == 0.0
+    assert hit_rate([(["x", "a"], {"a"})], 2) == 1.0
+    assert hit_rate([(["a"], {"a"}), (["x"], {"a"})], 1) == 0.5
+    assert hit_rate([], 5) == 0.0
