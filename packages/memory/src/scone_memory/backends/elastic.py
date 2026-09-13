@@ -507,6 +507,11 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def prepare_ledger_read(self, space: str) -> None:
+        """Make acknowledged fact writes searchable before archive validation."""
+        deletion_key(space)
+        await self.client.indices.refresh(index=self._idx("facts"))
+
     async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
         """Newest first below the cursor. Each page is one bounded search,
         so a whole-space read is never cut at the 10,000-hit window."""

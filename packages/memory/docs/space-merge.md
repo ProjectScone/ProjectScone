@@ -37,7 +37,7 @@ reference with no matching episode or tombstone refuses the merge.
 
 Destination tombstones still take precedence. Claims tied to source episodes
 skipped by those target tombstones follow the existing archive remapping policy.
-Fact supersession pointers are not reconstructed. Target exclusions are preserved.
+[Fact replacement edges are remapped](archive-replacement-history.md). Target exclusions are preserved.
 This operation is not a lossless ledger/policy backup: jobs, event logs, tombstones
 and runtime configuration are not transported. Keep full storage backups when
 those histories must survive independently of the original space.
