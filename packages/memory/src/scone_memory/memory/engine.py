@@ -12,7 +12,8 @@ import hashlib
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import AsyncIterator, Callable, Iterable, Mapping, Optional, Sequence, TypedDict, cast
+from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
+                    Sequence, TypedDict, cast)
 
 from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
 from .identity import join_match
@@ -30,6 +31,12 @@ from ..ingestion.records import (
 )
 from ..retrieval import fact_recall
 from ..entities.meanings import RelationMeanings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Type-only: the vocabulary store needs cryptography, and a base
+    # install promises pydantic alone. Importing it here would make
+    # `import scone_memory` fail wherever that extra is absent.
+    from ..entities.vocabulary_store import VocabularyStore
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -157,9 +164,12 @@ class MemoryEngine:
         record_queries: bool = False,
         contextual_embeddings: bool = False,
         code_aware: bool = True,
+        structure_aware: bool = False,
+        semantic_aware: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
+        demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
         candidate_limit: int | None = None,
         reranker: Reranker | None = None,
@@ -168,6 +178,11 @@ class MemoryEngine:
         rerank_timeout: float = 1.0,
         many_valued: Iterable[str] = (),
         relation_meanings: "RelationMeanings | None" = None,
+        #: A store holding each space's own relation vocabulary. When one
+        #: is attached, what a space holds beats what this process was
+        #: configured with, so two processes read one space alike.
+        vocabulary: "VocabularyStore | None" = None,
+        vocabulary_spaces: "Sequence[str] | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
@@ -183,10 +198,22 @@ class MemoryEngine:
         #: opposites, which read the same both ways, which carry through.
         #: None means the graph holds only what was said.
         self.relation_meanings = relation_meanings
+        self.vocabulary = vocabulary
+        #: Spaces whose vocabulary is read when this engine opens. A space
+        #: not named here falls back to process configuration and says so,
+        #: rather than reaching a thread-bound store from a request.
+        self.vocabulary_spaces: tuple[str, ...] = tuple(vocabulary_spaces or ("default",))
         #: Whether a source stored under a name that says it is code is cut
         #: at its declarations. Names say it, never the content: a note that
         #: quotes code is prose.
         self.code_aware = code_aware
+        self.structure_aware = structure_aware
+        #: Whether prose is cut where its subject changes rather than
+        #: where the length target lands. Off unless asked for: it decides
+        #: what chunks exist, and stored offsets are part of the shared
+        #: specification, so a space that already holds chunks cut another
+        #: way must not silently start cutting differently.
+        self.semantic_aware = semantic_aware
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -251,6 +278,10 @@ class MemoryEngine:
         #: so it is on. Nothing is dropped either way, only ordered, and a
         #: caller who wants what was believed at the time turns it off.
         self.demote_restated = demote_restated
+        #: Whether recall moves a passage the ledger has retired below the
+        #: passage that replaced it. On by default: it costs nothing when
+        #: a query matched no fact, and one chain read per fact it did.
+        self.demote_superseded = demote_superseded
         #: Experiment 9: with a floor, a recall whose best vector hit sits
         #: below it is flagged low_confidence so a reader can abstain
         #: instead of answering from weak evidence. None (the default) means
@@ -277,6 +308,16 @@ class MemoryEngine:
         if pending:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         await self.vectors.ensure(self.embedder.dim)
+        if self.vocabulary is not None:
+            # Read on this thread, which owns the store's connection, and
+            # held for the life of the engine. A vocabulary saved later
+            # takes effect when the engine is reopened; that contract is
+            # stated in entities/vocabulary.py rather than left to be
+            # discovered.
+            from ..entities.vocabulary import resolve_vocabulary
+
+            for space in self.vocabulary_spaces:
+                await resolve_vocabulary(self, space)
         self.vector_identity = await vector_identity.settle(self)
         report = await self.recover()
         if report.space_deletions_pending:
@@ -428,7 +469,7 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -437,7 +478,7 @@ class MemoryEngine:
             if existing is not None and existing.content == new.content:
                 added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
                 return Replaced(added=added, outcome="duplicate", replaced=None)
-            pending = ingestion_batch.chunk_record(runtime, new)
+            pending = await ingestion_batch.chunk_record(runtime, new)
             vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
             # Embedding can yield for a long time. Never revoke a different source
             # or recreate one that the user forgot during preparation.
@@ -445,7 +486,8 @@ class MemoryEngine:
             if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                        self.code_aware, self.code_graph) != configuration):
+                        self.code_aware, self.code_graph, self.structure_aware,
+                        self.semantic_aware) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -570,6 +612,8 @@ class MemoryEngine:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            structure_aware=self.structure_aware,
+            semantic_aware=self.semantic_aware,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
         )
 
@@ -796,7 +840,11 @@ class MemoryEngine:
         (bytes only when no other space holds them), the records of the
         space with their vectors, then the event trail; mark the space
         deleted so no write re-creates it. Returns the receipt
-        ``space_impact`` would have shown, with the counts of the deed."""
+        ``space_impact`` would have shown, with the counts of the deed.
+
+        Does **not** clear the space's relation vocabulary: that lives in a
+        host-owned store this engine has no handle on, so a space recreated
+        under this name would inherit it. The host clears that record."""
         try:
             return await retention.delete_space(self._retention_runtime(), space)
         finally:
@@ -887,7 +935,8 @@ class MemoryEngine:
             candidate_limit=self.candidate_limit, reranker=self.reranker,
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
-            demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
+            demote_restated=self.demote_restated, demote_superseded=self.demote_superseded,
+            similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
         )

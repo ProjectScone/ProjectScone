@@ -144,6 +144,44 @@ def _near(left: str, right: str) -> bool:
     return _spelt(left) and _spelt(right) and _one_apart(left, right)
 
 
+_QUALIFIED = re.compile(r"[/:]")
+
+
+def _identifier(key: str) -> bool:
+    """Whether a name is a path or a qualified symbol rather than prose.
+
+    Two reasons a spelling heuristic must not judge these. A one-letter
+    difference is a misspelling in a person's name and a different thing
+    entirely in an identifier -- `gate` and `rate`, `min` and `max`,
+    `read` and `real` are what code is made of. And the words a path
+    shares are mostly its directory, which says two files sit together,
+    not that they are one file.
+
+    Measured on this repository once code symbols reached the entity
+    graph: `scone_memory/audio/gate.py` and `scone_memory/audio/rate.py`
+    shared four words of five, differed in one letter of the fifth, and
+    were suggested as one thing at 0.667 against a default of 0.5.
+
+    **Only a path or a colon counts**, and a bare dotted name is left to
+    prose deliberately. `J.Anderson` and `pkg.store` are the same string
+    shape, and by the time a name reaches here it has been folded to
+    lower case, so even the capital is gone. A first attempt read any
+    dotted chain as a module path and turned the spelling comparison off
+    for everyone whose name carries an initial -- `J.Anderson` and
+    `J.Andersen` stopped being offered -- which is the opposite of the
+    "prose is unaffected" it was written as.
+
+    So the test here is the one that cannot be wrong: our code labels
+    carry their path (`pkg/store.py:Shelf.keep`), and no name does. Bare
+    module names keep the old behaviour, false pairs and all. Telling
+    those apart needs evidence from the graph -- whether the entity
+    appears in a code relation -- rather than a guess about a string, and
+    that is the next step if two module names one letter apart ever turn
+    up.
+    """
+    return bool(_QUALIFIED.search(key))
+
+
 def _spellings(word: str) -> frozenset[str]:
     """The word and, when it can be misspelt, each spelling of it one letter
     shorter: two words one edit apart share one of these."""
@@ -182,6 +220,8 @@ class _Name:
     every: tuple[str, ...]
     numbers: tuple[str, ...]
     initials: frozenset[str]
+    #: Whether the name is a path or qualified symbol rather than prose.
+    identifier: bool = False
 
     @property
     def compact(self) -> str:
@@ -193,18 +233,23 @@ def _name(key: str) -> _Name:
     every = folded.split()
     words = [word for word in every if word not in STOPWORDS]
     return _Name(folded, frozenset(words), tuple(every), tuple(re.findall(r"\d+", folded)),
-                 frozenset("".join(word[0] for word in names) for names in (every, words) if len(names) > 1))
+                 frozenset("".join(word[0] for word in names) for names in (every, words) if len(names) > 1),
+                 _identifier(key))
 
 
-def _aligned(left: frozenset[str], right: frozenset[str],
-             words: _Words) -> tuple[list[str], list[tuple[str, str, float]], bool]:
+def _aligned(left: frozenset[str], right: frozenset[str], words: _Words,
+             spelt: bool = True) -> tuple[list[str], list[tuple[str, str, float]], bool]:
     """The words two names share; then their other words one letter apart,
     paired most alike first, each word once, with how alike their letters
-    are; and whether all of one name's words found a pair."""
+    are; and whether all of one name's words found a pair.
+
+    Without ``spelt`` no word is paired with another it is merely one
+    letter from, so two names are alike only where one's words are all
+    the other's. That is the reading identifiers get."""
     shared = sorted(left & right)
     rest_left, rest_right = left - right, right - left
     by_spelling: dict[str, set[str]] = defaultdict(set)
-    for word in rest_right if rest_left else ():
+    for word in rest_right if rest_left and spelt else ():
         for spelling in words.spellings(word):
             by_spelling[spelling].add(word)
     edges = sorted((-_alike(words.letters(one), words.letters(other)), one, other) for one in rest_left
@@ -230,7 +275,8 @@ def _likeness(one: _Name, other: _Name, words: _Words) -> tuple[float, list[str]
         return 1.0, [_SPACING]
     why: list[str] = []
     by_words = 0.0
-    shared, near, whole = _aligned(one.words, other.words, words)
+    shared, near, whole = _aligned(one.words, other.words, words,
+                                   not (one.identifier or other.identifier))
     if whole and (shared or near):
         overlap = len(shared) + sum(alike for *_, alike in near)
         by_words = overlap / (len(one.words) + len(other.words) - overlap)

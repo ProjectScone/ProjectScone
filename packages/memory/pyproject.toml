@@ -29,6 +29,11 @@ classifiers = [
 dependencies = ["pydantic>=2.5"]
 
 [project.optional-dependencies]
+# A syntax tree for the brace family, so a call can be bound to the
+# declaration it names once parameters and locals are allowed to shadow.
+# Without it the code graph is exactly what it was: declarations, imports
+# and inheritance read from lines, and no calls outside Python.
+code-graph = ["tree-sitter>=0.25,<1", "tree-sitter-typescript>=0.23,<1"]
 documents = ["scone-memory[pdf]", "defusedxml>=0.7,<1"]
 document-workflows = ["scone-memory[documents,agents]"]
 document-converters = ["scone-memory[documents]", "striprtf>=0.0.33,<0.1", "python-calamine>=0.8.2,<1", "extract-msg>=0.56.1,<1"]
@@ -85,6 +90,21 @@ include = ["scone_memory*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Dump every thread's stack for a test that has run ten minutes, and let
+# it carry on: `faulthandler_exit_on_timeout` defaults to false, so this
+# fails nothing, skips nothing and changes no result. It is a diagnostic,
+# not a deadline -- a deadline near our real maximum would turn a slow
+# process fixture under load into a flake, which is worse than what it
+# would catch. The slowest things we have are far below this: 203s for
+# the 22 AWS catalog tests together, and a 180s migration budget.
+#
+# It exists because a stalled run reported nothing at all: on 2026-09-12
+# the full gate sat at 0% CPU twice, at different points on identical
+# code, with no failing test, no name and no traceback -- and CI is
+# exposed to the same stall on a runner where nobody is watching %CPU.
+# With this set the job still hangs, but its log says which test and what
+# it is waiting on.
+faulthandler_timeout = 600
 markers = [
     "mongo: needs a live MongoDB at SCONE_TEST_MONGO_URL",
     "qdrant: needs a live Qdrant at SCONE_TEST_QDRANT_URL",

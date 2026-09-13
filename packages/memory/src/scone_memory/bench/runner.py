@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Coroutine, Callable, Iterable, Optional, Sequence
 
+from . import metrics as bench_metrics
+
 from ..memory.engine import MemoryEngine, Record
 from ..core.models import RecallItem
 
@@ -201,6 +203,9 @@ class RunReport:
     #: metadata cannot say which configuration produced it is not evidence
     #: of anything.
     merge: bool
+    #: Bytes of window either side, 0 when off. Recorded for the same
+    #: reason.
+    window: int
     ks: list[int]
     recall_any: dict[int, float]
     recall_all: dict[int, float]
@@ -232,6 +237,17 @@ class RunReport:
     history: bool = False
     items_with_facts: int = 0
     items_with_history: int = 0
+    #: Rank-aware, because recall@k cannot tell first place from tenth
+    #: and cannot see a slot spent on nothing. The leading reference
+    #: reports these; reporting recall alone measured our changes with a
+    #: blunter instrument than the one they would be compared against.
+    mrr: float = 0.0
+    precision: dict[int, float] = field(default_factory=dict)
+    ndcg: dict[int, float] = field(default_factory=dict)
+    #: Mean average precision, and the share of items whose top k held
+    #: anything at all. The last two the reference reported and we did not.
+    mean_average_precision: float = 0.0
+    hit_rate: dict[int, float] = field(default_factory=dict)
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -260,6 +276,7 @@ async def run(
     history: bool = False,
     cross_queries: bool = False,
     merge: bool = False,
+    window: int = 0,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -311,6 +328,13 @@ async def run(
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
             pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            if window:
+                from ..retrieval.window import widen
+
+                opened = await widen(engine, space, pack.items, before=window, after=window)
+                pack = pack.model_copy(update={
+                    "items": list(opened.items),
+                    "returned_bytes": sum(len(i.text.encode()) for i in opened.items)})
             if merge:
                 from ..retrieval.merging import merge_neighbours
 
@@ -360,6 +384,14 @@ async def run(
     denom = len(scored)
     recall_any = {k: round(sum(r.any_at(k) for r in scored) / denom, 4) if denom else 0.0 for k in ks}
     recall_all = {k: round(sum(r.all_at(k) for r in scored) / denom, 4) if denom else 0.0 for k in ks}
+    ranked = [(r.retrieved_sessions, set(r.answer_sessions)) for r in scored]
+    mean_reciprocal = round(bench_metrics.mrr(ranked), 4) if denom else 0.0
+    precision = {k: round(sum(bench_metrics.precision_at(a, b, k) for a, b in ranked) / denom, 4)
+                 if denom else 0.0 for k in ks}
+    ndcg = {k: round(sum(bench_metrics.ndcg_at(a, b, k) for a, b in ranked) / denom, 4)
+            if denom else 0.0 for k in ks}
+    average_precision = round(bench_metrics.mean_average_precision(ranked), 4) if denom else 0.0
+    hits = {k: round(bench_metrics.hit_rate(ranked, k), 4) if denom else 0.0 for k in ks}
     by_type: dict[str, dict[str, float]] = {}
     for qt in sorted({r.question_type for r in scored}):
         rows = [r for r in scored if r.question_type == qt]
@@ -374,8 +406,10 @@ async def run(
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
-        merge=merge, ks=list(ks),
+        merge=merge, window=window, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, by_type=by_type,
+        mrr=mean_reciprocal, precision=precision, ndcg=ndcg,
+        mean_average_precision=average_precision, hit_rate=hits,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
         errors=sum(1 for r in results if r.error), python=platform.python_version(), platform=platform.platform(),
         started_at=started, finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),

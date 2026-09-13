@@ -62,19 +62,46 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 9,239, 5,509, 684 | recorded |
+| View bytes (knowledge, report, context) | 9,366, 5,509, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `e92a2920baf658b8a413753cee07ed25ba81796a8240f4e0345a6cf8cff584a2`. The scores
-match the first recording (`44ceae91…`). The hash has moved twice since:
-when the missing-evidence and out-of-view counts joined the report
-(`daceac58…`), and now that the knowledge view says when things held.
-No score changes. The view is 465 bytes longer for two reasons, both of
-them the view saying what it used to leave a reader to assume: every
-relation now lists the stretches of valid time it held over, rather than
-a first and last that read as one unbroken spell; and the view says that
-nothing follows from this fixture's claims, because it configures no
-vocabulary (`implied: []`, `meanings: null`, and the two counts).
+Artefact: `74c9275f6284e383077a826b84279a13fd1c66e2d2b34f9aa1bc09ed8efa32a3`. The scores
+match the first recording (`44ceae91…`). The hash has moved three times
+since, and no score has changed on any of them: when the
+missing-evidence and out-of-view counts joined the report
+(`daceac58…`); when the knowledge view began saying when things held
+(`e92a2920…`); and now that it says where its relation vocabulary came
+from.
+
+The second move added 465 bytes, both of them the view saying what it
+used to leave a reader to assume: every relation now lists the stretches
+of valid time it held over, rather than a first and last that read as one
+unbroken spell; and the view says that nothing follows from this
+fixture's claims, because it configures no vocabulary (`implied: []`,
+`meanings: null`, and the two counts).
+
+This third move adds **127 bytes**, all of it two fields at the two
+places the view describes a projection:
+
+```json
+"vocabulary_source": "none",
+"vocabulary_why": "nothing is configured in this process, so the graph holds only what was said"
+```
+
+Checked rather than asserted: removing exactly those two keys from the
+emitted view gives 9,239 bytes, the previous recording, so the whole
+difference is accounted for and no other field moved. A space that reads
+its own vocabulary says so here instead; this fixture configures none,
+and the point of the field is that "none" is stated rather than left as
+the reader's assumption.
+
+**This recording is late.** The fields landed with the vocabulary work
+and the baseline was not re-recorded, so
+`test_the_recorded_artefact_is_the_one_the_fixture_gives` failed for
+several commits — which is the test doing precisely its job. It went
+unseen because the two gate runs that reached it were both interrupted
+before pytest printed its summary, and the only signal in the meantime
+was a single `F` in the progress stream.
 
 ## What the numbers say
 

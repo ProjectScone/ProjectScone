@@ -52,6 +52,9 @@ def backends():
 async def engine(request, tmp_path):
     clock = Clock()
     events = InMemoryEventLog()
+    # Databases whose library keeps a background server alive past
+    # `close()`; released by path in the teardown. See `_release_embedded`.
+    embedded: list[str] = []
     if request.param == "memory":
         documents, vectors = InMemoryDocumentStore(), InMemoryVectorIndex()
     elif request.param == "sqlite":
@@ -104,7 +107,8 @@ async def engine(request, tmp_path):
         from scone_memory.backends import MilvusVectorIndex
 
         documents = InMemoryDocumentStore()
-        vectors = MilvusVectorIndex(str(tmp_path / "milvus.db"))
+        embedded.append(str(tmp_path / "milvus.db"))
+        vectors = MilvusVectorIndex(embedded[-1])
     elif request.param == "langchain-faiss":
         # The bridge over a real third-party store: FAISS with inner product
         # over unit vectors (cosine), and a callable filter over metadata.
@@ -155,6 +159,38 @@ async def engine(request, tmp_path):
             await store.drop()
         if hasattr(store, "close"):
             await store.close()
+    _release_embedded(embedded)
+
+
+def _release_embedded(paths: list[str]) -> None:
+    """Stop the embedded servers this fixture's own databases started.
+
+    `milvus_lite` keeps one background gRPC server per distinct `.db`
+    path in a module-level registry until `atexit`, and `MilvusClient.close`
+    releases only the client connection -- so closing the index cannot
+    stop the server. A fresh `tmp_path/milvus.db` per parametrisation
+    therefore accumulated one live server per test for the life of the
+    process: a full-suite run held 47 `grpc/_server.py` serving threads
+    and 53 idle pool workers at once, and logged
+    `GOAWAY ... ENHANCE_YOUR_CALM: too_many_pings`.
+
+    Only this fixture's own paths, never `release_all()`: another test's
+    client may still be using its own database, and nothing here should
+    reach into a store it did not create. Guarded, because a
+    `milvus_lite` without this call is a reason to leak a server rather
+    than to fail a suite.
+    """
+    if not paths:
+        return
+    try:
+        from milvus_lite.server_manager import server_manager_instance
+    except Exception:  # pragma: no cover - milvus-lite absent or changed
+        return
+    for path in paths:
+        try:
+            server_manager_instance.release_server(path)
+        except Exception:  # pragma: no cover - best effort teardown
+            pass
 
 
 def stores():
