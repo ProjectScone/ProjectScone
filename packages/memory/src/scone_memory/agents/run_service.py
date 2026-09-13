@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import stat
 
+from .approval_models import Decision, ToolApprovalActivation, ToolApprovalRecord
+from .approval_store import AgentApprovalStore
 from .catalog import AgentCatalog
 from .handoff_workflow import AgentHandoffPlan, AgentHandoffWorkflow, HandoffResult
 from .input_store import AgentInputRecord, AgentInputStore
@@ -49,12 +51,19 @@ class AgentRunStatus:
     max_parallel: int = 1
     inflight_steps: tuple[str, ...] = ()
     waiting_steps: tuple[str, ...] = ()
+    paused_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class AgentRunStatusPage:
     items: tuple[AgentRunStatus, ...]
     next_after: str | None
+
+
+@dataclass(frozen=True)
+class AgentToolContinuation:
+    status: AgentRunStatus
+    activation: ToolApprovalActivation
 
 
 class AgentRunService:
@@ -88,6 +97,7 @@ class AgentRunService:
         self._maximum, self._deadline = max_active, deadline_s
         self._runs = AgentRunStore(target / 'requests.sqlite', key=key, max_runs=max_runs)
         self._inputs = AgentInputStore(self._runs)
+        self._approvals = AgentApprovalStore(self._runs)
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._workflows: dict[tuple[str, str], AgentExecution] = {}
         self._failures: dict[tuple[str, str], str] = {}
@@ -106,6 +116,14 @@ class AgentRunService:
     def require_host(self, memory: MemoryEngine, plans: AgentPlanStore, catalog: AgentCatalog) -> None:
         if memory is not self._memory or plans is not self._plans or catalog is not self._catalog:
             raise ValueError('Agent run service must use this host memory, plan store and catalog')
+
+    def approval_actor(self, authenticated_key: str) -> str:
+        """Pseudonymize a host-authenticated key without persisting its secret."""
+        self._available()
+        if not isinstance(authenticated_key, str) or not authenticated_key:
+            raise WorkflowError('invalid_approval_actor')
+        return 'key:' + hmac.new(self._key, b'agent-approval-actor:' + authenticated_key.encode(),
+                                  hashlib.sha256).hexdigest()
 
     def _available(self) -> None:
         if self._closed or self._closing:
@@ -141,7 +159,8 @@ class AgentRunService:
             raise
         return descriptor
 
-    def _open(self, request: AgentRunRequest) -> AgentExecution:
+    def _open(self, request: AgentRunRequest, *, approval_activation: str | None = None,
+              input_activation: str | None = None) -> AgentExecution:
         plan = request.plan.checked_plan(self._catalog)
         scope = self._scope(request.space)
         if scope.as_dict() != request.scope:
@@ -149,14 +168,19 @@ class AgentRunService:
         if isinstance(plan, AgentHandoffPlan):
             return AgentHandoffWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
                 memory=self._memory, space=request.space, scope=scope,
-                exclude_session_id=request.exclude_session_id, deadline_s=self._deadline)
+                exclude_session_id=request.exclude_session_id, deadline_s=self._deadline,
+                approval_store=self._approvals, approval_activation=approval_activation)
         if isinstance(plan, InteractiveAgentPlan):
             return InteractiveAgentWorkflow(self._path(request), key=self._key, catalog=self._catalog,
                 request=request, memory=self._memory, inputs=self._inputs,
-                activated=self._inputs.activated(request.space, request.run_id), deadline_s=self._deadline)
+                activated=tuple(record for record in self._inputs.activated(request.space, request.run_id)
+                                if input_activation is not None and record.activation_id == input_activation),
+                deadline_s=self._deadline,
+                approval_store=self._approvals, approval_activation=approval_activation)
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
-            exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel)
+            exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel,
+            approval_store=self._approvals, approval_activation=approval_activation)
 
     def _progress(self, request: AgentRunRequest) -> WorkflowStatus | None:
         identity = (request.space, request.run_id)
@@ -171,11 +195,12 @@ class AgentRunService:
         finally:
             workflow.close()
 
-    def _status(self, request: AgentRunRequest) -> AgentRunStatus:
+    def _status(self, request: AgentRunRequest, *, ignore_admission: bool = False) -> AgentRunStatus:
         progress = self._progress(request)
         identity = (request.space, request.run_id)
-        active = identity in self._tasks or identity in self._admissions
-        unknown = bool(progress and any(name not in progress.completed_steps for name in progress.attempts))
+        active = identity in self._tasks or (identity in self._admissions and not ignore_admission)
+        unknown = bool(progress and any(name not in progress.completed_steps and name not in progress.paused_steps
+                                        for name in progress.attempts))
         return AgentRunStatus(run_id=request.run_id, space=request.space,
             created_at=request.created_at.isoformat(), workflow_id=request.plan.plan.workflow_id,
             plan_revision=request.plan.revision,
@@ -186,7 +211,8 @@ class AgentRunService:
             inflight=progress.inflight if progress else None, outcome_unknown=unknown and not active,
             error_class=progress.error_class if progress else self._failures.get(identity),
             max_parallel=request.max_parallel, inflight_steps=progress.inflight_steps if progress else (),
-            waiting_steps=progress.waiting_steps if progress else ())
+            waiting_steps=progress.waiting_steps if progress else (),
+            paused_steps=progress.paused_steps if progress else ())
 
     async def status(self, space: str, run_id: str) -> AgentRunStatus | None:
         await self._space(space)
@@ -238,7 +264,7 @@ class AgentRunService:
                 raise WorkflowError('run_cancelled')
             if current.status == 'sources_invalid':
                 raise WorkflowError('sources_invalid')
-            if isinstance(prior.plan.plan, InteractiveAgentPlan) and current.status == 'awaiting_input':
+            if current.paused_steps or (isinstance(prior.plan.plan, InteractiveAgentPlan) and current.status == 'awaiting_input'):
                 return current
         if len(self._tasks) + len(self._admissions) >= self._maximum:
             raise WorkflowError('run_busy')
@@ -262,10 +288,7 @@ class AgentRunService:
             self._workflows[identity] = workflow
             admission = self._status(current_request)
         except BaseException:
-            if workflow is not None:
-                workflow.close()
-            self._workflows.pop(identity, None)
-            os.close(descriptor)
+            self._release_admission(identity, descriptor, workflow)
             raise
         self._owners[identity] = descriptor
         self._failures.pop(identity, None)
@@ -274,13 +297,26 @@ class AgentRunService:
         task.add_done_callback(lambda finished: self._finished(identity, workflow))
         return replace(admission, active_local=True)
 
-    def _check_input_request(self, request: AgentRunRequest, guard: Callable[[], None] | None) -> None:
+    def _release_admission(self, identity: tuple[str, str], descriptor: int,
+                           workflow: AgentExecution | None) -> None:
+        try:
+            if workflow is not None:
+                workflow.close()
+        finally:
+            self._owners.pop(identity, None)
+            self._workflows.pop(identity, None)
+            os.close(descriptor)
+
+    def _check_run_request(self, request: AgentRunRequest, guard: Callable[[], None] | None) -> None:
         self._available()
         if guard is not None:
             guard()
         request.plan.checked_plan(self._catalog)
         if request.scope != self._scope(request.space).as_dict():
             raise WorkflowError('run_scope_changed')
+
+    def _check_input_request(self, request: AgentRunRequest, guard: Callable[[], None] | None) -> None:
+        self._check_run_request(request, guard)
         if not isinstance(request.plan.plan, InteractiveAgentPlan):
             raise WorkflowError('interactive_plan_required')
 
@@ -330,7 +366,7 @@ class AgentRunService:
         workflow: AgentExecution | None = None
         admitted = False
         try:
-            current = self._status(request)
+            current = self._status(request, ignore_admission=True)
             if current.outcome_unknown:
                 raise WorkflowError('outcome_unknown')
             if request.cancel_requested_at is not None:
@@ -346,7 +382,7 @@ class AgentRunService:
                 return current
             # Persisted activation can be reconciled by the same explicit request
             # after an admission failure. Startup and read paths never launch it.
-            workflow = self._open(request)
+            workflow = self._open(request, input_activation=continuation_id)
             self._workflows[identity] = workflow
             admission = self._status(request)
             self._owners[identity] = descriptor
@@ -359,16 +395,111 @@ class AgentRunService:
         finally:
             self._admissions.pop(identity, None)
             if not admitted:
-                self._owners.pop(identity, None)
-                if workflow is not None:
-                    workflow.close()
-                    self._workflows.pop(identity, None)
-                os.close(descriptor)
+                self._release_admission(identity, descriptor, workflow)
 
-    async def _execute(self, request: AgentRunRequest, workflow: AgentExecution) -> None:
+    async def approvals(self, space: str, run_id: str, *,
+                        admission_guard: Callable[[], None] | None = None) -> tuple[ToolApprovalRecord, ...]:
+        await self._space(space)
+        request = self._runs.get(space, run_id)
+        if request is None:
+            raise WorkflowError('run_not_found')
+        self._check_run_request(request, admission_guard)
+        if not self._path(request).exists():
+            if self._approvals.list(space, run_id):
+                raise WorkflowError('approval_not_ready')
+            return ()
+        workflow = self._open(request)
+        try:
+            records = await workflow.inspect_approvals(run_id, request.question)
+            self._check_run_request(request, admission_guard)
+            return records
+        finally:
+            workflow.close()
+
+    async def decide_tool(self, space: str, run_id: str, request_id: str, *, decision: Decision,
+                          actor: str, expected_revision: int,
+                          admission_guard: Callable[[], None] | None = None) -> ToolApprovalRecord:
+        records = await self.approvals(space, run_id, admission_guard=admission_guard)
+        if not any(record.request_id == request_id for record in records):
+            raise WorkflowError('approval_not_ready')
+        return self._approvals.decide(space, run_id, request_id, decision=decision,
+                                      actor=actor, expected_revision=expected_revision)
+
+    async def continue_tools(self, space: str, run_id: str, *, continuation_id: str,
+                             decisions: dict[str, int], admission_guard: Callable[[], None] | None = None) -> AgentToolContinuation:
+        await self._space(space)
+        _name(continuation_id)
+        if not isinstance(decisions, dict) or not 1 <= len(decisions) <= 32:
+            raise WorkflowError('invalid_approval_activation')
+        decisions = dict(decisions)
+        for name, revision in decisions.items():
+            _name(name)
+            _integer(revision, 2, 2)
+        request = self._runs.get(space, run_id)
+        if request is None:
+            raise WorkflowError('run_not_found')
+        self._check_run_request(request, admission_guard)
+        _integer(request.max_parallel, 1, self._parallel)
+        identity = (space, run_id)
+        existing = self._approvals.activation(space, run_id, continuation_id)
+        if existing is not None and existing.decisions != decisions:
+            raise WorkflowError('approval_activation_conflict')
+        if identity in self._tasks or identity in self._admissions:
+            if existing is not None:
+                return AgentToolContinuation(self._status(request), existing)
+            raise WorkflowError('run_busy')
+        if len(self._tasks) + len(self._admissions) >= self._maximum:
+            raise WorkflowError('run_busy')
+        owner = asyncio.current_task()
+        if owner is None:
+            raise WorkflowError('run_service_unavailable')
+        descriptor = self._claim(request)
+        self._admissions[identity] = owner
+        self._owners[identity] = descriptor
+        workflow: AgentExecution | None = None
+        admitted = False
+        try:
+            request = self._runs.get(space, run_id)
+            if request is None:
+                raise WorkflowError('run_not_found')
+            self._check_run_request(request, admission_guard)
+            current = self._status(request, ignore_admission=True)
+            if current.outcome_unknown:
+                raise WorkflowError('outcome_unknown')
+            if request.cancel_requested_at is not None:
+                raise WorkflowError('run_cancelled')
+            records = {record.request_id: record for record in await self.approvals(space, run_id, admission_guard=admission_guard)}
+            if not set(decisions) <= records.keys():
+                raise WorkflowError('approval_not_ready')
+            pending = tuple(dict.fromkeys(records[name].call.step_id for name in decisions if records[name].revision != 4))
+            if existing is not None and not pending:
+                self._check_run_request(request, admission_guard)
+                return AgentToolContinuation(current, existing)
+            if not pending or not set(pending) <= set(current.paused_steps):
+                raise WorkflowError('approval_not_ready')
+            if len(self._tasks) + len(self._admissions) > self._maximum:
+                raise WorkflowError('run_busy')
+            self._check_run_request(request, admission_guard)
+            activation = self._approvals.activate(space, run_id, continuation_id, decisions=decisions)
+            workflow = self._open(request, approval_activation=continuation_id)
+            self._workflows[identity] = workflow
+            admission = self._status(request)
+            self._failures.pop(identity, None)
+            task = asyncio.create_task(self._execute(request, workflow, pending))
+            self._tasks[identity] = task
+            task.add_done_callback(lambda finished: self._finished(identity, workflow))
+            admitted = True
+            return AgentToolContinuation(replace(admission, active_local=True), activation)
+        finally:
+            self._admissions.pop(identity, None)
+            if not admitted:
+                self._release_admission(identity, descriptor, workflow)
+
+    async def _execute(self, request: AgentRunRequest, workflow: AgentExecution,
+                       resume_steps: tuple[str, ...] = ()) -> None:
         identity = (request.space, request.run_id)
         try:
-            await workflow.run(request.run_id, request.question)
+            await workflow.run(request.run_id, request.question, resume_steps=resume_steps)
         except asyncio.CancelledError:
             pass
         except WorkflowError as error:

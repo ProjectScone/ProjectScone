@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import TYPE_CHECKING, Literal, Self, cast
 
 from pydantic import (BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler,
                       field_validator, model_serializer, model_validator)
@@ -18,12 +18,17 @@ from .catalog import AgentCatalog, BoundAgent, Identifier
 from .tool_evidence import prepare_tool_evidence
 from .task_requirements import TaskAnswerRequirements
 from .usage import ToolTokenUsage
-from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, _integer
+from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, WorkflowPaused, _integer
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine
 from ..retrieval.recall_scope import RecallScope
 from ..core.validation import check_space
 from ..realtime.answer_requirements import AnswerRequirements
+
+if TYPE_CHECKING:
+    from .approval_store import AgentApprovalStore
+    from .approval_models import ToolApprovalRecord
+
 
 MAX_EVIDENCE_PACKETS = 128
 MAX_HANDOFF_BYTES = 32000
@@ -161,7 +166,8 @@ class AgentWorkflow:
     def __init__(self, path: str | Path, *, key: bytes, catalog: AgentCatalog, plan: AgentTaskPlan,
                  memory: MemoryEngine, space: str, scope: RecallScope,
                  exclude_session_id: str | None = None, deadline_s: float = 120.0,
-                 max_payload_bytes: int = 1000000, max_parallel: int = 1) -> None:
+                 max_payload_bytes: int = 1000000, max_parallel: int = 1,
+                 approval_store: AgentApprovalStore | None = None, approval_activation: str | None = None) -> None:
         check_space(space)
         _integer(max_parallel, 1, 8)
         if not isinstance(plan, AgentTaskPlan) or not isinstance(scope, RecallScope):
@@ -170,6 +176,7 @@ class AgentWorkflow:
         self._tasks = {task.task_id: task for task in plan.ordered()}
         self._agents = {task.task_id: catalog.bind(task.agent_id, model_id=task.model_id) for task in self._tasks.values()}
         self._memory, self._space = memory, space
+        self._approvals, self._approval_activation = approval_store, approval_activation
         self._scope = RecallScope.validated(**scope.kwargs())
         self._excluded = exclude_session_id
         # Validate the complete tool binding before opening any journal file.
@@ -178,10 +185,12 @@ class AgentWorkflow:
             'bindings': {name: agent.fingerprint for name, agent in self._agents.items()}}).encode()).hexdigest()
         self._binding_scope = cast(dict[str, JSONValue], json.loads(_json({
             'plan': signature, 'recall': self._scope.as_dict(), 'exclude_session_id': exclude_session_id})))
+        from .workflow_approvals import guarded, model_step
         self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
             deadline=deadline_s, max_payload_bytes=max_payload_bytes, verify_before_step=True,
             max_parallel=max_parallel, dependencies={task.task_id: task.depends_on for task in self._tasks.values()} if max_parallel > 1 else None,
-            steps=[WorkflowStep(task.task_id, signature, self._step(task, self._agents[task.task_id]))
+            steps=[model_step(task.task_id, signature, self._step(task, self._agents[task.task_id]),
+                              pausable=guarded(self._agents[task.task_id]))
                    for task in self._tasks.values()])
 
     def _tools(self) -> ScopedMemoryTools:
@@ -213,8 +222,8 @@ class AgentWorkflow:
         return await _verify_agent_evidence(self._memory, self._space, self._scope,
                                             self._excluded, tuple(receipts.values()))
 
-    def _step(self, task: AgentTask, agent: BoundAgent) -> Callable[[StepContext], Awaitable[JSONValue]]:
-        async def execute(context: StepContext) -> JSONValue:
+    def _step(self, task: AgentTask, agent: BoundAgent) -> Callable[[StepContext], Awaitable[JSONValue | WorkflowPaused]]:
+        async def execute(context: StepContext) -> JSONValue | WorkflowPaused:
             receipts = self._receipts(context)
             handoff = None
             if task.depends_on:
@@ -227,8 +236,12 @@ class AgentWorkflow:
             if not isinstance(context.inputs, str):
                 raise ValueError('workflow question required')
             question = task.prompt + '\n\nUser request:\n' + context.inputs
-            result = await agent.run(question, tools=self._tools(), context=handoff,
-                                     answer_requirements=task.answer_requirements)
+            from .workflow_approvals import invoke_agent
+            result = await invoke_agent(agent, question, tools=self._tools(), context=context,
+                step_id=task.task_id, selection_id=task.task_id, store=self._approvals,
+                activation_id=self._approval_activation, prior=handoff, requirements=task.answer_requirements)
+            if isinstance(result, WorkflowPaused):
+                return result
             output = result.output
             receipt = AgentTaskReceipt(task_id=task.task_id, agent_id=result.agent_id, model_id=result.model_id,
                 binding=result.binding, depends_on=task.depends_on, text=output.text, source_status=cast(Literal['retained', 'none'], output.source_status),
@@ -243,8 +256,15 @@ class AgentWorkflow:
             raise ValueError('workflow question must contain 1..4000 UTF-8 bytes')
         return question
 
-    async def run(self, run_id: str, question: str) -> WorkflowResult:
-        return await self._runner.run(run_id, space=self._space, scope=self._binding_scope, inputs=self._question(question))
+    async def run(self, run_id: str, question: str, *, resume_steps: Sequence[str] | None = None) -> WorkflowResult:
+        return await self._runner.run(run_id, space=self._space, scope=self._binding_scope,
+                                      inputs=self._question(question), resume_steps=resume_steps)
+
+    async def inspect_approvals(self, run_id: str, question: str) -> tuple[ToolApprovalRecord, ...]:
+        from .workflow_approvals import inspect_workflow_approvals
+        return await inspect_workflow_approvals(self._runner, self._approvals, run_id=run_id,
+            space=self._space, scope=self._binding_scope, inputs=self._question(question), tools=self._tools(),
+            select=lambda snapshot: (snapshot.step_id, self._agents[snapshot.step_id]))
 
     async def read_result(self, run_id: str, question: str) -> WorkflowResult | None:
         """Read a complete, freshly verified answer without executing an agent."""

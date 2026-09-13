@@ -172,6 +172,11 @@ class AgentApprovalStore:
         except (ValidationError, ValueError, WorkflowError, RecursionError):
             raise WorkflowError('approval_key_or_integrity') from None
 
+    def activation(self, space: str, run_id: str, activation_id: str) -> ToolApprovalActivation | None:
+        self._token(space, run_id, activation_id, activation=True)
+        with self._storage._access() as db:
+            return self._activation(db, self._run(db, space, run_id), activation_id)
+
     def activate(self, space: str, run_id: str, activation_id: str, *, decisions: dict[str, int]) -> ToolApprovalActivation:
         _name(activation_id)
         if not isinstance(decisions, dict) or not 1 <= len(decisions) <= 32:
