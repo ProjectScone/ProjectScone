@@ -28,7 +28,7 @@ async def run():
     catalog = AgentCatalog(models=[AgentModel(name, name.title() + ' local', '1', lambda name=name: Model(name))
                                    for name in ('fast', 'careful')], agents=[AgentDefinition(
         agent_id='worker', instructions='Use the provided direction.', models=('fast', 'careful'),
-        default_model='fast', initial_search=False)])
+        default_model='fast', initial_search=(state / 'initial-search').exists())])
     plans = AgentPlanStore(state / 'plans.sqlite', key=b'k' * 32)
     service = AgentRunService(state / 'runs', key=b'k' * 32, catalog=catalog, plans=plans, memory=memory,
                               scope_for=lambda space: RecallScope.validated())

@@ -109,7 +109,8 @@ coverage, stable task/hop/activation identity and native cursor replay. Direct
 `BoundAgent` callers can still opt into the bounded stream independently.
 
 Authenticated HTTP cursor replay now verifies current recipients and committed/paused
-sources. Live delivery, standalone SDK reconnect and Console rendering remain required. Real provider public-text streaming also remains required; these
+sources. The standalone SDK supports typed cursor replay and reconnect. Live
+delivery and Console rendering remain required. Real provider public-text streaming also remains required; these
 events neither simulate token streaming nor expose hidden reasoning. Old journals
 do not acquire historical timing data retrospectively. History is metadata, not
 an answer or proof of current source/recipient authorization.

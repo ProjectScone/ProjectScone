@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from .agent_history import HistoryPage, history_cursor
 from ._wire import ResourceClient, address, boolean, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_approvals import AgentToolContinuation, ApprovalCall, ToolApprovalActivation, ToolApprovalRecord
 from .agent_inputs import InputRecord
@@ -89,6 +90,17 @@ class AgentClient(ResourceClient):
         path = '/v1/agent-runs/' + address(run_id)
         self._check('agents.runs')
         return RunStatus.from_json(self._client._request('GET', path), expected_space=self.expected_space, run_id=run_id)
+
+    def history(self, run_id: str, *, limit: int = 50, after: Optional[str] = None) -> HistoryPage:
+        """Read verified metadata; reconnect with next_after without resuming work."""
+        path = '/v1/agent-runs/' + address(run_id) + '/history'
+        params = {'limit': str(integer(limit, 1, 100))}
+        if after is not None:
+            params['after'] = history_cursor(after)
+        self._check('agents.runs').require('agents.history')
+        request = self.request(run_id)
+        return HistoryPage.from_json(self._client._request('GET', path, params=params),
+                                     request=request, after=after, limit=limit)
 
     def runs(self, *, limit: int = 20, after: Optional[str] = None) -> RunPage:
         params = {'limit': str(integer(limit, 1, 100))}
