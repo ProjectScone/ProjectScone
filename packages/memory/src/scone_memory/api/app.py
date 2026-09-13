@@ -448,7 +448,7 @@ def create_app(
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
-            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
+            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "recall.graph_questions": True, "facts.read": True, "facts.review": True,
             "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
@@ -1016,13 +1016,23 @@ def create_app(
                 if evidence_graph:
                     response["evidence_graph"] = graph.model_dump(mode="json")
                 if graph_analysis:
+                    from ..retrieval import graph_questions
                     from ..retrieval.graph_analysis import GraphAnalysisResult, analyze_evidence_graph
                     try:
                         analysis = (analyze_evidence_graph(graph) if graph_available else
                                     GraphAnalysisResult.unavailable("evidence_graph_unavailable"))
                     except Exception:
                         analysis = GraphAnalysisResult.unavailable("analysis_unavailable")
-                    response["graph_analysis"] = analysis.model_dump(mode="json")
+                    payload = analysis.model_dump(mode="json")
+                    try:
+                        questions = graph_questions.questions_for(graph, analysis)
+                    except Exception:
+                        # Derived from the same authorized graph; a fault deriving them is
+                        # disclosed as that, never as private exception text.
+                        questions = graph_questions.Questions(analysis_status="unavailable", analysis_method=analysis.method,
+                                                              reason="questions_unavailable")
+                    payload["questions"] = questions.model_dump(mode="json")
+                    response["graph_analysis"] = payload
             if structural_context:
                 from ..retrieval.structural import StructuralLimits, expand_structural_context
                 try:

@@ -178,3 +178,12 @@ def test_algorithm_version_is_separate_from_partition_outcome():
     assert result.algorithm=='scone_label_propagation_v1'
     assert result.counts.iterations>0
     assert result.method=='components'
+
+
+def test_a_cut_edge_to_a_leaf_is_marked_pendant():
+    """A leaf's only edge is a cut edge by definition; saying so lets a
+    reader tell a bridge between two structures from a dangling end."""
+    leaf=analyze_evidence_graph(graph('abcd', [('a','b'),('b','c'),('c','a'),('c','d')]))
+    assert [(b.source,b.target,b.cut_edge,b.pendant) for b in leaf.bridges]==[('c','d',True,True)]
+    joined=analyze_evidence_graph(graph('abcxyz', [('a','b'),('b','c'),('c','a'),('x','y'),('y','z'),('z','x'),('c','x')]))
+    assert [(b.source,b.target,b.cut_edge,b.pendant) for b in joined.bridges]==[('c','x',True,False)]
