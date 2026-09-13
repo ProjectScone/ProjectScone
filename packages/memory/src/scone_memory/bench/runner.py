@@ -137,6 +137,23 @@ class ItemResult:
         seen = set(self.retrieved_sessions[:k])
         return bool(self.answer_sessions) and all(a in seen for a in self.answer_sessions)
 
+    def share_at(self, k: int) -> float:
+        """The share of this item's evidence sessions among the top k.
+
+        ``any_at`` and ``all_at`` bracket the truth: on three evidence
+        sessions of which two came back, any says 1, all says 0, and "two
+        of three" is invisible. This is that number. A session returned
+        as several items counts once, and an item with no evidence scores
+        zero, as it does for any and all. It is an addition beside the
+        Rust harness's two definitions, not a replacement: the two engines
+        are still compared on any/all until the Rust harness reports it.
+        """
+        expected = set(self.answer_sessions)
+        if not expected:
+            return 0.0
+        seen = set(self.retrieved_sessions[:k])
+        return sum(a in seen for a in expected) / len(expected)
+
 
 def cross_partner(items: Sequence[BenchItem], idx: int) -> Optional[BenchItem]:
     """Another item whose question has no evidence in this item's haystack:
@@ -248,6 +265,11 @@ class RunReport:
     #: anything at all. The last two the reference reported and we did not.
     mean_average_precision: float = 0.0
     hit_rate: dict[int, float] = field(default_factory=dict)
+    #: Mean share of each item's evidence sessions found in the top k --
+    #: between any and all, which bracket it. Beside them, not instead of
+    #: them, since the Rust harness reports only those two. Defaults so a
+    #: saved run from before this field still loads.
+    recall_share: dict[int, float] = field(default_factory=dict)
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -384,6 +406,7 @@ async def run(
     denom = len(scored)
     recall_any = {k: round(sum(r.any_at(k) for r in scored) / denom, 4) if denom else 0.0 for k in ks}
     recall_all = {k: round(sum(r.all_at(k) for r in scored) / denom, 4) if denom else 0.0 for k in ks}
+    recall_share = {k: round(sum(r.share_at(k) for r in scored) / denom, 4) if denom else 0.0 for k in ks}
     ranked = [(r.retrieved_sessions, set(r.answer_sessions)) for r in scored]
     mean_reciprocal = round(bench_metrics.mrr(ranked), 4) if denom else 0.0
     precision = {k: round(sum(bench_metrics.precision_at(a, b, k) for a, b in ranked) / denom, 4)
@@ -396,7 +419,8 @@ async def run(
     for qt in sorted({r.question_type for r in scored}):
         rows = [r for r in scored if r.question_type == qt]
         by_type[qt] = {"n": len(rows), **{f"any@{k}": round(sum(r.any_at(k) for r in rows) / len(rows), 4) for k in ks},
-                       **{f"all@{k}": round(sum(r.all_at(k) for r in rows) / len(rows), 4) for k in ks}}
+                       **{f"all@{k}": round(sum(r.all_at(k) for r in rows) / len(rows), 4) for k in ks},
+                       **{f"share@{k}": round(sum(r.share_at(k) for r in rows) / len(rows), 4) for k in ks}}
     reductions = [1 - r.returned_bytes / r.stored_bytes for r in results if r.error is None and r.stored_bytes]
     verdicts: dict[str, int] = {}
     for r in results + cross:
@@ -407,7 +431,7 @@ async def run(
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
         merge=merge, window=window, ks=list(ks),
-        recall_any=recall_any, recall_all=recall_all, by_type=by_type,
+        recall_any=recall_any, recall_all=recall_all, recall_share=recall_share, by_type=by_type,
         mrr=mean_reciprocal, precision=precision, ndcg=ndcg,
         mean_average_precision=average_precision, hit_rate=hits,
         context_reduction_median=nearest_rank(reductions, 0.5), recall_ms_p50=nearest_rank(latencies, 0.5), recall_ms_p95=nearest_rank(latencies, 0.95),
