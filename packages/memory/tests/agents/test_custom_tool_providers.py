@@ -6,19 +6,22 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
+from scone_memory.agents.custom_tools import ToolContext
+from scone_memory.agents.function_tools import function_tool
 from scone_memory.agents.evidence_loop import ToolLoopLimits
 from scone_memory.agents.task_requirements import TaskAnswerRequirements
 from scone_memory.agents.task_workflow import AgentTask, AgentTaskPlan, AgentWorkflow
 from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
 from scone_memory.providers.tool_chat import SelfHostedToolChat
 from scone_memory.retrieval.recall_scope import RecallScope
-from .test_custom_tools import SCHEMA, tool
+from .test_custom_tools import tool
 from .test_task_workflow import memory
 
 
 @pytest.mark.parametrize('structured', [False, True])
 @pytest.mark.parametrize('exhausted', [False, True])
-async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_result(tmp_path, memory, structured, exhausted):
+@pytest.mark.parametrize('inferred', [False, True])
+async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_result(tmp_path, memory, structured, exhausted, inferred):
     requests, invocations = [], []
     output_schema = {'type': 'object', 'properties': {'doubled': {'type': 'integer'}},
                      'required': ['doubled'], 'additionalProperties': False}
@@ -37,7 +40,7 @@ async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_res
                 reason = 'stop'
             else:
                 custom = next(row for row in body['tools'] if row['function']['name'] == 'double_count')
-                assert custom['function']['parameters'] == SCHEMA
+                assert custom['function']['parameters'] == registration.openai()['function']['parameters']
                 message = {'role': 'assistant', 'content': None, 'tool_calls': [{
                     'id': 'custom-1', 'type': 'function', 'function': {
                         'name': 'double_count', 'arguments': '{"count":3}'}}]}
@@ -57,6 +60,14 @@ async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_res
         invocations.append((arguments, context.space, context.scope.kwargs()))
         return {'doubled': 2 * arguments['count']}
 
+    async def double_count(count: int, context: ToolContext, multiplier: int = 2) -> object:
+        """Multiply the supplied count by the configured factor."""
+        assert multiplier == 2
+        return await execute({'count': count}, context)
+
+    registration = (function_tool(double_count, revision='1', context_parameter='context')
+                    if inferred else tool(execute))
+
     provider = SelfHostedStructuredToolChat if structured else SelfHostedToolChat
     catalog = AgentCatalog(models=[
         AgentModel('unused', 'Unused', '1', lambda: pytest.fail('selected wrong model')),
@@ -65,7 +76,7 @@ async def test_selected_local_provider_executes_custom_tool_and_reuses_saved_res
         agents=[AgentDefinition(agent_id='worker', instructions='Use the count tool.',
             models=('unused', 'selected'), default_model='unused', initial_search=False,
             tools=('double_count',), limits=ToolLoopLimits(max_tool_calls=1 if exhausted else 8))],
-        tools=[tool(execute)])
+        tools=[registration])
     plan = AgentTaskPlan(workflow_id='count', tasks=(AgentTask(task_id='one', agent_id='worker',
         model_id='selected', prompt='Double three.', answer_requirements=TaskAnswerRequirements(
             format='json_object', output_schema=output_schema)),))
