@@ -358,9 +358,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("answer", help="answer a question with whichever machinery suits it, and say which")
     p.add_argument("question")
-    p.add_argument("--route", choices=("temporal", "graph", "recall"),
-                   help="insist on one route instead of letting the rule choose")
-    p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with")
+    p.add_argument("--route", choices=("temporal", "graph", "recall", "synthesize"),
+                   help="insist on one route instead of letting the rule choose; synthesize is never chosen "
+                        "by the rule and needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+    p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with, or a synthesis reads")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
@@ -1619,8 +1620,17 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "answer":
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
+        synthesis = None
+        if args.route == "synthesize":
+            from . import config as runtime_config
+
+            synthesis = runtime_config.build_chat(settings or settings_for_cli(os.environ))
+            if synthesis is None:
+                print("error: the synthesize route needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)", file=sys.stderr)
+                return 2
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
-                                       route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS)
+                                       route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS,
+                                       synthesis=synthesis)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
