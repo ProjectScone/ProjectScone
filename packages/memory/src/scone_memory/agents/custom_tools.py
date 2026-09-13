@@ -177,6 +177,7 @@ class AgentTool:
     handler: Callable[[dict[str, object], ToolContext], object] = field(repr=False, compare=False)
     max_output_bytes: int = 16000
     return_direct: bool = field(default=False, kw_only=True)
+    requires_approval: bool = field(default=False, kw_only=True)
     _compiled: dict[str, object] = field(init=False, repr=False, compare=False)
     _parameters_json: str = field(init=False, repr=False, compare=False)
 
@@ -188,7 +189,7 @@ class AgentTool:
         if (not isinstance(self.description, str) or not self.description.strip()
                 or len(self.description) > 4000 or len(self.description.encode()) > 4000 or not callable(self.handler)
                 or type(self.max_output_bytes) is not int or not 1 <= self.max_output_bytes <= 64000
-                or type(self.return_direct) is not bool):
+                or type(self.return_direct) is not bool or type(self.requires_approval) is not bool):
             raise ValueError('invalid application tool metadata or output budget')
         try:
             parameters = _thaw(self.parameters) if isinstance(self.parameters, MappingProxyType) else self.parameters
@@ -202,14 +203,28 @@ class AgentTool:
 
     def snapshot(self) -> AgentTool:
         return AgentTool(self.name, self.description, self.revision, json.loads(self._parameters_json),
-                         self.handler, self.max_output_bytes, return_direct=self.return_direct)
+                         self.handler, self.max_output_bytes, return_direct=self.return_direct,
+                         requires_approval=self.requires_approval)
 
     def info(self) -> dict[str, object]:
         result: dict[str, object] = {'name': self.name, 'description': self.description, 'revision': self.revision,
                                    'parameters': json.loads(self._parameters_json), 'max_output_bytes': self.max_output_bytes}
         if self.return_direct:
             result['return_direct'] = True
+        if self.requires_approval:
+            result['requires_approval'] = True
         return result
+
+    def prepare_arguments(self, arguments: dict[str, object]) -> str | None:
+        """Validate without dispatch and return a detached canonical JSON identity."""
+        try:
+            encoded = _encoded(arguments, 16000)
+            if not accepts_schema(encoded, self._compiled):
+                return None
+            return json.dumps(json.loads(encoded), sort_keys=True, ensure_ascii=False,
+                              separators=(',', ':'), allow_nan=False)
+        except (ValueError, RecursionError):
+            return None
 
     def openai(self) -> dict[str, object]:
         return {'type': 'function', 'function': {'name': self.name, 'description': self.description,
@@ -228,13 +243,9 @@ class AgentTool:
         output_limit = min(self.max_output_bytes, remaining_output_bytes) if remaining_output_bytes is not None else self.max_output_bytes
         if output_limit < _MIN_RESULT_BYTES:
             raise RuntimeError('application tool output budget exhausted before execution')
-        try:
-            encoded = _encoded(arguments, 16000)
-        except (ValueError, RecursionError):
-            encoded = ''
-        accepted = bool(encoded) and accepts_schema(encoded, self._compiled)
+        encoded = self.prepare_arguments(arguments)
         _check_context(context)
-        if not accepted:
+        if encoded is None:
             return '{"ok":false,"status":"unavailable","error":"invalid_arguments","verified_accuracy":false}'
         detached: dict[str, object] = json.loads(encoded)
         try:
