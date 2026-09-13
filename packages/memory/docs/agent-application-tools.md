@@ -260,3 +260,10 @@ and binding identity.
 Runtime plugin loading, custom tool management in the console, streaming custom
 results, and public SDK registration remain separate capabilities. Inferred
 function tools still require explicit host registration and agent selection.
+
+
+Tools may opt into [native exact-call approval](agent-tool-approvals.md) with
+`requires_approval=True`. Guarded agents require an active workflow checkpoint and
+an approval context matching the saved plan and selected model. A recorded decision
+alone never invokes the handler; an explicit continuation activates and claims the
+exact proposed call. The default remains false and preserves prior bindings.
