@@ -393,7 +393,10 @@ async def test_consumption_cancel_and_drained_sibling_cannot_restore_ticket(tmp_
             await run(job)
         job._save = original
         assert sibling_started.is_set() and injected and calls == [1]
-        assert 'b' in status(job).completed_steps
+        # A callback swallowing cancellation cannot authorize a completed receipt.
+        # Its uncertain attempt still must not restore the consumed pause ticket.
+        assert 'b' not in status(job).completed_steps
+        assert 'b' in status(job).inflight_steps
         assert status(job).paused_steps == ()
         with pytest.raises(WorkflowError, match='outcome_unknown'):
             await run(job)

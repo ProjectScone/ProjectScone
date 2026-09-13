@@ -101,16 +101,15 @@ propagate from the task. The metadata stream does not carry exception details or
 an answer. Consume the task result separately and revalidate evidence before
 later publication under the original deadline.
 
-## Remaining observability work
+## Durable history and remaining delivery work
 
-This is an opt-in native metadata stream. It is not yet attached to the task or
-handoff scheduler, persisted as encrypted run history, exposed through HTTP or
-the standalone SDK, or rendered in the Console. Durable replay/reconnect,
-authenticated streaming, workflow identity and retention handling remain separate
-required work. Real provider text streaming also remains required; these events
-neither simulate token streaming nor expose hidden reasoning. Old journals do
-not acquire historical timing data retrospectively.
+Saved task, handoff and interactive workflows now collect these observations into
+[encrypted event history](agent-event-history.md), including explicit collection
+coverage, stable task/hop/activation identity and native cursor replay. Direct
+`BoundAgent` callers can still opt into the bounded stream independently.
 
-The native [encrypted history store](agent-event-history.md) can persist supplied
-metadata observations with authenticated cursors. Automatic collection and the
-remaining integrations above are still required.
+Authenticated HTTP/live delivery, standalone SDK reconnect and Console rendering
+remain required. Real provider public-text streaming also remains required; these
+events neither simulate token streaming nor expose hidden reasoning. Old journals
+do not acquire historical timing data retrospectively. History is metadata, not
+an answer or proof of current source/recipient authorization.

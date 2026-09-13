@@ -20,7 +20,13 @@ from ._encrypted_store import EncryptedRecordStore
 from .approval_store import invocation_digest
 from .handoff_workflow import AgentHandoffPlan
 from .plan_store import _selections
-from .history_models import AgentHistoryEntry, AgentHistoryPage, HistoryManifest, MAX_POSITION
+from .history_models import (
+    AgentCollectionEvent,
+    AgentHistoryEntry,
+    AgentHistoryPage,
+    HistoryManifest,
+    MAX_POSITION,
+)
 from .progress import AgentProgressEvent, AgentProgressGap
 from .run_store import AgentRunRequest
 from .workflow import WorkflowError, _integer
@@ -155,6 +161,20 @@ class AgentEventHistoryStore:
         selection_id: str,
         event: AgentProgressEvent | AgentProgressGap,
     ) -> AgentHistoryEntry:
+        entry, _ = self._append(request, step_id=step_id, selection_id=selection_id, event=event)
+        return entry
+
+    def _append(
+        self,
+        request: AgentRunRequest,
+        *,
+        step_id: str,
+        selection_id: str,
+        event: AgentProgressEvent | AgentProgressGap | AgentCollectionEvent,
+        collection_id: str | None = None,
+        activation_id: str | None = None,
+        expected_generation: str | None = None,
+    ) -> tuple[AgentHistoryEntry, str]:
         token, digest, request = self._identity(request)
         try:
             if any(
@@ -162,7 +182,15 @@ class AgentEventHistoryStore:
                 for value in (step_id, selection_id)
             ):
                 raise ValueError('invalid event selection')
-            if type(event) not in (AgentProgressEvent, AgentProgressGap):
+            if collection_id is not None and (
+                type(collection_id) is not str or not re.fullmatch(r'[0-9a-f]{32}', collection_id)
+            ):
+                raise ValueError('invalid collection identity')
+            if activation_id is not None and (
+                type(activation_id) is not str or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', activation_id)
+            ):
+                raise ValueError('invalid activation identity')
+            if type(event) not in (AgentProgressEvent, AgentProgressGap, AgentCollectionEvent):
                 raise ValueError('invalid native event')
             values: dict[str, object] = {field.name: getattr(event, field.name) for field in fields(event)}
             for value in values.values():
@@ -173,7 +201,14 @@ class AgentEventHistoryStore:
                 if type(value) is int and not 0 <= value <= MAX_POSITION:
                     raise ValueError('event integer out of bounds')
             encoded = json.dumps(
-                {'position': 1, 'step_id': step_id, 'selection_id': selection_id, 'event': values},
+                {
+                    'position': 1,
+                    'step_id': step_id,
+                    'selection_id': selection_id,
+                    'event': values,
+                    'collection_id': collection_id,
+                    'activation_id': activation_id,
+                },
                 allow_nan=False,
             )
             if len(encoded.encode()) > 4096:
@@ -184,6 +219,8 @@ class AgentEventHistoryStore:
         self._selection(request, entry)
         with self._access(write=True) as db:
             prior = self._manifest(db, token, digest)
+            if expected_generation is not None and (prior is None or prior.generation != expected_generation):
+                raise WorkflowError('history_generation_changed')
             if prior is None:
                 if (
                     db.execute("SELECT COUNT(*) FROM agent_history WHERE token LIKE 'state:%'").fetchone()[0]
@@ -218,7 +255,7 @@ class AgentEventHistoryStore:
                 'INSERT INTO agent_history VALUES (?,?) ON CONFLICT(token) DO UPDATE SET payload=excluded.payload',
                 ('state:' + token, self._storage._seal('state:' + token, state.model_dump_json().encode())),
             )
-            return entry
+            return entry, generation
 
     def read(
         self, request: AgentRunRequest, *, after: str | None = None, limit: int = 50

@@ -13,6 +13,9 @@ import stat
 
 from .approval_models import Decision, ToolApprovalActivation, ToolApprovalRecord
 from .approval_store import AgentApprovalStore
+from .history_capture import AgentRunHistory
+from .event_history import AgentEventHistoryStore
+from .history_models import AgentHistoryPage
 from .catalog import AgentCatalog
 from .handoff_workflow import AgentHandoffPlan, AgentHandoffWorkflow, HandoffResult
 from .input_store import AgentInputRecord, AgentInputStore
@@ -96,6 +99,11 @@ class AgentRunService:
         self._plans, self._memory, self._scope_for = plans, memory, scope_for
         self._maximum, self._deadline = max_active, deadline_s
         self._runs = AgentRunStore(target / 'requests.sqlite', key=key, max_runs=max_runs)
+        try:
+            self._history = AgentEventHistoryStore(target / 'history.sqlite', key=key, max_histories=max_runs)
+        except BaseException:
+            self._runs.close()
+            raise
         self._inputs = AgentInputStore(self._runs)
         self._approvals = AgentApprovalStore(self._runs)
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
@@ -165,22 +173,23 @@ class AgentRunService:
         scope = self._scope(request.space)
         if scope.as_dict() != request.scope:
             raise WorkflowError('run_scope_changed')
+        history = AgentRunHistory(self._history, request, activation_id=approval_activation or input_activation)
         if isinstance(plan, AgentHandoffPlan):
             return AgentHandoffWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
                 memory=self._memory, space=request.space, scope=scope,
                 exclude_session_id=request.exclude_session_id, deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history)
         if isinstance(plan, InteractiveAgentPlan):
             return InteractiveAgentWorkflow(self._path(request), key=self._key, catalog=self._catalog,
                 request=request, memory=self._memory, inputs=self._inputs,
                 activated=tuple(record for record in self._inputs.activated(request.space, request.run_id)
                                 if input_activation is not None and record.activation_id == input_activation),
                 deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history)
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
             exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel,
-            approval_store=self._approvals, approval_activation=approval_activation)
+            approval_store=self._approvals, approval_activation=approval_activation, history=history)
 
     def _progress(self, request: AgentRunRequest) -> WorkflowStatus | None:
         identity = (request.space, request.run_id)
@@ -564,6 +573,18 @@ class AgentRunService:
             if descriptor is not None:
                 os.close(descriptor)
 
+    async def history(self, space: str, run_id: str, *, after: str | None = None, limit: int = 50,
+                      admission_guard: Callable[[], None] | None = None) -> AgentHistoryPage:
+        """Read metadata only under current space, scope and catalog policy."""
+        await self._space(space)
+        request = self._runs.get(space, run_id)
+        if request is None:
+            raise WorkflowError('run_not_found')
+        self._check_run_request(request, admission_guard)
+        page = self._history.read(request, after=after, limit=limit)
+        self._check_run_request(request, admission_guard)
+        return page
+
     async def result(self, space: str, run_id: str) -> WorkflowResult | HandoffResult | None:
         await self._space(space)
         request = self._runs.get(space, run_id)
@@ -588,8 +609,11 @@ class AgentRunService:
         if self._closed:
             return
         self._closing = True
-        self._runs.close()
-        self._closed = True
+        try:
+            self._history.close()
+        finally:
+            self._runs.close()
+            self._closed = True
 
     async def aclose(self) -> None:
         if self._closed:
@@ -598,6 +622,17 @@ class AgentRunService:
         tasks = (*self._tasks.values(), *self._admissions.values())
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._runs.close()
-        self._closed = True
+        drain = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                cancelled = True
+        try:
+            self._history.close()
+        finally:
+            self._runs.close()
+            self._closed = True
+        if cancelled:
+            raise asyncio.CancelledError
