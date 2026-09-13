@@ -322,16 +322,27 @@ def unresolved_calls(content: str, path: str, *, language: Optional[Language]) -
     every call in it would read as a defect in the graph rather than as
     a reader it never had.
     """
+    return tuple(sorted({name for _, name in unresolved_call_sites(content, path, language=language)}))
+
+
+def unresolved_call_sites(content: str, path: str, *,
+                          language: Optional[Language]) -> tuple[tuple[str, str], ...]:
+    """Each call the graph could not bind, with the declaration that made it.
+
+    The caller is what turns a disclosure into something resolvable: a
+    corpus-wide pass can only draw an edge if it knows which end it comes
+    from. See `code_resolution`.
+    """
     if language != "python":
         return ()
-    unbound: list[str] = []
+    unbound: list[tuple[str, str]] = []
     code_claims(content, path, language=language, _unbound=unbound)
-    return tuple(sorted({name for name in unbound if name not in BUILTINS}))
+    return tuple((caller, name) for caller, name in unbound if name not in BUILTINS)
 
 
 def code_claims(content: str, path: str, *, language: Optional[Language],
                 resolve: Optional["Resolve"] = None,
-                _unbound: Optional[list[str]] = None) -> tuple[CodeClaim, ...]:
+                _unbound: Optional[list[tuple[str, str]]] = None) -> tuple[CodeClaim, ...]:
     """What a source file defines, imports and calls, as claims about it.
 
     Names are paths: a module is its path, and a declaration is its path
@@ -550,7 +561,7 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str],
            imported: dict[str, tuple[str, Optional[str]]], say,
-           unbound: Optional[list[str]] = None) -> None:
+           unbound: Optional[list[tuple[str, str]]] = None) -> None:
     """Calls between things this file can see, and no others.
 
     A bare name is a call to this file's own declaration when it has one,
@@ -578,7 +589,11 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
                 if unbound is not None:
                     spelt = _spelling(call.func)
                     if spelt is not None:
-                        unbound.append(spelt)
+                        # The caller travels with the name: a corpus-wide
+                        # pass needs to know which declaration made the
+                        # call, and recovering that later would mean
+                        # walking the tree a second time.
+                        unbound.append((whole, spelt))
             elif target != whole:
                 say(whole, CALLS, target, call.lineno)
 
@@ -648,7 +663,8 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
 
 
 async def record_claims(engine, space: str, *, episode_id: int, content: str, path: str,
-                        when: str, resolve: Optional["Resolve"] = None) -> int:
+                        when: str, resolve: Optional["Resolve"] = None,
+                        _recorded: Optional[list[CodeClaim]] = None) -> int:
     """Record what a file says about itself, and say how many claims that
     was. One place decides how these are written — quoted from the line,
     cited to the episode, extracted rather than stated — so the engine and
@@ -657,6 +673,8 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
 
     said = 0
     for claim in code_claims(content, path, language=code_language(path), resolve=resolve):
+        if _recorded is not None:
+            _recorded.append(claim)
         await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
                                  valid_from=when, source_episode_id=episode_id,
                                  quote=claim.quote, origin="extracted")
