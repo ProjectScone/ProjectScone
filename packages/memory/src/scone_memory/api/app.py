@@ -148,7 +148,10 @@ _REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", 
 
 
 def _is_decision(path: str) -> bool:
-    return path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+    parts = path.rstrip('/').split('/')
+    tool_decision = (len(parts) == 7 and parts[1:3] == ['v1', 'agent-runs']
+                     and parts[4] == 'approvals' and parts[6] == 'decision')
+    return tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
 
 
 def _is_space_delete(method: str, path: str) -> bool:
@@ -479,6 +482,7 @@ def create_app(
             features["agents.runs"] = True
             features["agents.usage"] = True
             features["agents.inputs"] = True
+            features["agents.approvals"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         features["documents.sync"] = directory_sync_service is not None
         if document_import_service is not None:
@@ -504,7 +508,13 @@ def create_app(
         mount_agent_plan_routes(app, agent_catalog, agent_plan_store, space_for)
     if agent_run_service is not None:
         from .agent_runs import mount_agent_run_routes
+        from .agent_approvals import mount_agent_approval_routes
         mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
+        def approval_actor(request: Request) -> str:
+            current_space_for(request)
+            token = request.headers.get('authorization', '').partition(' ')[2].strip()
+            return agent_run_service.approval_actor(token)
+        mount_agent_approval_routes(app, agent_run_service, space_for, assert_current_space, approval_actor)
 
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
