@@ -1,6 +1,6 @@
 # Checkpoint-backed workflow pauses
 
-[Package overview](../README.md) · [Agent tools](agent-tools.md)
+[Package overview](../README.md) · [Agent tools](agent-tools.md) · [Durable agent turns](agent-turn-journal.md)
 
 `WorkflowPausableStep` lets a trusted native workflow callback return
 `WorkflowPaused(checkpoint)` instead of a completed JSON result. The named
@@ -104,6 +104,7 @@ runner. Once control returns, an expired invocation refuses successful pause
 acknowledgement. If the pause record committed while a journal write crossed the
 deadline, it remains available for inspection and later explicit continuation.
 
-This API is a native workflow primitive. Tool-specific approval requests,
-decisions, agent-turn replay journals, HTTP/SDK continuation and console approval
-controls require further integration and are not provided by these types.
+This API is a native workflow primitive. [Durable agent turns](agent-turn-journal.md)
+add ordered model/tool receipts and native scheduling yields on top of it.
+Tool-specific approval requests, decisions, HTTP/SDK continuation and console
+approval controls still require further integration.
