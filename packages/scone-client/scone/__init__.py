@@ -15,7 +15,7 @@ from .agent_usage import ModelTokenUsage, ToolTokenUsage
 from .agent_results import AgentResult, HandoffHop, HandoffResult, HumanOutput, ModelOutput, TaskResult
 from .agent_evidence import EvidencePacket
 from .agents import AgentClient, PlanPage, RunPage
-from .agent_models import (AgentChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
+from .agent_models import (AgentChoice, ToolChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
 from .client import DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, Scone
 from .document_jobs import DocumentJobs, DocumentPage
@@ -44,7 +44,7 @@ __all__ = [
     "SyncSourceOutcome", "SyncScanIssue", "SyncOutcome", "SyncOutcomePage",
     "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
     "DocumentSpec", "DocumentStatus", "DocumentStored", "ParserLimits", "PdfOcr",
-    "PlanPage", "RunPage", "AgentChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
+    "PlanPage", "RunPage", "AgentChoice", "ToolChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
     "ModelChoice", "ModelTask", "RunPolicy", "RunRequest", "RunStatus", "SavedPlan", "TaskPlan",
     "SconeError",
     "Added",

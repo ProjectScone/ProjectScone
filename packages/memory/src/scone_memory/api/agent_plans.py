@@ -60,7 +60,7 @@ def mount_agent_plan_routes(app: FastAPI, catalog: AgentCatalog, store: AgentPla
 
     @app.get('/v1/agents/catalog')
     async def choices(space: str = Depends(space_for)) -> JSONResponse:
-        return response({'agents': catalog.describe()})
+        return response({'agents': catalog.describe(), 'tools': catalog.tool_descriptions()})
 
     @app.get('/v1/agent-plans')
     async def plans(limit: int = 50, after: str | None = None, space: str = Depends(space_for)) -> JSONResponse:

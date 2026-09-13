@@ -137,6 +137,15 @@ model choices. Resource construction is local; reads and plan saves do not
 execute a model. Only an explicit `start` submits a run. Errors never trigger an
 automatic retry, resume, or alternate model selection.
 
+Catalogue choices also expose the host's configured application tools through
+`AgentChoice.tools`: an immutable tuple of `ToolChoice(name, description,
+revision)`, or `None` when a legacy host does not report tool selections. An
+empty tuple means the agent has no application tools. Shared descriptions are
+validated once and resolved to each agent's selected names; tool schemas,
+handlers, and private configuration are not exposed. Reading this metadata
+does not invoke tools or require an additional capability beyond
+`agents.catalog`. Tool selection remains host configuration, not a plan edit.
+
 New workflow response models reject malformed scalars, mismatched identities,
 and changed acknowledgement bindings. The client preserves server HTTP errors
 and refuses redirects. JSON is encoded as UTF-8 so valid multibyte inputs do not
