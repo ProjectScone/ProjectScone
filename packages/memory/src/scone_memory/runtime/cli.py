@@ -914,6 +914,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
               f"{report.errors} error(s)", file=out)
         for k in report.ks:
             print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%"
+                  f"   share {report.recall_share.get(k, 0.0) * 100:5.1f}%"
                   f"   P@{k} {report.precision.get(k, 0.0) * 100:5.1f}%   nDCG@{k} {report.ndcg.get(k, 0.0) * 100:5.1f}%"
                   f"   hit@{k} {report.hit_rate.get(k, 0.0) * 100:5.1f}%",
                   file=out)
@@ -922,7 +923,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
               f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
         for qt, row in report.by_type.items():
-            print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+            print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(
+                f"all@{k} {row[f'all@{k}'] * 100:5.1f}% share@{k} {row.get(f'share@{k}', 0.0) * 100:5.1f}%" for k in report.ks), file=out)
         if report.history:
             print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
                   + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
