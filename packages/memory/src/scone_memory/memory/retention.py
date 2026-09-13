@@ -16,6 +16,8 @@ from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import DoctorReport, Episode, ExpiryReport, ForgetReceipt, ForgetStatus, SpaceReceipt, Tombstone
 from ..core.ports import DocumentStore, EventLog, NewEvent, NewTombstone, VectorIndex
 from ..core.retirement import Retirement, RetirementStore, retirement_key, supports_retirement
+from ..core.space_deletion import supports_space_deletion, validate_deletion
+from . import space_cleanup
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space, retention_policy
 
@@ -337,6 +339,10 @@ async def space_deleted(runtime: RetentionRuntime, space: str) -> Optional[str]:
     """When the space was deleted, or None while it lives. A store
     that cannot record a deletion has never deleted one."""
     check_space(space)
+    if supports_space_deletion(runtime.documents):
+        pending = await runtime.documents.space_deletion(space)
+        if pending is not None:
+            return validate_deletion(pending, space).requested_at
     deleted = getattr(runtime.documents, "space_deleted", None)
     return await deleted(space) if callable(deleted) else None
 
@@ -365,27 +371,9 @@ async def space_impact(runtime: RetentionRuntime, space: str) -> SpaceReceipt:
 
 
 async def delete_space(runtime: RetentionRuntime, space: str) -> SpaceReceipt:
-    """Remove everything the space holds, in order: attachment holds
-    (bytes only when no other space holds them), the records of the
-    space with their vectors, then the event trail; mark the space
-    deleted so no write re-creates it. Returns the receipt
-    ``space_impact`` would have shown, with the counts of the deed."""
-    check_space(space)
-    await runtime.living(space)
-    if not callable(getattr(runtime.documents, "delete_space", None)):
-        raise InvalidInput("this document store does not implement delete-space")
-    preview = await runtime.space_receipt(space)
-    deleted_at = runtime.clock()
-    released, kept = await runtime.blobs.release_space(space)
-    gone = await runtime.documents.delete_space(space, deleted_at)
-    sweep = getattr(runtime.vectors, "delete_space", None)
-    if sweep is not None:
-        await sweep(space)
-    else:
-        await runtime.vectors.delete(list(gone.chunk_ids))
-    events = (await runtime.events.purge(space)) if runtime.events is not None else 0
-    return preview.model_copy(update={
-        "episodes": gone.episodes, "chunks": len(gone.chunk_ids), "facts": gone.facts, "links": gone.links,
-        "tombstones": gone.tombstones, "events": events, "attachments_released": released,
-        "attachments_kept": kept, "deleted_at": deleted_at,
-    })
+    """Accept deletion durably, then finish or resume independent store cleanup.
+
+    The receipt retains the accepted impact snapshot across retries. Callers
+    must serialize affected writers and recovery; this is not an atomic cutover.
+    """
+    return await space_cleanup.delete(runtime, space)

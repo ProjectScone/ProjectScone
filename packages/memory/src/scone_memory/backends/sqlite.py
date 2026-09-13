@@ -28,6 +28,9 @@ from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, Ne
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -123,6 +126,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     # its last old row. Seeding only on insert loses that history.
     conn.execute("BEGIN IMMEDIATE")
     try:
+        conn.execute("CREATE TABLE IF NOT EXISTS space_deletions (space TEXT PRIMARY KEY, payload TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS retirements (space TEXT NOT NULL, episode_id INTEGER NOT NULL,"
                      " payload TEXT NOT NULL, PRIMARY KEY (space, episode_id))")
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)",
@@ -675,6 +679,29 @@ class SqliteDocumentStore:
         )
         self.conn.commit()
         return _tombstone(self.conn.execute("SELECT * FROM tombstones WHERE space = ? AND episode_id = ?", (new.space, new.episode_id)).fetchone())
+
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        payload = encode_deletion(record)
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO space_deletions (space, payload) VALUES (?, ?)", (record.space, payload))
+            row = self.conn.execute("SELECT payload FROM space_deletions WHERE space = ?", (record.space,)).fetchone()
+        return decode_deletion(row["payload"], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        row = self.conn.execute("SELECT payload FROM space_deletions WHERE space = ?", (deletion_key(space),)).fetchone()
+        return decode_deletion(row["payload"], space) if row is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        if after is None:
+            rows = self.conn.execute("SELECT space, payload FROM space_deletions ORDER BY space LIMIT ?", (limit,))
+        else:
+            rows = self.conn.execute("SELECT space, payload FROM space_deletions WHERE space > ? ORDER BY space LIMIT ?", (after, limit))
+        return [decode_deletion(row["payload"], row["space"]) for row in rows]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM space_deletions WHERE space = ?", (deletion_key(space),))
 
     async def record_retirement(self, record: Retirement) -> Retirement:
         payload = encode_retirement(record)
