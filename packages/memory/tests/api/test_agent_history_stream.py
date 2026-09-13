@@ -567,3 +567,71 @@ async def test_a_delivery_still_awaiting_when_the_window_closes_ends_cleanly(set
     events = frames(await collect(app))
     assert events[-1] == ('end', None, {'reason': 'observation_window_ended'}), events
     assert not any(kind == 'error' for kind, _, _ in events), events
+
+
+async def test_a_cursor_survives_a_server_restart_and_resumes_exactly(tmp_path, short_window):
+    """The restart case. The cursor is signed against the run and its
+    on-disk journal, not against anything held in a process -- so a
+    client that reconnects to a freshly built service with the cursor it
+    last saw resumes from exactly that position, with nothing repeated
+    and nothing skipped, and without any model call."""
+    import httpx
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
+    from scone_memory.agents.evidence_loop import ToolStep
+    from scone_memory.agents.plan_store import AgentPlanStore
+    from scone_memory.agents.run_service import AgentRunService
+    from scone_memory.agents.task_workflow import AgentTask, AgentTaskPlan
+    from scone_memory.api.app import create_app
+    from scone_memory.retrieval.recall_scope import RecallScope
+
+    calls = []
+
+    class Model:
+        async def complete(self, messages, tools):
+            calls.append(messages)
+            return ToolStep(content='Selected model answer')
+
+    catalog = AgentCatalog(models=[AgentModel('local', 'Local', '1', Model)], agents=[AgentDefinition(
+        agent_id='research', instructions='Use evidence.', models=('local',), default_model='local',
+        initial_search=False)])
+
+    lives = 0
+
+    async def build():
+        nonlocal lives
+        lives += 1
+        memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+        plans = AgentPlanStore(tmp_path / 'plans.db', key=b'k' * 32)
+        if lives == 1:
+            plans.save('alpha', AgentTaskPlan(workflow_id='report', tasks=(
+                AgentTask(task_id='find', agent_id='research', prompt='Find evidence.'),)),
+                catalog=catalog, expected_revision=0)
+        service = AgentRunService(tmp_path / 'runs', key=b'k' * 32, catalog=catalog, plans=plans,
+                                  memory=memory, scope_for=lambda space: RecallScope.validated(),
+                                  max_active=1, max_parallel_tasks=1)
+        app = create_app(memory, {'writer': 'alpha', 'reader': 'alpha'}, roles={'writer': 'write', 'reader': 'read'}, agent_catalog=catalog,
+                         agent_plan_store=plans, agent_run_service=service)
+        return memory, plans, service, app
+
+    # First life: run to completion and stream one page.
+    memory, plans, service, app = await build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://scone.test') as client:
+        assert (await client.post('/v1/agent-runs', json=body(), headers=auth())).status_code == 202
+        await service.wait('alpha', 'one')
+    first = frames(await collect(app, query='limit=1'))
+    cursor, page = next((c, d) for k, c, d in first if k == 'history')
+    seen = page['items'][-1]['position']
+    await service.aclose(); plans.close(); await memory.close()
+
+    # Second life: nothing in memory survives; only the journal on disk.
+    memory, plans, service, app = await build()
+    try:
+        resumed = await collect(app, query='limit=1', headers=[(b'last-event-id', cursor.encode())])
+        assert resumed[0]['status'] == 200, resumed[0]
+        positions = [e['position'] for k, _, d in frames(resumed) if k == 'history' for e in d['items']]
+        assert positions and positions[0] == seen + 1, positions
+        assert positions == sorted(set(positions))
+        assert len(calls) == 1, 'a restart must not re-run the model'
+    finally:
+        await service.aclose(); plans.close(); await memory.close()
