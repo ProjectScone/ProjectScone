@@ -468,6 +468,7 @@ def create_app(
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
+            features["agents.tools"] = True
             features["agents.plans"] = True
             features["agents.handoffs"] = True
             from ..agents.task_requirements import output_schema_available

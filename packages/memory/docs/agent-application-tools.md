@@ -74,6 +74,33 @@ before calling the handler, even if the provider ignores the schema.
 
 ## Contracts and scope
 
+An embedded host can combine its existing private runtime configuration with
+trusted Python registrations:
+
+```python
+from scone_memory.runtime.agent_runtime import load_agent_runtime
+
+runtime = load_agent_runtime("/path/to/private/agents.json", engine, tools=[count_tool])
+```
+
+The JSON agent entry selects `"tools": ["double_count"]`. Unknown names fail
+before opening runtime state. The ordinary CLI has no registrations by default;
+JSON cannot import Python modules or install handlers. The host owns runtime
+shutdown through `await runtime.aclose()` or its application lifespan.
+
+Authenticated `GET /v1/agents/catalog` responses contain a shared `tools` table
+with each selected tool's `name`, `description`, and `revision`, and a `tools`
+name list for each agent. `agents.tools` advertises this catalog support. Only
+selected registrations are published; schemas and executable state stay private.
+Descriptions are public to callers authorized to read that host's agent catalog,
+so keep credentials and private configuration out of them.
+
+The Python SDK resolves these summaries to immutable `AgentChoice.tools` values.
+The console shows them in task and handoff editors alongside model selection.
+An explicit empty list means no application tools are configured; absent metadata
+on older hosts means availability is unknown. Reading summaries never executes
+a model or function and does not let clients change the host's tool policy.
+
 An agent sees only the tools named in its definition. A catalog accepts at most
 32 registrations and rejects duplicate, reserved, or unknown selected names.
 Names contain 1–64 ASCII letters, digits, underscores or hyphens. Descriptions

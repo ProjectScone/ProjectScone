@@ -17,6 +17,42 @@ def document(tmp_path):
 def write(tmp_path,value):
     path=tmp_path/'agents.json';path.write_text(json.dumps(value));path.chmod(0o600);return path
 
+
+async def test_runtime_binds_only_host_supplied_tools_before_opening_state(tmp_path, memory, monkeypatch):
+    from scone_memory.agents.custom_tools import AgentTool
+    from scone_memory.agents.evidence_loop import ToolCall, ToolStep
+    from scone_memory.integrations.scoped_tools import ScopedMemoryTools
+    from scone_memory.retrieval.recall_scope import RecallScope
+    from scone_memory.runtime.agent_runtime import LocalAgentModel
+    monkeypatch.setenv('SCONE_TEST_AGENT_KEY', '6b'*32)
+    value = document(tmp_path)
+    value['agents'][0]['tools'] = ['double_count']
+    path = write(tmp_path, value)
+    with pytest.raises(ValueError):
+        load_agent_runtime(path, memory)
+    assert not (tmp_path/'agents').exists()
+    invoked = []
+    registration = AgentTool('double_count', 'Double a count.', '1', {
+        'type': 'object', 'properties': {'count': {'type': 'integer'}},
+        'required': ['count'], 'additionalProperties': False},
+        lambda args, context: invoked.append((args['count'], context.space)) or {'doubled': 6})
+    class Model:
+        def __init__(self):
+            self.calls = 0
+        async def complete(self, messages, tools):
+            self.calls += 1
+            return (ToolStep(calls=(ToolCall(id='one', name='double_count', arguments={'count': 3}),))
+                    if self.calls == 1 else ToolStep(content='Six.'))
+    monkeypatch.setattr(LocalAgentModel, 'create', lambda self: Model())
+    owner = load_agent_runtime(path, memory, tools=[registration])
+    try:
+        assert not invoked
+        answer = await owner.catalog.bind('research').run('Double three.',
+            tools=ScopedMemoryTools(memory, 'alpha', scope=RecallScope.validated()))
+        assert answer.output.text == 'Six.' and invoked == [(3, 'alpha')]
+    finally:
+        await owner.aclose()
+
 @pytest.fixture
 async def memory():
     engine=await MemoryEngine(InMemoryDocumentStore(),InMemoryVectorIndex(),HashEmbedder()).open()
