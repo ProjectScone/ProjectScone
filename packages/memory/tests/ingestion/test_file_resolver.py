@@ -1,10 +1,12 @@
-"""A relative import is followed to a file that was actually read.
+"""A relative import is followed only to a file that was actually read.
 
-`map` resolved relative imports with a closure over the files it walked;
-`sync` recorded claims through the engine with no resolver at all, so a
-synced tree's graph had no edge for `from .store import Shelf` while a
-mapped one did. The resolver is now one function of the paths a walk saw,
-shared by both, and sync hands it to the engine for every file it stores.
+Without a resolver the reader names a candidate for every relative import
+by path arithmetic, whether or not the file exists. `map` confirmed its
+candidates against the files it walked, through a closure of its own;
+`sync` recorded claims through the engine with no resolver, so a synced
+tree's graph carried an edge to `./missing` that a mapped one left out.
+The resolver is now one function of the paths a walk saw, shared by map,
+sync and a batch of files remembered together.
 """
 
 from __future__ import annotations
@@ -41,16 +43,33 @@ async def test_the_resolver_is_bound_to_the_paths_it_was_given():
     assert file_resolver({'pkg/store.py'})('pkg/api.py', 1, 'store') == 'pkg/store.py'
 
 
-async def test_sync_records_the_edge_a_relative_import_makes(tmp_path):
-    """The whole point: a synced tree has the same import edges a mapped one
-    does. Before, the engine recorded the file's claims with no resolver
-    and the relative import was left out rather than guessed at."""
-    (tmp_path / 'pkg').mkdir()
-    (tmp_path / 'pkg' / 'store.py').write_text('class Shelf:\n    pass\n', encoding='utf-8')
-    (tmp_path / 'pkg' / 'api.py').write_text('from .store import Shelf\n\ndef put():\n    return Shelf()\n', encoding='utf-8')
+async def test_sync_keeps_the_import_the_tree_holds_and_leaves_out_the_one_it_does_not(tmp_path):
+    """The whole point. Without a resolver the reader names a candidate by
+    path arithmetic for every relative import, existing or not; with one
+    over the walked files, an import of a file the tree does not hold is
+    left out rather than guessed at. Sync now has the same precision as
+    map."""
+    (tmp_path / 'web').mkdir()
+    (tmp_path / 'web' / 'store.ts').write_text('export class Shelf {}\n', encoding='utf-8')
+    (tmp_path / 'web' / 'api.ts').write_text("import {Shelf} from './store';\nimport {gone} from './missing';\n", encoding='utf-8')
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
     try:
         await sync_directory(memory, 's', str(tmp_path), marker='tree', apply=True)
+        imports = sorted(f.object for f in await memory.facts('s') if f.subject == 'web/api.ts' and f.predicate == 'imports')
+        assert imports == ['web/store.ts'], imports
+    finally:
+        await memory.close()
+
+
+async def test_a_lone_file_still_names_a_python_relative_import_by_its_own_path(tmp_path):
+    """One file is no tree. A resolver over it alone would decline every
+    relative import; the reader's own path arithmetic still names the
+    candidate, and a file remembered on its own keeps that."""
+    from scone_memory.ingestion.records import Record
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    try:
+        await memory.replace('s', Record(content='from .store import Shelf\n', kind='file', source='pkg/api.py', dedup_key='api'))
         held = {(f.subject, f.predicate, f.object) for f in await memory.facts('s')}
         assert ('pkg/api.py', 'imports', 'pkg/store.py') in held, sorted(t for t in held if t[1] == 'imports')
     finally:
@@ -75,18 +94,19 @@ async def test_a_changed_file_keeps_its_resolved_edge_and_loses_the_one_it_dropp
         await memory.close()
 
 
-async def test_files_remembered_together_follow_imports_among_themselves():
-    """A batch is a walk of its own: the engine resolves relative imports
-    among the files it was handed, without a caller's resolver."""
+async def test_files_remembered_together_resolve_imports_among_themselves():
+    """A batch is a walk of its own: the engine confirms relative imports
+    against the files it was handed, without a caller's resolver, and
+    leaves out an import of a file the batch does not hold."""
     from scone_memory.ingestion.records import Record
 
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
     try:
         await memory.remember_many('s', [
-            Record(content='class Shelf:\n    pass\n', kind='file', source='pkg/store.py'),
-            Record(content='from .store import Shelf\n', kind='file', source='pkg/api.py'),
+            Record(content='export class Shelf {}\n', kind='file', source='web/store.ts'),
+            Record(content="import {Shelf} from './store';\nimport {gone} from './missing';\n", kind='file', source='web/api.ts'),
         ])
-        held = {(f.subject, f.predicate, f.object) for f in await memory.facts('s')}
-        assert ('pkg/api.py', 'imports', 'pkg/store.py') in held, sorted(t for t in held if t[1] == 'imports')
+        imports = sorted(f.object for f in await memory.facts('s') if f.subject == 'web/api.ts' and f.predicate == 'imports')
+        assert imports == ['web/store.ts'], imports
     finally:
         await memory.close()

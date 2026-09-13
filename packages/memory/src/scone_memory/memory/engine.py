@@ -672,9 +672,13 @@ class MemoryEngine:
         from ..ingestion.code_resolution import file_resolver
 
         # A batch of files remembered together can follow relative imports
-        # among themselves; a caller that walked a tree passes its own.
+        # among themselves; a caller that walked a tree passes its own. One
+        # file alone is no tree: a resolver over it would decline every
+        # relative import, where the reader's own path arithmetic still
+        # names a candidate, so a lone file keeps that.
         if resolve is None:
-            resolve = file_resolver([record.source for record in records if record.source])
+            sources = [record.source for record in records if record.source]
+            resolve = file_resolver(sources) if len(sources) > 1 else None
         mapped: list[Fact] = []
         for record, outcome in zip(records, added):
             if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
