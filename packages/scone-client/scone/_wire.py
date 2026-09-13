@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 import re
 from types import MappingProxyType
-from typing import Dict, List, Mapping, Optional, Protocol
+from typing import Iterator, Dict, List, Mapping, Optional, Protocol
 from urllib.parse import quote
 
 from .errors import SconeError
@@ -114,6 +114,16 @@ class WorkflowTransport(Protocol):
                  json: Optional[Dict[str, object]] = None, data: Optional[bytes] = None,
                  headers: Optional[Mapping[str, str]] = None) -> object: ...
     def capabilities(self) -> Capabilities: ...
+
+    def _stream(self, path: str, *, params: Optional[Mapping[str, str]] = None,
+                headers: Optional[Mapping[str, str]] = None) -> "StreamedLines": ...
+
+
+class StreamedLines(Protocol):
+    """An open streamed response: iterate its lines, and always close it."""
+
+    def __iter__(self) -> Iterator[bytes]: ...
+    def close(self) -> None: ...
 
 
 class ResourceClient:

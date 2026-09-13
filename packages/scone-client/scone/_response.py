@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sys
 import zlib
-from typing import Optional
+from typing import Iterator, Optional
 
 import requests
+import urllib3
 from urllib3.exceptions import HTTPError
 from urllib3.response import HTTPResponse
 
@@ -129,3 +130,49 @@ def read_response(response: requests.Response, limit: int) -> bytes:
         return _decode(bytes(body_buffer), coding, limit, status)
     except (HTTPError, requests.RequestException, OSError, zlib.error) as exc:
         raise SconeError(f"response body failed: {exc}", status) from exc
+
+
+def read_lines(response: requests.Response, *, line_limit: int, total_limit: int) -> Iterator[bytes]:
+    """Yield one line at a time from a streaming response, bounded twice.
+
+    A frame is checked before it is parsed: a single line longer than
+    ``line_limit`` is refused rather than buffered, and a stream that has
+    delivered more than ``total_limit`` in all is refused rather than kept
+    open. The wire must be uncompressed -- an encoded stream cannot be
+    bounded per line -- so anything but ``identity`` is refused here.
+    """
+    status = response.status_code
+    coding = response.headers.get("Content-Encoding", "").strip().lower()
+    if coding not in ("", "identity"):
+        raise SconeError("streamed response must not be content-encoded", status)
+    if response.raw is None:
+        raise SconeError("streamed response has no readable body", status)
+    total = 0
+    pending = b""
+    try:
+        for chunk in response.raw.stream(8192, decode_content=False):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > total_limit:
+                raise _limit(status)
+            pending += chunk
+            if len(pending) > line_limit and b"\n" not in pending:
+                raise SconeError("streamed line exceeds its limit", status)
+            while True:
+                cut = pending.find(b"\n")
+                if cut < 0:
+                    break
+                line, pending = pending[:cut], pending[cut + 1:]
+                if len(line) > line_limit:
+                    raise SconeError("streamed line exceeds its limit", status)
+                yield line.rstrip(b"\r")
+    except (requests.RequestException, urllib3.exceptions.HTTPError, TimeoutError, OSError) as exc:
+        # urllib3 raises its own ReadTimeoutError from `raw.stream()`, which
+        # is not a requests exception; a stalled server must still surface
+        # as a refusal rather than as a raw transport error.
+        raise SconeError("streamed read failed: " + str(exc), status) from exc
+    if pending:
+        if len(pending) > line_limit:
+            raise SconeError("streamed line exceeds its limit", status)
+        yield pending.rstrip(b"\r")

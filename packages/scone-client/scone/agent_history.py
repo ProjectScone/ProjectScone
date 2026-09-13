@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, fields
 import re
-from typing import Optional
+from typing import Iterator, Optional
 
+from .errors import SconeError
+from ._wire import StreamedLines
 from ._wire import boolean, identifier, integer, invalid, items, record, text
 from .agent_events import CollectionEvent, HistoryEvent, MAX_POSITION, ProgressEvent, invocation, parse_event
 from .agent_models import HandoffPlan, ModelTask, RunRequest
@@ -144,3 +147,81 @@ class HistoryPage:
                 raise invalid('collection continuity')
             observed[entry.collection_id] = (current[0] or (earlier[0] if earlier else None), *current[1:])
         return cls(request.space, request.run_id, True, entries, next_after, floor, omitted)
+
+
+class HistoryStream:
+    """Verified pages as they are published, read frame by frame.
+
+    Each ``history`` frame is validated exactly as a page read is -- same
+    identity, same shape, same cursor continuity -- and its SSE ``id`` must
+    name that page's ``next_after``, because the ``id`` is what a
+    reconnect will send back. An ``error`` frame is a refusal and is
+    raised; an ``end`` frame stops the iteration. Comments are ignored.
+    Use as a context manager so the connection is released whether the
+    stream ended, was refused, or the caller stopped early.
+    """
+
+    def __init__(self, lines: "StreamedLines", *, request: "RunRequest", after: Optional[str],
+                 limit: int) -> None:
+        self._lines = lines
+        self._request = request
+        self._after = after
+        self._limit = limit
+        self._closed = False
+        self.cursor: Optional[str] = after
+
+    def __enter__(self) -> "HistoryStream":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._lines.close()
+
+    def __iter__(self) -> Iterator[HistoryPage]:
+        kind: Optional[str] = None
+        identifier: Optional[str] = None
+        data: list[bytes] = []
+        for raw in self._lines:
+            if raw == b"":
+                if kind is not None or data:
+                    page = self._frame(kind, identifier, b"\n".join(data))
+                    kind, identifier, data = None, None, []
+                    if page is None:
+                        return
+                    yield page
+                continue
+            if raw.startswith(b":"):
+                continue
+            field, _, value = raw.partition(b":")
+            value = value[1:] if value.startswith(b" ") else value
+            if field == b"event":
+                kind = value.decode("utf-8", errors="strict")
+            elif field == b"id":
+                identifier = value.decode("utf-8", errors="strict")
+            elif field == b"data":
+                data.append(value)
+        if kind is not None or data:
+            raise invalid("history stream ended inside a frame")
+
+    def _frame(self, kind: Optional[str], identifier: Optional[str], data: bytes) -> Optional[HistoryPage]:
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            raise invalid("history frame") from None
+        if kind == "end":
+            return None
+        if kind == "error":
+            row = record(payload)
+            reason = row.get("reason")
+            raise SconeError("history stream refused: " + (reason if isinstance(reason, str) else "unknown"))
+        if kind != "history":
+            raise invalid("history frame kind")
+        page = HistoryPage.from_json(payload, request=self._request, after=self.cursor, limit=self._limit)
+        if identifier is None or identifier != page.next_after:
+            raise invalid("history frame id does not name its page")
+        self.cursor = page.next_after
+        return page
