@@ -63,6 +63,18 @@ def test_hit_definitions():
     assert not none.any_at(5) and not none.all_at(5), "no evidence can never be a hit"
 
 
+def test_share_of_evidence_found():
+    """any@k and all@k bracket the truth. On an item with three evidence
+    sessions of which two came back, any says 1, all says 0, and "two of
+    three" is invisible. share@k is that number."""
+    r = ItemResult("q", "t", True, ["s1", "s0", "s9", "s1"], 0, 0, 0.0, answer_sessions=["s0", "s1", "s2"])
+    assert r.share_at(1) == 1 / 3
+    assert r.share_at(3) == 2 / 3 and r.any_at(3) and not r.all_at(3)
+    assert r.share_at(4) == 2 / 3, "a session returned twice counts once"
+    none = ItemResult("q", "t", False, ["s1"], 0, 0, 0.0, answer_sessions=[])
+    assert none.share_at(5) == 0.0, "no evidence can never be a hit, as with any and all"
+
+
 async def test_run_scores_under_the_stated_definitions(tmp_path):
     path = tmp_path / "d.json"
     path.write_text(json.dumps(DATASET))
@@ -81,8 +93,11 @@ async def test_run_scores_under_the_stated_definitions(tmp_path):
     assert report.recall_all[3] == 1.0
     assert report.recall_any[1] == 1.0, "each question's top item is an evidence session"
     assert report.recall_all[1] == 0.5, "q2 needs two sessions; one cannot hold both"
+    assert report.recall_share[1] == 0.75, "q1 found its one session, q2 one of two: the mean share is what any/all cannot say"
+    assert report.recall_share[3] == 1.0
     assert set(report.by_type) == {"single-session-user", "multi-session"}
     assert report.by_type["multi-session"]["all@1"] == 0.0 and report.by_type["multi-session"]["all@2"] == 1.0
+    assert report.by_type["multi-session"]["share@1"] == 0.5 and report.by_type["multi-session"]["share@2"] == 1.0
     assert report.context_reduction_median == 0.0, "k=3 returns every one of three sessions: nothing is left behind"
     tight = await run(make, items[:2], ks=(1,), limit=1)
     assert 0 < (tight.context_reduction_median or 0) < 1, "k=1 leaves the other sessions' bytes behind"
@@ -92,6 +107,7 @@ async def test_run_scores_under_the_stated_definitions(tmp_path):
 
     with_abst = await run(make, items, ks=(3,), include_abstention=True)
     assert with_abst.scored == 3 and with_abst.recall_any[3] == round(2 / 3, 4)
+    assert with_abst.recall_share[3] == round(2 / 3, 4), "an abstention item counts as zero share, as it does for any and all"
 
 
 async def test_each_item_gets_a_fresh_engine(tmp_path):
@@ -346,3 +362,26 @@ async def test_cross_queries_give_the_sweep_a_no_evidence_population(tmp_path):
     assert (crossed.scored, crossed.items, crossed.recall_any, crossed.recall_all) == (plain.scored, plain.items, plain.recall_any, plain.recall_all)
     assert [r.question_id for r in crossed.results] == ["q1", "q2", "q3"]
     assert "cross_results" not in crossed.as_dict(with_items=False) and len(crossed.as_dict()["cross_results"]) == 3
+
+
+async def test_the_printed_report_shows_the_share_beside_any_and_all(tmp_path):
+    """The human-readable report is what a person reads after a run; the
+    share has to be on the same line as the two numbers it sits between,
+    and on every per-type row."""
+    import io
+
+    from scone_memory.runtime.cli import bench_command, build_parser
+    from scone_memory.runtime.config import Settings
+
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(DATASET))
+    out = io.StringIO()
+    # Default settings are in-process stores and the hash embedder: no model, no file.
+    code = await bench_command(build_parser().parse_args(["bench", str(path), "--k", "1,3"]), Settings(), out)
+    text = out.getvalue()
+    assert code == 0, text
+    lines = [line for line in text.splitlines() if line.strip().startswith("R@")]
+    assert len(lines) == 2 and all("any" in line and "all" in line and "share" in line for line in lines), text
+    assert "share  75.0%" in lines[0], lines[0]
+    rows = [line for line in text.splitlines() if "multi-session" in line]
+    assert rows and "share@1  50.0%" in rows[0] and "share@3 100.0%" in rows[0], rows

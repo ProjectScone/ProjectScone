@@ -391,11 +391,12 @@ async def recall(
     facts = await fact_recall.facts_for_query(runtime.documents, space, query, boundary or now, scope=fact_scope, degraded=degraded)
     if runtime.demote_superseded:
         # After the facts, because this is the one thing in the recall path
-        # that reads the ledger rather than the index. `demote_restated`
-        # ran earlier on wording alone and cannot see a replacement that
-        # was worded differently.
+        # that reads the ledger rather than the index -- what the returned
+        # episodes stated, not the query's facts. `demote_restated` ran
+        # earlier on wording alone and cannot see a replacement that was
+        # worded differently.
         result_items = await supersession.demote_superseded(
-            runtime.documents, space, result_items, facts, boundary or now)
+            runtime.documents, space, result_items, boundary or now, degraded=degraded)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
     result = RecallResult(

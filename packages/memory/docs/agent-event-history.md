@@ -12,8 +12,9 @@ run identifiers in row keys are HMAC-derived.
 interactive workflows, including parallel tasks and approval resumptions. Native
 replay checks current space, scope, catalog bindings and an optional host admission
 guard. Authenticated HTTP replay, standalone SDK replay and SSE live delivery
-(host route and SDK stream) are available. A Console timeline and provider
-answer-token streaming remain follow-up work.
+(host route and SDK stream) are available, and the Console shows an execution
+timeline for every opened run, following the stream live. Provider
+answer-token streaming for agents remains follow-up work.
 The store itself trusts the host; neither storage nor native metadata replay
 revalidates answers or grants recipient authorization. The HTTP delivery path
 adds current recipient and committed/paused-source verification, described below.
@@ -218,6 +219,12 @@ The standalone SDK exposes immutable typed `agents.history()` pages, cursor
 reconnect and `agents.stream_history()`, a context-managed reader of the SSE
 route above that yields the same verified pages, keeps the last cursor for a
 resume after a disconnect or server restart, and closes the connection when the
-block exits. Native process-restart tests cover both. Still required: Console
-rendering and genuine provider public-text streaming. Neither cursor replay nor
-metadata delivery substitutes for those or simulates token streaming.
+block exits. Native process-restart tests cover both. The Console (Webapp
+PR21) renders an execution timeline on every opened run with the same checks
+as the SDK decoder, loads more by cursor, follows the SSE route live with
+bounded reconnection, and withholds an entry that carries anything beyond
+metadata. Still required: genuine provider public-text streaming for agent
+answers -- the agent tool chat is a nonstreaming turn by design, while
+conversations already stream public deltas through a process-local text
+window. Neither cursor replay nor metadata delivery substitutes for that or
+simulates token streaming.

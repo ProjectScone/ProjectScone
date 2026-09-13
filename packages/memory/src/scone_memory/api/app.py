@@ -448,7 +448,7 @@ def create_app(
     async def capabilities(_space: str = Depends(space_for)) -> dict:
         """Implemented HTTP operations, not a health check or a ledger read."""
         features = {
-            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
+            "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "recall.graph_questions": True, "facts.read": True, "facts.review": True,
             "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
@@ -734,8 +734,9 @@ def create_app(
         return (await engine.forget_status(space, episode_id)).model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
-    async def delete_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
-        receipt = await engine.forget(space, episode_id)
+    async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
+                             space: str = Depends(space_for)) -> dict:
+        receipt = await engine.forget(space, episode_id, with_claims=with_claims)
         return {"forgotten": episode_id, **receipt.model_dump()}
 
     @app.get("/v1/spaces/{name}/impact")
@@ -779,6 +780,7 @@ def create_app(
         limit: int = Query(default=5, ge=1, le=50),
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph or recall instead of the rule."),
+        whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -787,9 +789,10 @@ def create_app(
         knows by name is answered from the claims, and anything else is an
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for."""
-        from ..retrieval.router import answer_question
+        from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
-        return (await answer_question(engine, space, q, now=now, limit=limit, route=route)).record(space)
+        return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
+                                      max_item_chars=0 if whole else DEFAULT_ITEM_CHARS)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
@@ -1019,13 +1022,23 @@ def create_app(
                 if evidence_graph:
                     response["evidence_graph"] = graph.model_dump(mode="json")
                 if graph_analysis:
+                    from ..retrieval import graph_questions
                     from ..retrieval.graph_analysis import GraphAnalysisResult, analyze_evidence_graph
                     try:
                         analysis = (analyze_evidence_graph(graph) if graph_available else
                                     GraphAnalysisResult.unavailable("evidence_graph_unavailable"))
                     except Exception:
                         analysis = GraphAnalysisResult.unavailable("analysis_unavailable")
-                    response["graph_analysis"] = analysis.model_dump(mode="json")
+                    payload = analysis.model_dump(mode="json")
+                    try:
+                        questions = graph_questions.questions_for(graph, analysis)
+                    except Exception:
+                        # Derived from the same authorized graph; a fault deriving them is
+                        # disclosed as that, never as private exception text.
+                        questions = graph_questions.Questions(analysis_status="unavailable", analysis_method=analysis.method,
+                                                              reason="questions_unavailable")
+                    payload["questions"] = questions.model_dump(mode="json")
+                    response["graph_analysis"] = payload
             if structural_context:
                 from ..retrieval.structural import StructuralLimits, expand_structural_context
                 try:

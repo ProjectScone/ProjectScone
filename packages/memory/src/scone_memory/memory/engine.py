@@ -663,7 +663,7 @@ class MemoryEngine:
         return retention.RetentionRuntime(
             self.documents, self.vectors, self.blobs, self.events, self.clock, self._emit,
             self._episode_or_gone, self.impact, self.forget, self._living,
-            self.space_deleted, self._space_receipt,
+            self.space_deleted, self._space_receipt, self.exclude,
         )
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
@@ -703,11 +703,14 @@ class MemoryEngine:
         """Observe retained, pending or completed source removal without writes."""
         return await retention.forget_status(self._retention_runtime(), space, episode_id)
 
-    async def forget(self, space: str, episode_id: int) -> ForgetReceipt:
+    async def forget(self, space: str, episode_id: int, *,
+                     with_claims: retention.ClaimPolicy = "keep") -> ForgetReceipt:
         """Remove the episode, its chunks and vectors, and release the
         attachments nothing else carries; return the receipt that
-        ``impact`` would have shown. Claims and links stand."""
-        return await retention.forget(self._retention_runtime(), space, episode_id)
+        ``impact`` would have shown. Claims and links stand, unless
+        ``with_claims="exclude"`` takes the claims only this source
+        supported out of recall, reversibly; see ``retention.forget``."""
+        return await retention.forget(self._retention_runtime(), space, episode_id, with_claims)
 
     # -- ingest jobs ---------------------------------------------------------
 

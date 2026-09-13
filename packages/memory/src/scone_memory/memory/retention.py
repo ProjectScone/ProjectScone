@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Mapping, Optional
+from typing import Awaitable, Callable, Literal, Mapping, Optional
 
 from ..backends.blobs import BlobStore
 from ..core.affirmations import affirmation_store
@@ -36,6 +36,12 @@ class RetentionRuntime:
     living: Callable[[str], Awaitable[None]]
     space_deleted: Callable[[str], Awaitable[Optional[str]]]
     space_receipt: Callable[[str], Awaitable[SpaceReceipt]]
+    #: Exclude one ledger claim from recall with a reason and an actor.
+    exclude: Callable[[str, int, str, Optional[str]], Awaitable[object]]
+
+
+ClaimPolicy = Literal["keep", "exclude"]
+CLAIM_POLICIES: tuple[str, ...] = ("keep", "exclude")
 
 
 def _ms(since: float) -> float:
@@ -227,17 +233,30 @@ async def forget_status(runtime: RetentionRuntime, space: str, episode_id: int) 
     raise NotFound(f"episode {episode_id} not found in {space!r}")
 
 
-async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> ForgetReceipt:
+async def forget(runtime: RetentionRuntime, space: str, episode_id: int,
+                 with_claims: ClaimPolicy = "keep") -> ForgetReceipt:
     """Remove the episode, its chunks and vectors, and release the
     attachments nothing else carries; return the receipt that
-    ``impact`` would have shown. Claims and links stand."""
+    ``impact`` would have shown. Claims and links stand -- unless
+    ``with_claims`` is ``exclude``: then, once the source is gone, each
+    ledger claim that cited or affirmed it and that no retained source
+    still supports is excluded from recall with a reason naming the
+    episode. A policy, reversible with ``include``, never an erasure:
+    the claim keeps its interval, its history and its quote. A claim
+    with another retained source, one stated on its own authority, one
+    proposed or declined, and one already excluded are left and listed
+    under why. Nothing is excluded before the source is gone, so an
+    interruption leaves the documented default and never a claim
+    excluded for a source that is still there; the retry finishes it."""
     check_space(space)
+    if with_claims not in CLAIM_POLICIES:
+        raise InvalidInput(f"with_claims must be one of {', '.join(CLAIM_POLICIES)}, not {with_claims!r}")
     retirement_key(space, episode_id)
     store = _retirement_store(runtime)
     started = time.perf_counter()
     pending = await store.retirement(space, episode_id)
     if pending is not None:
-        return await _finish_forget(runtime, store, pending)
+        return await _settle_claims(runtime, space, episode_id, await _finish_forget(runtime, store, pending), with_claims)
     try:
         receipt = await runtime.impact(space, episode_id)
     except NotFound as error:
@@ -253,7 +272,51 @@ async def forget(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
     ))
     if pending.content_hash != episode.content_hash:
         raise InvalidInput("retirement identity does not match its source")
-    return await _finish_forget(runtime, store, pending)
+    return await _settle_claims(runtime, space, episode_id, await _finish_forget(runtime, store, pending), with_claims)
+
+
+async def _settle_claims(runtime: RetentionRuntime, space: str, episode_id: int, receipt: ForgetReceipt,
+                         with_claims: ClaimPolicy) -> ForgetReceipt:
+    """Exclude what the forgotten source alone held up; list the rest and why."""
+    if with_claims != "exclude":
+        return receipt
+    store = affirmation_store(runtime.documents)
+    affirmed = await store.space_affirmations(space) if store is not None else []
+    candidates = set(receipt.facts_citing) | {a.fact_id for a in affirmed if a.source_episode_id == episode_id}
+    excluded: list[int] = []
+    other_support: list[int] = []
+    not_in_ledger: list[int] = []
+    already: list[int] = []
+    for fact_id in sorted(candidates):
+        fact = await runtime.documents.get_fact(space, fact_id)
+        if fact is None:
+            continue
+        if not fact.in_ledger:
+            not_in_ledger.append(fact_id)
+            continue
+        if fact.excluded:
+            already.append(fact_id)
+            continue
+        if fact.source_episode_id is None:
+            # Stated on its own authority; this episode only affirmed it.
+            other_support.append(fact_id)
+            continue
+        supports = {found for found in (fact.source_episode_id, *(a.source_episode_id for a in affirmed if a.fact_id == fact_id))
+                    if found is not None and found != episode_id}
+        retained = False
+        for other in sorted(supports):
+            if await runtime.documents.get_episode(space, other) is not None:
+                retained = True
+                break
+        if retained:
+            other_support.append(fact_id)
+            continue
+        await runtime.exclude(space, fact_id, f"source episode {episode_id} forgotten", "forget")
+        excluded.append(fact_id)
+    return receipt.model_copy(update={
+        "claims_policy": "exclude", "claims_excluded": excluded, "claims_kept_other_support": other_support,
+        "claims_kept_not_in_ledger": not_in_ledger, "claims_already_excluded": already,
+    })
 
 
 def _retirement_store(runtime: RetentionRuntime) -> RetirementStore:
