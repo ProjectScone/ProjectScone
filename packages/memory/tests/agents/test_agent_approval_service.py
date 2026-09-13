@@ -109,3 +109,89 @@ async def test_saved_service_approval_reopens_without_reproposing(memory, tmp_pa
     finally:
         await service.aclose()
         plans.close()
+
+
+async def test_handoff_successor_gets_its_own_exact_approval(memory, tmp_path):
+    effects = []
+    scripts = {
+        'first': Script(
+            call(call_id='first-call'), ToolStep(content='{"answer":"Handing over","handoff_to":"second"}')
+        ),
+        'second': Script(
+            call(call_id='second-call'), ToolStep(content='{"answer":"Finished","handoff_to":null}')
+        ),
+    }
+    registry = AgentCatalog(
+        models=[AgentModel(name, name, '1', lambda name=name: scripts[name]) for name in scripts],
+        tools=[tool(lambda args, ctx: effects.append(args['count']), requires_approval=True)],
+        agents=[
+            AgentDefinition(
+                agent_id=name,
+                instructions='Work',
+                models=(name,),
+                default_model=name,
+                initial_search=False,
+                tools=('double_count',),
+            )
+            for name in scripts
+        ],
+    )
+    plans = AgentPlanStore(tmp_path / 'plans', key=b'k' * 32)
+    plans.save(
+        'alpha',
+        AgentHandoffPlan(
+            workflow_id='handoff',
+            root_agent='first',
+            max_handoffs=1,
+            agents=(
+                HandoffAgent(agent_id='first', model_id='first', can_handoff_to=('second',)),
+                HandoffAgent(agent_id='second', model_id='second'),
+            ),
+        ),
+        catalog=registry,
+        expected_revision=0,
+    )
+
+    def open_service():
+        return AgentRunService(
+            tmp_path / 'runs',
+            key=b'k' * 32,
+            catalog=registry,
+            plans=plans,
+            memory=memory,
+            scope_for=lambda _: RecallScope.validated(),
+        )
+
+    service = open_service()
+    try:
+        await service.start('alpha', 'one', workflow_id='handoff', plan_revision=1, question='Work')
+        assert (await service.wait('alpha', 'one')).paused_steps == ('hop-01',)
+        (root,) = await service.approvals('alpha', 'one')
+        await service.decide_tool(
+            'alpha', 'one', root.request_id, decision='approve', actor='owner', expected_revision=1
+        )
+        await service.continue_tools('alpha', 'one', continuation_id='root', decisions={root.request_id: 2})
+        paused = await service.wait('alpha', 'one')
+        assert paused.completed_steps == ('hop-01',) and paused.paused_steps == ('hop-02',)
+        assert effects == [3]
+        await service.aclose()
+        service = open_service()
+        records = await service.approvals('alpha', 'one')
+        (child,) = [record for record in records if record.revision < 4]
+        assert child.call.selection_id == 'second' and child.call.model_id == 'second'
+        assert child.request_id != root.request_id and len(scripts['second'].requests) == 1
+        repeated = await service.continue_tools(
+            'alpha', 'one', continuation_id='root', decisions={root.request_id: 2}
+        )
+        assert not repeated.status.active_local and effects == [3]
+        await service.decide_tool(
+            'alpha', 'one', child.request_id, decision='deny', actor='owner', expected_revision=1
+        )
+        await service.continue_tools('alpha', 'one', continuation_id='child', decisions={child.request_id: 2})
+        assert (await service.wait('alpha', 'one')).status == 'completed' and effects == [3]
+        result = await service.result('alpha', 'one')
+        assert [hop.output.model_id for hop in result.hops] == ['first', 'second']
+        assert all(record.revision == 4 for record in await service.approvals('alpha', 'one'))
+    finally:
+        await service.aclose()
+        plans.close()
