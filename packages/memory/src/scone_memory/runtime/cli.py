@@ -155,6 +155,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
                    help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
 
+    p = sub.add_parser("forget-matching", help="forget every source a filter selects: previews unless --apply")
+    p.add_argument("--source-prefix", help="sources whose name starts with this text")
+    p.add_argument("--tag", action="append", default=[], help="a tag every selected source carries, repeatable")
+    p.add_argument("--conditions", help='metadata filter as JSON, e.g. {"field": "sync", "is": "old"}')
+    p.add_argument("--kind", help="only episodes of this kind")
+    p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
+    p.add_argument("--apply", action="store_true", help="forget; needs --selection from a preview")
+    p.add_argument("--selection", help="the selection digest a preview printed")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only these sources supported out of recall, reversibly")
+
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
     p.add_argument("--as-of", help="facts that held at this time")
@@ -1598,6 +1609,27 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             return 2
         receipt = await engine.delete_space(space)
         emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
+        return 0
+
+    if args.command == "forget-matching":
+        conditions = json.loads(args.conditions) if args.conditions else None
+        bulk = await engine.forget_matching(space, source_prefix=args.source_prefix, tags=args.tag,
+                                              conditions=conditions, kind=args.kind, limit=args.limit, apply=args.apply,
+                                              selection=args.selection, with_claims=args.with_claims)
+        if args.json:
+            emit(bulk.model_dump())
+            return 0
+        verb = "forgot" if bulk.applied else "would forget"
+        count = len(bulk.forgotten) if bulk.applied else len(bulk.episode_ids)
+        print(f"{verb} {count} of {bulk.matched} matching source(s): {bulk.chunks} chunk(s), "
+              f"{bulk.attachments_released} attachment(s) released, {bulk.facts_citing} claim(s) and "
+              f"{bulk.links_citing} link(s) cite them", file=out)
+        if bulk.pass_limited:
+            print(f"the pass limit of {args.limit} bit; run again for the rest", file=out)
+        if not bulk.selection_complete:
+            print("the walk stopped before reading every source; more may match", file=out)
+        if not bulk.applied:
+            print(f"to forget exactly these, run again with --apply --selection {bulk.selection}", file=out)
         return 0
 
     if args.command == "forget":

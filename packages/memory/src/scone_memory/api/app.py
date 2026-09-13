@@ -205,6 +205,22 @@ class MergeBody(BaseModel):
     preview: bool = False
 
 
+class ForgetMatchingBody(BaseModel):
+    """Unknown fields are refused: a filter field that is silently dropped
+    would widen what gets forgotten."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_prefix: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    conditions: Optional[dict[str, object]] = None
+    kind: Optional[str] = None
+    limit: int = 100
+    apply: bool = False
+    selection: Optional[str] = None
+    with_claims: Literal["keep", "exclude"] = "keep"
+
+
 class BatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -736,6 +752,16 @@ def create_app(
     async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
         """Read removal progress, including interrupted cleanup, without writes."""
         return (await engine.forget_status(space, episode_id)).model_dump()
+
+    @app.post("/v1/episodes/forget-matching")
+    async def forget_matching_route(body: ForgetMatchingBody, space: str = Depends(space_for)) -> dict:
+        """Forget what a filter selects. Without ``apply`` this is a preview and
+        removes nothing; with it, the preview's ``selection`` digest is required
+        and a selection that changed since is refused."""
+        report = await engine.forget_matching(space, source_prefix=body.source_prefix, tags=body.tags,
+                                              conditions=body.conditions, kind=body.kind, limit=body.limit,
+                                              apply=body.apply, selection=body.selection, with_claims=body.with_claims)
+        return report.model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
