@@ -460,7 +460,7 @@ class MemoryEngine:
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
 
-    async def replace(self, space: str, record: Record) -> "Replaced":
+    async def replace(self, space: str, record: Record, *, map_code: bool = True) -> "Replaced":
         """Store a keyed record as the current one under its key. A key
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
@@ -470,7 +470,12 @@ class MemoryEngine:
         the old source available. The subsequent forget/store is not an
         atomic swap: a storage failure between them can leave the key empty,
         and its error reports the removed source. Competing writers still
-        need caller serialization across the commit phase."""
+        need caller serialization across the commit phase.
+
+        With the code graph on, the new content's claims are read and the
+        replaced episode's claims it no longer makes are closed. A caller
+        that reads claims itself, with a resolver this engine does not
+        have, passes ``map_code=False`` and does both."""
         await self._living(space)
         check_space(space)
         if not record.dedup_key:
@@ -519,7 +524,7 @@ class MemoryEngine:
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
             retired = file_claims.Retired(closed=0)
-            if self.code_graph:
+            if self.code_graph and map_code:
                 prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
                 mapped = await self._map_code(space, [prepared], [added])
                 if receipt is not None:

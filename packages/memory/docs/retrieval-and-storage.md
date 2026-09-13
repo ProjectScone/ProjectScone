@@ -468,7 +468,13 @@ scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
 ```
 
 `map` walks a directory, remembers every source file under the path it
-was read from, and with `--graph` records what each says. An answer
+was read from, and with `--graph` records what each says. A map is of the
+tree as it is now: a file is held under the identity `sync` uses for it,
+so mapping again after an edit updates the file's memory rather than
+adding a second, the receipt counts it as `updated`, and with `--graph`
+the claims the new version no longer makes are closed, naming the file
+(`claims_closed`). What `map` stored, `sync` recognises as its own, and
+the other way round. An answer
 carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.
@@ -1093,10 +1099,12 @@ nothing parked in it — a CLI retry would report success and do nothing.
 
 ## Keeping a space in step with a directory
 
-`map` remembers the files under a directory and notices when it has seen
-one before. What it cannot notice is that a file has **changed** or that
-a file is **gone** — and those two are the difference between an import
-you run once and a sync you run on a schedule.
+`map` remembers the files under a directory, notices when it has seen
+one before, and updates one that has **changed**. What it cannot notice
+is that a file is **gone**, and it never plans before writing — those are
+the difference between an import you run once and a sync you run on a
+schedule. The two share one identity for a file, so either can follow the
+other.
 
 ```bash
 scone sync ~/work/notes                          # a plan: nothing is written

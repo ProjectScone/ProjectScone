@@ -283,3 +283,53 @@ async def test_everything_a_file_says_holds_at_once(tree):
     assert sorted(f.object for f in current if f.subject == "app/wide.py" and f.predicate == "defines") == \
         ["app/wide.py:a", "app/wide.py:b"]
     assert [f for f in await engine.facts("default", status="closed") if f.subject == "app/wide.py"] == []
+
+
+# --- a map reflects the tree as it is now -----------------------------------
+
+async def test_a_changed_file_replaces_the_memory_of_its_earlier_version(tree):
+    """Mapping again after an edit used to add a second memory of the
+    file beside the first, and the first version's claims stood. A map is
+    of the tree as it is: the file's memory is updated under the same
+    identity `sync` uses, and what the new version no longer says is
+    closed, naming the file."""
+    engine = await memory()
+    await mapped(engine, str(tree), "--graph")
+    (tree / "app" / "planner.py").write_text(PLANNER.replace("import json", "import csv"), encoding="utf-8")
+    said = await mapped(engine, str(tree), "--graph")
+    assert "1 updated" in said and "1 claim(s) closed" in said, said
+    held = [e for e in await engine.episodes("default", {"sync": str(tree.resolve())}) if e.source == "app/planner.py"]
+    assert len(held) == 1, "one memory of the file, not one per version"
+    current = {(f.subject, f.predicate, f.object) for f in await engine.facts("default")}
+    assert ("app/planner.py", "imports", "csv") in current
+    assert ("app/planner.py", "imports", "json") not in current
+    [closed] = [f for f in await engine.facts("default", status="closed") if f.object == "json"]
+    assert closed.closed_reason == "no longer stated by app/planner.py"
+
+
+async def test_the_json_receipt_counts_updates_and_closed_claims(tree):
+    import json as _json
+
+    engine = await memory()
+    await mapped(engine, str(tree), "--graph")
+    (tree / "app" / "planner.py").write_text(PLANNER.replace("import json", "import csv"), encoding="utf-8")
+    report = _json.loads(await mapped(engine, str(tree), "--graph", "--json"))
+    assert report["read"] == 1 and report["updated"] == 1 and report["claims_closed"] == 1
+    assert report["deduplicated"] >= 1
+
+
+async def test_map_and_sync_share_one_identity_for_a_directory(tree):
+    """What `map` remembers, `sync` recognises as its own, and the other
+    way round: neither adds a second memory of a file the other stored."""
+    from scone_memory.ingestion.sync import sync_directory
+
+    engine = await memory()
+    await mapped(engine, str(tree))
+    receipt = await sync_directory(engine, "default", str(tree), apply=True)
+    assert receipt.updated == 0 and receipt.unchanged >= 3, receipt.text()
+    (tree / "app" / "store.py").write_text(STORE + "\nEXTRA = 1\n", encoding="utf-8")
+    await sync_directory(engine, "default", str(tree), apply=True)
+    said = await mapped(engine, str(tree))
+    assert "0 file(s) read" in said or "updated" not in said, said
+    held = [e for e in await engine.episodes("default", {"sync": str(tree.resolve())}) if e.source == "app/store.py"]
+    assert len(held) == 1

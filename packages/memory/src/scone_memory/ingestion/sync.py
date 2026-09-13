@@ -250,13 +250,24 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
 KEYS = "scone.sync/1"
 
 
-def _key(marker: str, path: str) -> str:
+def sync_key(marker: str, path: str) -> str:
     """The identity a synced file is stored under: its marker and its path.
 
     Length-prefixed rather than separated, because a marker and a path are
     both text a caller chose and any separator could appear in either.
+    ``map`` stores files under the same identity, so the two commands
+    recognise each other's memories of a file rather than adding a second.
     """
     return f"{KEYS}:{len(marker)}:{marker}/{path}"
+
+
+_key = sync_key
+
+
+def default_marker(root: str | pathlib.Path) -> str:
+    """The name a directory's memories are held under when none is given:
+    its absolute path."""
+    return str(pathlib.Path(root).resolve())
 
 
 def _files(root: pathlib.Path, suffixes: Sequence[str],
@@ -333,7 +344,7 @@ async def sync_directory(
         raise InvalidInput(f"the byte limit must be from 1 to 50000000, not {max_bytes}")
     if not suffixes:
         raise InvalidInput("a sync needs at least one suffix to look for")
-    name = marker if marker is not None else str(where.resolve())
+    name = marker if marker is not None else default_marker(where)
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
 
