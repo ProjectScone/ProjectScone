@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
+import re
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Union
 
@@ -302,16 +304,76 @@ class ModelChoice:
 
 
 @dataclass(frozen=True)
+class ToolChoice:
+    name: str
+    description: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        _tool_name(self.name)
+        text(self.description, 4000, 'tool description')
+        revision = text(self.revision, 128, 'tool revision')
+        if re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', revision) is None:
+            raise invalid('tool revision')
+
+
+def _tool_name(value: object) -> str:
+    name = text(value, 64, 'tool name')
+    if (re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) is None
+            or name in {'search_memory', 'trace_memory', 'read_memory', 'compute_memory',
+                        'answer', 'unknown_tool', 'custom_tool'}):
+        raise invalid('tool name')
+    return name
+
+
+def _tool_table(value: object) -> Dict[str, ToolChoice]:
+    tools: Dict[str, ToolChoice] = {}
+    summaries: list[Dict[str, str]] = []
+    for entry in items(value, 32):
+        row = record(entry)
+        if set(row) != {'name', 'description', 'revision'}:
+            raise invalid('tool fields')
+        tool = ToolChoice(_tool_name(row['name']), text(row['description'], 4000, 'tool description'),
+                          text(row['revision'], 128, 'tool revision'))
+        if tool.name in tools:
+            raise invalid('duplicate tool names')
+        tools[tool.name] = tool
+        summaries.append({'name': tool.name, 'description': tool.description, 'revision': tool.revision})
+    if len(json.dumps(summaries, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 128000:
+        raise invalid('tool metadata byte limit')
+    return tools
+
+
+@dataclass(frozen=True)
 class AgentChoice:
     agent_id: str
     default_model: str
     models: tuple[ModelChoice, ...]
+    tools: Optional[tuple[ToolChoice, ...]] = None
+
+    def __post_init__(self) -> None:
+        if self.tools is None:
+            return
+        if (not isinstance(self.tools, tuple) or len(self.tools) > 32
+                or any(not isinstance(tool, ToolChoice) for tool in self.tools)
+                or len({tool.name for tool in self.tools}) != len(self.tools)):
+            raise invalid('catalog tool choices')
 
 
 def parse_catalog(value: object) -> tuple[AgentChoice, ...]:
+    response = record(value)
+    tools = _tool_table(response['tools']) if 'tools' in response else None
     catalog = []
-    for value in items(record(value).get('agents'), 32):
+    for value in items(response.get('agents'), 32):
         row = record(value)
+        if ('tools' in row) != (tools is not None):
+            raise invalid('partial tool catalog')
+        selected: Optional[tuple[ToolChoice, ...]] = None
+        if tools is not None:
+            selected_names = tuple(_tool_name(name) for name in items(row['tools'], 32))
+            if len(set(selected_names)) != len(selected_names) or set(selected_names) - tools.keys():
+                raise invalid('catalog tool choices')
+            selected = tuple(tools[name] for name in selected_names)
         choices = []
         for model_value in items(row.get('models'), 64):
             model = record(model_value)
@@ -324,7 +386,7 @@ def parse_catalog(value: object) -> tuple[AgentChoice, ...]:
         default = identifier(row.get('default_model'))
         if len(ids) != len(choices) or default not in ids:
             raise invalid('catalog model choices')
-        catalog.append(AgentChoice(identifier(row.get('agent_id')), default, tuple(choices)))
+        catalog.append(AgentChoice(identifier(row.get('agent_id')), default, tuple(choices), selected))
     if len({agent.agent_id for agent in catalog}) != len(catalog):
         raise invalid('catalog agent choices')
     return tuple(catalog)
