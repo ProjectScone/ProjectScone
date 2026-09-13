@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ._wire import ResourceClient, address, bounded_body, cursor, identifier, integer, invalid, items, record, text
+from ._wire import ResourceClient, address, boolean, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_inputs import InputRecord
 from .agent_results import AgentResult, parse_result
 from .agent_models import (AgentChoice, HandoffPlan, Plan, RunPolicy, RunRequest, RunStatus,
@@ -191,11 +191,17 @@ class AgentClient(ResourceClient):
         return status
 
 
-    def result(self, run_id: str) -> AgentResult:
+    def result(self, run_id: str, *, include_usage: bool = False) -> AgentResult:
+        boolean(include_usage)
         path = '/v1/agent-runs/' + address(run_id) + '/result'
-        self._check('agents.runs')
+        capabilities = self._check('agents.runs')
+        if include_usage:
+            capabilities.require('agents.usage')
         request = self.request(run_id)
         inputs = self.inputs(run_id) if isinstance(request.plan.plan, TaskPlan) and request.plan.plan.interactive else ()
         # The server's current source verification must be the final remote read.
-        raw = self._client._request('GET', path)
-        return parse_result(raw, request, inputs)
+        if include_usage:
+            raw = self._client._request('GET', path, params={'include_usage': 'true'})
+        else:
+            raw = self._client._request('GET', path)
+        return parse_result(raw, request, inputs, include_usage=include_usage)

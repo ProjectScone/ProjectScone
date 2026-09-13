@@ -1,7 +1,7 @@
 """Authenticated background run admission and non-executing result reads."""
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
-from typing import Self
+from typing import Self, cast
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -11,7 +11,7 @@ from ..agents.catalog import Identifier
 from ..agents.handoff_workflow import HandoffResult
 from ..agents.input_store import AgentInputRecord
 from ..agents.run_service import AgentRunService
-from ..agents.workflow import WorkflowError
+from ..agents.workflow import WorkflowError, WorkflowResult
 
 
 class _CancelRun(BaseModel):
@@ -88,6 +88,38 @@ def _input(record: AgentInputRecord) -> dict[str, object]:
     return record.model_dump(mode='json', exclude={'invocation_digest'})
 
 
+def _usage_selection(request: Request) -> bool:
+    values = request.query_params.getlist('include_usage')
+    if len(values) > 1 or (values and values[0] not in ('true', 'false')):
+        raise WorkflowError('invalid_usage_selection')
+    return values == ['true']
+
+
+def _result_payload(answer: WorkflowResult | HandoffResult, include_usage: bool) -> dict[str, object]:
+    def model_output(value: object) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise ValueError('invalid model receipt')
+        row = dict(cast(dict[str, object], value))
+        if include_usage:
+            row.setdefault('usage', None)
+        else:
+            row.pop('usage', None)
+        return row
+
+    if isinstance(answer, HandoffResult):
+        payload = answer.model_dump(mode='json')
+        payload['final'] = model_output(payload['final']) if answer.final is not None else None
+        payload['hops'] = [{'output': model_output(hop.output.model_dump(mode='json')),
+                            'handoff_to': hop.handoff_to} for hop in answer.hops]
+        return payload
+    payload = asdict(answer)
+    rows = cast(dict[str, object], payload['results'])
+    payload['results'] = {
+        name: row if isinstance(row, dict) and row.get('kind') == 'human_input' else model_output(row)
+        for name, row in rows.items()}
+    return payload
+
+
 def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
                            space_for: Callable[..., Awaitable[str]],
                            assert_current_space: Callable[[Request, str], None]) -> None:
@@ -147,11 +179,12 @@ def mount_agent_run_routes(app: FastAPI, service: AgentRunService,
     @app.get('/v1/agent-runs/{run_id}/result')
     async def result(run_id: str, request: Request, space: str = Depends(space_for)) -> JSONResponse:
         try:
+            include_usage = _usage_selection(request)
             answer = await service.result(space, run_id)
             assert_current_space(request, space)
             if answer is None:
                 return _response({'error': 'agent_result_not_found'}, 404)
-            payload = answer.model_dump(mode='json') if isinstance(answer, HandoffResult) else asdict(answer)
+            payload = _result_payload(answer, include_usage)
             return _response({'space': space, **payload})
         except (WorkflowError, ValueError) as error:
             return _failure(error)

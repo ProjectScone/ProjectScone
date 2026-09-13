@@ -157,7 +157,7 @@ class InteractiveAgentWorkflow:
                 binding=result.binding, depends_on=task.depends_on, text=output.text,
                 source_status=cast(Literal['retained', 'none'], output.source_status),
                 evidence_ids=output.evidence_ids, evidence_packets=output.evidence_packets,
-                model_calls=output.model_calls, tool_calls=output.tool_calls)
+                model_calls=output.model_calls, tool_calls=output.tool_calls, usage=output.usage)
             return cast(JSONValue, receipt.model_dump(mode='json'))
         return execute
 

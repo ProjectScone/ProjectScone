@@ -66,9 +66,9 @@ producing a completed turn result; these totals cannot represent all attempted
 work. Existing private provider diagnostics remain available for failures when
 metadata was received.
 
-This change does not add usage to persisted `AgentTaskReceipt` records, workflow
-HTTP responses, standalone client result types, or console views. Those surfaces
-need a coordinated contract extension before they can display durable per-model
-usage. Native users can serialize `usage.model_dump_json()` themselves; that
+Workflow receipts now persist these reports and expose them through an explicit
+HTTP/client opt-in. See [durable workflow token usage](workflow-token-usage.md)
+for compatibility, historical receipts, console coverage, and interpretation.
+Native users can also serialize `usage.model_dump_json()` themselves; that
 representation contains the ordered reports, and the aggregate properties are
-recomputed when read with `ToolTokenUsage.model_validate_json()`.
+recomputed with `ToolTokenUsage.model_validate_json()`.
