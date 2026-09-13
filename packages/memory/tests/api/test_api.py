@@ -486,3 +486,212 @@ def test_a_retry_will_not_take_a_boolean_or_a_string_for_an_episode_id(client):
         assert refused.status_code == 422, (wrong, refused.status_code, refused.json())
     assert client.post("/v1/consolidate/retry", json={"episodes": [1]},
                        headers=auth()).status_code in (200, 501)
+
+
+def test_a_recall_can_withhold_what_a_caller_must_not_receive(client):
+    """The way-out half of redaction. Capture scrubs the agent feed; this
+    memory arrived through the episodes endpoint, which does not scrub, so
+    retrieval is the only place left to catch it."""
+    assert client.post("/v1/episodes", json={
+        "content": "Write to ana.alves@meridian-health.example about AKIAIOSFODNN7EXAMPLE."},
+        headers=auth()).status_code == 200
+    asked = {"q": "write about", "limit": 3}
+    plain = client.get("/v1/recall", params=asked, headers=auth()).json()
+    assert "ana.alves@meridian-health.example" in plain["items"][0]["text"]
+    assert "withheld" not in plain, "withholding is opt-in"
+
+    held = client.get("/v1/recall", params={**asked, "withhold": "email,secret"},
+                      headers=auth()).json()
+    assert "ana.alves@meridian-health.example" not in held["items"][0]["text"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in held["items"][0]["text"]
+    assert held["withheld"]["count"] == 2, held["withheld"]
+    assert held["withheld"]["by_kind"] == {"email": 1, "secret": 1}, held["withheld"]
+    # The sentence that stops the report being read as a safety claim.
+    assert "not a finding" in held["withheld"]["why"], held["withheld"]["why"]
+    # The byte count has to describe what was actually handed back.
+    assert held["returned_bytes"] != plain["returned_bytes"]
+    assert client.get("/v1/recall", params={**asked, "withhold": "astrology"},
+                      headers=auth()).status_code == 422
+
+
+def test_withholding_covers_the_whole_answer_and_not_only_the_passage(client):
+    """The report said one match and nothing unscanned while the same
+    address came back in the item's source, tags and metadata and as the
+    object of a fact. A report of coverage has to be true of everything
+    handed back, or it is a safety claim about surfaces nobody scanned."""
+    address = "ana.alves@meridian-health.example"
+    assert client.post("/v1/episodes", json={
+        "content": f"Write to {address} about the rota.", "source": address,
+        "tags": [address], "metadata": {"contact": address}},
+        headers=auth()).status_code == 200
+    assert client.post("/v1/facts", json={
+        "subject": "Ana", "predicate": "email", "object": address},
+        headers=auth()).status_code == 200
+
+    asked = {"q": "Ana write rota email", "limit": 3}
+    held = client.get("/v1/recall", params={**asked, "withhold": "email"}, headers=auth())
+    assert held.status_code == 200, held.text
+    body = held.json()
+    assert body["facts"], "this test needs a fact in the answer to be about anything"
+    leaked = [section for section, value in body.items() if address in json.dumps(value)]
+    assert leaked == [], f"{address} still in {leaked}"
+    assert "facts" in body["withheld"]["surfaces"], body["withheld"]
+
+    # A section the policy cannot reach is refused, not served under a
+    # report that reads as clean.
+    refused = client.get("/v1/recall", params={**asked, "withhold": "email",
+                                               "evidence_graph": "true"}, headers=auth())
+    assert refused.status_code == 422, refused.text
+    assert "evidence_graph" in refused.text, refused.text
+
+
+async def test_an_unknown_withhold_kind_is_refused_before_any_recall_runs():
+    """Naming a kind that does not exist is a mistake in the request, and
+    answering it by searching first and raising afterwards spends the
+    whole search -- and logs a recall event -- for an answer nobody
+    receives. Counted through the engine rather than inferred, because
+    "it was refused" is true either way and only one of the two is right.
+    """
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    searches = 0
+    real = engine.recall
+
+    async def counted(*args, **kwargs):
+        nonlocal searches
+        searches += 1
+        return await real(*args, **kwargs)
+
+    engine.recall = counted  # type: ignore[method-assign]
+    try:
+        with TestClient(create_app(engine, {"key-a": "alpha"})) as spy:
+            assert spy.post("/v1/episodes", json={"content": "Anything at all."},
+                            headers=auth()).status_code == 200
+            refused = spy.get("/v1/recall", params={"q": "anything", "withhold": "astrology"},
+                              headers=auth())
+            assert refused.status_code == 422, refused.text
+            assert searches == 0, "the search ran for an answer that was never returned"
+            assert spy.get("/v1/recall", params={"q": "anything", "withhold": "email"},
+                           headers=auth()).status_code == 200
+            assert searches == 1, "a valid policy must not stop the search"
+    finally:
+        await engine.close()
+
+
+def test_a_window_and_code_context_are_reachable_over_http(client):
+    """Both shipped to the CLI and stopped there, and HTTP is the surface
+    everything else uses. A retrieval feature only the terminal can ask
+    for is a feature the product does not have."""
+    source = ("import json\n\n\n"
+              "def keep(paper: str) -> str:\n"
+              "    \"\"\"Keep one paper.\"\"\"\n"
+              "    return json.dumps({\"paper\": paper})\n")
+    assert client.post("/v1/episodes", json={
+        "content": source, "source": "pkg/store.py"}, headers=auth()).status_code == 200
+    asked = {"q": "keep one paper", "limit": 3}
+
+    widened = client.get("/v1/recall", params={**asked, "window": 200}, headers=auth())
+    assert widened.status_code == 200, widened.text
+    assert "widened" in widened.json(), widened.json()
+
+    inside = client.get("/v1/recall", params={**asked, "code_context": True}, headers=auth())
+    assert inside.status_code == 200, inside.text
+    assert "code_context" in inside.json(), inside.json()
+
+
+def test_a_stage_receipt_over_http_does_not_repeat_the_passages(client):
+    """The fault the CLI had: a stage's receipt kept its own copy of the
+    text, so `--json --window --withhold` handed the withheld address back
+    inside the widened receipt. The same shape would arrive here with the
+    same parameters, so the copy is dropped from every stage here too."""
+    address = "ana.alves@meridian-health.example"
+    assert client.post("/v1/episodes", json={
+        "content": f"Write to {address} about the rota, at length, so the window has "
+                   f"something either side of the match to widen into."},
+        headers=auth()).status_code == 200
+    asked = {"q": "write rota", "limit": 3, "window": 300, "withhold": "email"}
+    held = client.get("/v1/recall", params=asked, headers=auth())
+    assert held.status_code == 200, held.text
+    body = held.json()
+    assert address not in json.dumps(body), "the widened receipt handed back what was withheld"
+    assert "items_not_repeated" in body["widened"], body["widened"]
+
+
+def test_code_context_is_refused_beside_withholding(client):
+    """Code context quotes the file again after withholding, so asking
+    for both hands back what was just withheld. The CLI refuses this; a
+    route that did not would be the same hole wearing different clothes."""
+    refused = client.get("/v1/recall", params={
+        "q": "anything", "limit": 3, "withhold": "email", "code_context": True}, headers=auth())
+    assert refused.status_code == 422, (refused.status_code, refused.text)
+    assert "code_context" in refused.text, refused.text
+
+
+async def test_code_context_is_the_last_stage_over_http_and_not_merely_the_last_written():
+    """I claimed code context runs last and it did not.
+
+    The expansions -- evidence graph, structural context, multi-hop --
+    are awaited *after* the response dictionary is built, and I put the
+    code context stage next to that dictionary. So a source deleted while
+    the evidence graph was being built came back with its signature and
+    imports quoted and `gone: 0`, from a file that no longer existed when
+    the response was written.
+
+    Running last is the whole of the fence, because code context is a
+    second copy of the source that no amount of tidying receipts removes.
+    Asserted here through the real route with the real combination,
+    because reading the code is what convinced me it was already true.
+    """
+    from scone_memory.api import create_app
+    from scone_memory.retrieval import evidence_graph
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    try:
+        added = await engine.remember("alpha", "import json\n\n\ndef keep(paper):\n"
+                                      "    return json.dumps(paper)\n", source="pkg/store.py")
+        whole = evidence_graph.build_query_evidence_graph
+
+        async def forget_while_the_graph_is_built(documents, space, q, result, **rest):
+            await engine.forget(space, added.episode_id)
+            return await whole(documents, space, q, result, **rest)
+
+        evidence_graph.build_query_evidence_graph = forget_while_the_graph_is_built
+        try:
+            with TestClient(create_app(engine, {"key-a": "alpha"})) as gone:
+                answered = gone.get("/v1/recall", params={
+                    "q": "keep paper json", "limit": 3,
+                    "code_context": True, "evidence_graph": True}, headers=auth())
+        finally:
+            evidence_graph.build_query_evidence_graph = whole
+    finally:
+        await engine.close()
+
+    assert answered.status_code == 200, answered.text
+    assert "def keep" not in answered.text, "a deleted file was quoted back"
+    assert not answered.json()["items"], answered.json()["items"]
+
+
+def test_the_expansion_budget_governs_code_context_too(client):
+    """`expansion_max_bytes` is described on the route as the byte budget
+    per enabled expansion stage. Code context ignored it and kept its own
+    16,000-byte default, so a request asking for 512 got 2,208 bytes of
+    quoted code back and `beyond_budget: 0` -- a bound that read as a
+    fact, in the answer's own receipt.
+    """
+    source = "".join(f"import module_with_a_long_name_{index}\n" for index in range(25))
+    source += "\n\ndef keep(paper):\n    return paper\n"
+    assert client.post("/v1/episodes", json={
+        "content": source, "source": "pkg/store.py"}, headers=auth()).status_code == 200
+    asked = {"q": "keep paper", "limit": 3, "code_context": True}
+
+    roomy = client.get("/v1/recall", params={**asked, "expansion_max_bytes": 16000},
+                       headers=auth()).json()
+    tight = client.get("/v1/recall", params={**asked, "expansion_max_bytes": 512},
+                       headers=auth()).json()
+    assert "code_context" in tight, tight
+    quoted = len(json.dumps(tight["code_context"]["by_chunk"]).encode())
+    assert quoted <= 2 * 512, (quoted, tight["code_context"])
+    assert quoted < len(json.dumps(roomy["code_context"]["by_chunk"]).encode()), tight
+    # And the bound that bit has to say so rather than be inferred.
+    assert tight["code_context"]["beyond_budget"] > 0, tight["code_context"]

@@ -1,0 +1,671 @@
+"""A recalled body, with the two things that make it readable.
+
+A chunk of code already says which declaration it came from --
+``Engine.forget`` -- and that is where our answer stopped. It did not say
+the declaration's **signature**, so a caller saw a body without its
+parameters, and it did not say what the file **imported**, so a name in
+the body could not be traced to where it came from. For the question
+"how is this done here", a body without its signature and its imports is
+a fragment.
+
+The reference that has this prepends the context into the chunk text.
+Ours does not: invariant I1 says ``content[span.start:span.end]`` is the
+source unchanged, and a chunk that has grown a header is no longer a
+quotation of the file. So the context sits **beside** the chunk, quoted
+from the source with the line numbers it came from, and every line of it
+can be checked against the file.
+
+Three rules, each with a test:
+
+- **Nothing is guessed from content.** A file called ``notes.md`` holding
+  a code block is prose that quotes code, and gets no code context. The
+  language comes from the stored name, as everywhere else.
+- **A source confirmed gone is dropped, not answered.** The same rule
+  merging and windowing learned: the fragment we happen to hold is
+  deleted text.
+- **A list that stopped says so.** A file with more imports than the
+  bound reports ``more_imports``, because a count of what we listed must
+  never read as a count of what the file imports.
+
+No model is called and nothing is re-embedded.
+"""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass, field
+import io
+import re
+import tokenize
+from typing import TYPE_CHECKING, Optional, Sequence
+
+from ..core.errors import Gone, InvalidInput, NotFound, SconeError
+from ..core.models import RecallItem
+from ..ingestion.code import Declaration, code_language, declarations_in
+from ..ingestion.code_graph import masked
+from ..memory.engine import check_space
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..memory.engine import MemoryEngine
+
+#: Imports listed for one file. Past this the list says it stopped.
+MAX_IMPORTS = 200
+#: Episodes read in one call, and the most a caller may ask for. A read
+#: that fails counts against it: it is work done.
+MAX_EPISODES = 100
+#: Lines any quotation from a source may run to, and bytes it may reach.
+#: One pair for signatures and imports alike: keeping two invited exactly
+#: what happened -- the signature became character-precise and
+#: byte-bounded while the import beside it stayed line-shaped, three
+#: separate times.
+MAX_QUOTED_LINES = 12
+MAX_QUOTED_BYTES = 4_000
+#: Kept as the older name for the signature bound, which reads better at
+#: its use and is the same number.
+MAX_SIGNATURE_LINES = MAX_QUOTED_LINES
+#: The same bound, under the name the import path reads by.
+MAX_IMPORT_LINES = MAX_QUOTED_LINES
+#: Bytes of context one call may return, and the most a caller may ask
+#: for. Bounding each quote does not bound the answer: a hundred episodes
+#: of two hundred imports is a six-hundred kilobyte reply out of a module
+#: whose every individual quote is bounded. Shaped like the recall
+#: route's ``expansion_max_bytes``, which is the same decision made once
+#: already.
+MAX_CONTEXT_BYTES = 256_000
+DEFAULT_CONTEXT_BYTES = 16_000
+
+#: How the brace languages open a line that brings a name in. This reads
+#: **lines**, where ``ingestion/code_graph.py`` resolves **targets** --
+#: quoting the line the file wrote needs no resolution, and a resolved
+#: target is not something the reader can check against the source.
+_BROUGHT_IN = re.compile(
+    r"^\s*(?:"
+    r"import\b"                       # JS/TS/Java/Kotlin/Scala/Go
+    r"|from\s+['\"]"                  # JS re-export form
+    r"|#\s*include\b"                 # C/C++
+    r"|(?:pub\s+)?use\b"              # Rust
+    r"|using\b"                       # C#
+    r"|(?:const|let|var)\s+.*\brequire\s*\("   # CommonJS
+    r")")
+
+
+@dataclass(frozen=True)
+class Signature:
+    """A declaration's header, quoted from the source."""
+
+    name: str
+    kind: str
+    line: int
+    #: The header as the file wrote it, from the declaring keyword
+    #: through the end of its parameter list.
+    text: str
+    #: Whether the header ran past the line bound and was quoted to it.
+    clipped: bool = False
+
+
+@dataclass(frozen=True)
+class Imported:
+    """One line that brings a name into the file, quoted."""
+
+    line: int
+    text: str
+    #: Whether the import was quoted to a bound.
+    clipped: bool = False
+    #: Which bound cut it -- "lines", "bytes", or both. A single very long
+    #: line was described as "running past 12 lines", which it was not.
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class ChunkContext:
+    """What one recalled chunk needed and could not say for itself."""
+
+    chunk_id: int
+    language: str
+    #: The declarations holding this chunk, outermost first.
+    holders: tuple[Signature, ...] = ()
+    imports: tuple[Imported, ...] = ()
+    #: Whether the file brings in more names than were listed.
+    more_imports: bool = False
+
+
+@dataclass(frozen=True)
+class CodeContext:
+    """The context found, and every reason a chunk has none."""
+
+    #: The items a caller should hand on, with any whose source is
+    #: confirmed gone removed -- so a receipt saying "dropped" and the
+    #: passages a caller prints cannot disagree.
+    items: tuple[RecallItem, ...] = ()
+    by_chunk: dict[int, ChunkContext] = field(default_factory=dict)
+    #: Items whose stored name does not say a language. Not a failure.
+    not_code: int = 0
+    #: Items whose episode is confirmed absent; dropped rather than
+    #: answered from text this space no longer holds.
+    gone: int = 0
+    #: Items whose episode could not be read, which is not a finding that
+    #: it is absent.
+    unread: int = 0
+    #: Items skipped because the episode budget was spent before theirs
+    #: was reached. Nobody looked at those.
+    not_read: int = 0
+    #: Contexts whose import list reached the bound.
+    capped: int = 0
+    #: Contexts with a signature longer than the line bound, quoted to
+    #: there. A header cut short must not read as the whole header.
+    shortened: int = 0
+    #: Contexts with an import longer than the line bound, quoted to
+    #: there. Counted apart from ``shortened`` because a truncated header
+    #: and a truncated import are different things to a reader.
+    long_imports: int = 0
+    #: Chunks whose context was not returned because the byte budget was
+    #: spent -- the first one included, with no exemption. Their items are
+    #: still in the answer; only the context they would have carried is
+    #: missing, and a caller can ask again with a larger budget or a
+    #: smaller limit.
+    beyond_budget: int = 0
+    why: str = ""
+
+    def record(self) -> dict[str, object]:
+        return {"chunks": len(self.by_chunk), "not_code": self.not_code, "gone": self.gone,
+                "unread": self.unread, "not_read": self.not_read, "capped": self.capped,
+                "shortened": self.shortened, "long_imports": self.long_imports,
+                "beyond_budget": self.beyond_budget, "why": self.why,
+                "items": [item.model_dump() for item in self.items],
+                "by_chunk": {str(key): {
+                    "language": value.language, "more_imports": value.more_imports,
+                    "holders": [{"name": s.name, "line": s.line, "text": s.text,
+                                 "clipped": s.clipped} for s in value.holders],
+                    "imports": [{"line": i.line, "text": i.text, "clipped": i.clipped,
+                                 "why": i.why} for i in value.imports],
+                } for key, value in self.by_chunk.items()}}
+
+
+def _python_headers(content: str) -> dict[int, tuple[int, int]]:
+    """Each Python declaration's ``def``/``class`` line to the exact
+    character span of its header, ending at its own colon.
+
+    Two wrong answers came before this one, and each was wrong in a way
+    the code confidently explained:
+
+    - **Bracket depth over raw text.** Justified on the grounds that a
+      colon in a default argument is inside brackets. So it is -- but a
+      bracket inside a *string* is inside nothing, so
+      ``def f(value="("):`` never reached depth zero at its own colon
+      and ``def f(value=")"):`` went negative.
+    - **``ast`` body-start minus one line.** ``ast`` reports where a
+      declaration *begins*, not where its header ends, and the gap
+      between them is not empty: leading comments and blank lines in the
+      body are not statements, so they became part of the "signature"; a
+      class whose first method carries a decorator took that decorator
+      into the class header, because ``FunctionDef.lineno`` points at the
+      ``def``; long leading body comments set ``clipped`` on a one-line
+      header; and ``def f(): return secret`` returned its body as its
+      signature -- which in a withholding answer is the leak shape
+      again.
+
+    ``tokenize`` is the tool that actually knows: strings and comments
+    are single tokens, so no bracket inside either can move the depth,
+    and the colon that ends the header is the first ``:`` operator at
+    depth zero after the declaring keyword. Character offsets, not
+    lines, so a one-line suite yields ``def f():`` and not its body.
+
+    The header begins at ``def``, ``class`` or the ``async`` before
+    them, so **a decorator is not part of the signature**. That is a
+    choice rather than an oversight: a decorator is a separate
+    statement, the reason a class header must not swallow its first
+    method's decorator is that they belong to different declarations,
+    and a rule that starts at the keyword cannot make that mistake in
+    either direction. A caller wanting the decorators has the
+    declaration's own line range.
+    """
+    # `_line_starts`, not a second table built here. The first version of
+    # this function had its own `splitlines(keepends=True)` copy, and
+    # when the newline semantics were corrected only the shared helper
+    # was fixed -- so the bug stayed exactly where the finding was about,
+    # in a duplicate four lines away. One table, one convention.
+    starts = _line_starts(content)
+
+    def offset(row: int, column: int) -> int:
+        return starts[row - 1] + column
+
+    at: dict[int, tuple[int, int]] = {}
+    begin: Optional[tuple[int, int]] = None
+    depth = 0
+    previous_async: Optional[tuple[int, int]] = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if begin is None:
+                if token.type == tokenize.NAME and token.string == "async":
+                    previous_async = token.start
+                    continue
+                if token.type == tokenize.NAME and token.string in ("def", "class"):
+                    head = previous_async or token.start
+                    begin, depth = (head[0], offset(*head)), 0
+                elif token.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT,
+                                        tokenize.INDENT, tokenize.DEDENT):
+                    previous_async = None
+                continue
+            if token.type == tokenize.OP:
+                if token.string in "([{":
+                    depth += 1
+                elif token.string in ")]}":
+                    depth -= 1
+                elif token.string == ":" and depth == 0:
+                    at[begin[0]] = (begin[1], offset(token.end[0], token.end[1]))
+                    begin, previous_async = None, None
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        # A file `ast` accepted should tokenize, so this is unreachable in
+        # practice; returning what was read keeps a partial answer honest
+        # rather than claiming none.
+        pass
+    return at
+
+
+def _header(headers: dict[int, tuple[int, int]],
+            declaration: Declaration) -> Optional[tuple[int, int]]:
+    """The character span of a declaration's own header, or None.
+
+    Found by range rather than by exact key: a declaration's span starts
+    at its decorators and at the comment lines written directly above
+    it, so ``first_line`` is often earlier than the ``def`` the parser
+    reports. Looking up ``first_line`` alone returned the comment line
+    and nothing else.
+    """
+    inside = [line for line in headers
+              if declaration.first_line <= line <= declaration.last_line]
+    return headers[min(inside)] if inside else None
+
+
+def _brace_header(blank: list[str], starts: list[int], start: int) -> tuple[int, bool]:
+    """A brace declaration's header, through the ``{`` that opens its body.
+
+    Scanned over the **blanked** copy, where string literals and comments
+    are replaced in place, so a brace inside a string cannot move the
+    depth and every line and column still indexes the real source.
+
+    Answers a character offset rather than a line, for the same reason
+    the Python path does: ``function contact() { return secret; }`` puts
+    a body on the header's line, and quoting the line whole made that
+    body part of the signature. The Python path was made
+    character-precise and this one was left counting lines -- the same
+    half-fix, one language later.
+    """
+    depth = 0
+    for offset in range(MAX_SIGNATURE_LINES):
+        index = start - 1 + offset
+        if index >= len(blank):
+            return starts[min(index, len(starts) - 1)], False
+        line = blank[index]
+        for column, char in enumerate(line):
+            if char == "{" and depth == 0:
+                return starts[index] + column + 1, False
+            if char in "([":
+                depth += 1
+            elif char in ")]":
+                depth = max(0, depth - 1)
+            elif char == ";" and depth == 0:
+                # A declaration with no body of its own: the header is
+                # the whole of it, up to and including the semicolon.
+                return starts[index] + column + 1, False
+    last = start - 1 + MAX_SIGNATURE_LINES - 1
+    return starts[min(last, len(starts) - 1)] + len(blank[min(last, len(blank) - 1)]), True
+
+
+def _line_starts(content: str) -> list[int]:
+    """The offset each **physical** line begins at, as the tokenizer
+    counts them.
+
+    Not ``str.splitlines()``, which was the first version of this and
+    was wrong: it also breaks on U+2028, U+2029, U+0085, vertical tab
+    and form feed, none of which the tokenizer treats as a physical
+    newline. A string literal holding one -- ``banner = "one\u2028two"``
+    is ordinary code -- shifted every row after it, and a signature came
+    back as ``'two"\ndef conta'``. Two coordinate systems that disagree,
+    which is the third time that shape has bitten this work.
+
+    ``io.StringIO`` is what ``tokenize`` reads through here, and with its
+    default ``newline='\n'`` it performs no translation and ends a line
+    only at ``\n``. So this does too, and a ``\r`` stays part of its
+    line, keeping offsets into the source exactly as it arrived.
+    """
+    at = [0]
+    index = content.find("\n")
+    while index != -1:
+        at.append(index + 1)
+        index = content.find("\n", index + 1)
+    return at
+
+
+def _column(lines: list[str], row: int, byte_column: Optional[int]) -> int:
+    """A parser's byte column on a line, as a count of characters.
+
+    ``ast`` measures a column in UTF-8 bytes of that line; everything
+    else here measures in characters, because that is what slicing a
+    ``str`` uses. The two agree on ASCII and diverge by one per
+    non-ASCII character before the column, which is exactly how an
+    import span came to quote the wrong nine characters.
+    """
+    if byte_column is None:
+        return 0
+    line = lines[row - 1] if 0 < row <= len(lines) else ""
+    return len(line.encode()[:byte_column].decode("utf-8", errors="ignore"))
+
+
+def _quoted(content: str, start: int, end: int) -> tuple[str, str]:
+    """A construct's own characters, bounded in lines **and** in bytes.
+
+    One helper for every quotation here, because writing the bound twice
+    is how a signature came to be character-precise and byte-bounded
+    while the import beside it was neither. A twelve-line bound says
+    nothing about one line fifty thousand characters long, and a
+    whole-line quote of `import os; secret = "..."` reports a statement
+    that is not an import at all.
+
+    Trimmed on a character boundary in a single pass: slicing a ``str``
+    cannot split a character, where slicing its encoding can -- and
+    decoding a cut byte string leniently is the mistake that put a
+    window's span and its text out of step.
+    """
+    text = content[start:end]
+    lines = text.split("\n")
+    why = "lines" if len(lines) > MAX_QUOTED_LINES else ""
+    text = "\n".join(lines[:MAX_QUOTED_LINES])
+    if len(text.encode()) > MAX_QUOTED_BYTES:
+        total, cut = 0, len(text)
+        for index, char in enumerate(text):
+            size = len(char.encode())
+            if total + size > MAX_QUOTED_BYTES:
+                cut = index
+                break
+            total += size
+        text, why = text[:cut], "bytes" if not why else "lines and bytes"
+    return text, why
+
+
+def _looks_like_a_header(text: str, language: str, clipped: str = "") -> bool:
+    """Whether a quoted span is plausibly the header it claims to be.
+
+    Never asked of a span that was **clipped**: a header cut at a bound
+    legitimately lacks its own terminator, so judging it would always
+    fail -- and the fallback then quoted the entire source line,
+    bypassing the very bound that truncated it. Two of my own mechanisms
+    working against each other, and the safety net causing the unbounded
+    quote it was added to prevent.
+    """
+    if clipped:
+        return True
+    return _terminated(text, language)
+
+
+def _terminated(text: str, language: str) -> bool:
+    """Whether a quoted span is plausibly the header it claims to be.
+
+    A post-condition rather than trust in the arithmetic. Every
+    coordinate mistake in this work has produced text that is obviously
+    not a header -- a fragment of a string literal, half of two lines --
+    and one cheap check turns the next one into a visibly incomplete
+    answer instead of a confident quotation of the wrong bytes.
+    """
+    said = text.strip()
+    if not said:
+        return False
+    if language == "python":
+        # Both halves, not either. Written first as `A and B or C`, which
+        # binds as `(A and B) or C` -- so anything merely *starting* with
+        # `def ` passed, and the check was weaker than its own docstring
+        # claimed. A header that opens with the keyword and does not
+        # reach its colon is exactly the case this exists to catch.
+        return said.endswith(":") and said.startswith(("def ", "class ", "async "))
+    return said.endswith(("{", ";"))
+
+
+def _declaring_line(content: str, starts: list[int], lines: list[str], row: int,
+                    declaration: Declaration) -> Signature:
+    """The declaring line, quoted through the same bound as everything else.
+
+    The fallback used to slice ``lines`` directly, which is unbounded --
+    so a fifty-thousand-byte line came back whole, carrying its body,
+    from the branch that exists to keep a doubtful quote small.
+    """
+    begin = starts[row - 1] if 0 < row <= len(starts) else 0
+    end = starts[row] if row < len(starts) else len(content)
+    text, _ = _quoted(content, begin, end)
+    return Signature(name=declaration.name, kind=declaration.kind, line=row,
+                     text=text.rstrip("\r\n"), clipped=True)
+
+
+def _signature(content: str, lines: list[str], blank: list[str], starts: list[int],
+               declaration: Declaration, language: str,
+               headers: dict[int, tuple[int, int]]) -> Signature:
+    """A declaration's header, quoted from the source."""
+    if language == "python":
+        span = _header(headers, declaration)
+        if span is None:
+            # The header's end could not be established, so the declaring
+            # line is all that can honestly be quoted -- and `clipped`
+            # is the field that says a header is incomplete.
+            return _declaring_line(content, starts, lines, declaration.first_line, declaration)
+        text, cut = _quoted(content, span[0], span[1])
+        text = "\n".join(line.rstrip("\r") for line in text.split("\n"))
+        if not _looks_like_a_header(text, language, cut):
+            return _declaring_line(content, starts, lines, declaration.first_line, declaration)
+        return Signature(name=declaration.name, kind=declaration.kind,
+                         line=content[:span[0]].count("\n") + 1,
+                         text=text, clipped=bool(cut))
+    start = declaration.first_line
+    at, over = _brace_header(blank, starts, start)
+    text, cut = _quoted(content, starts[start - 1], at)
+    text = text.strip("\n")
+    if not _looks_like_a_header(text, language, cut):
+        return _declaring_line(content, starts, lines, start, declaration)
+    return Signature(name=declaration.name, kind=declaration.kind, line=start,
+                     text=text, clipped=over or bool(cut))
+
+
+def _imports(content: str, language: str, limit: int) -> tuple[tuple[Imported, ...], bool]:
+    """The lines this file brings names in on, quoted, and whether there
+    are more than were listed.
+
+    Physical lines, indexed by the parser's own line numbers, so the same
+    convention as everything else here. This was the third copy of a
+    ``splitlines()`` table in this file and had the same fault as the
+    other two: a line separator inside a string literal above an import
+    shifted every line after it, and the import came back misquoted.
+    """
+    lines = [line.rstrip("\r") for line in content.split("\n")]
+    found: list[Imported] = []
+    if language == "python":
+        try:
+            tree = ast.parse(content)
+        except (SyntaxError, ValueError, RecursionError):
+            return (), False
+        starts = _line_starts(content)
+        at: list[tuple[int, int, int]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                # The statement's own characters. Quoting whole lines
+                # reported `import os; secret = "..."` as an import, and
+                # `def f(): import os; return secret` likewise -- a
+                # statement that is not an import, labelled as one.
+                #
+                # `ast` reports a column as a **UTF-8 byte** offset into
+                # its line, and these are character offsets. Adding one
+                # to the other put the slice adrift by one per non-ASCII
+                # character earlier on the line -- the fourth
+                # coordinate-system fault in this work, and the reason
+                # `_column` exists rather than a bare addition.
+                begin = starts[node.lineno - 1] + _column(lines, node.lineno, node.col_offset)
+                last = (node.end_lineno or node.lineno)
+                stop = (starts[last - 1] + _column(lines, last, node.end_col_offset)
+                        if node.end_col_offset is not None else len(content))
+                at.append((node.lineno, begin, stop))
+        for first, begin, stop in sorted(at):
+            if len(found) >= limit:
+                return tuple(found), True
+            text, cut = _quoted(content, begin, stop)
+            found.append(Imported(line=first, text=text, clipped=bool(cut), why=cut))
+        return tuple(found), False
+    starts = _line_starts(content)
+    blank = masked(content, prose=False).split("\n")
+    for number, line in enumerate(lines, 1):
+        if _BROUGHT_IN.match(line):
+            if len(found) >= limit:
+                return tuple(found), True
+            # To the statement's own semicolon where there is one, found
+            # in the blanked copy so a `;` inside a string cannot end it.
+            # `import fs from "fs"; const secret = "..."` is two
+            # statements and only the first is an import.
+            quiet = blank[number - 1] if number - 1 < len(blank) else line
+            depth, ends = 0, len(line)
+            for column, char in enumerate(quiet):
+                if char in "([{":
+                    depth += 1
+                elif char in ")]}":
+                    depth = max(0, depth - 1)
+                elif char == ";" and depth == 0:
+                    ends = column + 1
+                    break
+            begin = starts[number - 1]
+            text, cut = _quoted(content, begin, begin + ends)
+            found.append(Imported(line=number, text=text, clipped=bool(cut), why=cut))
+    return tuple(found), False
+
+
+async def code_context(engine: "MemoryEngine", space: str, items: Sequence[RecallItem], *,
+                       imports: int = MAX_IMPORTS,
+                       episodes: int = MAX_EPISODES,
+                       max_bytes: int = DEFAULT_CONTEXT_BYTES) -> CodeContext:
+    """The signature and imports each recalled code chunk sits inside."""
+    check_space(space)
+    if type(imports) is not int or not 1 <= imports <= MAX_IMPORTS:
+        raise InvalidInput(f"imports is a whole number from 1 to {MAX_IMPORTS}, not {imports!r}")
+    if type(episodes) is not int or not 1 <= episodes <= MAX_EPISODES:
+        raise InvalidInput(f"episodes is a whole number from 1 to {MAX_EPISODES}, not "
+                           f"{episodes!r}")
+    if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_CONTEXT_BYTES:
+        raise InvalidInput(f"max_bytes is a whole number from 1 to {MAX_CONTEXT_BYTES}, not "
+                           f"{max_bytes!r}")
+
+    found: dict[int, ChunkContext] = {}
+    kept: list[RecallItem] = []
+    read: dict[int, Optional[str]] = {}
+    unavailable: set[int] = set()
+    not_code = vanished = unread = unbudgeted = capped = shortened = lengthy = 0
+    spent = beyond = 0
+    reasons: set[str] = set()
+    for item in items:
+        language = code_language(item.source)
+        if language is None:
+            not_code += 1
+            kept.append(item)
+            continue
+        if item.episode_id in unavailable:
+            unread += 1
+            kept.append(item)
+            continue
+        if item.episode_id not in read:
+            if len(read) + len(unavailable) >= episodes:
+                unbudgeted += 1
+                kept.append(item)
+                continue
+            try:
+                read[item.episode_id] = (await engine.episode(space, item.episode_id)).content
+            except (Gone, NotFound):
+                read[item.episode_id] = None
+            except SconeError:
+                unavailable.add(item.episode_id)
+                unread += 1
+                kept.append(item)
+                continue
+        content = read[item.episode_id]
+        if content is None:
+            # Confirmed absent. Counting it as dropped while a caller
+            # still holds the item is how stale text gets served under a
+            # clean reason, so the item goes with the count.
+            vanished += 1
+            continue
+        # Split the same way `_line_starts` counts, so a row indexes the
+        # same text in all three.
+        lines = content.split("\n")
+        blank = masked(content, prose=False).split("\n")
+        starts = _line_starts(content)
+        headers = _python_headers(content) if language == "python" else {}
+        holders = declarations_in(content, item.start, item.end, language=language,
+                                  offsets="bytes")
+        brought, more = _imports(content, language, imports)
+        if more:
+            capped += 1
+        signatures = tuple(_signature(content, lines, blank, starts, holder, language, headers)
+                           for holder in holders)
+        size = (sum(len(s.text.encode()) for s in signatures)
+                + sum(len(i.text.encode()) for i in brought))
+        if spent + size > max_bytes:
+            # No exemption for the first chunk. I gave it one on purpose,
+            # so a tiny budget returned one context rather than none, and
+            # that made `max_bytes=16` answer with four thousand bytes,
+            # `beyond_budget: 0` and nothing in `why` -- a bound with an
+            # unreported exemption, which is the fault this framework
+            # keeps making, committed knowingly in the name of being
+            # helpful. A budget too small for any context now returns
+            # none and says so.
+            #
+            # The item stays in the answer either way: only the context
+            # it would have carried is left out.
+            beyond += 1
+            kept.append(item)
+            continue
+        spent += size
+        # Counted after the budget, so the receipt describes the context
+        # that was returned rather than context that was refused.
+        if any(signature.clipped for signature in signatures):
+            shortened += 1
+        if any(brought_in.clipped for brought_in in brought):
+            lengthy += 1
+            reasons.update(brought_in.why for brought_in in brought if brought_in.why)
+        found[item.chunk_id] = ChunkContext(
+            chunk_id=item.chunk_id, language=language, holders=signatures,
+            imports=brought, more_imports=more)
+        kept.append(item)
+
+    if found:
+        why = (f"{len(found)} chunk(s) given the signature they sit inside and the imports of "
+               f"their file")
+    elif beyond:
+        # "Nothing to give" and "the budget refused it" are different
+        # answers and a caller acts on them differently.
+        why = f"no context returned: the budget of {max_bytes} byte(s) did not reach any chunk"
+    else:
+        why = "no chunk had code context to give"
+    if not_code:
+        why += (f"; {not_code} item(s) are stored under a name that does not say a language, so "
+                f"nothing was read from them -- a file of prose quoting code is prose")
+    if vanished:
+        why += (f"; {vanished} item(s) are no longer there and were dropped rather than "
+                f"answered from text this space has deleted")
+    if unread:
+        why += (f"; {unread} item(s) could not be read, which is not a finding that there was "
+                f"nothing to read")
+    if unbudgeted:
+        why += (f"; {unbudgeted} item(s) were skipped because the budget of {episodes} "
+                f"episode(s) was spent before theirs was reached -- nobody looked at those")
+    if capped:
+        why += (f"; {capped} file(s) bring in more than {imports} names and this listed "
+                f"{imports} of them, not all of them")
+    if shortened:
+        why += (f"; {shortened} signature(s) run past {MAX_SIGNATURE_LINES} lines and were "
+                f"quoted to there, so those headers are incomplete")
+    if lengthy:
+        # Which bound bit, rather than naming the line bound for a single
+        # line cut by the byte one -- which is what it used to say.
+        by = ", ".join(sorted(reasons)) or "a bound"
+        why += (f"; {lengthy} chunk(s) have an import quoted to {by} "
+                f"({MAX_QUOTED_LINES} lines, {MAX_QUOTED_BYTES} bytes), so those import "
+                f"lines are incomplete")
+    if beyond:
+        why += (f"; {beyond} chunk(s) have no context here because the budget of {max_bytes} "
+                f"byte(s) was spent -- their passages are still in the answer, and a larger "
+                f"budget or a smaller limit would carry them")
+    return CodeContext(items=tuple(kept), by_chunk=found, not_code=not_code, gone=vanished,
+                       unread=unread, not_read=unbudgeted, capped=capped, shortened=shortened,
+                       long_imports=lengthy, beyond_budget=beyond, why=why)

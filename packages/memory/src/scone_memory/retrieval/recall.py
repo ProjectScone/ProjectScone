@@ -18,7 +18,7 @@ from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, Rerank
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
-from . import fact_recall, fusion
+from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
 from .episode_scope import episode_fits
 from .filters import parse_filter
@@ -51,6 +51,10 @@ class RecallRuntime:
     rerank_timeout: float = 1.0
     contextual_embeddings: bool = False
     demote_restated: bool = True
+    #: Whether a passage whose claim the ledger has retired is moved below
+    #: the passage that replaced it. Order only, and only against evidence
+    #: the reader actually got.
+    demote_superseded: bool = True
     similarity_floor: float | None = None
     #: The width the floor was measured at, when it came from a measured
     #: policy. The query's own vector is checked against it, because an
@@ -385,6 +389,13 @@ async def recall(
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
     facts = await fact_recall.facts_for_query(runtime.documents, space, query, boundary or now, scope=fact_scope, degraded=degraded)
+    if runtime.demote_superseded:
+        # After the facts, because this is the one thing in the recall path
+        # that reads the ledger rather than the index. `demote_restated`
+        # ran earlier on wording alone and cannot see a replacement that
+        # was worded differently.
+        result_items = await supersession.demote_superseded(
+            runtime.documents, space, result_items, facts, boundary or now)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
     result = RecallResult(

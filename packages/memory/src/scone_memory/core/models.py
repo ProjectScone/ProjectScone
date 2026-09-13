@@ -342,6 +342,11 @@ class RecallItem(BaseModel):
     source: Optional[str] = None
     tags: tuple[str, ...] = ()
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: Whether the ledger has since retired the claim this passage was the
+    #: evidence for, as of the reader's boundary. Order alone serves a
+    #: reader who takes the first result; one who reads or quotes them all
+    #: needs to be told, and a passage carries no date that says so.
+    superseded: bool = False
     #: The chunk's own UTF-8 byte span of its episode, half-open, so a
     #: caller can quote the source exactly and cite where it stops.
     start: int = 0

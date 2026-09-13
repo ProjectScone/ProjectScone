@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import io
+import posixpath
 import tokenize
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -29,7 +30,19 @@ from typing import Callable, Optional
 #: exists — so whoever walked the tree decides, and a name nothing
 #: resolves to is left out rather than guessed at.
 Resolve = Callable[[str, int, str], Optional[str]]
+#: What a relative import is spelt as when nobody has read the tree: the
+#: first file name the language itself would try. Keyed by the importing
+#: file's extension, because that is what says which language this is.
+FIRST = {"ts": "ts", "tsx": "ts", "mts": "ts", "cts": "ts", "d.ts": "ts",
+         "js": "js", "jsx": "js", "mjs": "js", "cjs": "js",
+         "go": "go", "rs": "rs"}
+#: Extensions a bundler resolves by exact path rather than by trying a
+#: language's own list. An import of one of these already names its file.
+ASSETS = frozenset("css scss sass less styl png jpg jpeg gif svg webp avif ico bmp json json5 "
+                   "yaml yml toml wasm txt md mdx woff woff2 ttf otf eot mp4 webm mov mp3 wav "
+                   "ogg flac pdf csv graphql gql".split())
 
+import builtins
 import re
 
 from .code import Language, MAX_LINES, _line_starts, declarations
@@ -43,6 +56,14 @@ CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
 INHERITS = "inherits"
+#: What a type satisfies without extending it: an interface, a protocol,
+#: a Rust trait, a Scala mixin. "What implements this interface?" is a
+#: different question from "what extends this class?", and flattening
+#: both into one predicate means the graph answers neither precisely.
+#: Rust has no class inheritance at all, so every Rust edge is one of
+#: these -- calling them inheritance described a relation the language
+#: does not have.
+MIXES_IN = "mixes_in"
 #: Why the code is the way it is, in the words of whoever wrote it.
 NOTES = "notes"
 #: What is known to be wrong with it. A different question from why it
@@ -64,9 +85,26 @@ _CITED = re.compile(r"\b(ADR|RFC)[\s\-_#]*([0-9]{1,6})\b", re.IGNORECASE)
 #: built on. Read separately: `extends Base implements Face` is two
 #: relationships, and one capture for both invented a single target named
 #: after neither.
-_DECLARES = re.compile(r"\b(?:class|interface|struct)\s+([A-Za-z_]\w*)")
-_BUILT_ON = re.compile(r"\b(?:extends|implements)\s+([A-Za-z_][\w.:<>,\s]*?)"
-                       r"(?=\b(?:extends|implements)\b|[{;]|$)")
+_DECLARES = re.compile(r"\b(?:class|interface|struct|enum|record|protocol)\s+([A-Za-z_]\w*)")
+#: Go writes a type with `type Name struct` / `type Name interface`, which
+#: the class-first pattern misses entirely -- so Go types were invisible
+#: while Go was on the supported list.
+_GO_TYPE = re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b")
+#: Rust says what a type implements with `impl Trait for Type`, which is
+#: the language's most important relation and produced no edge at all.
+#: `impl Type` alone is an inherent block: the same type, not a second
+#: definition of it and not an inheritance.
+_RUST_IMPL = re.compile(r"^\s*impl(?:\s*<[^>]*>)?\s+([A-Za-z_][\w:]*)"
+                        r"(?:\s*<[^>]*>)?(?:\s+for\s+([A-Za-z_][\w:]*))?")
+#: Scala joins its mixins with `with`, and Kotlin and Scala write a base
+#: as a constructor call -- `extends Base(3) with Store`. A capture class
+#: without parentheses matched nothing at all there, so Scala produced no
+#: edges while it was on the supported list.
+_BUILT_ON = re.compile(r"\b(extends|implements|with)\s+([A-Za-z_][\w.:<>,()\s]*?)"
+                       r"(?=\b(?:extends|implements|with)\b|[{;]|$)")
+#: Which relation a clause keyword names. `extends` is the only one that
+#: extends; `implements` and Scala's `with` satisfy without extending.
+_CLAUSE_MEANS = {"extends": INHERITS, "implements": MIXES_IN, "with": MIXES_IN}
 #: C++ and C# write the bases after a colon, immediately following the
 #: declared name. Anchored there on purpose: a colon anywhere else is a
 #: type annotation or a label, and reading those would invent bases.
@@ -97,7 +135,7 @@ def _cited(text: str) -> list[str]:
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
 
 
-def _masked(content: str, *, prose: bool = True) -> str:
+def masked(content: str, *, prose: bool = True) -> str:
     """The source with text that is not code blanked, in place.
 
     A regex over raw source cannot tell code from data, and there are two
@@ -239,7 +277,7 @@ def _meaning(content: str, path: str, language: str,
         for at, prose in _python_prose(content):
             _tagged(prose, path, at, declared, say)
         return
-    for number, line in enumerate(_masked(content).split("\n"), start=1):
+    for number, line in enumerate(masked(content).split("\n"), start=1):
         _tagged(line, path, number, declared, say)
 
 
@@ -258,8 +296,42 @@ class CodeClaim:
     end: int
 
 
+#: Names that resolve to nothing in any file and never will. Reporting
+#: `len` and `isinstance` as calls the graph could not bind would bury
+#: the names that matter under noise every Python file produces.
+BUILTINS = frozenset(dir(builtins))
+
+
+def unresolved_calls(content: str, path: str, *, language: Optional[Language]) -> tuple[str, ...]:
+    """The calls this file makes that the graph could not bind, by name.
+
+    ``_calls`` records an edge only where it can name the target, and
+    points at nothing otherwise -- which is right, because an edge nobody
+    can check is worse than no edge. But that leaves "what calls this?"
+    answering with everything it *could* see, and nothing distinguishing
+    a function genuinely called by nobody from one whose callers could
+    not be resolved. This is what says which.
+
+    **Names, never edges.** A name here is a disclosure that something
+    was not seen; it is not a claim about what it refers to, and nothing
+    downstream may treat it as one. The same reason
+    ``entities/affected.py`` carries ``unresolved_imports``.
+
+    Empty for a language with no call reader at all: a brace file claims
+    no calls, so there is no subset it failed to resolve, and listing
+    every call in it would read as a defect in the graph rather than as
+    a reader it never had.
+    """
+    if language != "python":
+        return ()
+    unbound: list[str] = []
+    code_claims(content, path, language=language, _unbound=unbound)
+    return tuple(sorted({name for name in unbound if name not in BUILTINS}))
+
+
 def code_claims(content: str, path: str, *, language: Optional[Language],
-                resolve: Optional["Resolve"] = None) -> tuple[CodeClaim, ...]:
+                resolve: Optional["Resolve"] = None,
+                _unbound: Optional[list[str]] = None) -> tuple[CodeClaim, ...]:
     """What a source file defines, imports and calls, as claims about it.
 
     Names are paths: a module is its path, and a declaration is its path
@@ -270,7 +342,27 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     if not content or content.count("\n") > MAX_LINES:
         return ()
     if language == "braces":
-        return _brace_claims(content, path, resolve)
+        line_read = _brace_claims(content, path, resolve)
+        # A syntax tree settles what a line cannot. It is an optional
+        # extra, so this changes nothing at all where it is not
+        # installed.
+        from .code_syntax import syntax_claims
+
+        parsed = syntax_claims(content, path)
+        if not parsed:
+            return line_read
+        # Where the grammar speaks, it **decides**, and only about what it
+        # speaks about. Measured against tree-sitter over 200 files of
+        # this project's web application, 505 declarations in the source:
+        # the line reader found 71% of them and 19% of what it found were
+        # not declarations at all -- `useEffect(() => {…})` has the shape
+        # of one, and React files are full of it. Merging the two answers
+        # kept those. The line reader keeps every claim the parser does
+        # not make: imports, inheritance, and the rationale it reads out
+        # of comments.
+        decided = {claim.predicate for claim in parsed}
+        kept = [claim for claim in line_read if claim.predicate not in decided]
+        return (*kept, *parsed)
     if language != "python":
         return ()
     try:
@@ -328,19 +420,24 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                     for alias in child.names:
                         if came:
                             imported[alias.asname or alias.name] = (came[0], alias.name)
-                elif resolve is not None and child.level:
+                elif child.level:
                     # "from . import alpha, beta" names a module per alias.
                     # Reusing the first resolved module for all of them sent
-                    # `beta.Parent` to alpha's file.
+                    # `beta.Parent` to alpha's file. Named by arithmetic
+                    # when nobody read the tree, the same as the form
+                    # above -- these two spellings of one import were
+                    # treated differently, so `core.Base` stayed an
+                    # unbound word and its base class could not be placed.
                     for alias in child.names:
-                        where = resolve(path, child.level, alias.name)
+                        where = (resolve(path, child.level, alias.name) if resolve is not None
+                                 else _stem(path, child.level, alias.name))
                         if where:
                             imported[alias.asname or alias.name] = (where, None)
             else:
                 walk(child, owner, inside)
 
     walk(tree, path, None)
-    _calls(tree, path, named, say)
+    _calls(tree, path, named, imported, say, _unbound)
     _meaning(content, path, "python", say)
     return tuple(found)
 
@@ -399,41 +496,106 @@ def _joined(module: str, name: str) -> str:
     return f"{module}.{name}" if module != name else module
 
 
+def _stem(path: str, level: int, module: str) -> Optional[str]:
+    """The file a relative import names, by arithmetic on the importing
+    file's own path.
+
+    A relative import does not need the tree to be **named**, only to be
+    **confirmed**. `from ..core.errors import Bad` inside
+    `pkg/api/routes.py` names `pkg/core/errors.py` and nothing about any
+    other file changes that. Returning it here is what lets a caller who
+    has seen one file -- `engine.remember`, the episodes route -- record
+    the edge at all; whether such a file exists is a question the whole
+    graph answers later, which is also what makes the answer independent
+    of the order files arrived in.
+
+    `.py` because this is the Python reader. A package imported by its
+    directory (`pkg/core/errors/__init__.py`) is named as `errors.py` and
+    will not be confirmed; that is a miss, not a wrong edge, and it is
+    recorded in bench-runs/code-graph-imports-2026-09-12.
+    """
+    here = posixpath.dirname(path)
+    for _ in range(level - 1):
+        if not here:
+            # Further up than the corpus goes: nothing can be named.
+            return None
+        here = posixpath.dirname(here)
+    parts = [one for one in module.split(".") if one]
+    if not parts:
+        return None
+    return posixpath.join(here, *parts) + ".py"
+
+
 def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[str]:
     """What an import names: an absolute module as written, and a relative
-    one only when somebody who knows the tree can say what it is."""
+    one named by the tree when somebody knows it and by arithmetic on the
+    importing file's path when nobody does."""
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if not isinstance(node, ast.ImportFrom):
         return []
     if not node.level:
         return [node.module] if node.module else []
-    if resolve is None:
-        return []
     # "from .code import x" names the module in module; "from . import
     # code" names it in the aliases. Either way what is imported is a
-    # module, and that is what the resolver is asked for.
+    # module.
     wanted = [node.module] if node.module else [alias.name for alias in node.names]
-    found = [resolve(path, node.level, one) for one in wanted]
-    return [one for one in found if one]
+    if resolve is not None:
+        # Somebody who read the tree can confirm the file exists, which
+        # is strictly better than naming a candidate. Left exactly as it
+        # was, so `scone sync --graph` is unchanged.
+        return [one for one in (resolve(path, node.level, one) for one in wanted) if one]
+    return [one for one in (_stem(path, node.level, one) for one in wanted) if one]
 
 
-def _calls(tree: ast.AST, path: str, named: dict[str, str], say) -> None:
+def _calls(tree: ast.AST, path: str, named: dict[str, str],
+           imported: dict[str, tuple[str, Optional[str]]], say,
+           unbound: Optional[list[str]] = None) -> None:
     """Calls between things this file can see, and no others.
 
-    A bare name is a call to this file's own declaration when it has one.
-    ``self.rank`` inside a class is that class's method. Anything else —
-    another module's function, a method on a value whose type nobody
-    stated — is left out rather than pointed at a name that might mean
-    anything."""
+    A bare name is a call to this file's own declaration when it has one,
+    or to the declaration an import brought in. ``self.rank`` inside a
+    class is that class's method, and ``mod.f`` is a declaration in
+    ``mod`` when ``mod`` is a module this file imported. A method on a
+    value whose type nobody stated is left out rather than pointed at a
+    name that might mean anything.
+
+    Measured before imports were followed: of the distinct call names
+    this package could not place, 37.2% had a head the file had itself
+    imported, while 59.8% were methods on values of unstated type. This
+    reaches the first group and cannot reach the second."""
     for holder, inside in _holders(tree, None):
         whole = f"{path}:{_qualified(holder, inside)}"
         for call in ast.walk(holder):
             if not isinstance(call, ast.Call):
                 continue
-            target = _target(call.func, inside, named)
-            if target is not None and target != whole:
+            target = _target(call.func, inside, named, imported)
+            if target is None:
+                # Collected here rather than walked again elsewhere: a
+                # second copy of the name table is the one that drifts
+                # from this one. A self-call resolves and simply earns no
+                # edge, so it is not counted as unseen.
+                if unbound is not None:
+                    spelt = _spelling(call.func)
+                    if spelt is not None:
+                        unbound.append(spelt)
+            elif target != whole:
                 say(whole, CALLS, target, call.lineno)
+
+
+def _spelling(func: ast.AST) -> Optional[str]:
+    """How a call was written, for one the graph could not bind.
+
+    Only the shapes a reader can act on: a bare name and a dotted chain
+    of them. `f()()` and `things[0].go()` name nothing a person could
+    look up, so they are left out rather than reported as a word.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        inner = _spelling(func.value)
+        return f"{inner}.{func.attr}" if inner is not None else None
+    return None
 
 
 def _holders(node: ast.AST, inside: Optional[str]):
@@ -454,12 +616,34 @@ def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
     return f"{inside}.{name}" if inside else name
 
 
-def _target(func: ast.AST, inside: Optional[str], named: dict[str, str]) -> Optional[str]:
+def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
+            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None) -> Optional[str]:
+    """What a call refers to, or nothing.
+
+    The import table says which of two things a local name is, and the
+    difference decides whether an edge is safe. An entry carrying an
+    inner name is a **declaration taken out of** a module, so calling it
+    is calling that declaration. An entry without one is a **module**, so
+    ``name.attr`` is a declaration inside it. The two are never swapped:
+    ``from x import y`` then ``y.z()`` is an attribute of ``y``, not a
+    declaration ``z`` in ``x``, and binding it would name something that
+    need not exist -- the false-edge shape that cost the brace call graph
+    its life.
+    """
     if isinstance(func, ast.Name):
-        return named.get(func.id)
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "self":
-        within = inside.split(".")[0] if inside else None
-        return named.get(f"{within}.{func.attr}") if within else None
+        here = named.get(func.id)
+        if here is not None:
+            return here
+        came = imported.get(func.id) if imported else None
+        # `Store as Shelf` is Store: named where it was declared, which is
+        # the rule `_base` already follows for an inherited name.
+        return _joined(came[0], came[1]) if came is not None and came[1] is not None else None
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        if func.value.id == "self":
+            within = inside.split(".")[0] if inside else None
+            return named.get(f"{within}.{func.attr}") if within else None
+        came = imported.get(func.value.id) if imported else None
+        return _joined(came[0], func.attr) if came is not None and came[1] is None else None
     return None
 
 
@@ -503,31 +687,92 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     held: dict[str, str] = {}
     for item in declarations(content, language="braces"):
         owner = path if "." not in item.name else f"{path}:{item.name.rsplit('.', 1)[0]}"
+        # A Rust `impl Shelf` block is a good place to cut a chunk and not
+        # a definition of Shelf: the type is defined by its struct, enum or
+        # trait, here or in another file. Emitting a define for the impl
+        # too made one type look like two. `declarations()` is right to
+        # report it -- chunking wants the boundary -- so the distinction
+        # belongs here, where the claim is made.
+        if path.endswith(".rs") and _at_impl(lines, item.first_line):
+            held.setdefault(item.name.rsplit(".", 1)[-1], f"{path}:{item.name}")
+            continue
         say(owner, DEFINES, f"{path}:{item.name}", item.first_line)
         held[item.name.rsplit(".", 1)[-1]] = f"{path}:{item.name}"
 
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    for number, line in enumerate(_masked(content, prose=False).split("\n"), start=1):
+    code = masked(content, prose=False).split("\n")
+    if path.endswith(".go"):
+        # Go's types, which the brace declaration pattern cannot see.
+        for number, line in enumerate(code, start=1):
+            named = _GO_TYPE.match(line)
+            if named and named.group(1) not in held:
+                whole = f"{path}:{named.group(1)}"
+                held[named.group(1)] = whole
+                say(path, DEFINES, whole, number)
+    if path.endswith(".rs"):
+        for number, line in enumerate(code, start=1):
+            impl = _RUST_IMPL.match(line)
+            if not impl:
+                continue
+            first, second = impl.group(1), impl.group(2)
+            # `impl Trait for Type` says the type implements the trait.
+            # `impl Type` is an inherent block on a type already defined,
+            # so it is neither an edge nor a second definition.
+            if second is None:
+                continue
+            subject = held.get(second, f"{path}:{second}")
+            say(subject, MIXES_IN, held.get(first, first), number)
+    for number, line in enumerate(code, start=1):
         declares = _DECLARES.search(line)
         if not declares:
             continue
         child = declares.group(1)
         subject = held.get(child, f"{path}:{child}")
-        clauses = [clause.group(1) for clause in _BUILT_ON.finditer(line, declares.end())]
+        # `None` means the source did not say which relation it is, which
+        # only the colon form leaves open.
+        clauses: list[tuple[str | None, str]] = [
+            (_CLAUSE_MEANS[clause.group(1).lower()], clause.group(2))
+            for clause in _BUILT_ON.finditer(line, declares.end())]
         colon = _AFTER_COLON.match(line, declares.end())
         if colon:
-            clauses.append(colon.group(1))
-        for clause in clauses:
+            # After a colon the line does not say which is which, except in
+            # one real way: Kotlin constructs its superclass and does not
+            # construct an interface, so `Base(), Store` distinguishes
+            # them. C++ has no interfaces, so a colon base there extends.
+            clauses.append((None, colon.group(1)))
+        for means, clause in clauses:
             for base in clause.split(","):
-                written = base.strip().split("<")[0].strip().rstrip("{").strip()
+                # Kotlin and Scala write `: Base(), Store` and
+                # `extends Base(3)`. Keeping the call would make `Base()`
+                # and `Base` two entities, and a graph with both cannot
+                # answer a question about either.
+                constructed = "(" in base
+                written = base.strip().split("<")[0].split("(")[0].strip().rstrip("{").strip()
                 # A base list may lead with specifiers that name no type.
                 words = [word for word in written.split() if word.lower() not in _SPECIFIERS]
                 written = words[-1] if words else ""
                 if not written or not (written[0].isalpha() or written[0] == "_"):
                     continue
-                say(subject, INHERITS, held.get(written, written), number)
+                # A colon clause says less than a keyword does, and how
+                # much less depends on the language.
+                #
+                # Kotlin constructs its superclass and does not construct
+                # an interface, so `Base(), Store` really does distinguish
+                # them. C++ has no interfaces at all, so `: public Base` is
+                # inheritance and reading it as a mixin would be a new
+                # error. Everywhere else a colon list is genuinely
+                # ambiguous, and inheritance is what it most often is --
+                # recorded with that limitation stated rather than guessed
+                # at silently.
+                if means is not None:
+                    relation = means
+                elif path.endswith((".kt", ".kts")):
+                    relation = INHERITS if constructed else MIXES_IN
+                else:
+                    relation = INHERITS
+                say(subject, relation, held.get(written, written), number)
 
     inside = False
     for number, line in enumerate(lines, start=1):
@@ -558,9 +803,51 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
-    """An import as it can be named. One written relative to this file is
-    left to whoever knows the tree, because this file cannot say what it
-    points at; anything else is a package, and names itself."""
+    """An import as it can be named. Anything not written relative to this
+    file is a package, and names itself.
+
+    A relative one is resolved by whoever walked the tree when there is
+    such a person, because they can *confirm* a file exists. When there
+    is not -- `engine.remember` and the episodes route see one file each
+    -- it is named the way the importing file is spelt: a `.ts` file
+    importing `./store` means `store.ts` far more often than anything
+    else, and one import mixing extensions is rare.
+
+    That is a candidate, not a resolution, and the difference is where it
+    is settled. Which spelling the graph actually holds is a question for
+    read time, when every file is visible; the same answer a Python
+    package's `__init__.py` gets. Leaving it out instead cost every
+    cross-file edge a TypeScript project has: measured over 58 files of
+    this project's own web application, 39 import edges all naming
+    external packages and 0 files with a dependant.
+    """
     if not module.startswith("."):
         return module
-    return resolve(path, 1, module) if resolve is not None else None
+    if resolve is not None:
+        return resolve(path, 1, module)
+    # ``./store`` and ``../core/api`` are already paths; only the leading
+    # dots are relative, and posixpath.normpath settles them.
+    stem = posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
+    if stem.startswith("..") or stem in (".", "/"):
+        return None
+    # An import that already names a file keeps that name. A web
+    # application imports `./page.css` and `../assets/logo.png` by
+    # relative path and a bundler resolves those exactly; `./personas.ts`
+    # is ordinary in modern ESM and under `moduleResolution: bundler`.
+    # Appending to either produced `page.css.tsx` and `personas.ts.ts`,
+    # names no file can have.
+    written = posixpath.splitext(stem)[1].lstrip(".").lower()
+    if written in ASSETS or written in FIRST:
+        return stem
+    # Everything else takes the **family's** first spelling, not the
+    # importing file's own. `tsc --traceResolution` selects `store.ts`
+    # for `./store` from a `.tsx` file, and `foo.bar.ts` for `./foo.bar`
+    # -- an unknown suffix is part of the name, not an extension to keep.
+    return f"{stem}.{FIRST[suffix]}" if (suffix := posixpath.splitext(path)[1].lstrip(".")) in FIRST else None
+
+
+def _at_impl(lines: list[str], line: int) -> bool:
+    """Whether this declaration is a Rust ``impl`` block rather than a type."""
+    if not 1 <= line <= len(lines):
+        return False
+    return _RUST_IMPL.match(lines[line - 1]) is not None

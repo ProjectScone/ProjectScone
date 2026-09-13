@@ -27,6 +27,7 @@ be traced to it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from ..core.errors import InvalidInput
@@ -89,7 +90,12 @@ class RelationMeanings:
                 opposites[side] = partner
         if len(opposites) + len(both) + len(through) > MAX_MEANINGS:
             raise InvalidInput(f"a vocabulary may name at most {MAX_MEANINGS} predicates")
-        object.__setattr__(self, "inverse", dict(sorted(opposites.items())))
+        # A read-only mapping, not a dict. The class is frozen, but a plain
+        # dict behind a frozen field is not immutable: a holder could empty
+        # it and leave a cached projection implying edges the vocabulary no
+        # longer mentions. Nothing in the framework mutates this mapping,
+        # so making it refuse is free.
+        object.__setattr__(self, "inverse", MappingProxyType(dict(sorted(opposites.items()))))
         object.__setattr__(self, "symmetric", tuple(sorted(both)))
         object.__setattr__(self, "transitive", tuple(sorted(through)))
 
