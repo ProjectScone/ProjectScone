@@ -6,6 +6,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Union
 
+from .task_requirements import TaskAnswerRequirements
 from ._wire import boolean, digest, identifier, integer, invalid, items, names, record, text, timestamp
 
 
@@ -22,6 +23,7 @@ class ModelTask:
     model_id: str
     prompt: str
     depends_on: tuple[str, ...] = ()
+    answer_requirements: Optional[TaskAnswerRequirements] = None
 
     def __post_init__(self) -> None:
         for name in (self.task_id, self.agent_id, self.model_id):
@@ -30,10 +32,15 @@ class ModelTask:
         _dependencies(self.depends_on)
         if self.task_id in self.depends_on:
             raise invalid('self dependency')
+        if self.answer_requirements is not None and not isinstance(self.answer_requirements, TaskAnswerRequirements):
+            raise invalid('answer requirements')
 
     def to_json(self) -> Dict[str, object]:
-        return {'task_id': self.task_id, 'agent_id': self.agent_id, 'model_id': self.model_id,
-                'prompt': self.prompt, 'depends_on': list(self.depends_on)}
+        result: Dict[str, object] = {'task_id': self.task_id, 'agent_id': self.agent_id, 'model_id': self.model_id,
+                                    'prompt': self.prompt, 'depends_on': list(self.depends_on)}
+        if self.answer_requirements is not None:
+            result['answer_requirements'] = self.answer_requirements.to_json()
+        return result
 
 
 @dataclass(frozen=True)
@@ -158,9 +165,10 @@ def parse_plan(value: object) -> Plan:
                 raise invalid('input fields')
             tasks.append(HumanInput(task_id, prompt, dependencies, integer(task.get('max_response_bytes'), 1, 4000)))
         else:
-            if set(task) - {'task_id', 'agent_id', 'model_id', 'prompt', 'depends_on'}:
+            if set(task) - {'task_id', 'agent_id', 'model_id', 'prompt', 'depends_on', 'answer_requirements'}:
                 raise invalid('model task fields')
-            tasks.append(ModelTask(task_id, identifier(task.get('agent_id')), identifier(task.get('model_id')), prompt, dependencies))
+            tasks.append(ModelTask(task_id, identifier(task.get('agent_id')), identifier(task.get('model_id')), prompt, dependencies,
+                TaskAnswerRequirements.from_json(task['answer_requirements']) if task.get('answer_requirements') is not None else None))
     plan = TaskPlan(identifier(row.get('workflow_id')), tuple(tasks))
     if plan.interactive != (row.get('kind') == 'interactive'):
         raise invalid('interactive plan kind')

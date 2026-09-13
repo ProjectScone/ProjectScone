@@ -11,16 +11,19 @@ import json
 from pathlib import Path
 from typing import Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler,
+                      field_validator, model_serializer, model_validator)
 
 from .catalog import AgentCatalog, BoundAgent, Identifier
 from .tool_evidence import prepare_tool_evidence
+from .task_requirements import TaskAnswerRequirements
 from .usage import ToolTokenUsage
 from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, _integer
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine
 from ..retrieval.recall_scope import RecallScope
 from ..core.validation import check_space
+from ..realtime.answer_requirements import AnswerRequirements
 
 MAX_EVIDENCE_PACKETS = 128
 MAX_HANDOFF_BYTES = 32000
@@ -33,6 +36,25 @@ class AgentTask(BaseModel):
     model_id: Identifier | None = None
     prompt: str = Field(min_length=1, max_length=2000)
     depends_on: tuple[Identifier, ...] = Field(default=(), max_length=31)
+    answer_requirements: TaskAnswerRequirements | None = None
+
+    @field_validator('answer_requirements', mode='before')
+    @classmethod
+    def snapshot_requirements(cls, value: object) -> object:
+        if isinstance(value, AnswerRequirements):
+            return dict(vars(value))
+        return value
+
+    @model_serializer(mode='wrap')
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        if self.answer_requirements is not None:
+            if not isinstance(self.answer_requirements, TaskAnswerRequirements):
+                raise ValueError('invalid task answer requirements')
+            TaskAnswerRequirements.model_validate(dict(vars(self.answer_requirements)))
+        result = cast(dict[str, object], handler(self))
+        if self.answer_requirements is None:
+            result.pop('answer_requirements', None)
+        return result
 
     @model_validator(mode='after')
     def valid(self) -> Self:
@@ -177,6 +199,8 @@ class AgentWorkflow:
                     or receipt.model_id != agent.model_id or receipt.binding != agent.fingerprint
                     or receipt.depends_on != task.depends_on or not set(task.depends_on) <= context.completed.keys()):
                 raise ValueError('saved task binding changed')
+            if task.answer_requirements is not None and not task.answer_requirements.accepts(receipt.text):
+                raise ValueError('saved task violates answer requirements')
             receipts[task_id] = receipt
         if sum(len(receipt.evidence_packets) for receipt in receipts.values()) > MAX_EVIDENCE_PACKETS:
             raise ValueError('workflow evidence packet limit')
@@ -203,7 +227,8 @@ class AgentWorkflow:
             if not isinstance(context.inputs, str):
                 raise ValueError('workflow question required')
             question = task.prompt + '\n\nUser request:\n' + context.inputs
-            result = await agent.run(question, tools=self._tools(), context=handoff)
+            result = await agent.run(question, tools=self._tools(), context=handoff,
+                                     answer_requirements=task.answer_requirements)
             output = result.output
             receipt = AgentTaskReceipt(task_id=task.task_id, agent_id=result.agent_id, model_id=result.model_id,
                 binding=result.binding, depends_on=task.depends_on, text=output.text, source_status=cast(Literal['retained', 'none'], output.source_status),
