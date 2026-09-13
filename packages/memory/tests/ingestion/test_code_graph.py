@@ -74,12 +74,24 @@ def test_a_call_this_file_can_see_is_recorded():
         "self.rank is the method of the class it is written in"
 
 
-def test_a_call_this_file_cannot_see_is_left_out_and_counted():
-    """keep() comes from another module and json.dumps from a package. A
-    graph with edges nobody can check is worse than a smaller graph."""
-    found = claims()
-    assert not [claim for claim in found if claim.predicate == "calls" and "keep" in claim.object]
-    assert not [claim for claim in found if claim.predicate == "calls" and "dumps" in claim.object]
+def test_a_call_this_file_cannot_see_is_left_out():
+    """A call is left out when nothing in the file says what it refers to.
+
+    This used to assert that `keep()` and `json.dumps()` were left out
+    too, on the grounds that "a graph with edges nobody can check is
+    worse than a smaller graph". That reasoning was right and the
+    examples were wrong: the file's own `from pkg.store import keep` says
+    where `keep` lives, and the identical import already produces
+    `inherits -> pkg.store.Shelf` for `Shelf`. Refusing the call while
+    making the inheritance edge was an inconsistency, not caution.
+
+    What stays out is a call whose target nothing states -- a method on a
+    value of unknown type -- which is a different thing from a call whose
+    target an import names.
+    """
+    found = code_claims(
+        "def use(thing):\n    return thing.method()\n", "app/x.py", language="python")
+    assert not [claim for claim in found if claim.predicate == "calls"]
 
 
 def test_every_claim_carries_the_line_it_was_read_from():
