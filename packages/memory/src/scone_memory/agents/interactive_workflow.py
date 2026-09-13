@@ -111,6 +111,8 @@ class InteractiveAgentWorkflow:
                 if (model.task_id != name or model.agent_id != task.agent_id or model.model_id != agent.model_id
                         or model.binding != agent.fingerprint or model.depends_on != task.depends_on):
                     raise ValueError('model receipt binding changed')
+                if task.answer_requirements is not None and not task.answer_requirements.accepts(model.text):
+                    raise ValueError('saved task violates answer requirements')
                 receipts[name] = model
         for name, receipt in receipts.items():
             if isinstance(receipt, HumanInputReceipt):
@@ -151,7 +153,8 @@ class InteractiveAgentWorkflow:
             if not isinstance(context.inputs, str):
                 raise ValueError('workflow question required')
             result = await agent.run(task.prompt + '\n\nUser request:\n' + context.inputs,
-                                     tools=self._tools(), context=handoff)
+                                     tools=self._tools(), context=handoff,
+                                     answer_requirements=task.answer_requirements)
             output = result.output
             receipt = AgentTaskReceipt(task_id=task.task_id, agent_id=result.agent_id, model_id=result.model_id,
                 binding=result.binding, depends_on=task.depends_on, text=output.text,
