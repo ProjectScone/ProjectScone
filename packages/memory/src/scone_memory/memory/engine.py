@@ -165,6 +165,7 @@ class MemoryEngine:
         contextual_embeddings: bool = False,
         code_aware: bool = True,
         structure_aware: bool = False,
+        semantic_aware: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
@@ -206,6 +207,12 @@ class MemoryEngine:
         #: quotes code is prose.
         self.code_aware = code_aware
         self.structure_aware = structure_aware
+        #: Whether prose is cut where its subject changes rather than
+        #: where the length target lands. Off unless asked for: it decides
+        #: what chunks exist, and stored offsets are part of the shared
+        #: specification, so a space that already holds chunks cut another
+        #: way must not silently start cutting differently.
+        self.semantic_aware = semantic_aware
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -438,7 +445,7 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph, self.structure_aware)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -447,7 +454,7 @@ class MemoryEngine:
             if existing is not None and existing.content == new.content:
                 added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
                 return Replaced(added=added, outcome="duplicate", replaced=None)
-            pending = ingestion_batch.chunk_record(runtime, new)
+            pending = await ingestion_batch.chunk_record(runtime, new)
             vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
             # Embedding can yield for a long time. Never revoke a different source
             # or recreate one that the user forgot during preparation.
@@ -455,7 +462,8 @@ class MemoryEngine:
             if (self.embedder is not runtime.embedder or self.documents is not runtime.documents
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                        self.code_aware, self.code_graph, self.structure_aware) != configuration):
+                        self.code_aware, self.code_graph, self.structure_aware,
+                        self.semantic_aware) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -581,6 +589,7 @@ class MemoryEngine:
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
+            semantic_aware=self.semantic_aware,
             context_inputs=context_inputs,
         )
 
