@@ -20,6 +20,7 @@ from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
 from ..ingestion.formats.types import DocumentLimits
 from ..memory.engine import MemoryEngine
 from .video_documents import mount_video_frame_routes
+from .video_catalogue import mount_video_catalogue_route
 
 
 class _FileBody(BaseModel):
@@ -39,6 +40,8 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
                                document_video: DocumentVideo | None = None) -> None:
     mount_video_frame_routes(app, engine, space_for, ingest_slot, document_video,
                              assert_current_space=assert_current_space)
+    mount_video_catalogue_route(app, engine, space_for, ingest_slot,
+                               assert_current_space=assert_current_space)
     @app.get('/v1/documents/formats')
     async def formats(_space: str = Depends(space_for)) -> dict[str, object]:
         from ..ingestion.formats.capabilities import document_formats
