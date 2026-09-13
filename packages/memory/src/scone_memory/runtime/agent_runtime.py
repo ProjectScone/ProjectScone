@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
 from ipaddress import ip_address
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..agents.catalog import AgentCatalog, AgentDefinition, AgentModel, Identifier
+from ..agents.custom_tools import AgentTool
 from ..agents.evidence_loop import ToolModel
 from ..agents.plan_store import AgentPlanStore
 from ..agents.run_service import AgentRunService
@@ -160,11 +162,12 @@ class AgentRuntime:
         return app
 
 
-def load_agent_runtime(path: str | Path, memory: MemoryEngine) -> AgentRuntime:
+def load_agent_runtime(path: str | Path, memory: MemoryEngine, *,
+                       tools: Sequence[AgentTool] = ()) -> AgentRuntime:
     """Read configuration, bind factories and open private state; no model calls."""
     config_path = Path(path).expanduser().absolute()
     config = AgentRuntimeConfig.read(config_path)
-    catalog = AgentCatalog(models=[model.registered() for model in config.models], agents=config.agents)
+    catalog = AgentCatalog(models=[model.registered() for model in config.models], agents=config.agents, tools=tools)
     secret = os.environ.get(config.key_env, '')
     if not re.fullmatch(r'[a-fA-F0-9]{64}', secret):
         raise ValueError('Agent encryption key environment variable must contain exactly 64 hex characters')

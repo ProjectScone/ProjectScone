@@ -187,8 +187,15 @@ class AgentCatalog:
     def describe(self) -> tuple[dict[str, object], ...]:
         """Selector data without instructions, credentials, endpoints or factories."""
         return tuple({'agent_id': definition.agent_id, 'default_model': definition.default_model,
-                      'models': [model.model_dump() for model in self.choices(definition.agent_id)]}
+                      'models': [model.model_dump() for model in self.choices(definition.agent_id)],
+                      'tools': list(definition.tools)}
                      for definition in self._agents.values())
+
+    def tool_descriptions(self) -> tuple[dict[str, str], ...]:
+        """Public summaries of selected tools, once per registration."""
+        selected = {name for definition in self._agents.values() for name in definition.tools}
+        return tuple({'name': tool.name, 'description': tool.description, 'revision': tool.revision}
+                     for name, tool in self._tools.items() if name in selected)
 
     def bind(self, agent_id: str, *, model_id: str | None = None) -> BoundAgent:
         definition = self._definition(agent_id)
