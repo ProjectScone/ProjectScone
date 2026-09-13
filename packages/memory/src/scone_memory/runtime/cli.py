@@ -1517,6 +1517,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.narrowing is not None and result.narrowing.window_exhausted:
+            n = result.narrowing
+            print(f"note: the narrowing removed {n.postfiltered_out} candidate(s) and a lane's window of "
+                  f"{max(n.vector_window, n.text_window)} was full when it did; memories that fit may lie deeper", file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
