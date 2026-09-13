@@ -224,6 +224,13 @@ rather than chosen: a rule that cannot be overridden is a rule somebody
 will work around, and then the framework learns nothing from being
 wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
 
+An ordinary answer shows each passage to its first 200 characters, and
+says so: `shown` carries `per_item_chars`, `items_cut` and
+`chars_omitted`, and when anything was cut the text ends with one line
+naming how many of how many were shortened and that `detail` holds them
+whole. `scone answer --whole`, `GET /v1/answer?whole=true` and
+`answer_question(..., max_item_chars=0)` show them whole instead.
+
 ### Checking the rule instead of asserting it
 
 A routing rule written down is only better than one a model invents if

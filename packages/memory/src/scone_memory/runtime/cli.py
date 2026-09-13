@@ -362,6 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
+    p.add_argument("--whole", action="store_true",
+                   help="show each passage whole instead of its first 200 characters")
 
     p = sub.add_parser("sync", help="bring a space into step with a directory: added, changed and gone")
     p.add_argument("directory")
@@ -1613,10 +1615,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "answer":
-        from ..retrieval.router import answer_question
+        from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
-                                       route=args.route)
+                                       route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
