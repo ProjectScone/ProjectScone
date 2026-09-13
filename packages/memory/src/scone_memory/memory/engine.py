@@ -269,9 +269,18 @@ class MemoryEngine:
         return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
+        from . import space_cleanup
+
+        # Identity settlement may rebuild vectors and call the embedder. Finish
+        # accepted space erasures before it can inspect their source content.
+        _, pending = await space_cleanup.recover(self._retention_runtime(), 100)
+        if pending:
+            raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         await self.vectors.ensure(self.embedder.dim)
         self.vector_identity = await vector_identity.settle(self)
         report = await self.recover()
+        if report.space_deletions_pending:
+            raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         if report.retirements_pending:
             raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
         return self
@@ -335,11 +344,12 @@ class MemoryEngine:
         if first is not None:
             raise first
 
-    async def recover(self, *, retirement_limit: int = 100) -> RecoveryReport:
+    async def recover(self, *, retirement_limit: int = 100, space_deletion_limit: int = 100) -> RecoveryReport:
         """Finish interrupted deletions before repairing interrupted ingestion.
 
-        At most ``retirement_limit`` source cleanups (1..1000, default 100) run
-        per call. A remaining backlog is disclosed and ingestion repair waits
+        Whole-space cleanup runs first, bounded by ``space_deletion_limit``.
+        At most ``retirement_limit`` source cleanups follow. Both limits accept
+        1..1000 and default to 100. A remaining backlog is disclosed and ingestion repair waits
         for a later call. A failing store leaves its intent and raises; callers
         serialize this operation with source writes. A remember marks its
         episode identity in the document store before writing and clears
@@ -351,11 +361,20 @@ class MemoryEngine:
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
 
+        from . import space_cleanup
+
+        space_cleanup.cleanup_limit(space_deletion_limit)
+        if type(retirement_limit) is not int or not 1 <= retirement_limit <= 1000:
+            raise InvalidInput("retirement_limit must be 1..1000")
+        spaces, spaces_pending = await space_cleanup.recover(self._retention_runtime(), space_deletion_limit)
+        if spaces_pending:
+            return RecoveryReport(spaces_deleted=spaces, space_deletions_pending=True)
         retired, pending = await retention.recover_forgets(self._retention_runtime(), retirement_limit)
         if pending:
-            return RecoveryReport(retired=retired, retirements_pending=True)
+            return RecoveryReport(retired=retired, retirements_pending=True, spaces_deleted=spaces)
         report = await ingestion_batch.recover(self._ingestion_runtime())
         report.retired = retired
+        report.spaces_deleted = spaces
         return report
 
     # -- episodes ---------------------------------------------------------

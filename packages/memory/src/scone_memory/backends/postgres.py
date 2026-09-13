@@ -26,6 +26,9 @@ from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -192,6 +195,7 @@ class PostgresDocumentStore:
     CREATE INDEX IF NOT EXISTS tombstones_hash ON {s}.tombstones (space, content_hash);
     CREATE TABLE IF NOT EXISTS {s}.revisions (space TEXT PRIMARY KEY, revision BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.inflight (space TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (space, content_hash));
+    CREATE TABLE IF NOT EXISTS {s}.space_deletions (space TEXT PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS {s}.retirements (space TEXT NOT NULL, episode_id BIGINT NOT NULL,
         payload TEXT NOT NULL, PRIMARY KEY (space, episode_id));
     CREATE TABLE IF NOT EXISTS {s}.erased_spaces (space TEXT PRIMARY KEY, erased_at TEXT NOT NULL);
@@ -349,6 +353,11 @@ class PostgresDocumentStore:
             return []
         rows = await self._rows(f"SELECT * FROM {self.schema}.chunks WHERE space = %s AND id = ANY(%s)", (space, list(chunk_ids)))
         return [_chunk(r) for r in rows]
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        deletion_key(space)
+        rows = await self._rows(f"SELECT id, episode_id FROM {self.schema}.chunks WHERE space = %s ORDER BY id", (space,))
+        return [(row["id"], row["episode_id"]) for row in rows]
 
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         rows = await self._rows(
@@ -529,6 +538,32 @@ class PostgresDocumentStore:
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         rows = await self._rows(f"SELECT * FROM {self.schema}.tombstones WHERE space = %s ORDER BY episode_id", (space,))
         return [_tombstone(r) for r in rows]
+
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        payload = encode_deletion(record)
+        row = await self._row(
+            f"INSERT INTO {self.schema}.space_deletions (space, payload) VALUES (%s, %s)"
+            " ON CONFLICT (space) DO NOTHING RETURNING payload", (record.space, payload))
+        if row is None:
+            row = await self._row(f"SELECT payload FROM {self.schema}.space_deletions WHERE space = %s", (record.space,))
+        if row is None:
+            raise RuntimeError("space deletion disappeared after its write")
+        return decode_deletion(row["payload"], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        row = await self._row(f"SELECT payload FROM {self.schema}.space_deletions WHERE space = %s", (deletion_key(space),))
+        return decode_deletion(row["payload"], space) if row is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        if after is None:
+            rows = await self._rows(f"SELECT space, payload FROM {self.schema}.space_deletions ORDER BY space LIMIT %s", (limit,))
+        else:
+            rows = await self._rows(f"SELECT space, payload FROM {self.schema}.space_deletions WHERE space > %s ORDER BY space LIMIT %s", (after, limit))
+        return [decode_deletion(row["payload"], row["space"]) for row in rows]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        await self._rows(f"DELETE FROM {self.schema}.space_deletions WHERE space = %s RETURNING space", (deletion_key(space),))
 
     async def record_retirement(self, record: Retirement) -> Retirement:
         payload = encode_retirement(record)

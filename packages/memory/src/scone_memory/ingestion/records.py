@@ -51,13 +51,17 @@ class RecoveryReport:
     which how many needed their chunks rebuilt, and marks with no
     episode behind them (the write never landed). ``retired`` counts completed
     pending source deletions. If ``retirements_pending`` is true, the bounded
-    cleanup pass left work and ingestion repair has not run yet."""
+    cleanup pass left work and ingestion repair has not run yet.
+    ``spaces_deleted`` counts completed whole-space cleanups. A remaining
+    ``space_deletions_pending`` backlog defers source and ingestion repair."""
 
     completed: int = 0
     rechunked: int = 0
     forgotten: int = 0
     retired: int = 0
     retirements_pending: bool = False
+    spaces_deleted: int = 0
+    space_deletions_pending: bool = False
 
 
 @dataclass(frozen=True)
