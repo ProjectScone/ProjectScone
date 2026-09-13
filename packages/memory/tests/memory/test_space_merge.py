@@ -119,11 +119,11 @@ async def test_a_merge_over_http_needs_the_full_role_as_a_deletion_does():
     from scone_memory.api import create_app
 
     engine = await filled()
-    app = create_app(engine, {"key-w": "old", "key-a": "old"}, roles={"key-w": "write"})
+    app = create_app(engine, {"key-w": "old", "key-a": "old", "key-d": "new"}, roles={"key-w": "write"})
     with TestClient(app) as client:
         refused = client.post("/v1/spaces/old/merge", json={"into": "new", "confirm": "old"},
                               headers={"Authorization": "Bearer key-w"})
         assert refused.status_code == 403, "moving a whole space is not an ordinary write"
         said = client.post("/v1/spaces/old/merge", json={"into": "new", "confirm": "old"},
-                           headers={"Authorization": "Bearer key-a"})
+                           headers={"Authorization": "Bearer key-a", "X-Scone-Destination-Authorization": "Bearer key-d"})
         assert said.status_code == 200 and said.json()["moved"] is True

@@ -1015,9 +1015,13 @@ there stays forgotten, and claims arrive with their history.
 - **It needs the name said out loud**, as deleting a space does.
 - **It takes the same permission as a deletion**, not an ordinary write:
   moving a whole space away is as final as removing it.
-- **The space merged from is closed for good.** Everything it held is
-  somewhere else now, and leaving the name open would invite somebody to
-  write into a space whose contents have moved and find them missing.
+- **Retained attachments move too**, including unlinked holds. Preview and
+  completion receipts report attachment counts/bytes, skipped forgotten sources
+  and omitted references to known forgotten sources.
+- **The source closes after evidence verification.** Quiesce source and destination
+  writers throughout the operation. Separate storage observations do not provide
+  an atomic cutover. See [space merge](space-merge.md) for failure/retry behavior
+  and the ledger and runtime state this operation does not preserve.
 
 ## What an archive says it is
 
