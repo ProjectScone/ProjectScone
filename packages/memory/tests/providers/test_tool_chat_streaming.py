@@ -153,3 +153,25 @@ async def test_a_server_that_ignores_stream_still_answers_and_the_reader_gets_it
     body = json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Hello there'}}]})
     step = await chat(served(body, [])).complete(MESSAGES, [], on_public_text=sink)
     assert step.content == 'Hello there' and seen == ['Hello there']
+
+
+async def test_a_structured_turn_accepts_a_sink_and_never_writes_to_it():
+    """A structured decision is JSON, not an answer being written; the loop
+    delivers the accepted answer whole once it is known."""
+    from scone_memory.providers.structured_tool_chat import SelfHostedStructuredToolChat
+
+    seen: list[str] = []
+
+    async def sink(text: str) -> None:
+        seen.append(text)
+
+    requests: list[dict[str, object]] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Hello'}}]})
+
+    model = SelfHostedStructuredToolChat('http://127.0.0.1:11434/v1', 'local-model', transport=httpx.MockTransport(serve))
+    step = await model.complete(MESSAGES, [], on_public_text=sink)
+    assert step.content == 'Hello' and seen == [], 'nothing streamed: the loop delivers the answer whole'
+    assert requests[0]['stream'] is False, 'the structured turn is never requested as a stream'
