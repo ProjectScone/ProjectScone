@@ -173,3 +173,26 @@ not retain a frame cache. The work remains bounded by the recorded sampling
 policy and the host document limits. Entirely visual documents with no recognized
 text, generated video interpretations and video citation UI remain subsequent
 integration work.
+
+## Browser frame catalogue
+
+`GET /v1/episodes/{episode_id}/document/video/catalogue` returns an independently
+versioned representation for clients whose JSON numbers cannot retain int64
+timestamps. The response has `schema_version: 1`,
+`timestamp_encoding: "decimal-string"`, the current `space`, `episode_id` as
+decimal text, and `evidence` with the full document provenance. Inside
+`evidence.video`, `start_timestamp`, `duration_ticks`, and every frame's
+`presentation_timestamp` are canonical signed decimal strings (`duration_ticks`
+is positive). The rational `time_base` remains a string. Use integer arithmetic
+for `(presentation_timestamp - start_timestamp) * time_base`; do not first
+convert these timestamp strings to floating-point numbers.
+
+The catalogue retains original/manifest identities, UTF-8 text regions and all
+sampled frames, including those with empty OCR. It performs no decoding or OCR
+and works without current decoder configuration. Existing stored manifests and
+the ordinary document endpoint retain their previous numeric representation.
+Catalogue reads share bounded ingestion capacity, set `no-store` and `nosniff`,
+and recheck attachment bytes, links, the source row and access before returning.
+As with frame reads, this is observed-state validation rather than an atomic
+transaction across stores. A valid catalogue is evidence about retained frames;
+it does not guarantee that the current decoder can reproduce their pixels.
