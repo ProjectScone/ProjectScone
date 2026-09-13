@@ -43,6 +43,9 @@ Route = Literal["temporal", "graph", "recall"]
 #: Passages an ordinary search answers with, by default and at most.
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 50
+#: Characters of each passage shown in the text of an ordinary answer.
+#: Zero shows them whole. The answer says how many it cut and by how much.
+DEFAULT_ITEM_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -56,17 +59,27 @@ class Answered:
     #: The answer from the machinery that served it, as that machinery
     #: gives it, so nothing is lost by going through here.
     detail: dict[str, object] = field(default_factory=dict)
+    #: How much of each passage the text shows, and what it cut: the
+    #: bound the ordinary route applies, said out loud. Empty on routes
+    #: that show nothing by the passage.
+    shown: dict[str, object] = field(default_factory=dict)
 
     def record(self, space: str) -> dict[str, object]:
         return {"schema_version": 1, "space": space, "question": self.question, "route": self.route,
-                "why": self.why, "text": self.text, "detail": dict(self.detail)}
+                "why": self.why, "text": self.text, "detail": dict(self.detail), "shown": dict(self.shown)}
 
 
 async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
                           now: Optional[str] = None, limit: int = DEFAULT_LIMIT,
-                          route: Optional[str] = None) -> Answered:
-    """Answer a question with whichever machinery suits it, and say which."""
+                          route: Optional[str] = None, max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
+    """Answer a question with whichever machinery suits it, and say which.
+
+    ``max_item_chars`` bounds each passage shown in an ordinary answer's
+    text (zero shows them whole); the answer's ``shown`` says how many
+    were cut and by how much, and ``detail`` always holds them whole."""
     check_space(space)
+    if not isinstance(max_item_chars, int) or isinstance(max_item_chars, bool) or max_item_chars < 0:
+        raise InvalidInput(f"max_item_chars must be a whole number of characters (0 for whole passages), not {max_item_chars!r}")
     if not isinstance(question, str) or not question.strip():
         raise InvalidInput("a question must have something in it")
     if not 1 <= limit <= MAX_LIMIT:
@@ -76,7 +89,7 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     when = now or engine.clock()
     if route is not None:
         return await _by(engine, space, question, route, when, limit,
-                         why=f"the {route} route was asked for")
+                         why=f"the {route} route was asked for", max_item_chars=max_item_chars)
     computed, unread = await _temporal(engine, space, question, when, limit)
     if computed is not None:
         return computed
@@ -88,11 +101,11 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     # as being about dates, and a caller who cannot tell them apart cannot
     # tell a gap in the ledger from a gap in the rule.
     return await _recall(engine, space, question, limit,
-                         why=unread or "nothing it could compute and nothing the graph knows by name")
+                         why=unread or "nothing it could compute and nothing the graph knows by name", max_item_chars=max_item_chars)
 
 
 async def _by(engine: "MemoryEngine", space: str, question: str, route: str, when: str,
-              limit: int, why: str) -> Answered:
+              limit: int, why: str, max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
     """One named route, whatever the rule would have chosen."""
     if route == "temporal":
         found, _ = await _temporal(engine, space, question, when, limit, insist=True)
@@ -100,7 +113,7 @@ async def _by(engine: "MemoryEngine", space: str, question: str, route: str, whe
     if route == "graph":
         found = await _graph(engine, space, question, when, limit, insist=True)
         return found if found is not None else Answered(question, "graph", why, "", {})
-    return await _recall(engine, space, question, limit, why=why)
+    return await _recall(engine, space, question, limit, why=why, max_item_chars=max_item_chars)
 
 
 async def _temporal(engine: "MemoryEngine", space: str, question: str, when: str, limit: int,
@@ -153,10 +166,23 @@ def _labels(text: str) -> list[str]:
     return found
 
 
-async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int, why: str) -> Answered:
+async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int, why: str,
+                  max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
     """The ordinary search, which is the answer when nothing else is."""
     found = await engine.recall(space, question, limit=limit)
-    lines = [f"{item.score:.2f}  {item.text.strip()[:200]}" for item in found.items]
+    lines: list[str] = []
+    cut, omitted = 0, 0
+    for item in found.items:
+        text = item.text.strip()
+        if max_item_chars and len(text) > max_item_chars:
+            cut += 1
+            omitted += len(text) - max_item_chars
+            text = text[:max_item_chars]
+        lines.append(f"{item.score:.2f}  {text}")
+    if cut:
+        lines.append(f"{cut} of {len(found.items)} passage(s) shortened to {max_item_chars} characters; "
+                     "the items in detail hold them whole")
     return Answered(question, "recall", why, "\n".join(lines) or "nothing found",
                     {"items": [item.model_dump() for item in found.items],
-                     "facts": [fact.model_dump() for fact in found.facts]})
+                     "facts": [fact.model_dump() for fact in found.facts]},
+                    {"per_item_chars": max_item_chars, "items_cut": cut, "chars_omitted": omitted})
