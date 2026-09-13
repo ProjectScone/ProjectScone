@@ -776,6 +776,7 @@ def create_app(
         limit: int = Query(default=5, ge=1, le=50),
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph or recall instead of the rule."),
+        whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -784,9 +785,10 @@ def create_app(
         knows by name is answered from the claims, and anything else is an
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for."""
-        from ..retrieval.router import answer_question
+        from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
-        return (await answer_question(engine, space, q, now=now, limit=limit, route=route)).record(space)
+        return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
+                                      max_item_chars=0 if whole else DEFAULT_ITEM_CHARS)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
