@@ -343,3 +343,53 @@ def test_a_generator_expression_keeps_its_own_var():
               "}\n")
     calls = {(one[0], one[2]) for one in claims(source) if one[1] == "calls"}
     assert ("web/app.ts:caller", "web/app.ts:leaf") in calls, calls
+
+
+@pytest.mark.parametrize("source, name", [
+    ("export interface Shelf { keep(p: string): string }\n", "Shelf"),
+    ("export type Feature = 'a' | 'b';\n", "Feature"),
+    ("export enum Mode { One, Two }\n", "Mode"),
+    ("interface Local { x: number }\n", "Local"),
+])
+def test_a_typescript_type_declaration_is_a_declaration(source, name):
+    """Measured against tree-sitter's own view of 200 files of this
+    project's web application: the reader emitted no interfaces, type
+    aliases or enums at all, and those are 62 of the 378 declarations the
+    grammar reports.
+
+    They are the vocabulary a TypeScript codebase is built from -- a
+    `type` alias is what a function signature refers to -- so a graph
+    that cannot name one cannot answer what depends on it.
+    """
+    assert ("web/app.ts", "defines", f"web/app.ts:{name}") in claims(source), claims(source)
+
+
+def test_the_grammar_overrules_the_line_reader_about_declarations():
+    """Both readers run and their claims are merged, so the line reader's
+    guesses survived alongside the grammar's answers.
+
+    `useEffect(() => {…})` is a call. The line reader reports it as a
+    declaration because it matches the shape of one, and over 200 files
+    of this project's web application that pattern is most of why its
+    precision is 81% against the grammar's 100%. Measured on the same
+    files: recall 71% against 100%.
+
+    So where the parser is installed it decides what a **declaration**
+    is, and the line reader keeps the claims the parser does not make --
+    imports, inheritance, and the rationale notes it reads from comments.
+    """
+    from scone_memory.ingestion.code_graph import code_claims
+
+    source = ("import {useEffect} from 'react';\n"
+              "export function App() {\n"
+              "  useEffect(() => {\n"
+              "    return undefined;\n"
+              "  }, []);\n"
+              "  return null;\n"
+              "}\n")
+    found = code_claims(source, "web/App.tsx", language="braces")
+    defines = {claim.object for claim in found if claim.predicate == "defines"}
+    assert "web/App.tsx:App" in defines, defines
+    assert not any("useEffect" in one for one in defines), defines
+    # The line reader's other work is untouched.
+    assert any(claim.predicate == "imports" for claim in found), found

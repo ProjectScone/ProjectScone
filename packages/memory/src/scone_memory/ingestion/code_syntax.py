@@ -49,7 +49,16 @@ GRAMMARS = {".ts": "ts", ".mts": "ts", ".cts": "ts", ".tsx": "tsx",
             ".js": "tsx", ".jsx": "tsx", ".mjs": "tsx", ".cjs": "tsx"}
 #: Nodes that bind their own name in the scope around them.
 _BINDS = frozenset({"function_declaration", "generator_function_declaration",
-                    "class_declaration", "abstract_class_declaration", "method_definition"})
+                    "class_declaration", "abstract_class_declaration", "method_definition",
+                    # A TypeScript type is a declaration. Scored against
+                    # tree-sitter over 200 files of this project's web
+                    # application, interfaces, type aliases and enums were
+                    # 62 of the 378 declarations in the source and the
+                    # reader emitted none of them -- and a `type` alias is
+                    # what a signature refers to, so a graph that cannot
+                    # name one cannot answer what depends on it.
+                    "interface_declaration", "type_alias_declaration",
+                    "enum_declaration"})
 #: Scopes a `var` hoists to. Everything else is a block, which `let` and
 #: `const` respect and `var` does not -- the distinction is the language's
 #: and getting it wrong bound a caller to a global it never called.
