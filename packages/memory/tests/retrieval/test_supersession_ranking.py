@@ -188,3 +188,74 @@ async def test_it_can_be_turned_off():
         assert (await sources(engine))[0] == "retired"
     finally:
         await engine.close()
+
+
+# --- Saying so, not just reordering ---------------------------------------
+
+async def test_a_retired_passage_says_that_it_is_retired():
+    """Order alone serves a reader who takes the top result and stops.
+
+    One who reads all of them, or quotes them, needs to know which claim
+    the ledger has since retired -- and a passage carries no date that
+    says so. The current one must not be marked, or the mark means
+    nothing.
+    """
+    engine = await chain()
+    try:
+        found = await engine.recall("s", QUERY, limit=5)
+        marked = {item.source: item.superseded for item in found.items}
+        assert marked == {"current": False, "retired": True}, marked
+    finally:
+        await engine.close()
+
+
+async def test_it_is_marked_even_when_its_replacement_was_not_returned():
+    """Where the mark matters most, and a limitation worth pinning.
+
+    Reordering runs **after** the result is cut to `limit`, exactly as
+    the lexical rule beside it does. So at `limit=1` the replacement has
+    already been discarded and the retired passage is the only thing the
+    reader gets -- there is nothing left to move it below.
+
+    The mark still lands, which is the whole reason it is computed for
+    every retired passage rather than only for the reorderable ones.
+    Without it this reader receives a retired claim with nothing at all
+    to distinguish it from a current one.
+    """
+    engine = await chain()
+    try:
+        found = await engine.recall("s", QUERY, limit=1)
+        assert [item.source for item in found.items] == ["retired"], \
+            "truncation precedes reordering; if that changes, this test should"
+        assert found.items[0].superseded is True
+    finally:
+        await engine.close()
+
+
+async def test_what_held_at_the_boundary_is_not_marked_retired():
+    """`as_of` before the replacement: that claim held then, and marking
+    it retired would contradict the question asked."""
+    engine = await chain()
+    try:
+        found = await engine.recall("s", QUERY, limit=5, as_of="2024-03-01T00:00:00Z")
+        assert [item.superseded for item in found.items] == [False]
+    finally:
+        await engine.close()
+
+
+async def test_nothing_is_marked_when_nothing_was_replaced():
+    """The other half: the mark must be able to be absent."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                HashEmbedder()).open()
+    try:
+        one = await engine.remember("s", RETIRED, source="only",
+                                    created_at="2024-01-02T00:00:00Z")
+        await engine.remember("s", "person-1 enjoys long walks by the river.",
+                              source="aside", created_at="2024-02-02T00:00:00Z")
+        await engine.assert_fact("s", "person-1", "works_at", "Northwind",
+                                 valid_from="2024-01-01T00:00:00Z",
+                                 source_episode_id=one.episode_id)
+        found = await engine.recall("s", QUERY, limit=5)
+        assert not any(item.superseded for item in found.items)
+    finally:
+        await engine.close()

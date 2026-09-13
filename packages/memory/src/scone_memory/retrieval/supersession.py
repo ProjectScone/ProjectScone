@@ -43,15 +43,30 @@ from ..core.ports import DocumentStore
 
 async def demote_superseded(documents: DocumentStore, space: str, items: list[RecallItem],
                             facts: Sequence[Fact], when: str) -> list[RecallItem]:
-    """``items`` reordered so a retired passage follows its replacement."""
-    if len(items) < 2 or not facts:
+    """``items`` marked and reordered: a retired passage says so, and
+    follows its replacement when the reader received one.
+
+    **Reordering runs after the result was cut to ``limit``**, as the
+    lexical rule beside it does, so at a small limit the replacement may
+    already have been discarded and there is nothing to move below. The
+    mark still lands, which is why it is computed for every retired
+    passage rather than only for the ones that can be reordered.
+    """
+    # Not `len(items) < 2`: a lone retired passage cannot be reordered and
+    # is precisely the one that must say so. Reordering checks its own
+    # group size further down.
+    if not items or not facts:
         return items
     present = {item.episode_id for item in items}
     replaced: dict[int, int] = {}
+    retired: set[int] = set()
     for fact in facts:
+        # Deliberately not skipped when the replacement's own episode is
+        # absent: whether `other` was retired does not depend on that, and
+        # the reader who did not receive the replacement is exactly the one
+        # who needs telling. Presence gates the **reordering** below, not
+        # the mark.
         current = fact.source_episode_id
-        if current is None or current not in present:
-            continue
         for other in await documents.facts_for(space, fact.subject, fact.predicate):
             # Believed once and not now: superseded at or before the
             # reader's boundary, rather than at some point after it.
@@ -70,7 +85,17 @@ async def demote_superseded(documents: DocumentStore, space: str, items: list[Re
                     and not other.holds_at(when)
                     and other.source_episode_id is not None
                     and other.source_episode_id != current):
-                replaced[other.source_episode_id] = current
+                retired.add(other.source_episode_id)
+                if (current is not None and current in present
+                        and other.source_episode_id in present):
+                    replaced[other.source_episode_id] = current
+    if retired:
+        # Marked whether or not the replacement is present. That is the
+        # case where the mark matters most: there is nothing to reorder
+        # against, so without it the reader is handed a retired claim
+        # with nothing to distinguish it.
+        items = [item.model_copy(update={"superseded": True})
+                 if item.episode_id in retired else item for item in items]
     if not replaced:
         return items
     leaders = set(replaced.values())
