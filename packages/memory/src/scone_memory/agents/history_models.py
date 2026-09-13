@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime
 import math
 import re
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .approval_models import Digest, Name
-from .progress import AgentProgressEvent, AgentProgressGap
+from .progress import AgentProgressEvent, AgentProgressGap, TerminalKind
 
 MAX_POSITION = 2**53 - 1
 _ERRORS = frozenset(
@@ -42,16 +42,66 @@ def _positive(value: int) -> None:
         raise ValueError('invalid event integer')
 
 
+@dataclass(frozen=True)
+class AgentCollectionEvent:
+    kind: Literal['collection_started', 'collection_finished', 'collection_failed']
+    collection_id: str
+    occurred_at: str
+    invocation_id: str | None = None
+    last_sequence: int = 0
+    observed_events: int = 0
+    lost_events: int = 0
+    terminal_kind: TerminalKind | None = None
+    error: Literal['history_unavailable', 'collection_interrupted'] | None = None
+
+
 class AgentHistoryEntry(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
     position: int = Field(ge=1, le=MAX_POSITION)
     step_id: Name
     selection_id: Name
-    event: AgentProgressEvent | AgentProgressGap
+    event: AgentProgressEvent | AgentProgressGap | AgentCollectionEvent
+    collection_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
+    activation_id: Name | None = None
 
     @model_validator(mode='after')
     def bounded_event(self) -> Self:
         event = self.event
+        if isinstance(event, AgentCollectionEvent):
+            if self.collection_id != event.collection_id or not re.fullmatch(
+                r'[0-9a-f]{32}', event.collection_id
+            ):
+                raise ValueError('invalid collection identity')
+            if len(event.occurred_at) > 64 or datetime.fromisoformat(event.occurred_at).tzinfo is None:
+                raise ValueError('invalid collection timestamp')
+            if event.invocation_id is not None and not re.fullmatch(r'[0-9a-f]{32}', event.invocation_id):
+                raise ValueError('invalid observed invocation')
+            if any(
+                type(value) is not int or not 0 <= value <= MAX_POSITION
+                for value in (event.last_sequence, event.observed_events, event.lost_events)
+            ):
+                raise ValueError('invalid collection counts')
+            if event.observed_events + event.lost_events != event.last_sequence:
+                raise ValueError('inconsistent collection counts')
+            if event.kind == 'collection_started':
+                if (
+                    event.last_sequence
+                    or event.invocation_id is not None
+                    or event.terminal_kind is not None
+                    or event.error is not None
+                ):
+                    raise ValueError('invalid collection start')
+            elif event.kind == 'collection_finished':
+                if (
+                    event.terminal_kind is None
+                    or event.invocation_id is None
+                    or event.last_sequence == 0
+                    or event.error is not None
+                ):
+                    raise ValueError('unfinished collection')
+            elif event.error is None:
+                raise ValueError('collection failure requires reason')
+            return self
         if not re.fullmatch(r'[0-9a-f]{32}', event.invocation_id):
             raise ValueError('invalid event invocation')
         if isinstance(event, AgentProgressGap):

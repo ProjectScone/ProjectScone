@@ -57,6 +57,7 @@ class StepContext:
     inputs: JSONValue
     completed: dict[str, JSONValue]
     checkpoints: StepCheckpoints | None = None
+    deadline: float | None = None
 
 
 @dataclass(frozen=True)
@@ -380,7 +381,7 @@ class WorkflowRunner:
         # Fresh copies stop callbacks from mutating future steps or bindings.
         payload: JSONValue = {'scope': scope, 'inputs': inputs, 'completed': state['results']}
         clean = cast(dict[str, JSONValue], _copy(payload, self._maximum))
-        return StepContext(run_id, space, cast(dict[str, JSONValue], clean['scope']), clean['inputs'], cast(dict[str, JSONValue], clean['completed']), checkpoints)
+        return StepContext(run_id, space, cast(dict[str, JSONValue], clean['scope']), clean['inputs'], cast(dict[str, JSONValue], clean['completed']), checkpoints, self._pause_expires_at)
 
     def _checkpoint_count(self, token: str) -> int:
         return int(self._db.execute('SELECT COUNT(*) FROM workflow_runs WHERE token LIKE ?',
@@ -736,8 +737,7 @@ class WorkflowRunner:
             self._save(token, state)
             self._clear_checkpoints(token)
             raise WorkflowError('sources_invalid')
-        if any(isinstance(step, WorkflowPausableStep) for step in self._steps):
-            self._check_pause_deadline()
+        self._check_pause_deadline()
 
     def _finished(self, context: StepContext) -> bool:
         if self._completion is None:
@@ -784,6 +784,7 @@ class WorkflowRunner:
             try:
                 value = await step.run(context)
             except Exception:
+                self._check_pause_deadline()
                 raise WorkflowError('step_failed') from None
             self._check_pause_deadline()
             if isinstance(value, WorkflowPaused):
@@ -865,6 +866,7 @@ class WorkflowRunner:
                     self._check_pause_deadline()
                     return WorkflowResult(run_id, 'paused', cast(dict[str, JSONValue], _copy(results, self._maximum)), reused)
                 _encode({'scope': scope, 'inputs': inputs, 'completed': {**results, step.step_id: paused_value}}, self._maximum)
+                self._check_pause_deadline()
                 results[step.step_id] = paused_value
                 state.update(inflight=None, status='running')
                 self._save(token, state)
@@ -879,15 +881,18 @@ class WorkflowRunner:
             if previous >= maximum:
                 raise WorkflowError('retries_exhausted')
             for attempt in range(previous + 1, maximum + 1):
+                self._check_pause_deadline()
                 state.update(status='running', inflight=step.step_id, error_class=None)
                 attempts[step.step_id] = attempt
                 self._save(token, state)
                 try:
+                    self._check_pause_deadline()
                     checkpoints = self._checkpoints(token, cast(str, state['binding']), step.step_id)
                     value = await step.run(self._context(run_id, space, scope, inputs, state, checkpoints))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    self._check_pause_deadline()
                     state.update(status='failed', error_class=type(exc).__name__[:80])
                     self._save(token, state)
                     if not self._automatic_retries or not step.retryable or attempt == maximum:
@@ -895,6 +900,7 @@ class WorkflowRunner:
                     continue
                 finally:
                     self._checkpoint_attempts.pop(step.step_id, None)
+                self._check_pause_deadline()
                 try:
                     clean = _copy(value, self._maximum)
                     # Enforce an aggregate input/scope/results budget.
@@ -903,6 +909,7 @@ class WorkflowRunner:
                     state.update(status='failed', error_class='InvalidPayload')
                     self._save(token, state)
                     raise
+                self._check_pause_deadline()
                 results[step.step_id] = clean
                 state.update(inflight=None, status='running')
                 self._save(token, state)
@@ -937,12 +944,14 @@ class WorkflowRunner:
             return {'waiting_steps': [step.step_id for step in self._steps if step.step_id in names]} if has_inputs else {}
 
         def publish(name: str, value: JSONValue) -> None:
+            self._check_pause_deadline()
             completed = {**results, name: value}
             _encode({'scope': scope, 'inputs': inputs, 'completed': completed}, self._maximum)
             pending = [step.step_id for step in self._steps if step.step_id in active and step.step_id != name]
             candidate = {**state, 'results': cast(JSONValue, completed),
                          'inflight_steps': cast(JSONValue, pending), 'inflight': pending[0] if pending else None,
                          **waiting_fields(waiting - {name})}
+            self._check_pause_deadline()
             self._save(token, candidate)
             results[name] = value
             state.update(candidate)
@@ -987,7 +996,10 @@ class WorkflowRunner:
             if isinstance(step, WorkflowPausableStep):
                 return await self._invoke_pause_step(step, context)
             try:
-                return _copy(await step.run(context), self._maximum)
+                self._check_pause_deadline()
+                value = await step.run(context)
+                self._check_pause_deadline()
+                return _copy(value, self._maximum)
             finally:
                 self._checkpoint_attempts.pop(step.step_id, None)
 
@@ -1114,7 +1126,7 @@ class WorkflowRunner:
                         continue
                     try:
                         publish(step.step_id, value)
-                    except (WorkflowError, OSError, sqlite3.Error):
+                    except (WorkflowError, OSError, sqlite3.Error, asyncio.CancelledError):
                         # Preserve the original failure; an uncommitted attempt
                         # remains uncertain and cannot be replayed.
                         continue
