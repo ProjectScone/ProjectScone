@@ -472,6 +472,7 @@ def create_app(
             features["agents.handoffs"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.usage"] = True
             features["agents.inputs"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         features["documents.sync"] = directory_sync_service is not None

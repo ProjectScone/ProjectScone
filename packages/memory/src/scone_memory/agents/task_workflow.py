@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .catalog import AgentCatalog, BoundAgent, Identifier
 from .tool_evidence import prepare_tool_evidence
+from .usage import ToolTokenUsage
 from .workflow import JSONValue, StepContext, WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, _integer
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine
@@ -82,6 +83,13 @@ class AgentTaskReceipt(BaseModel):
     evidence_packets: tuple[str, ...] = Field(max_length=32)
     model_calls: int = Field(ge=1, le=17)
     tool_calls: int = Field(ge=0, le=16)
+    usage: ToolTokenUsage | None = None
+
+    @model_validator(mode='after')
+    def usage_matches_calls(self) -> Self:
+        if self.usage is not None and len(self.usage.calls) != self.model_calls:
+            raise ValueError('usage report count does not match model calls')
+        return self
 
 
 def _json(value: object) -> str:
@@ -200,7 +208,7 @@ class AgentWorkflow:
             receipt = AgentTaskReceipt(task_id=task.task_id, agent_id=result.agent_id, model_id=result.model_id,
                 binding=result.binding, depends_on=task.depends_on, text=output.text, source_status=cast(Literal['retained', 'none'], output.source_status),
                 evidence_ids=output.evidence_ids, evidence_packets=output.evidence_packets,
-                model_calls=output.model_calls, tool_calls=output.tool_calls)
+                model_calls=output.model_calls, tool_calls=output.tool_calls, usage=output.usage)
             return cast(JSONValue, receipt.model_dump(mode='json'))
         return execute
 

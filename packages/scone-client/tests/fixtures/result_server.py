@@ -9,6 +9,7 @@ from scone_memory import HashEmbedder, MemoryEngine
 from scone_memory.backends.sqlite import SqliteDocumentStore, SqliteVectorIndex
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
 from scone_memory.agents.evidence_loop import ToolStep
+from scone_memory.agents.usage import ModelTokenUsage
 from scone_memory.agents.plan_store import AgentPlanStore
 from scone_memory.agents.run_service import AgentRunService
 from scone_memory.api.app import create_app
@@ -27,11 +28,12 @@ async def run():
         async def complete(self, messages, tools):
             with (state / 'calls.jsonl').open('a') as output:
                 output.write(json.dumps({'model': self.name, 'messages': messages}) + '\n')
+            usage = ModelTokenUsage(prompt_tokens=20, completion_tokens=5, total_tokens=25)
             if self.name == 'relay':
-                return ToolStep(content=json.dumps({'answer': 'Ask the finisher.', 'handoff_to': 'finisher'}))
+                return ToolStep(content=json.dumps({'answer': 'Ask the finisher.', 'handoff_to': 'finisher'}), usage=usage)
             if self.name == 'finish':
-                return ToolStep(content=json.dumps({'answer': 'Completed answer.', 'handoff_to': None}))
-            return ToolStep(content='Ada studies stars.')
+                return ToolStep(content=json.dumps({'answer': 'Completed answer.', 'handoff_to': None}), usage=usage)
+            return ToolStep(content='Ada studies stars.', usage=usage)
 
     catalog = AgentCatalog(models=[AgentModel(name, name.title(), '1', lambda name=name: Model(name))
                                    for name in ('careful', 'relay', 'finish')], agents=[

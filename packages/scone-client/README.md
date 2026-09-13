@@ -235,6 +235,40 @@ and native entity-classification rules; client-side packet checks establish wire
 consistency and do not independently prove that a model's answer is true. A deleted
 or unavailable source is an error, rather than a fallback to an old result.
 
+To read recorded provider token counts, opt in on hosts advertising `agents.usage`:
+
+```python
+result = agents.result("run-1", include_usage=True)
+if isinstance(result, TaskResult):
+    outputs = tuple(value for value in result.results.values() if isinstance(value, ModelOutput))
+else:
+    outputs = tuple(hop.output for hop in result.hops)
+for output in outputs:
+    usage = output.usage
+    if usage is not None:
+        print(output.model_id, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+        for call in usage.calls:
+            print(call.prompt_tokens, call.completion_tokens, call.total_tokens)
+```
+
+The default request is unchanged and exposes `ModelOutput.usage` as `None`.
+Opt-in reads send `include_usage=true` and require a usage field on every model
+output. `null` means the legacy journal has no recorded usage. A non-null
+`ToolTokenUsage` contains exactly `model_calls` immutable `ModelTokenUsage`
+reports, at most 17. Each report has three optional strict integer counts in
+`0..1_000_000_000`; contradictory totals or malformed reports are refused.
+Unknown categories remain `None`. Each category total is available only when
+all calls report it; a total is never inferred from the other categories.
+Aggregate counts may exceed the per-call limit. Human outputs cannot carry usage.
+
+Usage belongs to actual model outputs. For handoffs, iterate `hops` once: `final`
+is a checked copy of the last hop, not an additional model call. Reused steps
+retain their original reports; reading a result does not consume model tokens.
+These are provider assertions for recorded completed outputs, not billing totals
+for failed or uncertain attempts, token estimates, or measures of answer quality.
+Opt-in reads preserve the same final source-verification read and never execute
+or retry a workflow.
+
 ### Configured local directory scans
 
 A native host with `SCONE_DIRECTORY_SYNC_CONFIG` advertises `documents.sync`.

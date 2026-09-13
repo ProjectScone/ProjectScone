@@ -611,4 +611,4 @@ A completed native `AgentResult` retains per-call provider usage through
 `result.output.usage`, next to the chosen model ID. Missing reports remain
 unknown, and aggregate counts require complete coverage. See
 [token accounting](agent-token-usage.md) for custom adapters, validation, and the
-current boundary with durable workflow receipts and HTTP clients.
+the [durable workflow and HTTP contract](workflow-token-usage.md).

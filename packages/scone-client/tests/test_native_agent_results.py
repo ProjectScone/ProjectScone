@@ -19,7 +19,8 @@ def completed(agents, run_id):
 
 
 @pytest.mark.integration
-def test_retained_source_results_are_read_only_and_refuse_forgotten_evidence(tmp_path):
+@pytest.mark.parametrize('include_usage', [False, True])
+def test_retained_source_results_are_read_only_and_refuse_forgotten_evidence(tmp_path, include_usage):
     with native_server(tmp_path, 'result_server.py') as client:
         source = client.add('Ada studies stars.')
         agents = client.agents(expected_space='alpha')
@@ -27,23 +28,25 @@ def test_retained_source_results_are_read_only_and_refuse_forgotten_evidence(tmp
                                 expected_revision=0)
         agents.start('one', plan=plan, question='Ada stars')
         completed(agents, 'one')
-        result = agents.result('one')
+        result = agents.result('one', include_usage=include_usage)
         output = result.results['answer']
         assert output.source_status == 'retained' and output.evidence_ids
+        assert (output.usage.total_tokens if output.usage is not None else None) == (25 if include_usage else None)
         assert output.evidence_packets[0].payload['status'] == 'prepared'
         count = len((tmp_path / 'calls.jsonl').read_text().splitlines())
     with native_server(tmp_path, 'result_server.py') as client:
         agents = client.agents(expected_space='alpha')
-        assert agents.result('one').results == result.results
+        assert agents.result('one', include_usage=include_usage).results == result.results
         assert len((tmp_path / 'calls.jsonl').read_text().splitlines()) == count
         client._request('DELETE', '/v1/episodes/' + str(source.episode_id))
         with pytest.raises(SconeError):
-            agents.result('one')
+            agents.result('one', include_usage=include_usage)
         assert len((tmp_path / 'calls.jsonl').read_text().splitlines()) == count
 
 
 @pytest.mark.integration
-def test_actual_handoffs_and_limit_keep_final_answer_semantics(tmp_path):
+@pytest.mark.parametrize('include_usage', [False, True])
+def test_actual_handoffs_and_limit_keep_final_answer_semantics(tmp_path, include_usage):
     with native_server(tmp_path, 'result_server.py') as client:
         agents = client.agents(expected_space='alpha')
         policies = (HandoffAgent('relay', 'relay', ('finisher',)), HandoffAgent('finisher', 'finish'))
@@ -52,8 +55,9 @@ def test_actual_handoffs_and_limit_keep_final_answer_semantics(tmp_path):
             run_id = 'run-' + str(limit)
             agents.start(run_id, plan=saved, question='Delegate this')
             completed(agents, run_id)
-            result = agents.result(run_id)
+            result = agents.result(run_id, include_usage=include_usage)
             assert len(result.hops) == limit + 1
+            assert all((hop.output.usage.total_tokens if hop.output.usage is not None else None) == (25 if include_usage else None) for hop in result.hops)
             if limit == 0:
                 assert result.status == 'handoff_limit' and result.final is None
             else:
