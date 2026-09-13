@@ -604,3 +604,11 @@ In the console, choose **Human input** as a task type, save a reply in the run
 view, then choose **Continue with selected replies**. Model tasks keep their
 individual model selectors. Human input does not grant arbitrary tool or write
 authority.
+
+## Inspect native token reports
+
+A completed native `AgentResult` retains per-call provider usage through
+`result.output.usage`, next to the chosen model ID. Missing reports remain
+unknown, and aggregate counts require complete coverage. See
+[token accounting](agent-token-usage.md) for custom adapters, validation, and the
+current boundary with durable workflow receipts and HTTP clients.

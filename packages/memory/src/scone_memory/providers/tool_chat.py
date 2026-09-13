@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, cast
 
 from ..agents.evidence_loop import ToolCall, ToolStep
+from ..agents.usage import ModelTokenUsage
 from .llm import _thinking_options
 from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 from .tool_diagnostics import ToolCallDiagnostics
@@ -156,13 +157,17 @@ class SelfHostedToolChat:
                         raw.extend(part)
                     diagnostics.phase = 'parse'
                     response_body = bytes(raw)
+                    usage = ModelTokenUsage()
                     try:
                         metadata = _decode(response_body)
                     except (ValueError, TypeError, RecursionError):
                         pass  # The existing parser still owns response acceptance.
                     else:
                         diagnostics.observe(metadata)
+                        if isinstance(metadata, dict):
+                            usage = ModelTokenUsage.from_provider(metadata.get('usage'))
                     result = parse(response_body)
+                    result = result.model_copy(update={'usage': usage})
                     diagnostics.phase = 'cleanup'
             return result
 
